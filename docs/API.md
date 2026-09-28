@@ -112,6 +112,32 @@ curl -X POST "http://127.0.0.1:8080/api/ingest/upload?format=authlog&source=bast
 | `GET /api/attack/coverage` | viewer | `{tactics, techniques: [{id, name, tactic, rules: [{id, name, enabled}], hits, covered}], summary}` over the built-in ATT&CK subset; `hits` counts alerts from the covering rules |
 | `GET /api/metrics?hours=24` | viewer | Counts, severity/rule breakdowns, MTTR, top failing IPs/users, and a 24-hour histogram ending at the newest event |
 
+## Reports
+
+Incident and alert reports are downloads (`Content-Disposition: attachment`), not JSON. Analyst and admin only;
+viewers get 403. Each download is written to the audit log as `report_downloaded`.
+
+| Endpoint | Role | Notes |
+|---|---|---|
+| `GET /api/alerts/{id}/report.md` | analyst | Markdown report for one alert. `text/markdown; charset=utf-8` |
+| `GET /api/alerts/{id}/report.pdf` | analyst | The same report as PDF 1.4. `application/pdf` |
+| `GET /api/incidents/{id}/report.md` | analyst | Markdown report for a correlated incident and all its alerts |
+| `GET /api/incidents/{id}/report.pdf` | analyst | The same report as PDF 1.4 |
+
+Both formats carry the same sections: header (id, severity, status, first/last seen, generation time), summary,
+kill-chain stages (incidents only), entities (IPs, accounts, hosts), MITRE ATT&CK techniques grouped
+by tactic, a merged timeline (evidence events marked), each alert with its explanation and up to 25 evidence events,
+analyst notes, and recommended actions keyed by technique (generic actions when no technique is mapped).
+Reports built from synthetic data open with a "SYNTHETIC DATA" banner and repeat it in the PDF page footer.
+Log-derived text is escaped in Markdown so it cannot inject tables, links, or HTML.
+
+Incident reports are built from the correlated incident (`GET /api/incidents/{id}`): its status, severity
+(including escalation), span, kill-chain stages, and entities come from the `incidents` row; ATT&CK techniques
+come from the member alerts' rule metadata, grouped by tactic in kill-chain order, each listing the alerts that map
+to it. Incidents that span three or more tactics are marked escalated.
+
+Errors are JSON: unknown alert → 404 `alert not found`; unknown incident → 404 `incident not found`.
+
 ## Rules, feedback, and reviewed changes
 
 | Endpoint | Role | Notes |

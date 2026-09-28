@@ -118,6 +118,8 @@ button { font: inherit; cursor: pointer; border-radius: 4px; padding: 6px 12px; 
   background: var(--accent); color: var(--accent-ink); font-weight: 600; }
 button:hover { filter: brightness(1.1); }
 button.ghost { background: transparent; color: var(--accent); border-color: rgb(46 196 255 / .45); font-weight: 500; }
+a.button { display: inline-block; text-decoration: none; border-radius: 4px; padding: 6px 12px;
+  border: 1px solid rgb(46 196 255 / .45); background: transparent; color: var(--accent); font-weight: 500; }
 button.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
 button.mini { padding: 1px 8px; font-size: 10.5px; letter-spacing: .06em; }
 button:disabled { opacity: .45; cursor: default; }

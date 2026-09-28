@@ -234,6 +234,7 @@ async function alertDetail(id) {
     if (a.status === "open") actions.append(el("button", { onclick: () => setStatus(id, { status: "investigating" }) }, "Start investigating"));
     if (a.status !== "resolved") actions.append(el("button", { onclick: () => resolveDialog(id) }, "Resolve…"));
     else actions.append(el("button", { class: "ghost", onclick: () => setStatus(id, { status: "open" }) }, "Reopen"));
+    actions.append(reportLinks("alerts", id));
   }
   const noteForm = can("analyst") ? el("form", {},
     el("textarea", { name: "body", maxlength: 5000, required: true, placeholder: "Add an investigation note…" }),
@@ -278,6 +279,14 @@ async function alertDetail(id) {
   );
 }
 
+// Report downloads (analyst and admin). kind is "alerts" or "incidents"; plain GET links carry the session cookie.
+function reportLinks(kind, id) {
+  if (!can("analyst")) return null;
+  return el("span", { class: "row" },
+    el("a", { class: "button", href: `/api/${kind}/${id}/report.pdf`, download: "" }, "Report (PDF)"),
+    el("a", { class: "button", href: `/api/${kind}/${id}/report.md`, download: "" }, "Report (Markdown)"));
+}
+
 // ---------- incidents ----------
 async function incidentDetail(id) {
   const i = await api(`/api/incidents/${id}`);
@@ -287,6 +296,7 @@ async function incidentDetail(id) {
     if (i.status === "open") actions.append(el("button", { onclick: () => setIncident({ status: "investigating" }) }, "Start investigating"));
     if (i.status !== "resolved") actions.append(el("button", { onclick: () => setIncident({ status: "resolved" }) }, "Resolve"));
     else actions.append(el("button", { class: "ghost", onclick: () => setIncident({ status: "open" }) }, "Reopen"));
+    actions.append(reportLinks("incidents", id));
   }
   render(
     el("p", {}, el("a", { href: "#incidents" }, "← Incidents")),

@@ -64,6 +64,35 @@ The brief asked me to continue an existing SOC/SIEM project on Replit. That proj
 | No ML claims | ✅ stated in UI and docs |
 | README, demo script, LinkedIn text, real/synthetic/future separation | ✅ |
 
+## Watchpost 2.0 / D: incident reports (2026-09-28, branch `ws/d-reports`)
+
+Shipped:
+- `watchpost/pdfwriter.py`: a hand-written PDF 1.4 writer (Helvetica and Helvetica-Bold with WinAnsi encoding,
+  word wrap from the standard AFM widths, headings, rules, a highlighted banner, tables with a repeating header
+  and truncated cells, automatic page breaks, "Page n of N" footers, byte-exact xref table). Under 300 lines.
+- `watchpost/report.py`: `build(conn, incident_id)` and `build_from_alert(conn, alert_id)` return one report model;
+  `to_markdown(model)` and `to_pdf_bytes(model)` render it. Recommended actions come from a static table keyed by
+  ATT&CK technique id (sub-techniques fall back to the parent), with generic actions when no technique is mapped.
+  Techniques come from the `rules.techniques` column (falling back to `DEFAULT_RULES`), resolved through the
+  ATT&CK catalog in `watchpost/attack.py` and grouped by tactic in kill-chain order.
+- After A merged: `build(conn, incident_id)` reads the real incident through `incidents.get_incident` (status,
+  severity with escalation, span, kill-chain stages, entities, techniques per tactic with the alerts behind each),
+  then adds every member alert's evidence, timeline, and notes. Unknown incidents are a 404 `incident not found`.
+- Routes `GET /api/alerts/{id}/report.{md,pdf}` and `GET /api/incidents/{id}/report.{md,pdf}` (analyst+), audited.
+- UI: "Report (PDF)" and "Report (Markdown)" links on the alert detail view and the incident detail view.
+- Tests: `tests/test_pdfwriter.py` (6), `tests/test_report.py` (15, eight on incidents built by the real
+  correlation engine), `ReportApiTests` in `tests/test_api.py` (3), plus a tiny PDF reader in `tests/pdfparse.py`
+  that follows the xref table and extracts page text. The smoke check downloads alert and incident reports in both
+  formats and checks the incident Markdown lists every kill-chain tactic.
+- Verified outside the test suite (scratch venv, not a project dependency): qpdf (via pikepdf) reports no syntax
+  problems, pypdf opens the files in strict mode, and PDFium (the engine inside Chrome) renders every page.
+
+Not done:
+- The HTML print view from the spec ("third option via the dashboard") belongs with the dashboard rework (B).
+- Not opened in macOS Preview (no Mac in the cloud session). The file passes qpdf's checks and renders in PDFium.
+
+Decision for the owner: none required.
+
 ## Open items and blockers
 
 - **Not yet done by a human:** deploying to the user's Replit account (needs their login) and recording the demo video.
