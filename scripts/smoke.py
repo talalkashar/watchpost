@@ -21,7 +21,7 @@ from http.cookiejar import CookieJar
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-ADMIN_PW, ANALYST_PW = "smoke-admin-password", "smoke-analyst-password"
+ADMIN_PW, ANALYST_PW, VIEWER_PW = "smoke-admin-password", "smoke-analyst-password", "smoke-viewer-password"
 STEP = 0
 
 
@@ -84,6 +84,7 @@ def main():
     base = f"http://127.0.0.1:{port}"
     env = {**os.environ, "SIEM_DB": os.path.join(tmp.name, "smoke.db"), "SIEM_HOST": "127.0.0.1",
            "SIEM_PORT": str(port), "SIEM_ADMIN_PASSWORD": ADMIN_PW, "SIEM_ANALYST_PASSWORD": ANALYST_PW,
+           "SIEM_VIEWER_PASSWORD": VIEWER_PW,
            "SIEM_SYSLOG": "1", "SIEM_SYSLOG_PORT": str(syslog_port)}
     log_path = os.path.join(tmp.name, "server.log")
     log_file = open(log_path, "w")
@@ -275,9 +276,24 @@ def main():
         check(b"text/event-stream" in buf and b"event: hello" in buf and b"event: health" in buf, "stream frames")
         print(f"      {len(dash['attackers'])} attacker IPs, stream sent hello + health")
 
+        step("viewer account is read-only; login is rate limited")
+        viewer = Session(base)
+        viewer.login("viewer", VIEWER_PW)
+        incident_id = viewer.call("GET", "/api/incidents")[1][0]["id"]
+        check(viewer.call("GET", f"/api/incidents/{incident_id}")[0] == 200, "viewer cannot read an incident")
+        check(viewer.download(f"/api/incidents/{incident_id}/report.pdf")[0] == 200, "viewer cannot download a report")
+        for path, body in [("/api/ingest", []), (f"/api/incidents/{incident_id}/status", {"status": "resolved"}),
+                           ("/api/demo/load", {}), ("/api/tokens", {"name": "x"})]:
+            status, _ = viewer.call("POST", path, body)
+            check(status == 403, f"viewer POST {path} returned {status}")
+        statuses = [Session(base).call("POST", "/api/auth/login", {"username": "nobody", "password": "x" * 12})[0]
+                    for _ in range(12)]
+        check(statuses[-1] == 429, f"login attempts were not rate limited: {statuses}")
+        print(f"      login answered 429 after {statuses.index(429)} attempts")
+
         step("server log contains no secrets")
         log_text = Path(log_path).read_text()
-        for secret in (ADMIN_PW, ANALYST_PW, tok["token"]):
+        for secret in (ADMIN_PW, ANALYST_PW, VIEWER_PW, tok["token"]):
             check(secret not in log_text, "a secret appeared in the server log")
         print("\nSMOKE OK")
     finally:

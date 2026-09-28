@@ -11,7 +11,31 @@ Base URL: `http://127.0.0.1:8080`. All request and response bodies are JSON unle
 
 Roles: `viewer` (read) < `analyst` (read, ingest, triage, propose rule changes) < `admin` (everything, plus approvals, tokens, demo data, and audit log).
 
+**Viewer is read-only.** A viewer can call every `GET` route whose role below is `viewer` or `public`: dashboard,
+stream, events, alerts, incidents, reports, ATT&CK coverage, metrics, rules, settings, change requests, evaluations,
+batches, and health details. Any other method is refused with 403 `viewer accounts are read-only`, except
+`POST /api/auth/logout`. The server enforces this in `_authorize`, on top of each route's minimum role, so a new
+write route is closed to viewers even if its role is left at the default. Admin-only reads (`/api/tokens`,
+`/api/audit`) are 403 for viewers. The `viewer` account is created on start from `SIEM_VIEWER_PASSWORD` when set and
+no user named `viewer` exists.
+
 Five failed logins lock an account for 15 minutes. Both values are security settings, changed only through reviewed proposals.
+
+### Rate limiting
+
+Every request spends a token from a per-client-IP bucket held in memory:
+
+| Bucket | Applies to | Default | Settings |
+|---|---|---|---|
+| login | `POST /api/auth/login` | burst 10, then 10 per minute | `SIEM_LOGIN_RATE_BURST`, `SIEM_LOGIN_RATE_PER_MIN` |
+| general | every other request, API and static files | burst 300, then 1200 per minute | `SIEM_RATE_BURST`, `SIEM_RATE_PER_MIN` |
+
+An empty bucket answers **429** before authentication, with a `Retry-After: <seconds>` header and
+`{"error": "too many login attempts; retry in 6 s", "retry_after": 6}` (or `too many requests`). The two buckets are
+independent, so a client locked out of login can still load the page. `SIEM_RATE_LIMIT=0` turns limiting off. The
+client IP is the TCP peer. With `SIEM_TRUST_PROXY=1` and a loopback peer (a local reverse proxy), it is the **last**
+`X-Forwarded-For` entry, the one the proxy wrote, so client-supplied entries earlier in the header are ignored.
+Account lockout is separate: it is per account, also answers 429, and has no `Retry-After`.
 
 ```bash
 curl -c jar -H 'Content-Type: application/json' -d '{"username":"analyst","password":"..."}' \
@@ -62,7 +86,7 @@ Response:
                "correlation": {"status": "ok", "incidents_created": 1, "incidents_updated": 0}}}
 ```
 
-Status codes: **201** all accepted · **207** some rejected · **422** none accepted · **400** malformed body or bad source name · **413** body too large · **415** wrong content type · **401/403** auth.
+Status codes: **201** all accepted · **207** some rejected · **422** none accepted · **400** malformed body or bad source name · **413** body too large · **415** wrong content type · **401/403** auth · **429** rate limited (see Rate limiting).
 If `detection.status` is `"failed"`, the events **were stored**. Fix the cause, then run `POST /api/detection/run`.
 If only `detection.correlation.status` is `"failed"`, alerts were stored and only incident grouping was skipped; the next run retries it.
 
@@ -121,15 +145,16 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 
 ## Reports
 
-Incident and alert reports are downloads (`Content-Disposition: attachment`), not JSON. Analyst and admin only;
-viewers get 403. Each download is written to the audit log as `report_downloaded`.
+Incident and alert reports are downloads (`Content-Disposition: attachment`), not JSON. Any signed-in role,
+viewers included (since 2.0 / F; before that, analyst and admin only). Each download is written to the audit log as
+`report_downloaded`.
 
 | Endpoint | Role | Notes |
 |---|---|---|
-| `GET /api/alerts/{id}/report.md` | analyst | Markdown report for one alert. `text/markdown; charset=utf-8` |
-| `GET /api/alerts/{id}/report.pdf` | analyst | The same report as PDF 1.4. `application/pdf` |
-| `GET /api/incidents/{id}/report.md` | analyst | Markdown report for a correlated incident and all its alerts |
-| `GET /api/incidents/{id}/report.pdf` | analyst | The same report as PDF 1.4 |
+| `GET /api/alerts/{id}/report.md` | viewer | Markdown report for one alert. `text/markdown; charset=utf-8` |
+| `GET /api/alerts/{id}/report.pdf` | viewer | The same report as PDF 1.4. `application/pdf` |
+| `GET /api/incidents/{id}/report.md` | viewer | Markdown report for a correlated incident and all its alerts |
+| `GET /api/incidents/{id}/report.pdf` | viewer | The same report as PDF 1.4 |
 
 Both formats carry the same sections: header (id, severity, status, first/last seen, generation time), summary,
 kill-chain stages (incidents only), entities (IPs, accounts, hosts), MITRE ATT&CK techniques grouped

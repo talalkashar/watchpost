@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__, auth, engine, geo, improve, incidents, queries, report, simulate, storyline, stream
+from .ratelimit import TokenBucketLimiter
 from .config import Config
 from .db import audit, connect, init_schema, now_iso, row_to_dict
 from .diagnostics import configure_logging, log, record_error
@@ -46,6 +47,10 @@ class App:
             self.credentials_file = auth.bootstrap_users(conn, config, Path(config.db_path).parent)
         finally:
             conn.close()
+        self.login_limiter = self.request_limiter = None
+        if config.rate_limit_enabled:
+            self.login_limiter = TokenBucketLimiter(config.login_rate_burst, config.login_rate_per_minute)
+            self.request_limiter = TokenBucketLimiter(config.rate_burst, config.rate_per_minute)
         self.storyline = storyline.Runner(self.conn)
 
     def conn(self):
@@ -58,7 +63,11 @@ ROUTES = []
 
 
 def route(method, pattern, role="viewer", csrf=True):
-    """role: minimum role, 'public' for no auth, or 'ingest' to also accept API tokens."""
+    """role: minimum role, 'public' for no auth, or 'ingest' to also accept API tokens.
+
+    `viewer` accounts are read-only: whatever a route declares, a viewer may only send GETs
+    (plus logout). See Handler._authorize.
+    """
     def decorator(fn):
         ROUTES.append((method, re.compile(f"^{pattern}$"), fn, role, csrf))
         return fn
@@ -323,12 +332,12 @@ def _report(req, kind, ident, fmt):
     return Download(report.to_markdown(model).encode("utf-8"), "text/markdown; charset=utf-8", name)
 
 
-@route("GET", r"/api/alerts/(\d+)/report\.(md|pdf)", role="analyst")
+@route("GET", r"/api/alerts/(\d+)/report\.(md|pdf)")
 def alert_report(req, alert_id, fmt):
     return _report(req, "alert", int(alert_id), fmt)
 
 
-@route("GET", r"/api/incidents/(\d+)/report\.(md|pdf)", role="analyst")
+@route("GET", r"/api/incidents/(\d+)/report\.(md|pdf)")
 def incident_report(req, incident_id, fmt):
     return _report(req, "incident", int(incident_id), fmt)
 
@@ -476,6 +485,10 @@ def audit_log(req):
     return [dict(r) for r in req.conn.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT 200")]
 
 
+# The only non-GET routes a read-only viewer may call.
+VIEWER_WRITES = (logout,)
+
+
 # --- Request handling --------------------------------------------------------------------
 
 SECURITY_HEADERS = {
@@ -533,8 +546,39 @@ class Handler(BaseHTTPRequestHandler):
         morsel = cookie.get(SESSION_COOKIE)
         return morsel.value if morsel else None
 
+    def _client_ip(self):
+        """The peer address, or with SIEM_TRUST_PROXY=1 and a loopback peer, the last X-Forwarded-For entry.
+
+        The last entry is the one the local proxy wrote itself; earlier entries are client-supplied.
+        """
+        ip = self.client_address[0]
+        if self.app.config.trust_proxy and ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+            forwarded = self.headers.get("X-Forwarded-For", "").split(",")[-1].strip()
+            try:
+                return str(ipaddress.ip_address(forwarded))
+            except ValueError:
+                pass
+        return ip
+
+    def _rate_limited(self, path):
+        """Spend a token from the login or general bucket; on an empty bucket send 429 and return True."""
+        is_login = self.command == "POST" and path == "/api/auth/login"
+        limiter = self.app.login_limiter if is_login else self.app.request_limiter
+        if limiter is None:
+            return False
+        allowed, retry_after = limiter.allow(self._client_ip())
+        if allowed:
+            return False
+        what = "login attempts" if is_login else "requests"
+        self.close_connection = True  # the unread body (if any) must not be parsed as the next request
+        self._send(429, {"error": f"too many {what}; retry in {retry_after} s", "retry_after": retry_after},
+                   extra_headers={"Retry-After": str(retry_after), "Cache-Control": "no-store"})
+        return True
+
     def _handle(self):
         parsed = urlparse(self.path)
+        if self._rate_limited(parsed.path):
+            return
         if not parsed.path.startswith("/api/"):
             return self._static(parsed.path)
         self.query = {k: v[0] for k, v in parse_qs(parsed.query).items()}
@@ -555,7 +599,7 @@ class Handler(BaseHTTPRequestHandler):
                     fn not in (ingest_upload,) and "json" not in self.headers.get("Content-Type", ""):
                 raise ApiError(415, "Content-Type must be application/json")
             self.conn = self.app.conn()
-            self._authorize(role, csrf)
+            self._authorize(role, csrf, fn)
             result = fn(self, *match.groups())
             if result is STREAM_RESPONSE:
                 return self._stream()
@@ -577,7 +621,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.conn is not None:
                 self.conn.close()
 
-    def _authorize(self, role, csrf):
+    def _authorize(self, role, csrf, fn=None):
         self.session_token = self._session_token()
         self.user = None
         if role == "public":
@@ -596,6 +640,8 @@ class Handler(BaseHTTPRequestHandler):
         minimum = "analyst" if role == "ingest" else role
         if not auth.has_role(self.user, minimum):
             raise ApiError(403, f"requires the {minimum} role")
+        if self.user["role"] == "viewer" and self.command != "GET" and fn not in VIEWER_WRITES:
+            raise ApiError(403, "viewer accounts are read-only")
         if self.command == "POST" and csrf:
             sent = self.headers.get("X-CSRF-Token", "")
             if not hmac.compare_digest(sent, self.user["csrf"]):

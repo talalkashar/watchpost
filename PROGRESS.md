@@ -196,3 +196,70 @@ Decision for the owner: none required.
 **Not done / notes for the owner**
 - Written locally after two cloud sessions were stopped by the model's safety classifier while drafting this module (defensive, synthetic-only content; the block was a false positive but not worth fighting).
 - The rogue principal's first cloud event is the IAM change itself (the rule requires no prior cloud activity by that principal); a preceding `sts:GetCallerIdentity` was dropped for that reason.
+
+## Watchpost 2.0 / F: viewer role, rate limits, deploy kit, LinkedIn kit (2026-09-28, branch `ws/f-demo-kit`)
+
+**Shipped**
+- **Read-only `viewer` role, enforced by the server.** `Handler._authorize` refuses any non-GET request from a viewer
+  (403 `viewer accounts are read-only`), except logout, whatever role a route declares. A future write route that
+  keeps the default role is still closed to viewers. Viewers can read the dashboard, SSE stream, events, alerts,
+  incidents, **reports** (now open to every signed-in role; they were analyst-only), ATT&CK coverage, metrics, rules,
+  and health details. Admin-only reads (tokens, audit) stay 403. The UI shows report links to viewers and labels the
+  account "(read-only)".
+- `SIEM_VIEWER_PASSWORD` seeds a `viewer` account on start when set and no `viewer` user exists, so an existing
+  database can gain one. It is never generated and never resets an existing viewer's password.
+- **Rate limiting** (`watchpost/ratelimit.py`): in-memory per-IP token buckets. Login gets a burst of 10, then
+  10/min. Everything else, static files included, gets a burst of 300, then 1200/min. Over the limit: 429 JSON with
+  `retry_after` and a `Retry-After` header. Configured with `SIEM_RATE_LIMIT`, `SIEM_LOGIN_RATE_BURST`,
+  `SIEM_LOGIN_RATE_PER_MIN`, `SIEM_RATE_BURST`, `SIEM_RATE_PER_MIN`, and `SIEM_TRUST_PROXY` (the last
+  `X-Forwarded-For` entry, only from a loopback peer). Memory is bounded (10,000 keys, pruned).
+- **`deploy/`** for Debian 12: `watchpost.service` (dedicated `watchpost` user, `SIEM_HOST=127.0.0.1` forced in
+  `ExecStart`, StateDirectory `/var/lib/watchpost`, systemd sandboxing), an idempotent `install.sh` (apt deps, system
+  user, rsync to `/opt/watchpost`, `/etc/watchpost.env` from a secret-free template written once, enable and
+  restart, optional `--caddy DOMAIN` or `--nginx-selfsigned [IP]`, health wait), a `Caddyfile` with a domain
+  placeholder, `nginx-selfsigned.conf`, and `deploy/README.md` with the exact steps.
+- Rewrote `LINKEDIN.md` (project entry, a 1,220-character post, honest limits) and `DEMO_SCRIPT.md` (30-second shot
+  list plus a 2-minute walkthrough built around C's **Start storyline** button). Added the 2.0 feature table,
+  architecture diagram, configuration rows, and screenshot placeholders to the README. Documented the viewer rules
+  and rate limiting in `docs/API.md`.
+- Tests: `tests/test_viewer.py` (9) walks **every** registered route. Each GET must answer a viewer 200 (403 for
+  admin-only reads). Each POST except login and logout must answer 403 and leave events, notes, tokens, change
+  requests, evaluations, rule history, and alert and incident statuses unchanged. It also covers the read-only
+  backstop and account seeding. `tests/test_ratelimit.py` (11) covers bucket math with a fake clock, per-key
+  isolation, bounded memory, env parsing, login 429 with `Retry-After`, independent buckets, proxy trust (spoofed
+  first entries ignored), and disabling. The existing report-access test now expects viewers to get 200. A smoke
+  step signs in as the seeded viewer, reads an incident and its PDF, is refused four writes, and sees login
+  return 429.
+- `tests/test_workflow.py::test_storage_unavailable_is_failing_not_a_crash` used `chmod` to make storage
+  unwritable, which root ignores, so it failed in the cloud container (noted by B). It now puts a regular file where
+  the database directory should be, which fails for every user. Same assertions, no skip.
+
+**Verification.** `./run_tests.sh` as root in the cloud container: 194 tests OK, then SMOKE OK (18 steps); after merging C from `main`, 199 tests OK and SMOKE OK (19 steps).
+`bash -n` passes on `deploy/install.sh`, `start.sh`, and `run_tests.sh`. `systemd-analyze verify` accepts
+`watchpost.service`. `install.sh` ran three times in the container (Ubuntu 24.04, no systemd, `systemctl`
+stubbed to launch the app as the `watchpost` user with the env file). Each run was idempotent: the env file was kept
+at root:watchpost 0640, the app ran as `watchpost`, and adding `SIEM_VIEWER_PASSWORD` and re-running created a
+working viewer login. With `--nginx-selfsigned 203.0.113.10` and nginx 1.24: the certificate SAN is that IP, HTTP
+redirects to HTTPS, the cookie carries `Secure`, SSE streams through without buffering, and the login bucket
+returned 429 with `Retry-After` while spoofed `X-Forwarded-For` values made no difference. With `--caddy`: `caddy
+validate` passes on Caddy 2.6.2, the Debian 12 version, and `caddy fmt` reports no changes.
+
+**Not done**
+- Not run on the real VM: that needs the owner's access. Run `sudo ./deploy/install.sh --caddy <domain>` or
+  `--nginx-selfsigned <public IP>` there, per `deploy/README.md`. Real systemd sandboxing and Let's Encrypt
+  issuance are untested.
+- The storyline and `SIEM_DEMO_LOOP` come from workstream C (merged into this branch from `main`, not written here).
+  The env template lists `SIEM_DEMO_LOOP` commented out; `DEMO_SCRIPT.md` uses C's button and stage tile.
+- No video recorded and no new screenshots. README has placeholders for `incident-detail.png`,
+  `incident-report-pdf.png`, and `storyline-running.png`.
+- nginx listens on `[::]` as well as IPv4. In the container, which has no IPv6, those two lines had to be removed;
+  Debian 12 on GCP supports IPv6 sockets. The fix is in the deploy README's troubleshooting section.
+
+**Decisions for the owner**
+- Reports are now readable by viewers (the spec lists reports among what viewers see). Reports of synthetic incidents
+  contain only synthetic data, but every public visitor can download them. Revert by setting the two report routes
+  back to `role="analyst"`.
+- Pick the public viewer password (12+ characters) and put it in `/etc/watchpost.env` on the VM, not in the post
+  draft in the repo.
+- Rate-limit defaults suit a small public demo. Visitors behind one corporate NAT share a bucket. Raise
+  `SIEM_RATE_PER_MIN` if that becomes a problem.

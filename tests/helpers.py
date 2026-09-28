@@ -14,6 +14,7 @@ from watchpost.server import make_server  # noqa: E402
 
 ADMIN_PW = "admin-test-password-1"
 ANALYST_PW = "analyst-test-password-1"
+VIEWER_PW = "viewer-test-password-1"
 
 
 class Client:
@@ -56,11 +57,16 @@ class ServerTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = os.path.join(self.tmp.name, "test.db")
         self.config = Config.from_env(db_path=self.db_path, host="127.0.0.1", port=0,
-                                      admin_password=ADMIN_PW, analyst_password=ANALYST_PW)
+                                      admin_password=ADMIN_PW, analyst_password=ANALYST_PW,
+                                      viewer_password=VIEWER_PW, **self.config_overrides())
         self.server, self.app = make_server(self.config)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def config_overrides(self):
+        """Subclasses may change Config fields (e.g. rate limits) before the server starts."""
+        return {}
 
     def tearDown(self):
         self.server.shutdown()
@@ -73,4 +79,6 @@ class ServerTestCase(unittest.TestCase):
             self.assertEqual(client.login("admin", ADMIN_PW)[0], 200)
         elif user == "analyst":
             self.assertEqual(client.login("analyst", ANALYST_PW)[0], 200)
+        elif user == "viewer":
+            self.assertEqual(client.login("viewer", VIEWER_PW)[0], 200)
         return client

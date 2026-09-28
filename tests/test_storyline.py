@@ -76,8 +76,11 @@ class StorylineApiTests(ServerTestCase):
         self.assertEqual(sorted(actions), ["storyline_finished", "storyline_started"])
 
     def test_single_runner_stop_and_permissions(self):
-        admin, analyst = self.client("admin"), self.client("analyst")
+        admin, analyst, viewer = self.client("admin"), self.client("analyst"), self.client("viewer")
         self.assertEqual(analyst.post("/api/storyline/start", {})[0], 403)
+        self.assertEqual(viewer.post("/api/storyline/start", {})[0], 403)
+        self.assertEqual(viewer.post("/api/storyline/stop", {})[0], 403)
+        self.assertEqual(viewer.get("/api/storyline/status")[0], 200)
         self.assertEqual(admin.post("/api/storyline/start", {"speed": "fast"})[0], 400)
         self.assertEqual(admin.post("/api/storyline/start", {"speed": 1, "seed": 1.5})[0], 400)
         self.assertEqual(admin.post("/api/storyline/start", {"speed": 1})[0], 202)

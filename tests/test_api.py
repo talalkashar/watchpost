@@ -389,14 +389,16 @@ class ReportApiTests(ServerTestCase):
                        "('viewer1', ?, 'viewer', '2026-01-01')", (hash_password("viewer-password-1"),))
         viewer = self.client()
         self.assertEqual(viewer.login("viewer1", "viewer-password-1")[0], 200)
-        self.assertEqual(self.download(viewer, f"/api/alerts/{aid}/report.md")[0], 403)
+        # Viewers are read-only but may download reports (Watchpost 2.0 / F).
+        self.assertEqual(self.download(viewer, f"/api/alerts/{aid}/report.md")[0], 200)
         status, body, _ = self.download(self.analyst, "/api/alerts/999999/report.pdf")
         self.assertEqual((status, json.loads(body)["error"]), (404, "alert not found"))
         self.assertEqual(self.download(self.analyst, f"/api/alerts/{aid}/report.html")[0], 404)
         status, body, _ = self.download(self.analyst, "/api/incidents/999999/report.pdf")
         self.assertEqual((status, json.loads(body)["error"]), (404, "incident not found"))
         incident = self.analyst.get("/api/incidents")[1][0]
-        self.assertEqual(self.download(viewer, f"/api/incidents/{incident['id']}/report.pdf")[0], 403)
+        status, body, _ = self.download(viewer, f"/api/incidents/{incident['id']}/report.pdf")
+        self.assertEqual((status, body[:8]), (200, b"%PDF-1.4"))
         self.assertEqual(self.download(self.client(), f"/api/incidents/{incident['id']}/report.md")[0], 401)
         self.assertEqual(self.download(self.analyst, f"/api/incidents/{incident['id']}/report.txt")[0], 404)
 

@@ -286,17 +286,15 @@ class HealthRecoveryTests(ServerTestCase):
         self.assertNotIn("hunter2", json.dumps(details))
 
     def test_storage_unavailable_is_failing_not_a_crash(self):
+        # A regular file where a directory should be: unusable even for root, which ignores chmod.
         blocked = os.path.join(self.tmp.name, "blocked")
-        os.mkdir(blocked)
-        os.chmod(blocked, stat.S_IRUSR | stat.S_IXUSR)
-        try:
-            report = run_health_checks(lambda: connect(os.path.join(blocked, "sub", "x.db")),
-                                       os.path.join(blocked, "sub", "x.db"))
-            self.assertEqual(report["status"], "failing")
-            self.assertEqual(report["checks"][0]["name"], "storage")
-            self.assertIn("SIEM_DB", report["checks"][0]["guidance"])
-        finally:
-            os.chmod(blocked, stat.S_IRWXU)
+        with open(blocked, "w") as handle:
+            handle.write("not a directory")
+        report = run_health_checks(lambda: connect(os.path.join(blocked, "sub", "x.db")),
+                                   os.path.join(blocked, "sub", "x.db"))
+        self.assertEqual(report["status"], "failing")
+        self.assertEqual(report["checks"][0]["name"], "storage")
+        self.assertIn("SIEM_DB", report["checks"][0]["guidance"])
 
         # Recovery: pointing at a writable location reports healthy again.
         good = os.path.join(self.tmp.name, "good", "x.db")

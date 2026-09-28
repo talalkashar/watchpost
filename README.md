@@ -1,10 +1,53 @@
 # Watchpost: a small, working SIEM
 
-Watchpost is a self-contained Security Information and Event Management (SIEM) lab. It ingests authentication logs, normalizes them into one schema, and stores them in SQLite. It runs explainable detection rules, raises alerts with evidence, and supports an analyst workflow from triage to resolution. It also reports its own health and learns nothing on its own: rule changes come from analyst feedback and need approval from a second person.
+Watchpost is a self-contained Security Information and Event Management (SIEM) lab. It ingests authentication, web, firewall/VPN, cloud audit, and host logs, normalizes them into one schema, and stores them in SQLite. It runs explainable detection rules, raises alerts with evidence, and supports an analyst workflow from triage to resolution. It also reports its own health and learns nothing on its own: rule changes come from analyst feedback and need approval from a second person.
 
 It uses only the Python standard library (3.10+). No packages to install, no paid services, no outbound network calls.
 
 > **Honesty note.** This is a portfolio/learning project, not a production SIEM. All bundled data is synthetic. See [What is real vs. synthetic vs. future](#what-is-real-vs-synthetic-vs-future).
+
+![Watchpost SOC dashboard](docs/screenshots/soc-dashboard.png)
+
+<!-- Screenshot placeholders for 2.0; capture at 1280x800 and save under docs/screenshots/:
+     incident-detail.png (kill-chain stages, techniques by tactic), incident-report-pdf.png (first page of the PDF),
+     storyline-running.png (dashboard mid-storyline with the stage tile). -->
+
+## What's new in 2.0
+
+| Workstream | What it adds |
+|---|---|
+| **A · Correlation and MITRE ATT&CK** | Parsers for nginx/Apache access logs, firewall/VPN, CloudTrail-style cloud audit, and host sudo/process events. Six new rules (eleven in total), each mapped to techniques from a static 17-technique ATT&CK subset. Alerts that share an IP, account, or host are correlated into **incidents** with kill-chain stages, and severity is escalated at 3+ tactics. Adds `GET /api/attack/coverage`. |
+| **B · SOC dashboard** | A dark command-center view with a status strip, an attacker map (inline SVG, **synthetic geo** only), a live event stream over **Server-Sent Events** (`/api/stream`, with a polling fallback), alerts over time, top attacker IPs, an ATT&CK heat matrix, an incident board, and health. No JS libraries. |
+| **D · Incident reports** | One-click **Markdown and PDF** reports for incidents and alerts, with a timeline, entities, techniques by tactic, evidence, notes, and recommended actions per technique. The PDF writer is hand-written PDF 1.4. |
+| **E · Live ingestion** | A UDP/TCP **syslog listener** (RFC 3164/5424) and `scripts/shipper.py`, a file tailer that posts to the ingest API with a token. See [docs/LIVE_INGEST.md](docs/LIVE_INGEST.md). |
+| **F · Demo kit** | A read-only **viewer** role that the server enforces on every route, with a public demo account from `SIEM_VIEWER_PASSWORD`. **Per-IP rate limiting** (strict on login). A **`deploy/`** kit for Debian 12: a hardened systemd unit, an idempotent installer, and Caddy or nginx HTTPS. A LinkedIn kit and demo script. |
+| **C · Attack storyline** | **Admin → Start storyline** replays a six-stage synthetic intrusion in real time (recon → credential attack → foothold → escalation → lateral and cloud → exfiltration) over baseline noise; the dashboard shows the current stage. `SIEM_DEMO_LOOP=<minutes>` replays it on a timer for unattended public demos. |
+
+### 2.0 architecture
+
+```
+  SOURCES                         INGEST (auth: session+CSRF or ingest token)        STORE / ANALYZE
+  ───────                         ───────────────────────────────────────────        ───────────────
+  log files ──────────────┐
+  shipper.py (E) ─────────┤  POST /api/ingest[/upload] ─┐
+  simulator / storyline(C)┤                             ├─► normalize.py ──► events (SQLite, synthetic flag)
+  syslog UDP/TCP (E) ─► syslog_listener.py ─────────────┘   parse, validate,        │
+                                                            redact secrets          ▼
+                                                                         engine.run_detection
+                                                                         rules.py: 11 pure rules (A)
+                                                                         + attack.py ATT&CK map (A)
+                                                                                    │
+                                                                                    ▼
+                                                                    alerts ──► correlate.py (A) ──► incidents
+                                                                      │                               │
+                                  ┌───────────── stream.py broker ◄───┴───────────────────────────────┤
+                                  ▼                                                                   ▼
+  BROWSER ◄── HTTPS ── Caddy / nginx (F) ── server.py on 127.0.0.1 ──────────────────► report.py + pdfwriter.py (D)
+  dashboard.js, map.js,        deploy/         • ratelimit.py: per-IP buckets (F)       report.md / report.pdf
+  charts.js (B), app.js        systemd unit    • roles viewer < analyst < admin (F)
+  GET /api/stream (SSE, B)     (F)             • CSRF, CSP, sessions, ingest tokens
+                                               • geo.py synthetic geo (B), health.py, improve.py
+```
 
 ---
 
@@ -14,6 +57,7 @@ It uses only the Python standard library (3.10+). No packages to install, no pai
 cd labs/siem
 export SIEM_ADMIN_PASSWORD='choose-a-long-password'      # optional; otherwise generated
 export SIEM_ANALYST_PASSWORD='choose-another-long-one'   # optional; otherwise generated
+export SIEM_VIEWER_PASSWORD='a-read-only-demo-login'     # optional; creates a read-only `viewer` account
 ./start.sh                                               # http://127.0.0.1:8080
 ```
 
@@ -24,7 +68,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 ### Tests
 
 ```bash
-./run_tests.sh      # unit/integration tests + a 15-step end-to-end smoke check
+./run_tests.sh      # ~200 unit/integration tests + a 19-step end-to-end smoke check
 ```
 
 ### Replit
@@ -38,6 +82,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 | `SIEM_DB` | `data/watchpost.db` | SQLite database path |
 | `SIEM_HOST` / `SIEM_PORT` (or `PORT`) | `127.0.0.1` / `8080` | Bind address |
 | `SIEM_ADMIN_PASSWORD`, `SIEM_ANALYST_PASSWORD` | generated | Initial account passwords (min. 12 chars), used only when the database is empty |
+| `SIEM_VIEWER_PASSWORD` | unset (no viewer) | Creates a read-only `viewer` account on start if none exists; never generated, never resets an existing viewer |
 | `SIEM_SECURE_COOKIES` | `0` | Set `1` behind HTTPS |
 | `SIEM_SESSION_TTL` | `28800` | Session lifetime in seconds |
 | `SIEM_MAX_UPLOAD_BYTES` / `SIEM_MAX_BATCH_EVENTS` | 5 MB / 20000 | Ingestion limits |
@@ -45,6 +90,16 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 | `SIEM_SYSLOG_BIND` / `SIEM_SYSLOG_PORT` | `127.0.0.1` / `5514` | Syslog listener address (same port for UDP and TCP) |
 | `SIEM_SYSLOG_ALLOW` | empty (any) | Comma-separated IPs/CIDRs allowed to send syslog |
 | `SIEM_DEMO_LOOP` / `SIEM_DEMO_LOOP_SPEED` | `0` / `1` | Minutes between automatic replays of the synthetic attack storyline (0 = off) and its speed multiplier |
+| `SIEM_RATE_LIMIT` | `1` | `0` turns off per-IP rate limiting |
+| `SIEM_LOGIN_RATE_BURST` / `SIEM_LOGIN_RATE_PER_MIN` | `10` / `10` | Token bucket for `POST /api/auth/login`, per client IP |
+| `SIEM_RATE_BURST` / `SIEM_RATE_PER_MIN` | `300` / `1200` | Token bucket for every other request (API and static), per client IP |
+| `SIEM_TRUST_PROXY` | `0` | `1` behind a local reverse proxy: the client IP is the last `X-Forwarded-For` entry on loopback connections |
+
+### Public deployment
+
+[`deploy/`](deploy/README.md) installs Watchpost on a Debian 12 VM as a hardened systemd service on loopback, with
+Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in front:
+`sudo ./deploy/install.sh --caddy demo.example.org`. Publish only the `viewer` login.
 
 ---
 
@@ -73,7 +128,8 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 | `watchpost/rules.py` | Eleven threshold rules as pure functions over event lists, each with a plain-English explanation. Also validates rule parameters. |
 | `watchpost/engine.py` | Stores each batch atomically, then runs detection over the batch's time range plus the longest rule window. Deduplicates and extends open alerts, and records every detection run. |
 | `watchpost/queries.py` | Event search (parameterized SQL), alert detail with evidence and a related-events timeline, notes, status changes, and SOC metrics. |
-| `watchpost/auth.py` | PBKDF2-SHA256 password hashing, lockout, and server-side sessions (only token hashes are stored). Also ingest-only API tokens (hashed) and the viewer < analyst < admin roles. |
+| `watchpost/auth.py` | PBKDF2-SHA256 password hashing, lockout, and server-side sessions (only token hashes are stored). Also ingest-only API tokens (hashed) and the viewer < analyst < admin roles. Viewers are read-only: the server refuses every non-GET request from them except logout. |
+| `watchpost/ratelimit.py` | In-memory per-IP token buckets. `server.py` answers 429 with `Retry-After` when a bucket is empty. |
 | `watchpost/health.py` | Component checks, each with a status (`ok`/`degraded`/`failing`), a message, and recovery guidance. |
 | `watchpost/improve.py` | Scenario evaluation (TP/FN/FP, recall, precision), rule performance from analyst verdicts, heuristic suggestions, and two-person change review. |
 | `watchpost/syslog_listener.py` | Optional UDP/TCP syslog receiver (RFC 3164, RFC 5424, RFC 6587 framing). Runs each line through the auth.log parser, falls back to a generic `syslog` event with severity from PRI, and batches into the engine every 2 seconds. Reports itself as the `syslog` health component. |
@@ -151,7 +207,7 @@ Admin → "Attack storyline (synthetic)" replays a scripted six-stage intrusion 
 
 ## What is real vs. synthetic vs. future
 
-**Real, working, and tested:** everything in the architecture section. That includes the ingestion API and file upload, normalization, persistence, search, the eleven rules, ATT&CK mapping and coverage, incident correlation, alerts with evidence and timelines, notes, status and verdicts, metrics, health checks and recovery, authentication, roles, CSRF protection, API tokens, redaction, feedback-driven suggestions, two-person review, evaluation history, and the audit log.
+**Real, working, and tested:** everything in the architecture section. That includes the ingestion API and file upload, normalization, persistence, search, the eleven rules, ATT&CK mapping and coverage, incident correlation, Markdown and PDF reports, the SSE dashboard, the syslog listener and shipper, alerts with evidence and timelines, notes, status and verdicts, metrics, health checks and recovery, authentication, roles (including the read-only viewer), per-IP rate limiting, CSRF protection, API tokens, redaction, feedback-driven suggestions, two-person review, evaluation history, and the audit log.
 
 **Synthetic:** all bundled data. The demo dataset and simulator scenarios (`watchpost/simulate.py`) and the files in `samples/` are invented. External IPs come from the RFC 5737 documentation ranges. Synthetic events are stored with `synthetic=1`, sourced `demo:*`, and tagged in the UI. The evaluation scores (recall and precision) measure the rules against these hand-labeled scenarios only. They say nothing about real-world accuracy.
 
@@ -159,12 +215,12 @@ Admin → "Attack storyline (synthetic)" replays a scripted six-stage intrusion 
 - Single process with SQLite, sized for thousands to low millions of events, not enterprise volume. No retention or rollup.
 - Live ingestion is basic: an optional syslog listener (unauthenticated, no TLS; loopback by default) and a single-file-per-flag shipper script. See [docs/LIVE_INGEST.md](docs/LIVE_INGEST.md) for its limits.
 - Timestamps without a zone are treated as UTC. BSD syslog lines carry no year, so you pass one or the current year is assumed.
-- Only two seeded accounts; there is no user-management UI or API. Accounts can be added with `watchpost.auth.create_user`.
-- No TLS termination; run it behind HTTPS (as Replit does) before exposing it.
+- Seeded accounts only (admin, analyst, and an optional viewer); there is no user-management UI or API. Accounts can be added with `watchpost.auth.create_user`.
+- No TLS in the app itself; `deploy/` puts Caddy or nginx in front for HTTPS. Rate limits live in memory and reset on restart.
 - Rules cover authentication, web, firewall/VPN, cloud audit, and host scenarios with fixed thresholds. Geo for impossible travel comes from a synthetic table covering only documentation and private ranges.
 - There is no scheduled detection. Detection runs on ingest and on demand.
 
-**Future ideas (not implemented):** Sigma rule import, GeoIP and threat-intel enrichment (both need external data), scheduled runs and retention, user management, MFA, and case grouping across alerts.
+**Future ideas (not implemented):** Sigma rule import, GeoIP and threat-intel enrichment (both need external data), scheduled runs and retention, user management, MFA, and case management beyond incidents.
 
 ---
 
@@ -181,7 +237,8 @@ labs/siem/
 ├── tests/              unittest suite
 ├── docs/API.md         API reference
 ├── docs/LIVE_INGEST.md syslog listener, rsyslog forwarding, and the file shipper
-├── DEMO_SCRIPT.md      5-minute demo walkthrough
-├── LINKEDIN.md         project description
+├── deploy/             Debian 12 kit: systemd unit, install.sh, Caddyfile, nginx self-signed config
+├── DEMO_SCRIPT.md      30-second shot list and 2-minute walkthrough
+├── LINKEDIN.md         project entry, post, and honest limits
 └── PROGRESS.md         milestones, verification evidence, next steps
 ```
