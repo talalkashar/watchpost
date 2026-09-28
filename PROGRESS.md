@@ -77,3 +77,27 @@ The brief asked me to continue an existing SOC/SIEM project on Replit. That proj
 3. Add a retention job (delete events older than N days) behind a reviewed setting.
 4. Add a syslog UDP/TCP listener on loopback for live shipping.
 5. Add a Sigma-style YAML rule loader for simple field-match rules.
+
+## Watchpost 2.0 / A: correlation engine and MITRE ATT&CK (2026-09-28, branch `ws/a-correlation-attack`)
+
+**Shipped**
+- `watchpost/attack.py`: static ATT&CK Enterprise subset (17 techniques, all 14 tactics in kill-chain order), `technique(id)`, `tactics()`, `coverage()`. No network fetch.
+- Every rule carries `techniques`; new `rules.techniques` JSON column (added in place on existing databases), written by `seed_rules`, returned by `GET /api/rules` and in alert detail.
+- Parsers: nginx/Apache combined (`weblog`, auto-detected) → `web_request`/`web_scan`/`web_error`; firewall CSV (`action` column) and UFW/iptables syslog → `fw_deny`/`fw_allow`; OpenVPN → `vpn_login`; CloudTrail-style JSON → `cloud_api_call`/`cloud_iam_change`/`cloud_data_access`; sudo/su/runas (4648) → `privilege_escalation`; useradd, auditd process (`exe=`) and file (`type=PATH`, 4663) records. New event columns `dest_port`, `bytes`.
+- Six new rules with tests and labeled scenarios: `web_scanner`, `firewall_port_sweep`, `impossible_geo_login`, `privilege_escalation_after_login`, `cloud_iam_change_by_new_principal`, `data_exfil_volume`. Evaluation: every rule recall 1.0, no new false positives.
+- `watchpost/geo.py`: synthetic geo table (`locate(ip) -> {city, lat, lon, synthetic}` or `None`), documentation + RFC 1918 ranges only.
+- `watchpost/correlate.py` + `engine.correlate_alerts`: incidents and `incident_alerts` tables, run after every detection run, idempotent. Correlation failures leave alerts alone, are logged under component `correlation`, and mark detection health `degraded` until the next good run.
+- Routes: `GET /api/incidents`, `GET /api/incidents/{id}`, `POST /api/incidents/{id}/status`, `GET /api/attack/coverage`. UI: active incidents table on the Alerts page, incident detail view (`#incidents/{id}`), ATT&CK chips on rules and alerts.
+- Samples: `nginx_access.log`, `firewall.csv`, `cloudtrail.json`, `linux_host.log`. Smoke check uploads them and gained incident and coverage steps.
+- Verification: `./run_tests.sh` → 97 tests OK, SMOKE OK (14 steps), run as a non-root user.
+
+**Decisions made (owner may revisit)**
+- Linking uses each alert's evidence-event times per entity, not the alert's whole span. With spans, one multi-hour impossible-travel alert chained 9 unrelated demo alerts on host `web01` into one incident.
+- A new incident needs ≥ 2 related alerts or 1 critical alert; window 30 min (`correlate.DEFAULT_WINDOW_SECONDS`, not yet a setting).
+- `vpn_login` counts as a successful login for `success_after_failures` and `off_hours_privileged_login` too.
+- Detection now reads up to 24 h of extra history before each batch (for "new principal" checks); findings made only from that history are ignored, so older behaviour is unchanged.
+- Rule tuning suggestions still only propose `threshold`/`ignore_*` changes; the new parameters are tunable via manual proposals.
+
+**Not done / notes**
+- `test_storage_unavailable_is_failing_not_a_crash` fails when the suite runs as root (root ignores directory permissions). Pre-existing, identical on `main`; passes as a normal user.
+- No incident notes/assignment UI beyond status; reports (D) and dashboard panels (B) consume these routes.

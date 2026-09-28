@@ -1,15 +1,21 @@
 """Detection rule logic.
 
 Each rule is a pure function: (events, params) -> list of findings.
-Events are dicts with at least id, ts, event_type, user, src_ip.
+Events are dicts with at least id, ts, event_type, user, src_ip (and, for the 2.0 rules,
+host, dest_ip, dest_port, bytes, message).
 A finding is {"group_key", "event_ids", "first_seen", "last_seen", "title", "explanation"}.
+Every rule also lists the MITRE ATT&CK techniques it maps to (see attack.py).
 
 Rules are deliberately simple, threshold-based, and explainable. No machine learning.
 """
 
 from collections import Counter, defaultdict, deque
 
+from . import geo
+from .attack import techniques
 from .db import parse_iso
+
+LOGIN_SUCCESS_TYPES = ("auth_success", "vpn_login")
 
 DEFAULT_RULES = [
     {
@@ -17,6 +23,7 @@ DEFAULT_RULES = [
         "name": "Brute-force login attempts from one IP",
         "description": "Fires when a single source IP produces at least `threshold` failed logins "
                        "within `window_seconds`. Typical of password guessing against one or a few accounts.",
+        "techniques": techniques("T1110.001"),
         "severity": "high",
         "params": {"threshold": 10, "window_seconds": 300, "ignore_ips": [], "ignore_users": []},
     },
@@ -26,6 +33,7 @@ DEFAULT_RULES = [
         "description": "Fires when a single source IP fails to log in as at least `distinct_users` "
                        "different accounts within `window_seconds`. Spraying tries a few common passwords "
                        "across many users to stay under per-account lockout limits.",
+        "techniques": techniques("T1110.003"),
         "severity": "high",
         "params": {"distinct_users": 5, "window_seconds": 600, "ignore_ips": [], "ignore_users": []},
     },
@@ -35,6 +43,7 @@ DEFAULT_RULES = [
         "description": "Fires when one account has at least `threshold` failed logins within "
                        "`window_seconds`, from any number of IPs. Catches distributed guessing that "
                        "per-IP rules miss.",
+        "techniques": techniques("T1110"),
         "severity": "medium",
         "params": {"threshold": 8, "window_seconds": 900, "ignore_ips": [], "ignore_users": []},
     },
@@ -44,6 +53,7 @@ DEFAULT_RULES = [
         "description": "Fires when an account logs in successfully after at least `failures` failed "
                        "attempts for that account within the preceding `window_seconds`. A likely sign "
                        "that guessing succeeded; treat as possible account compromise.",
+        "techniques": techniques("T1110", "T1078"),
         "severity": "critical",
         "params": {"failures": 5, "window_seconds": 600, "ignore_ips": [], "ignore_users": []},
     },
@@ -53,12 +63,76 @@ DEFAULT_RULES = [
         "description": "Fires when an account in `privileged_users` logs in successfully outside "
                        "`business_start_hour`-`business_end_hour` (UTC). Unusual timing for admin "
                        "access deserves a second look.",
+        "techniques": techniques("T1078.003"),
         "severity": "medium",
         "params": {
             "privileged_users": ["root", "admin", "administrator"],
             "business_start_hour": 8, "business_end_hour": 18,
             "ignore_ips": [], "ignore_users": [],
         },
+    },
+    {
+        "id": "web_scanner",
+        "name": "Web vulnerability scanning from one IP",
+        "description": "Fires when one source IP sends at least `threshold` requests that look like scanning "
+                       "(probes for /.env, /wp-login.php, .git, injection strings, or scanner user agents) "
+                       "within `window_seconds`. Usually the reconnaissance step before an exploit attempt.",
+        "techniques": techniques("T1595.002", "T1595.003", "T1190"),
+        "severity": "medium",
+        "params": {"threshold": 5, "window_seconds": 300, "ignore_ips": [], "ignore_users": []},
+    },
+    {
+        "id": "firewall_port_sweep",
+        "name": "Port sweep blocked by the firewall",
+        "description": "Fires when the firewall denies one source IP on at least `distinct_ports` different "
+                       "destination ports within `window_seconds`. Looks for services to attack.",
+        "techniques": techniques("T1046", "T1595.001"),
+        "severity": "medium",
+        "params": {"distinct_ports": 10, "window_seconds": 300, "ignore_ips": [], "ignore_users": []},
+    },
+    {
+        "id": "impossible_geo_login",
+        "name": "Impossible travel between logins",
+        "description": "Fires when the same account logs in (SSH, VPN, or other success) from two places at "
+                       "least `min_distance_km` apart, faster than `max_speed_kmh` allows, within "
+                       "`window_seconds`. Positions come from Watchpost's synthetic geo table for demo "
+                       "address ranges only; unmapped addresses are never guessed and never alert.",
+        "techniques": techniques("T1078", "T1133"),
+        "severity": "high",
+        "params": {"max_speed_kmh": 900, "min_distance_km": 500, "window_seconds": 21600,
+                   "ignore_ips": [], "ignore_users": []},
+    },
+    {
+        "id": "privilege_escalation_after_login",
+        "name": "Privilege escalation soon after a suspicious login",
+        "description": "Fires when an account elevates privileges (sudo, su, runas) within "
+                       "`escalation_seconds` of a successful login that followed at least `failures` failed "
+                       "attempts in the preceding `window_seconds`. Catches the step after a guessed password.",
+        "techniques": techniques("T1548.003", "T1078"),
+        "severity": "critical",
+        "params": {"failures": 3, "window_seconds": 600, "escalation_seconds": 1800,
+                   "ignore_ips": [], "ignore_users": []},
+    },
+    {
+        "id": "cloud_iam_change_by_new_principal",
+        "name": "Cloud IAM change by a new principal",
+        "description": "Fires when a cloud principal changes IAM (creates users, access keys, or policies) "
+                       "without any cloud activity of its own in the preceding `history_seconds`. Further "
+                       "IAM changes by that principal within `window_seconds` join the same alert.",
+        "techniques": techniques("T1098.001", "T1136.003", "T1078.004"),
+        "severity": "high",
+        "params": {"history_seconds": 86400, "window_seconds": 3600, "ignore_ips": [], "ignore_users": []},
+    },
+    {
+        "id": "data_exfil_volume",
+        "name": "Large data transfer by one principal",
+        "description": "Fires when one account (or, without an account, one source IP) moves at least "
+                       "`bytes_threshold` bytes out through allowed firewall connections and cloud storage "
+                       "reads, or makes at least `access_threshold` cloud data reads, within `window_seconds`.",
+        "techniques": techniques("T1530", "T1048"),
+        "severity": "high",
+        "params": {"bytes_threshold": 1_000_000_000, "access_threshold": 100, "window_seconds": 3600,
+                   "ignore_ips": [], "ignore_users": []},
     },
 ]
 
@@ -73,6 +147,13 @@ PARAM_SCHEMA = {
     "ignore_ips": ("list", 0, 500),
     "ignore_users": ("list", 0, 500),
     "privileged_users": ("list", 1, 500),
+    "distinct_ports": ("int", 2, 65536),
+    "max_speed_kmh": ("int", 100, 50000),
+    "min_distance_km": ("int", 1, 20000),
+    "escalation_seconds": ("int", 10, 86400),
+    "history_seconds": ("int", 60, 86400 * 30),
+    "bytes_threshold": ("int", 1, 10 ** 15),
+    "access_threshold": ("int", 2, 1_000_000),
 }
 
 
@@ -121,11 +202,12 @@ def _epoch(event):
 
 
 def _filtered(events, params, event_type):
+    types = {event_type} if isinstance(event_type, str) else set(event_type)
     ignore_ips = set(params.get("ignore_ips", []))
     ignore_users = {u.lower() for u in params.get("ignore_users", [])}
     out = [
         e for e in events
-        if e["event_type"] == event_type
+        if e["event_type"] in types
         and e.get("src_ip") not in ignore_ips
         and (e.get("user") or "").lower() not in ignore_users
     ]
@@ -175,6 +257,15 @@ def _group(events, key):
         value = event.get(key)
         if value:
             groups[value].append(event)
+    return groups
+
+
+def _group_users(events):
+    """Group by account name, ignoring case."""
+    groups = defaultdict(list)
+    for event in events:
+        if event.get("user"):
+            groups[event["user"].lower()].append(event)
     return groups
 
 
@@ -233,7 +324,7 @@ def success_after_failures(events, params):
     failures = _group(_filtered(events, params, "auth_failure"), "user")
     failures = {u.lower(): v for u, v in failures.items()}
     findings = []
-    for success in _filtered(events, params, "auth_success"):
+    for success in _filtered(events, params, LOGIN_SUCCESS_TYPES):
         user = (success.get("user") or "").lower()
         if not user or user not in failures:
             continue
@@ -259,7 +350,7 @@ def off_hours_privileged_login(events, params):
     privileged = {u.lower() for u in params["privileged_users"]}
     start, end = params["business_start_hour"], params["business_end_hour"]
     findings = []
-    for event in _filtered(events, params, "auth_success"):
+    for event in _filtered(events, params, LOGIN_SUCCESS_TYPES):
         user = (event.get("user") or "").lower()
         if user not in privileged:
             continue
@@ -276,14 +367,184 @@ def off_hours_privileged_login(events, params):
     return findings
 
 
+def _request_path(event):
+    parts = (event.get("message") or "").split()
+    return parts[1] if len(parts) > 1 else "?"
+
+
+def web_scanner(events, params):
+    threshold, window = params["threshold"], params["window_seconds"]
+    findings = []
+    for ip, group in _group(_filtered(events, params, "web_scan"), "src_ip").items():
+        for cluster in _clusters(group, window, lambda w: len(w) >= threshold):
+            paths = Counter(_request_path(e) for e in cluster)
+            top = ", ".join(p[:60] for p, _ in paths.most_common(5))
+            findings.append(_finding(
+                ip, cluster,
+                f"Web scanning from {ip}: {len(cluster)} probe requests",
+                f"{ip} sent {len(cluster)} scanner-like requests between {cluster[0]['ts']} and "
+                f"{cluster[-1]['ts']} ({len(paths)} distinct paths, e.g. {top}). "
+                f"Threshold: {threshold} within {window}s.",
+            ))
+    return findings
+
+
+def firewall_port_sweep(events, params):
+    needed, window = params["distinct_ports"], params["window_seconds"]
+    denied = [e for e in _filtered(events, params, "fw_deny") if e.get("dest_port") is not None]
+    findings = []
+    for ip, group in _group(denied, "src_ip").items():
+        qualifies = lambda w: len({e["dest_port"] for e in w}) >= needed
+        for cluster in _clusters(group, window, qualifies):
+            ports = sorted({e["dest_port"] for e in cluster})
+            targets = sorted({e.get("dest_ip") or "?" for e in cluster})
+            findings.append(_finding(
+                ip, cluster,
+                f"Port sweep from {ip}: {len(ports)} ports denied",
+                f"The firewall denied {ip} on {len(ports)} distinct ports "
+                f"({', '.join(map(str, ports[:12]))}{'…' if len(ports) > 12 else ''}) of "
+                f"{', '.join(targets[:3])} between {cluster[0]['ts']} and {cluster[-1]['ts']}. "
+                f"Threshold: {needed} ports within {window}s.",
+            ))
+    return findings
+
+
+def impossible_geo_login(events, params):
+    max_speed, min_km, window = params["max_speed_kmh"], params["min_distance_km"], params["window_seconds"]
+    findings = []
+    for user, group in _group_users(_filtered(events, params, LOGIN_SUCCESS_TYPES)).items():
+        previous = None
+        for login in group:
+            where = geo.locate(login.get("src_ip"))
+            if where is None:
+                continue  # unmapped address: never guessed
+            if previous is not None:
+                before, before_where = previous
+                seconds = _epoch(login) - _epoch(before)
+                km = geo.distance_km(before_where, where)
+                speed = km / max(seconds / 3600, 1 / 60)  # floor at one minute
+                if seconds <= window and km >= min_km and speed > max_speed:
+                    findings.append(_finding(
+                        f"{user}|{before['src_ip']}|{login['src_ip']}", [before, login],
+                        f"Impossible travel for {login['user']}: {before_where['city']} to {where['city']}",
+                        f"{login['user']} logged in from {before_where['city']} ({before['src_ip']}) at {before['ts']} "
+                        f"and from {where['city']} ({login['src_ip']}) at {login['ts']}: {km:,.0f} km in "
+                        f"{seconds / 60:,.0f} min, about {speed:,.0f} km/h (limit {max_speed} km/h). "
+                        f"Locations come from the synthetic geo table.",
+                    ))
+            previous = (login, where)
+    return findings
+
+
+def privilege_escalation_after_login(events, params):
+    needed, window, reach = params["failures"], params["window_seconds"], params["escalation_seconds"]
+    failures = _group_users(_filtered(events, params, "auth_failure"))
+    logins = _group_users(_filtered(events, params, LOGIN_SUCCESS_TYPES))
+    findings = []
+    for esc in _filtered(events, params, "privilege_escalation"):
+        user = (esc.get("user") or "").lower()
+        t = _epoch(esc)
+        recent = [l for l in logins.get(user, []) if 0 <= t - _epoch(l) <= reach]
+        for login in reversed(recent):  # most recent qualifying login first
+            prior = [f for f in failures.get(user, []) if 0 <= _epoch(login) - _epoch(f) <= window]
+            if len(prior) < needed:
+                continue
+            host = esc.get("host") or "unknown"
+            minutes = (t - _epoch(login)) / 60
+            findings.append(_finding(
+                f"{user}|{host}", prior + [login, esc],
+                f"Privilege escalation by {esc.get('user')} on {host} after suspicious login",
+                f"{esc.get('user')} elevated privileges on {host} at {esc['ts']}, {minutes:,.0f} min after "
+                f"logging in from {login.get('src_ip') or 'an unknown IP'} at {login['ts']}. That login followed "
+                f"{len(prior)} failed attempts within {window}s (threshold {needed}; escalation window {reach}s).",
+            ))
+            break
+    return findings
+
+
+CLOUD_TYPES = ("cloud_api_call", "cloud_iam_change", "cloud_data_access")
+
+
+def cloud_iam_change_by_new_principal(events, params):
+    history, window = params["history_seconds"], params["window_seconds"]
+    findings = []
+    for principal, group in _group_users(_filtered(events, params, CLOUD_TYPES)).items():
+        index = 0
+        while index < len(group):
+            change = group[index]
+            t = _epoch(change)
+            seen_before = any(t - _epoch(p) <= history for p in group[:index])
+            if change["event_type"] != "cloud_iam_change" or seen_before:
+                index += 1
+                continue
+            cluster = [e for e in group[index:] if e["event_type"] == "cloud_iam_change" and _epoch(e) - t <= window]
+            actions = Counter((e.get("message") or "change").split(" on ")[0] for e in cluster)
+            findings.append(_finding(
+                principal, cluster,
+                f"IAM change by new principal {change['user']}",
+                f"{change['user']} made {len(cluster)} IAM change(s) ({', '.join(a for a, _ in actions.most_common(5))}) "
+                f"starting {change['ts']} from {change.get('src_ip') or 'an unknown IP'}, with no cloud activity "
+                f"of its own in the preceding {history}s.",
+            ))
+            while index < len(group) and _epoch(group[index]) - t <= window:
+                index += 1
+    return findings
+
+
+def _human_bytes(n):
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1000 or unit == "TB":
+            return f"{n:,.1f} {unit}" if unit != "B" else f"{n} B"
+        n /= 1000
+
+
+def data_exfil_volume(events, params):
+    limit, reads, window = params["bytes_threshold"], params["access_threshold"], params["window_seconds"]
+    groups = defaultdict(list)
+    for e in _filtered(events, params, ("cloud_data_access", "fw_allow", "network_connection")):
+        if e["event_type"] != "cloud_data_access" and not e.get("bytes"):
+            continue
+        key = (e.get("user") or "").lower() or e.get("src_ip")
+        if key:
+            groups[key].append(e)
+    findings = []
+    volume = lambda w: sum(e.get("bytes") or 0 for e in w)
+    accesses = lambda w: sum(e["event_type"] == "cloud_data_access" for e in w)
+    for principal, group in groups.items():
+        for cluster in _clusters(group, window, lambda w: volume(w) >= limit or accesses(w) >= reads):
+            total, count = volume(cluster), accesses(cluster)
+            findings.append(_finding(
+                principal, cluster,
+                f"Large data transfer by {principal}: {_human_bytes(total)}",
+                f"{principal} moved {_human_bytes(total)} across {len(cluster)} events ({count} cloud data "
+                f"reads) between {cluster[0]['ts']} and {cluster[-1]['ts']}. Thresholds: "
+                f"{_human_bytes(limit)} or {reads} reads within {window}s.",
+            ))
+    return findings
+
+
 RULE_FUNCTIONS = {
     "brute_force_ip": brute_force_ip,
     "password_spray": password_spray,
     "account_repeated_failures": account_repeated_failures,
     "success_after_failures": success_after_failures,
     "off_hours_privileged_login": off_hours_privileged_login,
+    "web_scanner": web_scanner,
+    "firewall_port_sweep": firewall_port_sweep,
+    "impossible_geo_login": impossible_geo_login,
+    "privilege_escalation_after_login": privilege_escalation_after_login,
+    "cloud_iam_change_by_new_principal": cloud_iam_change_by_new_principal,
+    "data_exfil_volume": data_exfil_volume,
 }
+
 
 # The largest time span a rule can look across; used to pick the rescan window after ingest.
 def lookback_seconds(rules):
-    return max([r["params"].get("window_seconds", 0) for r in rules] + [3600])
+    spans = [r["params"].get("window_seconds", 0) + r["params"].get("escalation_seconds", 0) for r in rules]
+    return max(spans + [3600])
+
+
+# Extra history some rules need before the rescan window (e.g. "no prior activity" checks).
+# Events in this span are context only: the engine ignores findings that end inside it.
+def history_seconds(rules):
+    return max([r["params"].get("history_seconds", 0) for r in rules] + [0])

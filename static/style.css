@@ -113,3 +113,7 @@ dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--p
 dialog::backdrop { background: rgb(0 0 0 / .4); }
 .toast { position: fixed; bottom: 16px; right: 16px; background: var(--ink); color: var(--bg); padding: 10px 14px;
   border-radius: 8px; max-width: 420px; z-index: 20; }
+
+/* ATT&CK technique and kill-chain stage chips */
+.pill.technique { background: #eef2ff; color: #3730a3; white-space: normal; }
+.pill.stage { background: #ecfeff; color: #155e75; }
