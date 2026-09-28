@@ -505,7 +505,8 @@ def make_server(config=None):
     return server, app
 
 
-def main():
+def main(before_serve=None):
+    """`before_serve(app)` may start extra services; it returns an object with stop(), or None."""
     configure_logging()
     server, app = make_server()
     host, port = server.server_address[:2]
@@ -514,11 +515,14 @@ def main():
         log.info("Initial admin/analyst passwords were generated and saved to %s", app.credentials_file)
     if host not in ("127.0.0.1", "localhost", "::1"):
         log.warning("Bound to %s: reachable beyond this machine. Set SIEM_SECURE_COOKIES=1 behind HTTPS.", host)
+    service = before_serve(app) if before_serve else None
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        if service is not None:
+            service.stop()
         server.server_close()
 
 

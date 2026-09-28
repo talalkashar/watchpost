@@ -295,7 +295,7 @@ async function events(offset = 0) {
       field("user", "User", { size: 10 }),
       field("ip", "IP (src or dest)", { size: 13 }),
       el("label", {}, "Event type", el("select", { name: "event_type" },
-        ["", "auth_failure", "auth_success", "account_lockout", "user_created", "privilege_use", "process_start", "network_connection", "file_access", "other"]
+        ["", "auth_failure", "auth_success", "account_lockout", "user_created", "privilege_use", "process_start", "network_connection", "file_access", "syslog", "other"]
           .map((v) => el("option", { value: v, selected: saved.get("event_type") === v }, v || "Any")))),
       el("label", {}, "Min severity", el("select", { name: "severity" },
         ["", "low", "medium", "high", "critical"].map((v) => el("option", { value: v, selected: saved.get("severity") === v }, v || "Any")))),

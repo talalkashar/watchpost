@@ -71,10 +71,11 @@ def free_port():
 
 def main():
     tmp = tempfile.TemporaryDirectory()
-    port = free_port()
+    port, syslog_port = free_port(), free_port()
     base = f"http://127.0.0.1:{port}"
     env = {**os.environ, "SIEM_DB": os.path.join(tmp.name, "smoke.db"), "SIEM_HOST": "127.0.0.1",
-           "SIEM_PORT": str(port), "SIEM_ADMIN_PASSWORD": ADMIN_PW, "SIEM_ANALYST_PASSWORD": ANALYST_PW}
+           "SIEM_PORT": str(port), "SIEM_ADMIN_PASSWORD": ADMIN_PW, "SIEM_ANALYST_PASSWORD": ANALYST_PW,
+           "SIEM_SYSLOG": "1", "SIEM_SYSLOG_PORT": str(syslog_port)}
     log_path = os.path.join(tmp.name, "server.log")
     log_file = open(log_path, "w")
     proc = subprocess.Popen([sys.executable, "main.py"], cwd=ROOT, env=env, stdout=log_file, stderr=log_file)
@@ -163,11 +164,36 @@ def main():
         status, res = admin.call("POST", f"/api/changes/{change['id']}/review", {"decision": "approve", "note": "smoke"})
         check(status == 200 and res["status"] == "approved", f"approve: {status} {res}")
 
+        step("live ingestion: syslog listener and file shipper")
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+            udp.sendto(b"<11>1 2026-09-28T10:00:00Z smoke-host smokeapp 1 - - live syslog frame",
+                       ("127.0.0.1", syslog_port))
+        for _ in range(50):
+            status, res = analyst.call("GET", "/api/events?source=syslog&host=smoke-host")
+            if res["total"]:
+                break
+            time.sleep(0.2)
+        check(res["total"] == 1 and res["events"][0]["event_type"] == "syslog", f"syslog event: {res}")
+        shipped = Path(tmp.name) / "shipped.log"
+        shipped.write_text("Sep 28 12:00:00 smoke-box sshd[1]: Accepted publickey for smokeuser "
+                           "from 198.51.100.99 port 22 ssh2\n")
+        out = subprocess.run([sys.executable, "scripts/shipper.py", "--url", base, "--once", "--from-start",
+                              "--max-retries", "0", "--file", f"{shipped}:authlog:smoke-shipper",
+                              "--state", os.path.join(tmp.name, "pos.json"), "--year", "2026"],
+                             cwd=ROOT, capture_output=True, text=True, timeout=60,
+                             env={**os.environ, "WATCHPOST_TOKEN": tok["token"]})
+        check(out.returncode == 0, out.stderr)
+        status, res = analyst.call("GET", "/api/events?source=smoke-shipper")
+        check(res["total"] == 1 and res["events"][0]["user"] == "smokeuser", f"shipped event: {res}")
+        check(tok["token"] not in out.stderr, "shipper logged its token")
+        print("      syslog frame and shipped auth.log line both searchable")
+
         step("metrics and health are consistent")
         status, m = analyst.call("GET", "/api/metrics")
         check(m["alerts_resolved"] >= 2 and m["events_total"] > 0, f"metrics: {m}")
         status, h = admin.call("GET", "/api/health/details")
         check(h["status"] == "ok", f"health after flow: {[(c['name'], c['status'], c['message']) for c in h['checks']]}")
+        check(any(c["name"] == "syslog" and c["status"] == "ok" for c in h["checks"]), "syslog health missing")
 
         step("server log contains no secrets")
         log_text = Path(log_path).read_text()

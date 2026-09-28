@@ -23,6 +23,11 @@ class Config:
     max_batch_events: int
     admin_password: str | None
     analyst_password: str | None
+    # Live syslog listener (off unless SIEM_SYSLOG=1). Loopback by default: syslog is unauthenticated.
+    syslog_enabled: bool = False
+    syslog_bind: str = "127.0.0.1"
+    syslog_port: int = 5514
+    syslog_allow: str = ""
 
     @classmethod
     def from_env(cls, **overrides):
@@ -37,6 +42,10 @@ class Config:
             max_batch_events=int(os.environ.get("SIEM_MAX_BATCH_EVENTS", "20000")),
             admin_password=os.environ.get("SIEM_ADMIN_PASSWORD") or None,
             analyst_password=os.environ.get("SIEM_ANALYST_PASSWORD") or None,
+            syslog_enabled=os.environ.get("SIEM_SYSLOG", "0") == "1",
+            syslog_bind=os.environ.get("SIEM_SYSLOG_BIND", "127.0.0.1"),
+            syslog_port=int(os.environ.get("SIEM_SYSLOG_PORT", "5514")),
+            syslog_allow=os.environ.get("SIEM_SYSLOG_ALLOW", ""),
         )
         values.update(overrides)
         return cls(**values)

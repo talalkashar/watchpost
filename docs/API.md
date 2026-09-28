@@ -35,7 +35,7 @@ Accepted fields (aliases in parentheses):
 | Field | Aliases | Notes |
 |---|---|---|
 | `ts` | `timestamp`, `@timestamp`, `time`, `TimeCreated`, `event_time` | **Required.** ISO-8601 or epoch seconds/ms. No zone = UTC. Must be ≤ 1 day in the future and ≥ year 2000. |
-| `event_type` | `type`, `action`, `category`, or Windows `EventID` | Normalized, e.g. `login_failed` → `auth_failure`; unknown → `other` |
+| `event_type` | `type`, `action`, `category`, or Windows `EventID` | Normalized, e.g. `login_failed` → `auth_failure`; unknown → `other`. `syslog` is also accepted, and `GET /api/events?event_type=syslog` filters on it |
 | `user` | `username`, `TargetUserName`, `account`, `user.name` | |
 | `src_ip` | `source_ip`, `client_ip`, `ip`, `IpAddress`, `source.ip` | Must be a valid IPv4/IPv6 address |
 | `dest_ip` | `destination_ip`, `server_ip` | |
@@ -62,6 +62,13 @@ Raw UTF-8 file body (`Content-Type: text/plain`). `format` is `auto` (default), 
 curl -X POST "http://127.0.0.1:8080/api/ingest/upload?format=authlog&source=bastion01&year=2026" \
   -H "Authorization: Bearer $SIEM_INGEST_TOKEN" -H "Content-Type: text/plain" --data-binary @/var/log/auth.log
 ```
+
+### Live ingestion (no new routes)
+
+- **File shipper.** `scripts/shipper.py` tails files and posts complete new lines to `POST /api/ingest/upload` with `Authorization: Bearer wp_...`, using `format` and `source` query parameters. It keeps a position file and retries network errors, 5xx, and 401/403 with backoff. It skips batches refused with 400, 413, 415, or 422.
+- **Syslog listener.** With `SIEM_SYSLOG=1`, Watchpost also accepts RFC 3164 and RFC 5424 syslog over UDP and TCP on `SIEM_SYSLOG_BIND:SIEM_SYSLOG_PORT` (default `127.0.0.1:5514`). Frames are stored as batches with `source=syslog`, `format=syslog`, and `submitted_by=syslog-listener`. Lines that no parser recognizes get `event_type=syslog`, with severity taken from PRI.
+
+Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 
 | Endpoint | Role | Notes |
 |---|---|---|
@@ -113,7 +120,7 @@ curl -X POST "http://127.0.0.1:8080/api/ingest/upload?format=authlog&source=bast
 
 | Endpoint | Role | Notes |
 |---|---|---|
-| `GET /api/health` | public | `{status, checks: {name: status}}`; HTTP 503 when failing |
+| `GET /api/health` | public | `{status, checks: {name: status}}`; HTTP 503 when failing. `checks` includes `syslog` while the listener is enabled |
 | `GET /api/health/details` | viewer | Full checks with guidance, recent redacted errors, recent detection runs |
 | `GET /api/tokens` / `POST /api/tokens` | admin | `{name}` → `{token}` (shown once; only a SHA-256 hash is stored) |
 | `POST /api/tokens/{id}/revoke` | admin | |

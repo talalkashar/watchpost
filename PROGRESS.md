@@ -77,3 +77,31 @@ The brief asked me to continue an existing SOC/SIEM project on Replit. That proj
 3. Add a retention job (delete events older than N days) behind a reviewed setting.
 4. Add a syslog UDP/TCP listener on loopback for live shipping.
 5. Add a Sigma-style YAML rule loader for simple field-match rules.
+
+## Watchpost 2.0 / E: live ingestion (2026-09-28, branch `ws/e-live-ingest`)
+
+**Shipped**
+- `watchpost/syslog_listener.py`: a UDP and TCP syslog receiver.
+  - Parses RFC 3164 and RFC 5424 messages and RFC 6587 TCP framing (octet-counted and newline).
+  - Each line goes through the existing auth.log parser first. Anything it doesn't recognize becomes a new `syslog` event type, with severity from PRI.
+  - Batches into `engine.ingest` every 2 seconds and bounds the queue at 50,000 frames. Optional `SIEM_SYSLOG_ALLOW` IP/CIDR allow list.
+  - Loopback by default. Started from `main.py` when `SIEM_SYSLOG=1`.
+  - Reported as the `syslog` health component. A bind failure is failing health plus an error_log entry, never a crash.
+- `watchpost/health.py`: `register_check` / `unregister_check`, so optional components can add a health check while they run. The four core checks are unchanged. Workstream C (storyline) can reuse this.
+- `scripts/shipper.py`: a stdlib-only tailer that posts to `/api/ingest/upload` with an ingest token.
+  - Batches by line count and size, retries with exponential backoff and jitter, and keeps an atomic position file (inode and offset).
+  - Follows rename rotation (drains the old file first) and copytruncate.
+  - Skips batches the server refuses as invalid instead of stalling. Refuses plain HTTP to non-loopback hosts. The token comes from an env var or a file only.
+- `docs/LIVE_INGEST.md`: listener setup, rsyslog forwarding for Debian 12 (install rsyslog first) and Ubuntu, remote options (SSH tunnel or allow list plus ufw), shipper install with a systemd unit, and limits.
+- Tests: `tests/test_live_ingest.py` has 29 tests: parsing, framing, a listener on random ports over UDP and TCP, allow list, bind failure, the health API, the shipper against a fake HTTP server, and the shipper CLI against a real server. The smoke check gained step 11 (a syslog frame plus a shipper run against the real server process), and step 12 now checks that `syslog` health is ok.
+
+**Verification:** `./run_tests.sh` gives 86 tests OK and SMOKE OK (13 steps), run as an unprivileged user. As root, the pre-existing `test_storage_unavailable_is_failing_not_a_crash` fails on `main` too, because a read-only directory does not stop root. Nothing in this workstream touches it.
+
+**Not done / limits**
+- No TLS syslog (RFC 5425). Syslog is unauthenticated, so use loopback, an SSH tunnel, or an allow list.
+- nginx access logs ship only once workstream A adds a web log format to the server parser.
+- BSD syslog timestamps are treated as UTC (the existing rule). The docs recommend the RFC 5424 rsyslog template.
+
+**Decisions for the owner**
+- Default syslog port is 5514, not 514, so Watchpost never needs root. Change it with `SIEM_SYSLOG_PORT`.
+- For the public demo VM (workstream F), the recommended live feed is the VM's own rsyslog forwarding to `127.0.0.1:5514`. It needs no open port.

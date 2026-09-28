@@ -24,7 +24,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 ### Tests
 
 ```bash
-./run_tests.sh      # 57 unit/integration tests + a 12-step end-to-end smoke check
+./run_tests.sh      # 86 unit/integration tests + a 13-step end-to-end smoke check
 ```
 
 ### Replit
@@ -41,6 +41,9 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 | `SIEM_SECURE_COOKIES` | `0` | Set `1` behind HTTPS |
 | `SIEM_SESSION_TTL` | `28800` | Session lifetime in seconds |
 | `SIEM_MAX_UPLOAD_BYTES` / `SIEM_MAX_BATCH_EVENTS` | 5 MB / 20000 | Ingestion limits |
+| `SIEM_SYSLOG` | `0` | `1` also starts the UDP/TCP syslog listener ([docs/LIVE_INGEST.md](docs/LIVE_INGEST.md)) |
+| `SIEM_SYSLOG_BIND` / `SIEM_SYSLOG_PORT` | `127.0.0.1` / `5514` | Syslog listener address (same port for UDP and TCP) |
+| `SIEM_SYSLOG_ALLOW` | empty (any) | Comma-separated IPs/CIDRs allowed to send syslog |
 
 ---
 
@@ -48,9 +51,10 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 
 ```
  log files ──► POST /api/ingest/upload ─┐
+ shipper.py ─► (same, ingest token) ────┤
  collectors ─► POST /api/ingest (token) ├─► normalize.py ──► events (SQLite) ──► engine.run_detection
- simulator ──► (same API, loopback) ────┘   parse + validate      │                 │  rules.py (pure functions)
-                                            + redact secrets      │                 ▼
+ simulator ──► (same API, loopback) ────┤   parse + validate      │                 │  rules.py (pure functions)
+ syslog ─────► syslog_listener.py ──────┘   + redact secrets      │                 ▼
                                                                   │            alerts + alert_events
                                                                   ▼                 │
  browser UI (static/) ◄── server.py (auth, CSRF, roles) ◄── queries.py ◄────────────┘
@@ -69,6 +73,8 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 | `watchpost/auth.py` | PBKDF2-SHA256 password hashing, lockout, and server-side sessions (only token hashes are stored). Also ingest-only API tokens (hashed) and the viewer < analyst < admin roles. |
 | `watchpost/health.py` | Component checks, each with a status (`ok`/`degraded`/`failing`), a message, and recovery guidance. |
 | `watchpost/improve.py` | Scenario evaluation (TP/FN/FP, recall, precision), rule performance from analyst verdicts, heuristic suggestions, and two-person change review. |
+| `watchpost/syslog_listener.py` | Optional UDP/TCP syslog receiver (RFC 3164, RFC 5424, RFC 6587 framing). Runs each line through the auth.log parser, falls back to a generic `syslog` event with severity from PRI, and batches into the engine every 2 seconds. Reports itself as the `syslog` health component. |
+| `scripts/shipper.py` | Stdlib-only file tailer for Linux boxes: batches new lines to `/api/ingest/upload` with an ingest token, with backoff, rotation handling, and a position file. |
 | `watchpost/simulate.py` | Labeled synthetic scenarios and a CLI that sends only to loopback unless you explicitly allow otherwise. |
 | `watchpost/server.py` | `http.server` routing, security headers (CSP, frame denial, nosniff), CSRF checks, body limits, and the static UI. |
 
@@ -76,7 +82,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 
 `id, ts (UTC ISO-8601), ingested_at, source, host, event_type, outcome, severity, user, src_ip, dest_ip, message, raw (redacted, truncated), synthetic, batch_id`
 
-`event_type` is one of `auth_failure, auth_success, account_lockout, user_created, privilege_use, process_start, network_connection, file_access, other`.
+`event_type` is one of `auth_failure, auth_success, account_lockout, user_created, privilege_use, process_start, network_connection, file_access, syslog, other`. `syslog` is a generic line received by the syslog listener that no parser recognized.
 
 ### Detection rules
 
@@ -100,6 +106,7 @@ Every rule accepts `ignore_ips` and `ignore_users`. The engine merges overlappin
 | ingestion | server-side ingestion errors in 24 h, or > 25 % of records rejected (degraded) |
 | detection | last run failed (failing); batches ingested while detection was failing and not yet reprocessed, no enabled rules, or a run stuck > 5 min (degraded) |
 | dependencies | Python < 3.10, SQLite < 3.35, or DB directory not writable (failing); UI files missing (degraded) |
+| syslog (only when `SIEM_SYSLOG=1`) | port can't be bound, invalid allow list, or a listener thread stopped (failing); last batch failed to store or frames dropped in the last 10 min (degraded) |
 
 If detection fails, the events stay stored, the ingest response says `"detection": {"status": "failed", ...}`, and the UI shows a banner. A full **Run detection** processes the backlog and marks those batches `recovered`. Tests cover each of these paths.
 
@@ -123,14 +130,14 @@ This is **not machine learning**. It is transparent, deterministic tuning suppor
 
 **Limitations:**
 - Single process with SQLite, sized for thousands to low millions of events, not enterprise volume. No retention or rollup.
-- No syslog/UDP listener or agents. Logs arrive by HTTP upload or API.
+- Live ingestion is basic: an optional syslog listener (unauthenticated, no TLS; loopback by default) and a single-file-per-flag shipper script. See [docs/LIVE_INGEST.md](docs/LIVE_INGEST.md) for its limits.
 - Timestamps without a zone are treated as UTC. BSD syslog lines carry no year, so you pass one or the current year is assumed.
 - Only two seeded accounts; there is no user-management UI or API. Accounts can be added with `watchpost.auth.create_user`.
 - No TLS termination; run it behind HTTPS (as Replit does) before exposing it.
 - Rules cover authentication scenarios only.
 - There is no scheduled detection. Detection runs on ingest and on demand.
 
-**Future ideas (not implemented):** a syslog listener, Sigma rule import, GeoIP and threat-intel enrichment (both need external data), scheduled runs and retention, user management, MFA, and case grouping across alerts.
+**Future ideas (not implemented):** Sigma rule import, GeoIP and threat-intel enrichment (both need external data), scheduled runs and retention, user management, MFA, and case grouping across alerts.
 
 ---
 
@@ -143,8 +150,10 @@ labs/siem/
 ├── static/             UI (index.html, app.js, style.css; no inline scripts)
 ├── samples/            synthetic log files for upload
 ├── scripts/smoke.py    end-to-end smoke check against a real server process
+├── scripts/shipper.py  log file shipper for Linux boxes (stdlib only)
 ├── tests/              unittest suite
 ├── docs/API.md         API reference
+├── docs/LIVE_INGEST.md syslog listener, rsyslog forwarding, and the file shipper
 ├── DEMO_SCRIPT.md      5-minute demo walkthrough
 ├── LINKEDIN.md         project description
 └── PROGRESS.md         milestones, verification evidence, next steps

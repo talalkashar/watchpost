@@ -19,7 +19,7 @@ from .diagnostics import redact
 
 EVENT_TYPES = {
     "auth_failure", "auth_success", "account_lockout", "user_created",
-    "privilege_use", "process_start", "network_connection", "file_access", "other",
+    "privilege_use", "process_start", "network_connection", "file_access", "syslog", "other",
 }
 SEVERITIES = ["info", "low", "medium", "high", "critical"]
 FORMATS = {"json", "jsonl", "csv", "authlog"}
