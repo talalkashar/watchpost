@@ -1,0 +1,40 @@
+# Render Blueprint: free-tier public demo of Watchpost (https://render.com/docs/blueprint-spec).
+# Free instances sleep after 15 idle minutes and lose their disk on every restart. That is fine
+# here: passwords come from the environment and SIEM_DEMO_LOOP refills the data with the
+# synthetic attack storyline on every start. Nothing real is stored.
+services:
+  - type: web
+    name: watchpost
+    runtime: python
+    plan: free
+    region: ohio
+    buildCommand: "python3 --version"          # standard library only; nothing to install
+    startCommand: "python3 main.py"
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: SIEM_HOST
+        value: 0.0.0.0                          # Render's proxy connects from the private network; PORT is injected
+      - key: SIEM_DB
+        value: /tmp/watchpost.db                # ephemeral by design (see the note above)
+      - key: SIEM_SECURE_COOKIES
+        value: "1"                              # Render terminates HTTPS
+      - key: SIEM_ADMIN_PASSWORD
+        generateValue: true                     # shown once in the Render dashboard; never in git
+      - key: SIEM_ANALYST_PASSWORD
+        generateValue: true
+      - key: SIEM_VIEWER_PASSWORD
+        value: watchpost-viewer-demo            # the public, read-only login for the LinkedIn post
+      - key: SIEM_DEMO_LOOP
+        value: "10"                             # replay the storyline every 10 minutes
+      - key: SIEM_DEMO_LOOP_SPEED
+        value: "1"
+      # All visitors arrive from Render's proxy, so the per-IP buckets are shared. Loosen them.
+      - key: SIEM_LOGIN_RATE_BURST
+        value: "60"
+      - key: SIEM_LOGIN_RATE_PER_MIN
+        value: "60"
+      - key: SIEM_RATE_BURST
+        value: "3000"
+      - key: SIEM_RATE_PER_MIN
+        value: "12000"
