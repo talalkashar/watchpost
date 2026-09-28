@@ -7,8 +7,8 @@ from .normalize import EVENT_TYPES, SEVERITIES, EventError, parse_timestamp
 
 ALERT_STATUSES = ("open", "investigating", "resolved")
 DISPOSITIONS = ("true_positive", "false_positive", "benign")
-EVENT_FIELDS = "id, ts, ingested_at, source, host, event_type, outcome, severity, user, src_ip, dest_ip, " \
-               "message, synthetic, batch_id"
+EVENT_FIELDS = "id, ts, ingested_at, source, host, event_type, outcome, severity, user, src_ip, dest_ip, dest_port, " \
+               "bytes, message, synthetic, batch_id"
 
 
 class QueryError(ValueError):
@@ -131,8 +131,8 @@ def get_alert(conn, alert_id):
     if alert is None:
         raise QueryError("alert not found", 404)
     alert = dict(alert)
-    alert["rule"] = row_to_dict(conn.execute("SELECT id, name, description, version FROM rules WHERE id = ?",
-                                             (alert["rule_id"],)).fetchone())
+    alert["rule"] = row_to_dict(conn.execute("SELECT id, name, description, version, techniques FROM rules"
+                                             " WHERE id = ?", (alert["rule_id"],)).fetchone(), ["techniques"])
     alert["evidence"] = [dict(r) for r in conn.execute(
         f"SELECT {', '.join('e.' + c.strip() for c in EVENT_FIELDS.split(','))} FROM events e"
         " JOIN alert_events ae ON ae.event_id = e.id WHERE ae.alert_id = ? ORDER BY e.ts, e.id LIMIT 500",

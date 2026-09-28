@@ -24,7 +24,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 ### Tests
 
 ```bash
-./run_tests.sh      # 57 unit/integration tests + a 12-step end-to-end smoke check
+./run_tests.sh      # 97 unit/integration tests + a 14-step end-to-end smoke check
 ```
 
 ### Replit
@@ -63,7 +63,9 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 | Module | Responsibility |
 |---|---|
 | `watchpost/normalize.py` | Parses JSON, JSONL, CSV, Linux `auth.log` (OpenSSH), and Windows Security events (4624/4625/4672/4688/4720/4740). Accepts common field aliases, including ECS-style nesting. Validates timestamps, IPs, severities, and lengths, strips control characters, and redacts secrets. Every rejected record gets a reason and a position. |
-| `watchpost/rules.py` | Five threshold rules as pure functions over event lists, each with a plain-English explanation. Also validates rule parameters. |
+| `watchpost/correlate.py`, `watchpost/incidents.py` | Pure alert-to-incident grouping; incident queries, status changes, and ATT&CK coverage. |
+| `watchpost/attack.py`, `watchpost/geo.py` | Static ATT&CK subset; synthetic geo table for demo IP ranges (never a real lookup). |
+| `watchpost/rules.py` | Eleven threshold rules as pure functions over event lists, each with a plain-English explanation. Also validates rule parameters. |
 | `watchpost/engine.py` | Stores each batch atomically, then runs detection over the batch's time range plus the longest rule window. Deduplicates and extends open alerts, and records every detection run. |
 | `watchpost/queries.py` | Event search (parameterized SQL), alert detail with evidence and a related-events timeline, notes, status changes, and SOC metrics. |
 | `watchpost/auth.py` | PBKDF2-SHA256 password hashing, lockout, and server-side sessions (only token hashes are stored). Also ingest-only API tokens (hashed) and the viewer < analyst < admin roles. |
@@ -76,7 +78,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 
 `id, ts (UTC ISO-8601), ingested_at, source, host, event_type, outcome, severity, user, src_ip, dest_ip, message, raw (redacted, truncated), synthetic, batch_id`
 
-`event_type` is one of `auth_failure, auth_success, account_lockout, user_created, privilege_use, process_start, network_connection, file_access, other`.
+`event_type` is one of `auth_failure, auth_success, account_lockout, user_created, privilege_use, process_start, network_connection, file_access, other`, plus (2.0) `web_request, web_scan, web_error, fw_deny, fw_allow, vpn_login, cloud_api_call, cloud_iam_change, cloud_data_access, privilege_escalation`. Events also carry `dest_port` and `bytes` when the source has them.
 
 ### Detection rules
 
@@ -87,6 +89,18 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 | `account_repeated_failures` | one account has ≥ 8 failures within 900 s, from any IPs | medium |
 | `success_after_failures` | a successful login follows ≥ 5 failures for that account within 600 s | critical |
 | `off_hours_privileged_login` | `root`/`admin`/`administrator` logs in outside 08:00–18:00 UTC on weekdays, or at any time on weekends | medium |
+| `web_scanner` | ≥ 5 scanner-like web requests (`/.env`, `/wp-login.php`, injection strings, scanner agents) from one IP within 300 s | medium |
+| `firewall_port_sweep` | the firewall denies one IP on ≥ 10 distinct ports within 300 s | medium |
+| `impossible_geo_login` | one account logs in from two places ≥ 500 km apart faster than 900 km/h (synthetic geo table only) | high |
+| `privilege_escalation_after_login` | sudo/su/runas within 30 min of a login that followed ≥ 3 failures | critical |
+| `cloud_iam_change_by_new_principal` | an IAM change by a cloud principal with no activity in the previous 24 h | high |
+| `data_exfil_volume` | one account (or IP) moves ≥ 1 GB out, or makes ≥ 100 cloud data reads, within 1 h | high |
+
+Every rule maps to MITRE ATT&CK techniques from a small static catalog (`watchpost/attack.py`, 17 techniques, no network fetch). `GET /api/attack/coverage` shows which techniques are covered and how often they fired.
+
+### Incidents (correlation)
+
+After each detection run, `watchpost/correlate.py` groups related alerts into incidents: alerts whose evidence shares a source IP, account, or host within 30 minutes. An incident needs two related alerts or one critical alert, lists its kill-chain stages (ATT&CK tactics in order), and is raised one severity level when it spans three or more tactics. Reruns change nothing; new alerts join an open incident.
 
 Every rule accepts `ignore_ips` and `ignore_users`. The engine merges overlapping findings into one open alert instead of creating duplicates, and a rescan never re-alerts on evidence already attached to an alert.
 
@@ -117,7 +131,7 @@ This is **not machine learning**. It is transparent, deterministic tuning suppor
 
 ## What is real vs. synthetic vs. future
 
-**Real, working, and tested:** everything in the architecture section. That includes the ingestion API and file upload, normalization, persistence, search, the five rules, alerts with evidence and timelines, notes, status and verdicts, metrics, health checks and recovery, authentication, roles, CSRF protection, API tokens, redaction, feedback-driven suggestions, two-person review, evaluation history, and the audit log.
+**Real, working, and tested:** everything in the architecture section. That includes the ingestion API and file upload, normalization, persistence, search, the eleven rules, ATT&CK mapping and coverage, incident correlation, alerts with evidence and timelines, notes, status and verdicts, metrics, health checks and recovery, authentication, roles, CSRF protection, API tokens, redaction, feedback-driven suggestions, two-person review, evaluation history, and the audit log.
 
 **Synthetic:** all bundled data. The demo dataset and simulator scenarios (`watchpost/simulate.py`) and the files in `samples/` are invented. External IPs come from the RFC 5737 documentation ranges. Synthetic events are stored with `synthetic=1`, sourced `demo:*`, and tagged in the UI. The evaluation scores (recall and precision) measure the rules against these hand-labeled scenarios only. They say nothing about real-world accuracy.
 
@@ -127,7 +141,7 @@ This is **not machine learning**. It is transparent, deterministic tuning suppor
 - Timestamps without a zone are treated as UTC. BSD syslog lines carry no year, so you pass one or the current year is assumed.
 - Only two seeded accounts; there is no user-management UI or API. Accounts can be added with `watchpost.auth.create_user`.
 - No TLS termination; run it behind HTTPS (as Replit does) before exposing it.
-- Rules cover authentication scenarios only.
+- Rules cover authentication, web, firewall/VPN, cloud audit, and host scenarios with fixed thresholds. Geo for impossible travel comes from a synthetic table covering only documentation and private ranges.
 - There is no scheduled detection. Detection runs on ingest and on demand.
 
 **Future ideas (not implemented):** a syslog listener, Sigma rule import, GeoIP and threat-intel enrichment (both need external data), scheduled runs and retention, user management, MFA, and case grouping across alerts.

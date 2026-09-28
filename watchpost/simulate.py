@@ -39,11 +39,12 @@ def _at(day, hh, mm, ss=0):
     return datetime.combine(day, time(hh, mm, ss), tzinfo=timezone.utc)
 
 
-def _event(ts, scenario, event_type, user, ip, host="web01", message=None):
+def _event(ts, scenario, event_type, user, ip, host="web01", message=None, **extra):
     return {
         "ts": iso(ts), "source": f"demo:{scenario}", "host": host, "event_type": event_type,
         "user": user, "src_ip": ip, "dest_ip": "10.0.0.10",
         "message": message or f"[SYNTHETIC] {event_type} for {user} from {ip}",
+        **extra,
     }
 
 
@@ -105,6 +106,87 @@ def noisy_scanner_repeat(day, rng):
             for i in range(12)]
 
 
+SCAN_PROBES = ["/.env", "/.git/config", "/wp-login.php", "/wp-admin/", "/xmlrpc.php", "/phpmyadmin/",
+               "/.aws/credentials", "/server-status", "/cgi-bin/test.cgi", "/actuator/env",
+               "/index.php?id=1%27%20or%20%271%27=%271", "/search?q=1%20union%20select%20password"]
+
+
+def web_scan(day, rng):
+    ip, start = "203.0.113.80", _at(day, 10, 10)
+    events = [_event(start + timedelta(seconds=i * 5 + rng.randint(0, 3)), "web_scan", "web_scan", None, ip,
+                     message=f"GET {path} -> 404 [SYNTHETIC scanner probe]", bytes=162)
+              for i, path in enumerate(SCAN_PROBES)]
+    events += [_event(start + timedelta(seconds=30 * i), "web_scan", "web_request", None, f"10.0.1.{20 + i}",
+                      message=f"GET /app/dashboard -> 200 [SYNTHETIC]", bytes=5120) for i in range(4)]
+    return events
+
+
+def port_sweep(day, rng):
+    ip, start = "198.51.100.140", _at(day, 12, 15)
+    ports = [21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 443, 445, 993, 1433, 3306, 3389, 5432, 5900, 6379, 8080]
+    events = [_event(start + timedelta(seconds=i * 2), "port_sweep", "fw_deny", None, ip, host="fw01",
+                     message=f"[SYNTHETIC] firewall deny {ip} -> 10.0.0.10:{port}/tcp", dest_port=port)
+              for i, port in enumerate(ports)]
+    events.append(_event(start + timedelta(seconds=90), "port_sweep", "fw_allow", None, "10.0.1.20", host="fw01",
+                         message="[SYNTHETIC] firewall allow 10.0.1.20 -> 10.0.0.10:443/tcp", dest_port=443,
+                         bytes=48_000))
+    return events
+
+
+def impossible_travel(day, rng):
+    return [
+        _event(_at(day, 9, 0), "impossible_travel", "auth_success", "erin", "10.0.1.24", host="mail01",
+               message="[SYNTHETIC] Accepted password for erin (office, Riverton HQ)"),
+        _event(_at(day, 9, 25), "impossible_travel", "vpn_login", "erin", "203.0.113.150", host="vpn01",
+               message="[SYNTHETIC] VPN session for erin from Emberfield 25 minutes later"),
+    ]
+
+
+def privilege_escalation(day, rng):
+    ip, start = "192.0.2.140", _at(day, 17, 30)
+    events = [_event(start + timedelta(seconds=i * 20), "privilege_escalation", "auth_failure", "frank", ip)
+              for i in range(3)]
+    events.append(_event(start + timedelta(seconds=60), "privilege_escalation", "auth_success", "frank", ip,
+                         message="[SYNTHETIC] Accepted password for frank after 3 failures"))
+    events.append(_event(start + timedelta(minutes=6), "privilege_escalation", "privilege_escalation", "frank", ip,
+                         message="[SYNTHETIC] frank : TTY=pts/0 ; PWD=/home/frank ; USER=root ; COMMAND=/bin/bash"))
+    # A normal admin session: login without failures, then sudo. Must not alert.
+    events.append(_event(_at(day, 16, 0), "privilege_escalation", "auth_success", "grace", "10.0.1.26"))
+    events.append(_event(_at(day, 16, 5), "privilege_escalation", "privilege_escalation", "grace", "10.0.1.26",
+                         message="[SYNTHETIC] grace : TTY=pts/1 ; PWD=/home/grace ; USER=root ; "
+                                 "COMMAND=/usr/bin/systemctl restart nginx"))
+    return events
+
+
+def cloud_new_principal(day, rng):
+    events = [_event(_at(day, 9, i * 5), "cloud_new_principal", "cloud_api_call", "ops-admin", "10.0.1.30",
+                     host=None, message=f"[SYNTHETIC] {action} on {service}")
+              for i, (action, service) in enumerate([("DescribeInstances", "ec2.amazonaws.com"),
+                                                     ("ListBuckets", "s3.amazonaws.com"),
+                                                     ("ListUsers", "iam.amazonaws.com")])]
+    # A known principal changing IAM is routine.
+    events.append(_event(_at(day, 9, 40), "cloud_new_principal", "cloud_iam_change", "ops-admin", "10.0.1.30",
+                         host=None, message="[SYNTHETIC] AttachUserPolicy on iam.amazonaws.com"))
+    # A principal never seen before creates a user and an access key.
+    ip = "203.0.113.150"
+    for i, action in enumerate(["CreateUser", "CreateAccessKey", "AttachUserPolicy"]):
+        events.append(_event(_at(day, 17, 45) + timedelta(seconds=i * 30), "cloud_new_principal", "cloud_iam_change", "svc-deploy-tmp",
+                             ip, host=None, message=f"[SYNTHETIC] {action} on iam.amazonaws.com"))
+    return events
+
+
+def exfiltration(day, rng):
+    ip, start = "203.0.113.150", _at(day, 18, 0)
+    events = [_event(start + timedelta(seconds=i * 15), "exfiltration", "cloud_data_access", "svc-deploy-tmp", ip,
+                     host=None, message="[SYNTHETIC] GetObject on s3.amazonaws.com (customer-exports)",
+                     bytes=50_000_000 + rng.randint(0, 1_000_000))
+              for i in range(40)]
+    events += [_event(_at(day, 11, i * 5), "exfiltration", "cloud_data_access", "analytics", "10.0.1.31",
+                      host=None, message="[SYNTHETIC] GetObject on s3.amazonaws.com (reports)", bytes=1_000_000)
+               for i in range(10)]
+    return events
+
+
 # expected: rule_id -> group_key the alert should be keyed on. Anything else firing is a false positive.
 SCENARIOS = {
     "baseline": {"build": baseline, "malicious": False, "expected": {},
@@ -125,6 +207,23 @@ SCENARIOS = {
                       "description": "Authorized internal scanner (10.0.50.5) - benign, but trips brute-force."},
     "noisy_scanner_repeat": {"build": noisy_scanner_repeat, "malicious": False, "expected": {},
                              "description": "The scanner's second pass later the same day."},
+    "web_scan": {"build": web_scan, "malicious": True, "expected": {"web_scanner": "203.0.113.80"},
+                 "description": "One IP probes /.env, /wp-login.php, .git and injection strings in a minute."},
+    "port_sweep": {"build": port_sweep, "malicious": True, "expected": {"firewall_port_sweep": "198.51.100.140"},
+                   "description": "The firewall blocks one IP on 20 different ports in 40 seconds."},
+    "impossible_travel": {"build": impossible_travel, "malicious": True,
+                          "expected": {"impossible_geo_login": "erin|10.0.1.24|203.0.113.150"},
+                          "description": "erin logs in at HQ, then over VPN from another continent 25 minutes later."},
+    "privilege_escalation": {"build": privilege_escalation, "malicious": True,
+                             "expected": {"privilege_escalation_after_login": "frank|web01"},
+                             "description": "3 failures, a login, then sudo to root; a normal admin sudo alongside."},
+    "cloud_new_principal": {"build": cloud_new_principal, "malicious": True,
+                            "expected": {"cloud_iam_change_by_new_principal": "svc-deploy-tmp"},
+                            "description": "A never-seen principal creates a user and access key; a known admin's "
+                                           "IAM change does not alert."},
+    "exfiltration": {"build": exfiltration, "malicious": True,
+                     "expected": {"data_exfil_volume": "svc-deploy-tmp"},
+                     "description": "About 2 GB read from cloud storage in 10 minutes; normal report reads alongside."},
 }
 
 
