@@ -101,3 +101,21 @@ The brief asked me to continue an existing SOC/SIEM project on Replit. That proj
 **Not done / notes**
 - `test_storage_unavailable_is_failing_not_a_crash` fails when the suite runs as root (root ignores directory permissions). Pre-existing, identical on `main`; passes as a normal user.
 - No incident notes/assignment UI beyond status; reports (D) and dashboard panels (B) consume these routes.
+
+## Watchpost 2.0 / B: SOC dashboard (2026-09-28, branch `ws/b-soc-dashboard`)
+
+**Shipped**
+- `GET /api/stream` (SSE): `watchpost/stream.py` broker with bounded per-client queues (overflow turns into a `resync` frame), 64-connection cap, heartbeat every 15 s, clean unsubscribe on disconnect. The engine publishes `event` after each stored batch and `alert`, `incident` (once A's `incidents` table exists), and partial `health` after each detection run. Publishing is skipped when nobody is connected and can never fail an ingest.
+- `GET /api/dashboard` (one aggregate read) and `GET /api/geo`. `GET /api/events` gained an additive `since_id` filter for the polling fallback.
+- `watchpost/geo.py`: A merged first, so A's table and `locate()` are kept unchanged (its `impossible_geo_login` rule and tests depend on them). B adds `LABEL` and `is_internal(ip)` (RFC 1918 only); `/api/geo` adds an `internal` flag per address so the map can draw internal sites as the HQ target.
+- Merged with A: A's incident detail view in `app.js` is kept (built on the real payload); B adds the Incidents board page, and the dashboard reads A's `/api/incidents` and `/api/attack/coverage`, including A's `covered` flag (enabled rules only).
+- `static/charts.js` (sparkline, line, bars, stacked bars, ranked bars, heat matrix: pure data-to-SVG-string functions), `static/map.js` (hand-drawn continent rings, dot-matrix world map, arcs), `static/dashboard.js` (panels, live client, incident board, incidents pages), dark theme in `static/style.css`. All earlier views are still in the left nav; the 1.0 dashboard is now "Metrics".
+- Graceful degradation: `/api/incidents`, `/api/attack/coverage`, `/api/storyline/status` returning 404 show "pending" panels; the incident board falls back to alerts by status. Checked in a browser both ways (real 404s, and mocked A/C payloads).
+- Tests: `tests/test_dashboard.py` (raw-socket SSE reads of the first frames, ingest → event/health/alert frames, heartbeat and disconnect cleanup, broker overflow and cap, geo table and route, dashboard aggregates, `since_id`, static-asset/CSP checks for the JS). Smoke step 12 checks dashboard, geo, and the stream's first frames.
+
+**Verification.** `./run_tests.sh` ends with SMOKE OK and no failures when run as a non-root user. Browser check with Playwright/Chromium at 1280×800: no page errors on any view; SSE mode shows LIVE, and blocking `/api/stream` switches to POLLING 3s and still delivers new events.
+
+**Not done / notes for the owner**
+- `tests/test_workflow.py::test_storage_unavailable_is_failing_not_a_crash` fails when the suite runs as **root** (as in the cloud container), on `main` too: it relies on `chmod` blocking writes, which root ignores. Not changed here. Decide whether to skip it under root or run CI as a normal user.
+- The tolerant readers for A's `/api/incidents` and `/api/attack/coverage` accept a list or `{incidents|techniques: [...]}` and several field spellings (`kill_chain`/`stages`/`tactics`, `hits`/`hit_count`/`alerts`). Check them against A's final shapes after merge.
+- C's storyline status tile appears only when `/api/storyline/status` exists; it reads `running`, `stage`, `progress`.

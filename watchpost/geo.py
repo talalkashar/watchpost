@@ -21,6 +21,9 @@ _TABLE = [
     ("192.168.0.0/16", "Hillcrest remote site", 40.71, -74.01),
 ]
 TABLE = [(ipaddress.ip_network(net), city, lat, lon) for net, city, lat, lon in _TABLE]
+LABEL = "synthetic geo"
+# RFC 1918 only. ipaddress's is_private also covers the RFC 5737 ranges, so it cannot be used here.
+_INTERNAL = [ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]
 
 
 def locate(ip):
@@ -35,6 +38,15 @@ def locate(ip):
         if addr.version == network.version and addr in network:
             return {"city": city, "lat": lat, "lon": lon, "synthetic": True}
     return None
+
+
+def is_internal(ip):
+    """True for RFC 1918 addresses; the dashboard map draws those sites as the HQ target."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr.version == n.version and addr in n for n in _INTERNAL)
 
 
 def distance_km(a, b):

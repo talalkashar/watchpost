@@ -3,34 +3,66 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Watchpost SIEM</title>
+  <meta name="color-scheme" content="dark">
+  <title>Watchpost SOC</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/style.css">
+  <script src="/charts.js" defer></script>
+  <script src="/map.js" defer></script>
+  <script src="/dashboard.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand"><span class="logo">◉</span> Watchpost <small>SIEM lab</small></div>
-    <nav id="nav" hidden>
-      <button data-view="dashboard">Dashboard</button>
-      <button data-view="alerts">Alerts</button>
-      <button data-view="events">Events</button>
-      <button data-view="ingest">Ingest</button>
-      <button data-view="rules">Rules</button>
-      <button data-view="health">Health</button>
-      <button data-view="admin" data-role="admin">Admin</button>
+  <aside class="rail" id="rail" hidden>
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="5.5"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/></svg>
+      <div><b>WATCHPOST</b><small>SOC console</small></div>
+    </div>
+    <nav id="nav" aria-label="Views">
+      <button data-view="dashboard"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 2h5v6H2zM9 2h5v3H9zM9 7h5v7H9zM2 10h5v4H2z"/></svg>Dashboard</button>
+      <button data-view="incidents"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5 15 14H1z"/><path d="M8 6v4M8 11.5v.5"/></svg>Incidents</button>
+      <button data-view="alerts"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2a4 4 0 0 1 4 4v3l1.5 2.5h-11L4 9V6a4 4 0 0 1 4-4zM6.5 13.5h3"/></svg>Alerts</button>
+      <button data-view="events"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 3h12M2 6.3h12M2 9.6h8M2 13h10"/></svg>Events</button>
+      <button data-view="overview"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 14V9M6 14V4M10 14V7M14 14V2"/></svg>Metrics</button>
+      <button data-view="ingest"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2v8M4.5 6.5 8 10l3.5-3.5M2 13h12"/></svg>Ingest</button>
+      <button data-view="rules"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2h10v12H3zM5.5 5h5M5.5 8h5M5.5 11h3"/></svg>Rules &amp; review</button>
+      <button data-view="health"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1 8h3l2-4 3 8 2-4h4"/></svg>Health</button>
+      <button data-view="admin" data-role="admin"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.5"/><path d="M8 1v2.5M8 12.5V15M1 8h2.5M12.5 8H15M3 3l1.8 1.8M11.2 11.2 13 13M3 13l1.8-1.8M11.2 4.8 13 3"/></svg>Admin</button>
     </nav>
-    <div class="who" id="who" hidden>
-      <span id="who-name"></span>
-      <button id="logout" class="ghost">Sign out</button>
+    <div class="rail-foot">
+      <div class="who" id="who" hidden>
+        <span id="who-name"></span>
+        <button id="logout" class="ghost">Sign out</button>
+      </div>
+      <p class="honesty">Portfolio lab. Demo data and geo positions are synthetic and labeled.</p>
+    </div>
+  </aside>
+
+  <header class="strip" id="strip" hidden>
+    <div class="tile t-epm"><span class="tl">Events / min</span><span class="tv" id="k-epm">0</span><span class="spark" id="k-epm-spark"></span></div>
+    <div class="tile"><span class="tl">Open alerts</span><span class="tv" id="k-open">—</span></div>
+    <div class="tile t-crit"><span class="tl">Critical</span><span class="tv" id="k-crit">—</span></div>
+    <div class="tile"><span class="tl">Incidents</span><span class="tv" id="k-inc">—</span></div>
+    <div class="tile"><span class="tl">Stored</span><span class="tv" id="k-events">—</span></div>
+    <div class="tile t-health"><span class="tl">Health</span><span class="checks" id="k-health"></span></div>
+    <div class="tile t-story" id="k-story" hidden><span class="tl">Storyline</span><span class="story" id="k-story-text"></span></div>
+    <div class="strip-end">
+      <div class="stack">
+        <span class="live" id="k-live" data-mode="off"><i></i><span id="k-live-text">OFFLINE</span></span>
+        <span class="chip synthetic" id="k-synth" hidden>SYNTHETIC DATA</span>
+      </div>
+      <span class="clock" id="k-clock">--:--:--</span>
     </div>
   </header>
 
   <div id="banner" class="banner" hidden></div>
 
   <main id="main">
-    <section id="login-view" class="card narrow" hidden>
-      <h1>Sign in</h1>
+    <section id="login-view" class="login" hidden>
+      <div class="login-brand">
+        <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="5.5"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/></svg>
+        <div><b>WATCHPOST</b><small>Security operations console</small></div>
+      </div>
       <form id="login-form">
         <label>Username <input name="username" autocomplete="username" required maxlength="64"></label>
         <label>Password <input name="password" type="password" autocomplete="current-password" required maxlength="256"></label>
