@@ -658,6 +658,7 @@ async function admin() {
         demoOut.replaceChildren(table(["Scenario", "Accepted", "Detection", "Alerts created"], Object.entries(r).map(([n, x]) => ({ cells: [n, { num: x.accepted }, x.detection.status, { num: x.detection.alerts_created ?? 0 }] }))));
         refreshBanner();
       }) }, "Load synthetic demo data"), demoOut),
+    storyCard(),
     el("div", { class: "card" }, el("h2", {}, "API tokens (ingest only)"), tokenForm, tokenOut,
       table(["Name", "Prefix", "Created", "Last used", "Status", ""], tokens.map((t) => ({ cells: [t.name, el("code", {}, `${t.prefix}…`), `${fmtTime(t.created_at)} by ${t.created_by}`, fmtTime(t.last_used_at),
         t.revoked_at ? pill("revoked", "st-rejected") : pill("active", "st-ok"),
@@ -665,6 +666,27 @@ async function admin() {
     el("div", { class: "card" }, el("h2", {}, "Audit log"),
       table(["When", "Actor", "Action", "Target", "Detail"], audit.map((a) => ({ cells: [fmtTime(a.created_at), a.actor, a.action, a.target ?? "", el("code", {}, a.detail ?? "")] })))),
   );
+}
+
+function storyCard() {
+  const out = el("div", { class: "story-status muted" }, "Loading…");
+  const speed = el("select", {}, ...[["1", "Real time (2 min)"], ["2", "2x (1 min)"], ["10", "10x (12 s)"], ["100", "Instant"]].map(([v, t]) => el("option", { value: v }, t)));
+  let timer = null;
+  const render = (s) => {
+    const stage = s.running ? `stage: ${s.stage} · ${Math.round((s.progress || 0) * 100)}%` : s.finished_at ? `last run finished ${fmtTime(s.finished_at)}` : "idle";
+    out.replaceChildren(el("div", {}, `${s.running ? "Running" : "Idle"} — ${stage}`),
+      el("div", { class: "muted" }, `${s.events_sent ?? 0} synthetic events sent, ${s.alerts_created ?? 0} alerts raised${s.error ? ` · error: ${s.error}` : ""}`));
+    if (s.running && !timer) timer = setInterval(poll, 2000);
+    if (!s.running && timer) { clearInterval(timer); timer = null; refreshBanner(); }
+  };
+  const poll = () => api("/api/storyline/status").then(render).catch(() => {});
+  poll();
+  return el("div", { class: "card" }, el("h2", {}, "Attack storyline (synthetic)"),
+    el("p", { class: "muted" }, "Replays a scripted six-stage intrusion — recon, credential attack, foothold, escalation, lateral movement, exfiltration — from RFC 5737 test addresses. Watch the SOC dashboard while it runs. Everything is labeled synthetic."),
+    el("div", { class: "row" }, speed,
+      el("button", { onclick: () => guarded(async () => { render(await api("/api/storyline/start", { method: "POST", body: { speed: Number(speed.value) } })); }) }, "Start storyline"),
+      el("button", { class: "danger", onclick: () => guarded(async () => { render(await api("/api/storyline/stop", { method: "POST" })); }) }, "Stop")),
+    out);
 }
 
 boot();

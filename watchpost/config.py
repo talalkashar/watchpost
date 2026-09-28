@@ -39,6 +39,9 @@ class Config:
     rate_per_minute: float = 1200.0
     # Behind a reverse proxy on loopback, take the client IP from the last X-Forwarded-For entry.
     trust_proxy: bool = False
+    # Attack storyline auto-replay for public demos (off unless SIEM_DEMO_LOOP=<minutes between runs>).
+    demo_loop_minutes: int = 0
+    demo_loop_speed: float = 1.0
 
     @classmethod
     def from_env(cls, **overrides):
@@ -64,6 +67,8 @@ class Config:
             rate_burst=int(os.environ.get("SIEM_RATE_BURST", "300")),
             rate_per_minute=float(os.environ.get("SIEM_RATE_PER_MIN", "1200")),
             trust_proxy=os.environ.get("SIEM_TRUST_PROXY", "0") == "1",
+            demo_loop_minutes=int(os.environ.get("SIEM_DEMO_LOOP", "0")),
+            demo_loop_speed=float(os.environ.get("SIEM_DEMO_LOOP_SPEED", "1")),
         )
         values.update(overrides)
         return cls(**values)

@@ -76,7 +76,7 @@ accepts the unit. It has **not** yet run on a real Debian 12 VM with systemd, so
    or change rules, settings, tokens, or users.
 
 5. **Load data and check.** Open `https://<domain or IP>/`. The self-signed option shows a browser warning; accept it.
-   Sign in as `admin`, then use **Admin → Load synthetic demo data** (or the attack storyline once it ships). Sign
+   Sign in as `admin`, then use **Admin → Attack storyline (synthetic) → Start storyline** (or **Load synthetic demo data** for everything at once). For an unattended demo, set `SIEM_DEMO_LOOP=15` in `/etc/watchpost.env` to replay the storyline every 15 minutes. Sign
    out and sign in as `viewer` to see what visitors see.
 
 ## Updating

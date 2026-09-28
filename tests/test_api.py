@@ -22,7 +22,7 @@ class AuthTests(ServerTestCase):
     def test_public_health_hides_details(self):
         status, data, headers = self.client().get("/api/health")
         self.assertEqual(status, 200)
-        self.assertEqual(set(data["checks"]), {"storage", "ingestion", "detection", "dependencies"})
+        self.assertEqual(set(data["checks"]), {"storage", "ingestion", "detection", "dependencies", "storyline"})
         self.assertNotIn("details", json.dumps(data))
         self.assertIn("default-src 'self'", headers["Content-Security-Policy"])
         self.assertEqual(headers["X-Frame-Options"], "DENY")

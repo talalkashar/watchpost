@@ -182,6 +182,21 @@ Decision for the owner: none required.
 - The tolerant readers for A's `/api/incidents` and `/api/attack/coverage` accept a list or `{incidents|techniques: [...]}` and several field spellings (`kill_chain`/`stages`/`tactics`, `hits`/`hit_count`/`alerts`). Check them against A's final shapes after merge.
 - C's storyline status tile appears only when `/api/storyline/status` exists; it reads `running`, `stage`, `progress`.
 
+## Watchpost 2.0 / C: attack storyline (2026-09-28, branch `ws/c-storyline`)
+
+**Shipped**
+- `watchpost/storyline.py`: deterministic timeline `build(seed, speed)` of `(offset_seconds, event, stage)` covering six stages (recon, credential_attack, foothold, escalation, lateral_cloud, exfiltration) plus baseline employee traffic; ~2 minutes of story time at speed 1. One attacker IP (`203.0.113.80`), one VPN egress (`198.51.100.140`), victim `dave`, rogue principal `svc-deploy-tmp`, so alerts correlate into multi-stage incidents (a 7-tactic Reconnaissance → Exfiltration incident in tests).
+- `Runner`: one background thread per `App`, batches records by story time, sleeps to wall-clock, feeds `parse_payload` → `engine.ingest(synthetic=True, source="demo:storyline")` so detection, correlation, SSE, and reports all see the data. Status dict, stop event, `storyline` health check, audit entries `storyline_started/finished/stopped`, errors recorded via `diagnostics.record_error` and never propagate.
+- Routes: `POST /api/storyline/start` (admin, 202/409), `POST /api/storyline/stop` (admin), `GET /api/storyline/status` (viewer; matches the shape `static/dashboard.js` already polls). Admin view gains an "Attack storyline (synthetic)" card with speed presets, start/stop, and live progress.
+- `SIEM_DEMO_LOOP=<minutes>` / `SIEM_DEMO_LOOP_SPEED`: `storyline.DemoLoop` restarts the story on a timer; `main.py` now starts both the syslog listener and the demo loop through one `before_serve` wrapper.
+- Tests: `tests/test_storyline.py` (determinism, ordering, RFC 5737-only sources, full replay at 2000x asserting all ten rules fire and a ≥3-stage incident exists, synthetic-only storage, audit entries, 403/400/409 handling, stop and restart, health check). Smoke step runs the replay at 1000x.
+
+**Verification.** `./run_tests.sh` ends with SMOKE OK.
+
+**Not done / notes for the owner**
+- Written locally after two cloud sessions were stopped by the model's safety classifier while drafting this module (defensive, synthetic-only content; the block was a false positive but not worth fighting).
+- The rogue principal's first cloud event is the IAM change itself (the rule requires no prior cloud activity by that principal); a preceding `sts:GetCallerIdentity` was dropped for that reason.
+
 ## Watchpost 2.0 / F: viewer role, rate limits, deploy kit, LinkedIn kit (2026-09-28, branch `ws/f-demo-kit`)
 
 **Shipped**
@@ -204,7 +219,7 @@ Decision for the owner: none required.
   restart, optional `--caddy DOMAIN` or `--nginx-selfsigned [IP]`, health wait), a `Caddyfile` with a domain
   placeholder, `nginx-selfsigned.conf`, and `deploy/README.md` with the exact steps.
 - Rewrote `LINKEDIN.md` (project entry, a 1,220-character post, honest limits) and `DEMO_SCRIPT.md` (30-second shot
-  list plus a 2-minute walkthrough built around C's **Run attack storyline** button). Added the 2.0 feature table,
+  list plus a 2-minute walkthrough built around C's **Start storyline** button). Added the 2.0 feature table,
   architecture diagram, configuration rows, and screenshot placeholders to the README. Documented the viewer rules
   and rate limiting in `docs/API.md`.
 - Tests: `tests/test_viewer.py` (9) walks **every** registered route. Each GET must answer a viewer 200 (403 for
@@ -212,14 +227,14 @@ Decision for the owner: none required.
   requests, evaluations, rule history, and alert and incident statuses unchanged. It also covers the read-only
   backstop and account seeding. `tests/test_ratelimit.py` (11) covers bucket math with a fake clock, per-key
   isolation, bounded memory, env parsing, login 429 with `Retry-After`, independent buckets, proxy trust (spoofed
-  first entries ignored), and disabling. The existing report-access test now expects viewers to get 200. Smoke
-  step 17 signs in as the seeded viewer, reads an incident and its PDF, is refused four writes, and sees login
+  first entries ignored), and disabling. The existing report-access test now expects viewers to get 200. A smoke
+  step signs in as the seeded viewer, reads an incident and its PDF, is refused four writes, and sees login
   return 429.
 - `tests/test_workflow.py::test_storage_unavailable_is_failing_not_a_crash` used `chmod` to make storage
   unwritable, which root ignores, so it failed in the cloud container (noted by B). It now puts a regular file where
   the database directory should be, which fails for every user. Same assertions, no skip.
 
-**Verification.** `./run_tests.sh` as root in the cloud container: 194 tests OK, then SMOKE OK (18 steps).
+**Verification.** `./run_tests.sh` as root in the cloud container: 194 tests OK, then SMOKE OK (18 steps); after merging C from `main`, 199 tests OK and SMOKE OK (19 steps).
 `bash -n` passes on `deploy/install.sh`, `start.sh`, and `run_tests.sh`. `systemd-analyze verify` accepts
 `watchpost.service`. `install.sh` ran three times in the container (Ubuntu 24.04, no systemd, `systemctl`
 stubbed to launch the app as the `watchpost` user with the env file). Each run was idempotent: the env file was kept
@@ -233,8 +248,8 @@ validate` passes on Caddy 2.6.2, the Debian 12 version, and `caddy fmt` reports 
 - Not run on the real VM: that needs the owner's access. Run `sudo ./deploy/install.sh --caddy <domain>` or
   `--nginx-selfsigned <public IP>` there, per `deploy/README.md`. Real systemd sandboxing and Let's Encrypt
   issuance are untested.
-- The `SIEM_DEMO_LOOP` timer and anything under `/api/storyline` belong to workstream C and are not in this branch.
-  `DEMO_SCRIPT.md` assumes C's button and stage tile.
+- The storyline and `SIEM_DEMO_LOOP` come from workstream C (merged into this branch from `main`, not written here).
+  The env template lists `SIEM_DEMO_LOOP` commented out; `DEMO_SCRIPT.md` uses C's button and stage tile.
 - No video recorded and no new screenshots. README has placeholders for `incident-detail.png`,
   `incident-report-pdf.png`, and `storyline-running.png`.
 - nginx listens on `[::]` as well as IPv4. In the container, which has no IPv6, those two lines had to be removed;

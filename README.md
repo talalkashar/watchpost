@@ -21,7 +21,7 @@ It uses only the Python standard library (3.10+). No packages to install, no pai
 | **D · Incident reports** | One-click **Markdown and PDF** reports for incidents and alerts, with a timeline, entities, techniques by tactic, evidence, notes, and recommended actions per technique. The PDF writer is hand-written PDF 1.4. |
 | **E · Live ingestion** | A UDP/TCP **syslog listener** (RFC 3164/5424) and `scripts/shipper.py`, a file tailer that posts to the ingest API with a token. See [docs/LIVE_INGEST.md](docs/LIVE_INGEST.md). |
 | **F · Demo kit** | A read-only **viewer** role that the server enforces on every route, with a public demo account from `SIEM_VIEWER_PASSWORD`. **Per-IP rate limiting** (strict on login). A **`deploy/`** kit for Debian 12: a hardened systemd unit, an idempotent installer, and Caddy or nginx HTTPS. A LinkedIn kit and demo script. |
-| C · Attack storyline *(separate workstream)* | A button that replays a six-stage synthetic intrusion in real time. Documented in the demo script; its routes land with that workstream. |
+| **C · Attack storyline** | **Admin → Start storyline** replays a six-stage synthetic intrusion in real time (recon → credential attack → foothold → escalation → lateral and cloud → exfiltration) over baseline noise; the dashboard shows the current stage. `SIEM_DEMO_LOOP=<minutes>` replays it on a timer for unattended public demos. |
 
 ### 2.0 architecture
 
@@ -68,7 +68,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 ### Tests
 
 ```bash
-./run_tests.sh      # ~200 unit/integration tests + an 18-step end-to-end smoke check
+./run_tests.sh      # ~200 unit/integration tests + a 19-step end-to-end smoke check
 ```
 
 ### Replit
@@ -89,6 +89,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 | `SIEM_SYSLOG` | `0` | `1` also starts the UDP/TCP syslog listener ([docs/LIVE_INGEST.md](docs/LIVE_INGEST.md)) |
 | `SIEM_SYSLOG_BIND` / `SIEM_SYSLOG_PORT` | `127.0.0.1` / `5514` | Syslog listener address (same port for UDP and TCP) |
 | `SIEM_SYSLOG_ALLOW` | empty (any) | Comma-separated IPs/CIDRs allowed to send syslog |
+| `SIEM_DEMO_LOOP` / `SIEM_DEMO_LOOP_SPEED` | `0` / `1` | Minutes between automatic replays of the synthetic attack storyline (0 = off) and its speed multiplier |
 | `SIEM_RATE_LIMIT` | `1` | `0` turns off per-IP rate limiting |
 | `SIEM_LOGIN_RATE_BURST` / `SIEM_LOGIN_RATE_PER_MIN` | `10` / `10` | Token bucket for `POST /api/auth/login`, per client IP |
 | `SIEM_RATE_BURST` / `SIEM_RATE_PER_MIN` | `300` / `1200` | Token bucket for every other request (API and static), per client IP |
@@ -199,6 +200,10 @@ This is **not machine learning**. It is transparent, deterministic tuning suppor
 The landing view is a dark SOC console built for a 1280×800 screen: a status strip (events per minute, open and critical alerts, incidents, stored events, health checks, stream state, UTC clock), an attacker world map, a live event stream, alerts over time, top attacker IPs, the MITRE ATT&CK coverage heat matrix, an incident board, top rules, and health. Live updates arrive over Server-Sent Events (`GET /api/stream`); if the stream fails, the page polls every 3 seconds. Charts and the map are inline SVG drawn by `static/charts.js` and `static/map.js`, with no libraries and no external tiles.
 
 **The map positions are synthetic.** `watchpost/geo.py` maps only the RFC 5737 documentation ranges to fictional city names at fixed coordinates, and the RFC 1918 ranges to internal sites. It is not a geo lookup. Any other address is listed as "unknown" and never guessed. The map is labeled "synthetic geo".
+
+## Attack storyline
+
+Admin → "Attack storyline (synthetic)" replays a scripted six-stage intrusion over about two minutes (or faster): web scanning and a port sweep from `203.0.113.80`, a password spray then brute force against `dave`, a VPN login with the cracked password, sudo to root and a new `svc-deploy-tmp` account, a hop to `db01` and cloud IAM changes by that new principal, then bulk storage reads and large outbound transfers. Ten detection rules fire in order and correlation folds them into one Reconnaissance → Exfiltration incident while the dashboard updates live. Every record is labeled synthetic and uses RFC 5737 documentation addresses; the same replay runs in the test suite (`tests/test_storyline.py`) and the smoke check.
 
 ## What is real vs. synthetic vs. future
 
