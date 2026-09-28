@@ -18,6 +18,23 @@ STATUS_ORDER = {"ok": 0, "degraded": 1, "failing": 2}
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 LOW_DISK_BYTES = 100 * 1024 * 1024
 
+# Optional components (e.g. the syslog listener) register a check while they run.
+# Each check is a no-argument callable returning (status, message, guidance, details).
+_COMPONENT_CHECKS = {}
+
+
+def register_check(name, fn):
+    _COMPONENT_CHECKS[name] = fn
+
+
+def unregister_check(name, fn=None):
+    if fn is None or _COMPONENT_CHECKS.get(name) == fn:
+        _COMPONENT_CHECKS.pop(name, None)
+
+
+def _component_checks():
+    return [_check(name, fn) for name, fn in list(_COMPONENT_CHECKS.items())]
+
 
 def _check(name, fn, *args):
     started = time.perf_counter()
@@ -158,7 +175,7 @@ def run_health_checks(open_conn, db_path):
             "guidance": "Check that SIEM_DB points to a writable location and the disk is not full, then restart.",
             "details": {}, "latency_ms": 0,
         }
-        checks = [failing, _check("dependencies", check_dependencies, db_path)]
+        checks = [failing, _check("dependencies", check_dependencies, db_path), *_component_checks()]
         return {"status": "failing", "checked_at": now_iso(), "checks": checks}
     try:
         checks = [
@@ -166,6 +183,7 @@ def run_health_checks(open_conn, db_path):
             _check("ingestion", check_ingestion, conn),
             _check("detection", check_detection, conn),
             _check("dependencies", check_dependencies, db_path),
+            *_component_checks(),
         ]
     finally:
         conn.close()
