@@ -1,7 +1,9 @@
 """HTTP API and static UI server (standard library only)."""
 
 import hmac
+import ipaddress
 import json
+import queue
 import mimetypes
 import re
 from http import HTTPStatus
@@ -10,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import __version__, auth, engine, improve, queries, simulate
+from . import __version__, auth, engine, geo, improve, queries, simulate, stream
 from .config import Config
 from .db import audit, connect, init_schema, now_iso, row_to_dict
 from .diagnostics import configure_logging, log, record_error
@@ -253,6 +255,42 @@ def metrics(req):
     return queries.metrics(req.conn, req.query.get("hours"))
 
 
+# SOC dashboard ---------------------------------------------------------------------------
+
+GEO_MAX_IPS = 200
+
+
+@route("GET", "/api/dashboard")
+def dashboard(req):
+    return queries.dashboard(req.conn)
+
+
+@route("GET", "/api/geo")
+def geo_lookup(req):
+    """Positions from the synthetic geo table only. Addresses outside it come back null ("unknown")."""
+    ips = [ip.strip() for ip in req.query.get("ips", "").split(",") if ip.strip()]
+    if len(ips) > GEO_MAX_IPS:
+        raise ApiError(400, f"at most {GEO_MAX_IPS} ips per request")
+    for ip in ips:
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            raise ApiError(400, "ips must be a comma-separated list of IP addresses")
+    return {"label": geo.LABEL, "ips": {ip: geo.locate(ip) for ip in ips}}
+
+
+class _StreamResponse:
+    """Returned by the stream route; the handler then keeps the connection open."""
+
+
+STREAM_RESPONSE = _StreamResponse()
+
+
+@route("GET", "/api/stream")
+def event_stream(req):
+    return STREAM_RESPONSE
+
+
 # Rules, feedback, and reviewed changes ----------------------------------------------------
 
 @route("GET", "/api/rules")
@@ -434,6 +472,8 @@ class Handler(BaseHTTPRequestHandler):
             self.conn = self.app.conn()
             self._authorize(role, csrf)
             result = fn(self, *match.groups())
+            if result is STREAM_RESPONSE:
+                return self._stream()
             headers = {"Cache-Control": "no-store"}
             if self.set_cookie is not None:
                 headers["Set-Cookie"] = self._cookie_header(self.set_cookie)
@@ -472,6 +512,48 @@ class Handler(BaseHTTPRequestHandler):
             sent = self.headers.get("X-CSRF-Token", "")
             if not hmac.compare_digest(sent, self.user["csrf"]):
                 raise ApiError(403, "missing or invalid CSRF token")
+
+    def _stream(self):
+        """Server-Sent Events: hello and a health snapshot, then published messages and heartbeats.
+
+        Runs on this connection's own thread (ThreadingHTTPServer) until the client goes away.
+        """
+        self.conn.close()
+        self.conn = None  # hold no database connection while streaming
+        try:
+            sub = stream.BROKER.subscribe()
+        except stream.TooManySubscribers:
+            return self._send(503, {"error": "too many live stream connections; retry later"})
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Accel-Buffering", "no")
+            for key, value in SECURITY_HEADERS.items():
+                self.send_header(key, value)
+            self.end_headers()
+            self.close_connection = True
+            report = run_health_checks(lambda: connect(self.app.config.db_path), self.app.config.db_path)
+            self._frame("hello", {"version": __version__, "user": self.user["username"],
+                                  "heartbeat_seconds": stream.HEARTBEAT_SECONDS}, retry=3000)
+            self._frame("health", {"partial": False, "status": report["status"], "checked_at": report["checked_at"],
+                                   "checks": {c["name"]: c["status"] for c in report["checks"]}})
+            while True:
+                try:
+                    kind, data = sub.get(timeout=stream.HEARTBEAT_SECONDS)
+                except queue.Empty:
+                    kind, data = "heartbeat", {"ts": now_iso(), "subscribers": stream.BROKER.active()}
+                self._frame(kind, data)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError, OSError):
+            pass  # client went away
+        finally:
+            stream.BROKER.unsubscribe(sub)
+
+    def _frame(self, kind, data, retry=None):
+        payload = (f"retry: {retry}\n".encode() if retry else b"") + \
+            stream.frame(kind, data, stream.BROKER.next_id())
+        self.wfile.write(payload)
+        self.wfile.flush()
 
     def _cookie_header(self, token):
         parts = [f"{SESSION_COOKIE}={token}", "Path=/", "HttpOnly", "SameSite=Strict"]

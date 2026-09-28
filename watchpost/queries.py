@@ -74,13 +74,19 @@ def search_events(conn, params):
     if params.get("synthetic") in ("0", "1"):
         where.append("synthetic = ?")
         args.append(int(params["synthetic"]))
+    # since_id: only events stored after that id, newest stored first (the dashboard's polling fallback).
+    since_id = _int(params.get("since_id"), "since_id", None, 0, 2**63 - 1)
+    if since_id is not None:
+        where.append("id > ?")
+        args.append(since_id)
 
     limit = _int(params.get("limit"), "limit", 100, 1, 1000)
     offset = _int(params.get("offset"), "offset", 0, 0, 10_000_000)
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     total = conn.execute(f"SELECT COUNT(*) FROM events{clause}", args).fetchone()[0]
     rows = conn.execute(
-        f"SELECT {EVENT_FIELDS} FROM events{clause} ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?",
+        f"SELECT {EVENT_FIELDS} FROM events{clause} ORDER BY "
+        f"{'id DESC' if since_id is not None else 'ts DESC, id DESC'} LIMIT ? OFFSET ?",
         args + [limit, offset],
     )
     return {"total": total, "limit": limit, "offset": offset, "events": [dict(r) for r in rows]}
@@ -264,4 +270,99 @@ def metrics(conn, hours=24):
         "events_by_type": by("SELECT event_type, COUNT(*) AS count FROM events GROUP BY event_type"
                              " ORDER BY count DESC"),
         "activity_last_24h_of_data": histogram,
+    }
+
+
+SEVERITY_RANK_SQL = ("CASE {col} WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2"
+                     " WHEN 'low' THEN 1 ELSE 0 END")
+RANK_SEVERITY = {4: "critical", 3: "high", 2: "medium", 1: "low", 0: "info"}
+
+
+def _alert_timeline(conn):
+    """Alerts per bucket by event time (last_seen), stacked by severity, plus event volume.
+
+    The window ends at the newest alert so demo data dated yesterday still shows. When
+    every recent alert falls inside the last two hours (a live storyline run), it zooms
+    in to 5-minute buckets; otherwise it shows 24 hourly buckets.
+    """
+    newest = conn.execute("SELECT MAX(last_seen) FROM alerts").fetchone()[0] or \
+        conn.execute("SELECT MAX(ts) FROM events").fetchone()[0]
+    if not newest:
+        return {"bucket_minutes": 60, "bins": []}
+    end_dt = parse_iso(newest)
+    oldest_recent = conn.execute("SELECT MIN(last_seen) FROM alerts WHERE last_seen >= ?",
+                                 (iso(end_dt - timedelta(hours=24)),)).fetchone()[0]
+    zoom = oldest_recent is not None and parse_iso(oldest_recent) >= end_dt - timedelta(hours=2)
+    minutes, count = (5, 24) if zoom else (60, 24)
+    end = end_dt.replace(second=0, microsecond=0)
+    end = end.replace(minute=end.minute - end.minute % minutes) + timedelta(minutes=minutes)
+    start = end - timedelta(minutes=minutes * count)
+    bins = [{"start": iso(start + timedelta(minutes=minutes * i)), "critical": 0, "high": 0, "medium": 0,
+             "low": 0, "events": 0} for i in range(count)]
+
+    def index(ts):
+        i = int((parse_iso(ts) - start).total_seconds() // (minutes * 60))
+        return i if 0 <= i < count else None
+
+    for row in conn.execute("SELECT last_seen, severity FROM alerts WHERE last_seen >= ? AND last_seen < ?",
+                            (iso(start), iso(end))):
+        i = index(row["last_seen"])
+        if i is not None and row["severity"] in bins[i]:
+            bins[i][row["severity"]] += 1
+    for row in conn.execute("SELECT substr(ts, 1, 16) AS minute, COUNT(*) AS n FROM events"
+                            " WHERE ts >= ? AND ts < ? GROUP BY minute", (iso(start), iso(end))):
+        i = index(row["minute"] + ":00Z")
+        if i is not None:
+            bins[i]["events"] += row["n"]
+    return {"bucket_minutes": minutes, "bins": bins}
+
+
+def dashboard(conn):
+    """Everything the SOC dashboard needs in one read. Live changes then arrive over /api/stream."""
+    one = lambda sql, *a: conn.execute(sql, a).fetchone()[0]
+    now = utcnow().replace(second=0, microsecond=0)
+    since = now - timedelta(minutes=59)
+    per_minute = {r["minute"]: r["n"] for r in conn.execute(
+        "SELECT substr(ingested_at, 1, 16) AS minute, COUNT(*) AS n FROM events WHERE ingested_at >= ?"
+        " GROUP BY minute", (iso(since),))}
+    epm = []
+    for i in range(60):
+        key = iso(since + timedelta(minutes=i))[:16]
+        epm.append({"minute": key + ":00Z", "count": per_minute.get(key, 0)})
+
+    sev_events = SEVERITY_RANK_SQL.format(col="e.severity")
+    sev_alerts = SEVERITY_RANK_SQL.format(col="a.severity")
+    attackers = [{**dict(r), "max_severity": RANK_SEVERITY[r["sev_rank"]]} for r in conn.execute(
+        f"SELECT e.src_ip AS ip, COUNT(DISTINCT e.id) AS events, COUNT(DISTINCT a.id) AS alerts,"
+        f" MAX(MAX({sev_events}), MAX({sev_alerts})) AS sev_rank, MAX(e.ts) AS last_seen,"
+        f" SUM(a.status != 'resolved') AS open_alerts"
+        f" FROM alerts a JOIN alert_events ae ON ae.alert_id = a.id JOIN events e ON e.id = ae.event_id"
+        f" WHERE e.src_ip IS NOT NULL GROUP BY e.src_ip ORDER BY alerts DESC, events DESC LIMIT 40")]
+    for a in attackers:
+        del a["sev_rank"]
+
+    top_rules = [dict(r) for r in conn.execute(
+        "SELECT a.rule_id, r.name, r.severity, COUNT(*) AS alerts, SUM(a.status != 'resolved') AS open"
+        " FROM alerts a LEFT JOIN rules r ON r.id = a.rule_id GROUP BY a.rule_id ORDER BY alerts DESC LIMIT 10")]
+    board = [dict(r) for r in conn.execute(
+        "SELECT id, rule_id, severity, title, status, group_key, first_seen, last_seen, event_count, synthetic,"
+        " assignee FROM alerts ORDER BY status = 'resolved', "
+        + SEVERITY_RANK_SQL.format(col="severity") + " DESC, last_seen DESC LIMIT 60")]
+    recent = [dict(r) for r in conn.execute(
+        f"SELECT {EVENT_FIELDS} FROM events ORDER BY ts DESC, id DESC LIMIT 60")]
+    return {
+        "generated_at": now_iso(),
+        "events_total": one("SELECT COUNT(*) FROM events"),
+        "synthetic_events": one("SELECT COUNT(*) FROM events WHERE synthetic = 1"),
+        "alerts_open": one("SELECT COUNT(*) FROM alerts WHERE status = 'open'"),
+        "alerts_investigating": one("SELECT COUNT(*) FROM alerts WHERE status = 'investigating'"),
+        "alerts_critical_open": one("SELECT COUNT(*) FROM alerts WHERE status != 'resolved'"
+                                    " AND severity = 'critical'"),
+        "alerts_total": one("SELECT COUNT(*) FROM alerts"),
+        "events_per_minute": epm,
+        "alert_timeline": _alert_timeline(conn),
+        "attackers": attackers,
+        "top_rules": top_rules,
+        "alerts": board,
+        "recent_events": recent,
     }

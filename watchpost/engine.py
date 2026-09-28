@@ -6,6 +6,7 @@ import uuid
 from datetime import timedelta
 
 from . import rules as rules_mod
+from . import stream
 from .db import audit, iso, now_iso, parse_iso, row_to_dict, transaction
 from .diagnostics import describe_exception, record_error
 
@@ -70,6 +71,7 @@ def ingest(conn, events, rejections, source, fmt, submitted_by, synthetic=False)
         "rejected": len(rejections),
         "rejections": rejections[:100],
     }
+    _publish_events(conn, batch_id, len(events), synthetic)
     if not events:
         conn.execute("UPDATE ingest_batches SET detection_status = 'skipped' WHERE id = ?", (batch_id,))
         result["detection"] = {"status": "skipped", "reason": "no accepted events"}
@@ -204,7 +206,54 @@ def run_detection(conn, trigger="manual", start=None, end=None):
                                   "reviewed change request, then use 'Run detection' to process the backlog.")
             conn.execute("UPDATE detection_runs SET status='failed', finished_at=?, error=? WHERE id=?",
                          (now_iso(), message, run_id))
+        _publish_detection(conn, started, summary)
         return summary
+
+
+# --- Live stream (SSE) ------------------------------------------------------------
+
+STREAM_EVENT_LIMIT = 50
+STREAM_EVENT_FIELDS = ("id, ts, source, host, event_type, outcome, severity, user, src_ip, dest_ip, message,"
+                       " synthetic")
+STREAM_ALERT_FIELDS = ("id, rule_id, severity, title, status, group_key, first_seen, last_seen, event_count,"
+                       " synthetic, created_at, updated_at")
+
+
+def _publish_events(conn, batch_id, count, synthetic):
+    """Tell dashboards about a stored batch (newest events only). Never fails the ingest."""
+    if not count or not stream.BROKER.active():
+        return
+    try:
+        rows = conn.execute(f"SELECT {STREAM_EVENT_FIELDS} FROM events WHERE batch_id = ?"
+                            " ORDER BY ts DESC, id DESC LIMIT ?", (batch_id, STREAM_EVENT_LIMIT))
+        stream.BROKER.publish("event", {"batch_id": batch_id, "count": count, "synthetic": bool(synthetic),
+                                        "events": [dict(r) for r in rows]})
+    except Exception as exc:  # the stream is best-effort; storage already succeeded
+        record_error(conn, "stream", exc, guidance="Live dashboard updates may lag; reload the dashboard.")
+
+
+def _publish_detection(conn, started, summary):
+    """Publish alerts (and incidents, once that table exists) touched by this run, plus detection health."""
+    if not stream.BROKER.active():
+        return
+    try:
+        failed = summary["status"] != "ok"
+        stream.BROKER.publish("health", {"partial": True, "checks": {"detection": "failing" if failed else "ok"},
+                                         "error": summary.get("error")})
+        if failed:
+            return
+        for row in conn.execute(f"SELECT {STREAM_ALERT_FIELDS} FROM alerts WHERE updated_at >= ? ORDER BY id",
+                                (started,)):
+            alert = dict(row)
+            alert["change"] = "created" if alert["created_at"] >= started else "updated"
+            stream.BROKER.publish("alert", alert)
+        has_incidents = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'incidents'").fetchone()
+        if has_incidents:
+            for row in conn.execute("SELECT * FROM incidents WHERE updated_at >= ? ORDER BY id", (started,)):
+                stream.BROKER.publish("incident", dict(row))
+    except Exception as exc:
+        record_error(conn, "stream", exc, guidance="Live dashboard updates may lag; reload the dashboard.")
 
 
 # --- Rule changes (applied only through approved change requests) ------------------

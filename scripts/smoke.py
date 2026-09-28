@@ -169,6 +169,23 @@ def main():
         status, h = admin.call("GET", "/api/health/details")
         check(h["status"] == "ok", f"health after flow: {[(c['name'], c['status'], c['message']) for c in h['checks']]}")
 
+        step("SOC dashboard: aggregates, synthetic geo, and the live SSE stream")
+        status, dash = analyst.call("GET", "/api/dashboard")
+        check(status == 200 and dash["attackers"] and dash["alert_timeline"]["bins"], f"dashboard: {status}")
+        status, located = analyst.call("GET", "/api/geo?ips=203.0.113.45,8.8.8.8")
+        check(located["ips"]["203.0.113.45"]["synthetic"] and located["ips"]["8.8.8.8"] is None, f"geo: {located}")
+        cookie = "; ".join(f"{c.name}={c.value}" for h in analyst.opener.handlers
+                           for c in getattr(h, "cookiejar", []))
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+            sock.sendall(f"GET /api/stream HTTP/1.1\r\nHost: x\r\nCookie: {cookie}\r\n\r\n".encode())
+            buf = b""
+            while buf.count(b"\n\n") < 2:  # the hello and health frames (headers end in CRLF CRLF)
+                chunk = sock.recv(65536)
+                check(chunk, "stream closed early")
+                buf += chunk
+        check(b"text/event-stream" in buf and b"event: hello" in buf and b"event: health" in buf, "stream frames")
+        print(f"      {len(dash['attackers'])} attacker IPs, stream sent hello + health")
+
         step("server log contains no secrets")
         log_text = Path(log_path).read_text()
         for secret in (ADMIN_PW, ANALYST_PW, tok["token"]):
