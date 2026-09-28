@@ -168,7 +168,7 @@ class IncidentReportTests(unittest.TestCase):
             self.assertIn(expected, text)
         self.assertIn(f"Page 1 of {len(pdf.pages())}", text)
 
-    def test_status_change_and_incident_notes_flow_through(self):
+    def test_status_change_and_alert_notes_flow_through(self):
         incidents.update_status(self.conn, self.id, "analyst", "investigating")
         queries.add_note(self.conn, self.exfil, "analyst", "Keys revoked for svc-deploy-tmp.")
         m = report.build(self.conn, self.id)
