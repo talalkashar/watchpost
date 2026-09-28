@@ -24,7 +24,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 ### Tests
 
 ```bash
-./run_tests.sh      # 97 unit/integration tests + a 14-step end-to-end smoke check
+./run_tests.sh      # unit/integration tests + a 15-step end-to-end smoke check
 ```
 
 ### Replit
@@ -131,6 +131,12 @@ This is **not machine learning**. It is transparent, deterministic tuning suppor
 
 ---
 
+## SOC dashboard
+
+The landing view is a dark SOC console built for a 1280×800 screen: a status strip (events per minute, open and critical alerts, incidents, stored events, health checks, stream state, UTC clock), an attacker world map, a live event stream, alerts over time, top attacker IPs, the MITRE ATT&CK coverage heat matrix, an incident board, top rules, and health. Live updates arrive over Server-Sent Events (`GET /api/stream`); if the stream fails, the page polls every 3 seconds. Charts and the map are inline SVG drawn by `static/charts.js` and `static/map.js`, with no libraries and no external tiles.
+
+**The map positions are synthetic.** `watchpost/geo.py` maps only the RFC 5737 documentation ranges to fictional city names at fixed coordinates, and the RFC 1918 ranges to internal sites. It is not a geo lookup. Any other address is listed as "unknown" and never guessed. The map is labeled "synthetic geo".
+
 ## What is real vs. synthetic vs. future
 
 **Real, working, and tested:** everything in the architecture section. That includes the ingestion API and file upload, normalization, persistence, search, the eleven rules, ATT&CK mapping and coverage, incident correlation, alerts with evidence and timelines, notes, status and verdicts, metrics, health checks and recovery, authentication, roles, CSRF protection, API tokens, redaction, feedback-driven suggestions, two-person review, evaluation history, and the audit log.
@@ -156,7 +162,7 @@ This is **not machine learning**. It is transparent, deterministic tuning suppor
 labs/siem/
 ├── main.py, start.sh, run_tests.sh, .replit
 ├── watchpost/          application package
-├── static/             UI (index.html, app.js, style.css; no inline scripts)
+├── static/             UI: SOC dashboard (dashboard.js, charts.js, map.js) and views (app.js); no inline scripts
 ├── samples/            synthetic log files for upload
 ├── scripts/smoke.py    end-to-end smoke check against a real server process
 ├── tests/              unittest suite

@@ -1,5 +1,7 @@
 "use strict";
-// Watchpost UI. All server data is rendered with textContent (via el()), never innerHTML.
+// Watchpost UI shell and the classic views. All server data is rendered with textContent
+// (via el()), never innerHTML. The SOC dashboard and live stream live in dashboard.js; its
+// charts are SVG strings from charts.js/map.js with every text value escaped.
 
 const state = { user: null, csrf: null, view: "dashboard", alertId: null };
 const ROLE_RANK = { viewer: 1, analyst: 2, admin: 3 };
@@ -77,8 +79,10 @@ async function guarded(fn) {
 // ---------- auth ----------
 function showLogin() {
   state.user = null; state.csrf = null;
+  Live.stop();
+  document.body.classList.remove("authed");
   $("#login-view").hidden = false;
-  $("#nav").hidden = true; $("#who").hidden = true;
+  $("#rail").hidden = true; $("#strip").hidden = true; $("#who").hidden = true;
   render();
 }
 
@@ -102,11 +106,13 @@ async function boot() {
 function onLogin(data) {
   state.user = data.user; state.csrf = data.csrf_token;
   $("#login-view").hidden = true;
-  $("#nav").hidden = false; $("#who").hidden = false;
+  document.body.classList.add("authed");
+  $("#rail").hidden = false; $("#strip").hidden = false; $("#who").hidden = false;
   $("#who-name").textContent = `${data.user.username} · ${data.user.role}`;
   document.querySelectorAll("#nav [data-role]").forEach((b) => { b.hidden = !can(b.dataset.role); });
   route();
   refreshBanner();
+  Live.start();
 }
 
 function go(view, id) { location.hash = id ? `${view}/${id}` : view; }
@@ -115,10 +121,12 @@ function route() {
   if (!state.user) return;
   const [view, id] = (location.hash.slice(1) || "dashboard").split("/");
   state.view = view;
+  document.body.dataset.view = view;
   document.querySelectorAll("#nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
-  const views = { dashboard, alerts: () => (id ? alertDetail(Number(id)) : alerts()),
-    incidents: () => (id ? incidentDetail(Number(id)) : alerts()), events, ingest, rules, health, admin };
-  guarded(views[view] || dashboard);
+  if (view !== "dashboard") Dash.unmount();
+  const views = { dashboard: socDashboard, incidents: () => (id ? incidentDetail(Number(id)) : incidentsView()),
+    alerts: () => (id ? alertDetail(Number(id)) : alerts()), events, overview, ingest, rules, health, admin };
+  guarded(views[view] || socDashboard);
 }
 
 async function refreshBanner() {
@@ -138,8 +146,8 @@ async function refreshBanner() {
   }
 }
 
-// ---------- dashboard ----------
-async function dashboard() {
+// ---------- metrics overview (the 1.0 dashboard) ----------
+async function overview() {
   const m = await api("/api/metrics");
   const kpi = (v, l) => el("div", { class: "kpi" }, el("div", { class: "v" }, v ?? "—"), el("div", { class: "l" }, l));
   const hist = m.activity_last_24h_of_data;
@@ -160,7 +168,7 @@ async function dashboard() {
     can("admin") ? el("button", { onclick: () => go("admin") }, "Go to demo data") : null) : null;
 
   render(
-    el("h1", {}, "SOC overview"),
+    el("h1", {}, "Metrics overview"),
     empty,
     el("div", { class: "kpis" },
       kpi(m.alerts_open, "Open alerts"), kpi(m.alerts_investigating, "Investigating"),
@@ -291,7 +299,7 @@ async function incidentDetail(id) {
     actions.append(reportLinks("incidents", id));
   }
   render(
-    el("p", {}, el("a", { href: "#alerts" }, "← Alerts and incidents")),
+    el("p", {}, el("a", { href: "#incidents" }, "← Incidents")),
     el("div", { class: "split" },
       el("div", {},
         el("div", { class: "card" },

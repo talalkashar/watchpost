@@ -97,6 +97,7 @@ curl -X POST "http://127.0.0.1:8080/api/ingest/upload?format=authlog&source=bast
 | `q` | Substring of `message` (`%` and `_` are literal) |
 | `synthetic` | `0` or `1` |
 | `limit` (1–1000, default 100), `offset` | Paging; response includes `total` |
+| `since_id` | Only events stored after that event id, newest stored first (ignores event time). Used by the dashboard's polling fallback |
 
 | Endpoint | Role | Notes |
 |---|---|---|
@@ -150,6 +151,32 @@ Errors are JSON: unknown alert → 404 `alert not found`; unknown incident → 4
 | `GET /api/changes?status=pending` | viewer | Change requests |
 | `POST /api/changes/{id}/review` | admin | `{decision: approve\|reject, note}`. Self-review → 403; already reviewed → 409 |
 | `GET /api/evaluations` / `POST /api/evaluations` | viewer / analyst | Evaluation history / run one now |
+
+## SOC dashboard and live stream
+
+| Endpoint | Role | Notes |
+|---|---|---|
+| `GET /api/dashboard` | viewer | One read for the dashboard: counts (`events_total`, `synthetic_events`, `alerts_open`, `alerts_investigating`, `alerts_critical_open`, `alerts_total`), `events_per_minute` (60 one-minute buckets by ingest time, ending now), `alert_timeline` (`bucket_minutes` 60 or 5, and 24 `bins` of `{start, critical, high, medium, low, events}` by event time, ending at the newest alert; 5-minute buckets when all recent alerts fall in the last 2 hours), `attackers` (source IPs in alert evidence: `{ip, events, alerts, open_alerts, max_severity, last_seen}`, top 40), `top_rules`, `alerts` (up to 60, for the board), `recent_events` (60 newest by event time, no `raw`) |
+| `GET /api/geo?ips=a,b,c` | viewer | Up to 200 IPs. `{label: "synthetic geo", ips: {ip: {city, lat, lon, synthetic: true, internal} \| null}}`. Only RFC 5737 documentation ranges (fictional cities) and RFC 1918 ranges (internal sites) have entries; every other address is `null` ("unknown") and is never guessed. 400 on an invalid address |
+| `GET /api/stream` | viewer | Server-Sent Events (`text/event-stream`), see below |
+
+### `GET /api/stream`
+
+Session cookie required (EventSource sends it). One thread per connection; at most 64 concurrent streams (503 after that). The first frame sets `retry: 3000`. Every frame is `id`, `event`, and one JSON `data` line:
+
+| `event` | When | `data` |
+|---|---|---|
+| `hello` | on connect | `{version, user, heartbeat_seconds}` |
+| `health` | on connect (full), after each detection run (partial) | `{partial: false, status, checked_at, checks: {name: status}}` or `{partial: true, checks: {detection: ok\|failing}, error}` |
+| `event` | after a batch is stored | `{batch_id, count, synthetic, events: [...]}`: the newest 50 events of the batch (no `raw`) |
+| `alert` | after detection, per alert created or extended | alert row fields plus `change: created\|updated` |
+| `incident` | after detection, per incident touched (once the `incidents` table exists) | the incident row |
+| `heartbeat` | every 15 s without other traffic | `{ts, subscribers}` |
+| `resync` | the client fell behind (its 500-message queue overflowed) | `{reason}`: refetch `/api/dashboard` |
+
+Clients that cannot hold a stream can poll `GET /api/events?since_id=<last id>` every few seconds, which is what the dashboard does when SSE fails.
+
+The dashboard also reads `GET /api/incidents`, `GET /api/attack/coverage`, and `GET /api/storyline/status` when the server has them (workstreams A and C). A 404 shows a "pending" panel.
 
 ## Health and administration
 
