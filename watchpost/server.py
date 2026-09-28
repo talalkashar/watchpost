@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import __version__, auth, engine, improve, queries, report, simulate
+from . import __version__, auth, engine, improve, incidents, queries, report, simulate
 from .config import Config
 from .db import audit, connect, init_schema, now_iso, row_to_dict
 from .diagnostics import configure_logging, log, record_error
@@ -253,6 +253,30 @@ def alert_status(req, alert_id):
     data = body_json(req)
     return queries.update_status(req.conn, int(alert_id), req.user["username"], data.get("status"),
                                  data.get("disposition"), data.get("note"))
+
+
+# Incidents (correlated alerts) and ATT&CK coverage -------------------------------------
+
+@route("GET", "/api/incidents")
+def incident_list(req):
+    return incidents.list_incidents(req.conn, req.query)
+
+
+@route("GET", r"/api/incidents/(\d+)")
+def incident_detail(req, incident_id):
+    return incidents.get_incident(req.conn, int(incident_id))
+
+
+@route("POST", r"/api/incidents/(\d+)/status", role="analyst")
+def incident_status(req, incident_id):
+    data = body_json(req)
+    return incidents.update_status(req.conn, int(incident_id), req.user["username"], data.get("status"),
+                                   data.get("note"))
+
+
+@route("GET", "/api/attack/coverage")
+def attack_coverage(req):
+    return incidents.coverage(req.conn)
 
 
 # Reports ---------------------------------------------------------------------------------

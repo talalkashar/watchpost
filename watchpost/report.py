@@ -1,13 +1,13 @@
 """Incident and alert reports: one report model, rendered as Markdown or PDF.
 
-`build(conn, incident_id)` reads the `incidents` / `incident_alerts` tables when they exist (they arrive
-with the correlation engine). `build_from_alert(conn, alert_id)` works on any database, so reports are
-available for single alerts too. Both return the same model shape.
+`build(conn, incident_id)` reads a correlated incident (watchpost.incidents) with every member alert's
+evidence, notes, and ATT&CK techniques. `build_from_alert(conn, alert_id)` reports on a single alert.
+Both return the same model shape.
 """
 
 import json
 
-from . import __version__
+from . import __version__, attack, incidents
 from .db import now_iso
 from .pdfwriter import Document
 from .queries import QueryError, get_alert
@@ -47,6 +47,7 @@ ACTIONS = {
     "T1048": ["Block the outbound destination and review egress rules for the source host."],
     "T1041": ["Isolate the host and inspect outbound connections to the command-and-control address."],
     "T1078.003": ["Disable the local account and check it against the approved local account inventory."],
+    "T1133": ["Require MFA on the VPN or remote service and review the sessions opened from the flagged sources."],
 }
 FALLBACK_ACTIONS = [
     "Confirm whether the activity was authorized by talking to the account owner.",
@@ -58,15 +59,6 @@ FALLBACK_ACTIONS = [
 
 class ReportError(QueryError):
     pass
-
-
-def incidents_available(conn):
-    names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    return {"incidents", "incident_alerts"} <= names
-
-
-def _columns(conn, table):
-    return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
 
 
 def _json(value, default):
@@ -81,22 +73,16 @@ def _json(value, default):
 
 
 def _catalog_lookup(technique_id):
-    """Resolve a bare technique id through watchpost.attack when that module exists."""
     try:
-        from . import attack  # added by the correlation workstream
-        found = attack.technique(technique_id)
-    except Exception:
+        return attack.technique(technique_id)
+    except KeyError:
         return None
-    return dict(found) if isinstance(found, dict) else None
 
 
 def rule_techniques(conn, rule_id):
-    """Techniques for a rule: the `rules.techniques` column when present, else the rule definition."""
-    raw = None
-    if "techniques" in _columns(conn, "rules"):
-        row = conn.execute("SELECT techniques FROM rules WHERE id = ?", (rule_id,)).fetchone()
-        raw = row[0] if row else None
-    techniques = _json(raw, None)
+    """Techniques for a rule: the `rules.techniques` column, else the built-in rule definition."""
+    row = conn.execute("SELECT techniques FROM rules WHERE id = ?", (rule_id,)).fetchone()
+    techniques = _json(row[0] if row else None, None)
     if techniques is None:
         from .rules import DEFAULT_RULES
         techniques = next((r.get("techniques") for r in DEFAULT_RULES if r.get("id") == rule_id), None) or []
@@ -141,7 +127,7 @@ def _assemble(conn, kind, ident, title, alerts, extra):
         for t in a["techniques"]:
             techniques.setdefault(t["id"], t)
     by_tactic = {}
-    for t in sorted(techniques.values(), key=lambda t: t["id"]):
+    for t in sorted(techniques.values(), key=lambda t: (attack.tactic_rank(t["tactic"]), t["tactic"], t["id"])):
         by_tactic.setdefault(t["tactic"], []).append(t)
     severity = max((a["severity"] for a in alerts), key=lambda s: SEVERITY_ORDER.get(s, -1), default="low")
     first = min((a["first_seen"] for a in alerts), default=None)
@@ -158,7 +144,7 @@ def _assemble(conn, kind, ident, title, alerts, extra):
         "timeline": sorted(timeline.values(), key=lambda e: (e["ts"], e["id"]))[:TIMELINE_LIMIT],
         "techniques_by_tactic": by_tactic,
         "notes": sorted(notes, key=lambda n: (n["created_at"], n["id"])),
-        "actions": actions_for(list(techniques.values())),
+        "actions": actions_for([t for items in by_tactic.values() for t in items]),
     }
     model.update(extra)
     model["summary"] = _summary(model)
@@ -178,6 +164,8 @@ def _summary(m):
     if m["techniques_by_tactic"]:
         parts.append(f"Mapped to {sum(len(v) for v in m['techniques_by_tactic'].values())} ATT&CK technique(s) "
                      f"across {len(m['techniques_by_tactic'])} tactic(s).")
+    if m.get("escalated"):
+        parts.append(f"Escalated: the alerts span {len(m['stages'])} ATT&CK tactics.")
     parts.append(f"Highest severity: {m['severity']}. Status: {m['status'] or 'unknown'}.")
     return " ".join(parts)
 
@@ -194,36 +182,27 @@ def build_from_alert(conn, alert_id):
 
 
 def build(conn, incident_id):
-    if not incidents_available(conn):
-        raise ReportError("incidents are not available on this server yet; use the alert report instead", 404)
-    row = conn.execute("SELECT * FROM incidents WHERE id = ?", (incident_id,)).fetchone()
-    if row is None:
-        raise ReportError("incident not found", 404)
-    incident = dict(row)
-    link = "incident_id" if "incident_id" in _columns(conn, "incident_alerts") else "incident"
-    alert_ids = [r[0] for r in conn.execute(
-        f"SELECT alert_id FROM incident_alerts WHERE {link} = ? ORDER BY alert_id", (incident_id,))]
-    alerts = [get_alert(conn, a) for a in alert_ids
-              if conn.execute("SELECT 1 FROM alerts WHERE id = ?", (a,)).fetchone()]
-    title = incident.get("title") or f"Incident #{incident_id}"
-    model = _assemble(conn, "incident", incident_id, title, alerts, {})
-    model["status"] = incident.get("status")
-    if incident.get("severity") in SEVERITY_ORDER:
+    try:
+        incident = incidents.get_incident(conn, incident_id)
+        alerts = [get_alert(conn, a["id"]) for a in incident["alerts"]]
+    except QueryError as exc:
+        raise ReportError(str(exc), exc.status)
+    model = _assemble(conn, "incident", incident["id"], incident["title"], alerts, {})
+    # The incident row is authoritative for status, severity (escalation included), span and kill chain.
+    model.update(status=incident["status"], first_seen=incident["first_seen"], last_seen=incident["last_seen"],
+                 synthetic=bool(incident["synthetic"]) or model["synthetic"], stages=list(incident["stages"]),
+                 escalated=incident["escalated"], assignee=incident.get("assignee"))
+    if incident["severity"] in SEVERITY_ORDER:
         model["severity"] = incident["severity"]
-    model["first_seen"] = incident.get("first_seen") or model["first_seen"]
-    model["last_seen"] = incident.get("last_seen") or model["last_seen"]
-    if "synthetic" in incident:
-        model["synthetic"] = bool(incident["synthetic"]) or model["synthetic"]
-    stages = next((_json(incident.get(c), None) for c in ("kill_chain", "stages", "kill_chain_stages", "tactics")
-                   if incident.get(c)), None)
-    model["stages"] = [str(s) for s in stages] if isinstance(stages, list) else []
-    if "incident_notes" in {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}:
-        cols = _columns(conn, "incident_notes")
-        if {"incident_id", "author", "body", "created_at"} <= cols:
-            model["notes"] = sorted(model["notes"] + [
-                {**dict(r), "alert_id": None} for r in conn.execute(
-                    "SELECT id, author, body, created_at FROM incident_notes WHERE incident_id = ?",
-                    (incident_id,))], key=lambda n: (n["created_at"], n["id"]))
+    for key, name in (("ips", "src_ip"), ("users", "user"), ("hosts", "host")):
+        model["entities"][key] = sorted(set(model["entities"][key]) | set(incident["entities"].get(name) or []))
+    # ATT&CK techniques by tactic in kill-chain order, each with the alerts that map to it.
+    by_tactic = {}
+    for t in incident["techniques"]:
+        by_tactic.setdefault(t["tactic"], []).append(
+            {"id": t["id"], "name": t.get("name") or "", "tactic": t["tactic"], "alert_ids": t["alert_ids"]})
+    model["techniques_by_tactic"] = by_tactic or model["techniques_by_tactic"]
+    model["actions"] = actions_for([t for items in model["techniques_by_tactic"].values() for t in items])
     model["summary"] = _summary(model)
     return model
 
@@ -247,6 +226,11 @@ def _md_table(headers, rows):
     return lines
 
 
+def _alert_refs(t):
+    ids = t.get("alert_ids")
+    return f" (alert{'s' if len(ids) > 1 else ''} " + ", ".join(f"#{i}" for i in ids) + ")" if ids else ""
+
+
 def to_markdown(m):
     label = "Incident" if m["kind"] == "incident" else "Alert"
     out = [f"# {label} report: {md(m['title'])}", ""]
@@ -256,14 +240,16 @@ def to_markdown(m):
             f"- **First seen:** {md(m['first_seen'])}", f"- **Last seen:** {md(m['last_seen'])}",
             f"- **Generated:** {m['generated_at']} by {m['generator']}", "", "## Summary", "", md(m["summary"]), ""]
     if m.get("stages"):
-        out += ["**Kill-chain stages:** " + " -> ".join(md(s) for s in m["stages"]), ""]
+        out += ["**Kill-chain stages:** " + " -> ".join(md(s) for s in m["stages"])
+                + (" (escalated: 3 or more tactics)" if m.get("escalated") else ""), ""]
     out += ["## Entities", ""]
     for key, label_ in (("ips", "IP addresses"), ("users", "Accounts"), ("hosts", "Hosts")):
         out.append(f"- **{label_}:** " + (", ".join(f"`{md(v)}`" for v in m["entities"][key]) or "none"))
     out += ["", "## MITRE ATT&CK techniques", ""]
     if m["techniques_by_tactic"]:
         for tactic, items in m["techniques_by_tactic"].items():
-            out.append(f"- **{md(tactic)}:** " + ", ".join(f"{md(t['id'])} {md(t['name'])}".strip() for t in items))
+            out.append(f"- **{md(tactic)}:** " + ", ".join(f"{md(t['id'])} {md(t['name'])}".strip() + _alert_refs(t)
+                                                          for t in items))
     else:
         out.append("No ATT&CK mapping is recorded for the rules involved.")
     out += ["", "## Timeline", ""]
@@ -314,15 +300,17 @@ def to_pdf_bytes(m):
     doc.heading("Summary")
     doc.text(m["summary"])
     if m.get("stages"):
-        doc.text("Kill-chain stages: " + " -> ".join(m["stages"]), bold=True)
+        doc.text("Kill-chain stages: " + " -> ".join(m["stages"])
+                 + (" (escalated: 3 or more tactics)" if m.get("escalated") else ""), bold=True)
     doc.heading("Entities")
     for key, name in (("ips", "IP addresses"), ("users", "Accounts"), ("hosts", "Hosts")):
         doc.text(f"{name}: " + (", ".join(m["entities"][key]) or "none"))
     doc.heading("MITRE ATT&CK techniques")
     if m["techniques_by_tactic"]:
-        doc.table(["Tactic", "Technique", "Name"],
-                  [[tactic, t["id"], t["name"]] for tactic, items in m["techniques_by_tactic"].items() for t in items],
-                  widths=[2, 1, 3], size=9)
+        doc.table(["Tactic", "Technique", "Name", "Alerts"],
+                  [[tactic, t["id"], t["name"], ", ".join(f"#{i}" for i in t.get("alert_ids") or []) or "-"]
+                   for tactic, items in m["techniques_by_tactic"].items() for t in items],
+                  widths=[2, 1, 3.4, 1], size=9)
     else:
         doc.text("No ATT&CK mapping is recorded for the rules involved.")
     doc.heading("Timeline")

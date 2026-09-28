@@ -115,6 +115,10 @@ def check_detection(conn):
         if started < iso(utcnow() - timedelta(minutes=5)):
             return ("degraded", "a detection run has been running for more than 5 minutes",
                     "The process may have crashed mid-run. Restart the app and run detection again.", details)
+    if last["correlation"] == "failed":
+        return ("degraded", "the last run stored its alerts but could not group them into incidents",
+                "Alerts are unaffected. See recent errors (component 'correlation'), fix the cause, and use "
+                "'Run detection' to correlate again.", details)
     if failed_batches:
         return ("degraded", f"{failed_batches} batch(es) were ingested while detection was failing",
                 "Use 'Run detection' to process them now that detection is healthy.", details)

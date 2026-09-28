@@ -73,25 +73,25 @@ Shipped:
 - `watchpost/report.py`: `build(conn, incident_id)` and `build_from_alert(conn, alert_id)` return one report model;
   `to_markdown(model)` and `to_pdf_bytes(model)` render it. Recommended actions come from a static table keyed by
   ATT&CK technique id (sub-techniques fall back to the parent), with generic actions when no technique is mapped.
-  Techniques are read from a `rules.techniques` JSON column or `DEFAULT_RULES[...]["techniques"]` when either
-  exists, so the reports light up automatically once workstream A lands. The incident path detects the
-  `incidents` / `incident_alerts` tables at runtime and returns a clean 404 when they are missing.
+  Techniques come from the `rules.techniques` column (falling back to `DEFAULT_RULES`), resolved through the
+  ATT&CK catalog in `watchpost/attack.py` and grouped by tactic in kill-chain order.
+- After A merged: `build(conn, incident_id)` reads the real incident through `incidents.get_incident` (status,
+  severity with escalation, span, kill-chain stages, entities, techniques per tactic with the alerts behind each),
+  then adds every member alert's evidence, timeline, and notes. Unknown incidents are a 404 `incident not found`.
 - Routes `GET /api/alerts/{id}/report.{md,pdf}` and `GET /api/incidents/{id}/report.{md,pdf}` (analyst+), audited.
-- UI: "Report (PDF)" and "Report (Markdown)" links on the alert detail view. `reportLinks("incidents", id)` in
-  `static/app.js` is ready for the incident detail view that workstream A/B adds.
-- Tests: `tests/test_pdfwriter.py` (6), `tests/test_report.py` (9), `ReportApiTests` in `tests/test_api.py` (3),
-  plus a tiny PDF reader in `tests/pdfparse.py` that follows the xref table and extracts page text. Smoke check
-  gained a step that downloads both report formats (and an incident report once `/api/incidents` exists).
+- UI: "Report (PDF)" and "Report (Markdown)" links on the alert detail view and the incident detail view.
+- Tests: `tests/test_pdfwriter.py` (6), `tests/test_report.py` (15, eight on incidents built by the real
+  correlation engine), `ReportApiTests` in `tests/test_api.py` (3), plus a tiny PDF reader in `tests/pdfparse.py`
+  that follows the xref table and extracts page text. The smoke check downloads alert and incident reports in both
+  formats and checks the incident Markdown lists every kill-chain tactic.
 - Verified outside the test suite (scratch venv, not a project dependency): qpdf (via pikepdf) reports no syntax
   problems, pypdf opens the files in strict mode, and PDFium (the engine inside Chrome) renders every page.
 
 Not done:
 - The HTML print view from the spec ("third option via the dashboard") belongs with the dashboard rework (B).
-- No incident detail view exists on `main` yet, so the incident report buttons wait for A/B to call `reportLinks`.
 - Not opened in macOS Preview (no Mac in the cloud session). The file passes qpdf's checks and renders in PDFium.
 
-Decision for the owner: none required. When A merges, confirm its join table uses `incident_alerts(incident_id,
-alert_id)`; the report code also accepts a column named `incident`.
+Decision for the owner: none required.
 
 ## Open items and blockers
 
@@ -106,3 +106,27 @@ alert_id)`; the report code also accepts a column named `incident`.
 3. Add a retention job (delete events older than N days) behind a reviewed setting.
 4. Add a syslog UDP/TCP listener on loopback for live shipping.
 5. Add a Sigma-style YAML rule loader for simple field-match rules.
+
+## Watchpost 2.0 / A: correlation engine and MITRE ATT&CK (2026-09-28, branch `ws/a-correlation-attack`)
+
+**Shipped**
+- `watchpost/attack.py`: static ATT&CK Enterprise subset (17 techniques, all 14 tactics in kill-chain order), `technique(id)`, `tactics()`, `coverage()`. No network fetch.
+- Every rule carries `techniques`; new `rules.techniques` JSON column (added in place on existing databases), written by `seed_rules`, returned by `GET /api/rules` and in alert detail.
+- Parsers: nginx/Apache combined (`weblog`, auto-detected) → `web_request`/`web_scan`/`web_error`; firewall CSV (`action` column) and UFW/iptables syslog → `fw_deny`/`fw_allow`; OpenVPN → `vpn_login`; CloudTrail-style JSON → `cloud_api_call`/`cloud_iam_change`/`cloud_data_access`; sudo/su/runas (4648) → `privilege_escalation`; useradd, auditd process (`exe=`) and file (`type=PATH`, 4663) records. New event columns `dest_port`, `bytes`.
+- Six new rules with tests and labeled scenarios: `web_scanner`, `firewall_port_sweep`, `impossible_geo_login`, `privilege_escalation_after_login`, `cloud_iam_change_by_new_principal`, `data_exfil_volume`. Evaluation: every rule recall 1.0, no new false positives.
+- `watchpost/geo.py`: synthetic geo table (`locate(ip) -> {city, lat, lon, synthetic}` or `None`), documentation + RFC 1918 ranges only.
+- `watchpost/correlate.py` + `engine.correlate_alerts`: incidents and `incident_alerts` tables, run after every detection run, idempotent. Correlation failures leave alerts alone, are logged under component `correlation`, and mark detection health `degraded` until the next good run.
+- Routes: `GET /api/incidents`, `GET /api/incidents/{id}`, `POST /api/incidents/{id}/status`, `GET /api/attack/coverage`. UI: active incidents table on the Alerts page, incident detail view (`#incidents/{id}`), ATT&CK chips on rules and alerts.
+- Samples: `nginx_access.log`, `firewall.csv`, `cloudtrail.json`, `linux_host.log`. Smoke check uploads them and gained incident and coverage steps.
+- Verification: `./run_tests.sh` → 97 tests OK, SMOKE OK (14 steps), run as a non-root user.
+
+**Decisions made (owner may revisit)**
+- Linking uses each alert's evidence-event times per entity, not the alert's whole span. With spans, one multi-hour impossible-travel alert chained 9 unrelated demo alerts on host `web01` into one incident.
+- A new incident needs ≥ 2 related alerts or 1 critical alert; window 30 min (`correlate.DEFAULT_WINDOW_SECONDS`, not yet a setting).
+- `vpn_login` counts as a successful login for `success_after_failures` and `off_hours_privileged_login` too.
+- Detection now reads up to 24 h of extra history before each batch (for "new principal" checks); findings made only from that history are ignored, so older behaviour is unchanged.
+- Rule tuning suggestions still only propose `threshold`/`ignore_*` changes; the new parameters are tunable via manual proposals.
+
+**Not done / notes**
+- `test_storage_unavailable_is_failing_not_a_crash` fails when the suite runs as root (root ignores directory permissions). Pre-existing, identical on `main`; passes as a normal user.
+- No incident notes/assignment UI beyond status; reports (D) and dashboard panels (B) consume these routes.

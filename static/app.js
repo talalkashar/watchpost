@@ -28,6 +28,8 @@ const sev = (s) => pill(s, `sev-${s}`);
 const status = (s) => pill(s, `st-${s}`);
 const synth = (flag) => (flag ? pill("synthetic", "synthetic") : null);
 const pct = (v) => (v === null || v === undefined ? "—" : `${Math.round(v * 100)}%`);
+const technique = (t) => el("span", { class: "pill technique", title: `${t.name} (${t.tactic})` }, `${t.id} ${t.name}`);
+const techniques = (list) => (list && list.length ? el("span", { class: "row" }, list.map(technique)) : "—");
 
 function toast(msg) {
   const t = el("div", { class: "toast", role: "status" }, msg);
@@ -114,7 +116,8 @@ function route() {
   const [view, id] = (location.hash.slice(1) || "dashboard").split("/");
   state.view = view;
   document.querySelectorAll("#nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
-  const views = { dashboard, alerts: () => (id ? alertDetail(Number(id)) : alerts()), events, ingest, rules, health, admin };
+  const views = { dashboard, alerts: () => (id ? alertDetail(Number(id)) : alerts()),
+    incidents: () => (id ? incidentDetail(Number(id)) : alerts()), events, ingest, rules, health, admin };
   guarded(views[view] || dashboard);
 }
 
@@ -200,8 +203,15 @@ async function alerts() {
     try { sessionStorage.setItem("alertFilter", p.toString()); } catch { /* ignore */ }
     guarded(alerts);
   });
-  const list = await api(`/api/alerts?${params}`);
-  render(el("h1", {}, "Alerts"), form, el("div", { class: "card" }, table(
+  const [list, incidents] = await Promise.all([api(`/api/alerts?${params}`), api("/api/incidents?status=open,investigating")]);
+  render(el("h1", {}, "Alerts"),
+    el("div", { class: "card" }, el("h2", {}, `Active incidents (${incidents.length})`),
+      el("p", { class: "muted" }, "Alerts that share a source IP, account, or host within 30 minutes are grouped into one incident. Severity rises one level when an incident spans three or more ATT&CK tactics."),
+      table(["Severity", "Incident", "Kill chain", "Alerts", "Status", "Last seen", ""],
+        incidents.map((i) => ({ id: i.id, cells: [sev(i.severity), i.title, i.stages.join(" → ") || "—", { num: i.alert_count },
+          status(i.status), fmtTime(i.last_seen), synth(i.synthetic)] })),
+        (r) => go("incidents", r.id))),
+    form, el("div", { class: "card" }, table(
     ["Severity", "Alert", "Rule", "Status", "Events", "Last seen", ""],
     list.map((a) => ({ id: a.id, cells: [sev(a.severity), a.title, el("code", {}, a.rule_id),
       el("span", {}, status(a.status), a.disposition ? ` ${a.disposition.replace("_", " ")}` : ""),
@@ -238,6 +248,7 @@ async function alertDetail(id) {
           el("h1", { style: { marginTop: "8px" } }, a.title),
           el("div", { class: "explain" }, el("strong", {}, "Why this fired: "), a.explanation),
           el("p", { class: "muted" }, `Rule: ${a.rule?.name ?? a.rule_id} (v${a.rule_version}). ${a.rule?.description ?? ""}`),
+          el("p", {}, el("strong", {}, "MITRE ATT&CK: "), techniques(a.rule?.techniques)),
           actions),
         el("div", { class: "card" }, el("h2", {}, `Evidence (${a.evidence.length} events)`),
           table(["Time", "Type", "User", "Source IP", "Host", "Message"],
@@ -266,6 +277,44 @@ function reportLinks(kind, id) {
   return el("span", { class: "row" },
     el("a", { class: "button", href: `/api/${kind}/${id}/report.pdf`, download: "" }, "Report (PDF)"),
     el("a", { class: "button", href: `/api/${kind}/${id}/report.md`, download: "" }, "Report (Markdown)"));
+}
+
+// ---------- incidents ----------
+async function incidentDetail(id) {
+  const i = await api(`/api/incidents/${id}`);
+  const setIncident = (body) => guarded(async () => { await api(`/api/incidents/${id}/status`, { method: "POST", body }); incidentDetail(id); });
+  const actions = el("div", { class: "row" });
+  if (can("analyst")) {
+    if (i.status === "open") actions.append(el("button", { onclick: () => setIncident({ status: "investigating" }) }, "Start investigating"));
+    if (i.status !== "resolved") actions.append(el("button", { onclick: () => setIncident({ status: "resolved" }) }, "Resolve"));
+    else actions.append(el("button", { class: "ghost", onclick: () => setIncident({ status: "open" }) }, "Reopen"));
+    actions.append(reportLinks("incidents", id));
+  }
+  render(
+    el("p", {}, el("a", { href: "#alerts" }, "← Alerts and incidents")),
+    el("div", { class: "split" },
+      el("div", {},
+        el("div", { class: "card" },
+          el("div", { class: "row" }, sev(i.severity), status(i.status), synth(i.synthetic), i.escalated ? pill("escalated: 3+ tactics", "sev-critical") : null),
+          el("h1", { style: { marginTop: "8px" } }, `Incident #${i.id}: ${i.title}`),
+          el("div", { class: "row" }, i.stages.map((t, n) => el("span", {}, n ? "→ " : "", pill(t, "stage")))),
+          actions),
+        el("div", { class: "card" }, el("h2", {}, `Alert timeline (${i.alerts.length})`),
+          table(["First seen", "Severity", "Alert", "Tactics", "Techniques", "Status"],
+            i.timeline.map((t) => ({ id: t.alert_id, cells: [fmtTime(t.ts), sev(t.severity), t.title, t.tactics.join(", "), t.techniques.join(", "), status(t.status)] })),
+            (r) => go("alerts", r.id))),
+        el("div", { class: "card" }, el("h2", {}, `Evidence (${i.events.length} events)`),
+          table(["Time", "Type", "User", "Source IP", "Host", "Message"],
+            i.events.map((e) => ({ cells: [fmtTime(e.ts), e.event_type, e.user ?? "—", el("code", {}, e.src_ip ?? "—"), e.host ?? "—", e.message ?? ""] }))))),
+      el("div", {},
+        el("div", { class: "card" }, el("h2", {}, "Details"), el("dl", { class: "kv" },
+          ...[["Incident", `#${i.id}`], ["First seen", fmtTime(i.first_seen)], ["Last seen", fmtTime(i.last_seen)],
+            ["Source IPs", i.entities.src_ip.join(", ") || "—"], ["Accounts", i.entities.user.join(", ") || "—"],
+            ["Hosts", i.entities.host.join(", ") || "—"], ["Assignee", i.assignee ?? "—"], ["Resolved", fmtTime(i.resolved_at)]]
+            .flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]))),
+        el("div", { class: "card" }, el("h2", {}, "MITRE ATT&CK"),
+          i.techniques_by_tactic.map((g) => el("div", { class: "note" }, el("h3", {}, g.tactic), techniques(g.techniques)))))),
+  );
 }
 
 async function setStatus(id, body) {
@@ -435,6 +484,7 @@ async function rules() {
       el("div", { class: "row", style: { justifyContent: "space-between" } },
         el("h2", {}, r.name), el("span", {}, sev(r.severity), " ", r.enabled ? pill("enabled", "st-ok") : pill("disabled", "st-rejected"))),
       el("p", { class: "muted" }, r.description),
+      el("p", {}, el("strong", {}, "MITRE ATT&CK: "), techniques(r.techniques)),
       el("div", { class: "grid" },
         el("div", {}, el("h3", {}, `Parameters (v${r.version})`), el("pre", {}, JSON.stringify(r.params, null, 2))),
         el("div", {},

@@ -38,25 +38,37 @@ Accepted fields (aliases in parentheses):
 | `event_type` | `type`, `action`, `category`, or Windows `EventID` | Normalized, e.g. `login_failed` → `auth_failure`; unknown → `other` |
 | `user` | `username`, `TargetUserName`, `account`, `user.name` | |
 | `src_ip` | `source_ip`, `client_ip`, `ip`, `IpAddress`, `source.ip` | Must be a valid IPv4/IPv6 address |
-| `dest_ip` | `destination_ip`, `server_ip` | |
+| `dest_ip` | `destination_ip`, `server_ip`, `dst_ip` | |
+| `dest_port` | `destination_port`, `dst_port`, `dport` | Integer 0–65535 (firewall events) |
+| `bytes` | `bytes_out`, `bytes_sent`, `sent_bytes`, `out_bytes` | Non-negative integer (outbound volume) |
 | `host` | `hostname`, `Computer`, `device`, `host.name` | |
 | `severity` | `level` | `info`, `low`, `medium`, `high`, or `critical`; defaults by type |
 | `outcome`, `message`, `source` | | Secrets like `password=` are redacted before storage |
+
+Event types: `auth_failure`, `auth_success`, `account_lockout`, `user_created`, `privilege_use`, `process_start`,
+`network_connection`, `file_access`, `other`, and (2.0) `web_request`, `web_scan`, `web_error`, `fw_deny`, `fw_allow`,
+`vpn_login`, `cloud_api_call`, `cloud_iam_change`, `cloud_data_access`, `privilege_escalation`. Firewall actions map
+directly (`deny`/`drop`/`block`/`reject` → `fw_deny`, `allow`/`accept`/`permit` → `fw_allow`), as do `sudo`/`runas`/`su`
+→ `privilege_escalation` and `vpn` → `vpn_login`. CloudTrail-style records (`eventName` + `eventSource`, optionally
+wrapped in `{"Records": [...]}`) are recognised: IAM write calls become `cloud_iam_change`, object and secret reads
+become `cloud_data_access`, everything else `cloud_api_call`; the principal comes from `userIdentity`.
 
 Response:
 
 ```json
 {"batch_id": "…", "received": 3, "accepted": 2, "rejected": 1,
  "rejections": [{"index": 2, "reason": "src_ip is not a valid IP address"}],
- "detection": {"run_id": 7, "status": "ok", "events_scanned": 40, "alerts_created": 1, "alerts_updated": 0}}
+ "detection": {"run_id": 7, "status": "ok", "events_scanned": 40, "alerts_created": 1, "alerts_updated": 0,
+               "correlation": {"status": "ok", "incidents_created": 1, "incidents_updated": 0}}}
 ```
 
 Status codes: **201** all accepted · **207** some rejected · **422** none accepted · **400** malformed body or bad source name · **413** body too large · **415** wrong content type · **401/403** auth.
 If `detection.status` is `"failed"`, the events **were stored**. Fix the cause, then run `POST /api/detection/run`.
+If only `detection.correlation.status` is `"failed"`, alerts were stored and only incident grouping was skipped; the next run retries it.
 
 ### `POST /api/ingest/upload?format=&source=&synthetic=&year=` (analyst session or token)
 
-Raw UTF-8 file body (`Content-Type: text/plain`). `format` is `auto` (default), `json`, `jsonl`, `csv`, or `authlog`. `year` applies only to BSD syslog lines, which carry no year. `synthetic=1` tags events and prefixes the source with `demo:`.
+Raw UTF-8 file body (`Content-Type: text/plain`). `format` is `auto` (default), `json`, `jsonl`, `csv`, `authlog`, or `weblog`. `authlog` also understands sudo/su, useradd, auditd `exe=`/`type=PATH` records, UFW/iptables `[BLOCK]`/`[ALLOW]` lines, and OpenVPN "Peer Connection Initiated" lines. `weblog` is the nginx/Apache combined access log; requests for scanner paths (`/.env`, `/wp-login.php`, `.git`, …), injection strings, or scanner user agents become `web_scan`, 5xx responses `web_error`. `year` applies only to BSD syslog lines, which carry no year. `synthetic=1` tags events and prefixes the source with `demo:`.
 
 ```bash
 curl -X POST "http://127.0.0.1:8080/api/ingest/upload?format=authlog&source=bastion01&year=2026" \
@@ -93,6 +105,10 @@ curl -X POST "http://127.0.0.1:8080/api/ingest/upload?format=authlog&source=bast
 | `GET /api/alerts/{id}` | viewer | Adds `rule`, `evidence`, `timeline` (events involving the same IPs or users, ±30 min), `notes`, `activity` |
 | `POST /api/alerts/{id}/notes` | analyst | `{body}` (≤ 5000 chars) |
 | `POST /api/alerts/{id}/status` | analyst | `{status: open\|investigating\|resolved, disposition?, note?}`. `resolved` requires `disposition` (`true_positive`, `false_positive`, or `benign`); reopening clears it |
+| `GET /api/incidents?status=open,investigating&severity=&limit=` | viewer | Correlated incidents: `title`, `severity`, `status`, `first_seen`, `last_seen`, `entities` (`{src_ip, user, host}` lists), `stages` (ATT&CK tactics in kill-chain order), `alert_count`, `synthetic`. Active first, then severity, then recency |
+| `GET /api/incidents/{id}` | viewer | Adds `alerts` (each with `techniques`), `events` (evidence, each with `alert_ids`), `timeline` (one entry per alert with tactics and technique ids), `techniques`, `techniques_by_tactic`, `escalated`. 404 if missing |
+| `POST /api/incidents/{id}/status` | analyst | `{status: open\|investigating\|resolved, note?}`; audited as `incident_status_changed` |
+| `GET /api/attack/coverage` | viewer | `{tactics, techniques: [{id, name, tactic, rules: [{id, name, enabled}], hits, covered}], summary}` over the built-in ATT&CK subset; `hits` counts alerts from the covering rules |
 | `GET /api/metrics?hours=24` | viewer | Counts, severity/rule breakdowns, MTTR, top failing IPs/users, and a 24-hour histogram ending at the newest event |
 
 ## Reports
@@ -108,20 +124,24 @@ viewers get 403. Each download is written to the audit log as `report_downloaded
 | `GET /api/incidents/{id}/report.pdf` | analyst | The same report as PDF 1.4 |
 
 Both formats carry the same sections: header (id, severity, status, first/last seen, generation time), summary,
-kill-chain stages (incidents only, when recorded), entities (IPs, accounts, hosts), MITRE ATT&CK techniques grouped
+kill-chain stages (incidents only), entities (IPs, accounts, hosts), MITRE ATT&CK techniques grouped
 by tactic, a merged timeline (evidence events marked), each alert with its explanation and up to 25 evidence events,
 analyst notes, and recommended actions keyed by technique (generic actions when no technique is mapped).
 Reports built from synthetic data open with a "SYNTHETIC DATA" banner and repeat it in the PDF page footer.
 Log-derived text is escaped in Markdown so it cannot inject tables, links, or HTML.
 
-Errors are JSON: unknown alert or incident → 404; `/api/incidents/{id}/report.*` on a database without the
-`incidents` tables (before the correlation engine is installed) → 404 `incidents are not available on this server yet`.
+Incident reports are built from the correlated incident (`GET /api/incidents/{id}`): its status, severity
+(including escalation), span, kill-chain stages, and entities come from the `incidents` row; ATT&CK techniques
+come from the member alerts' rule metadata, grouped by tactic in kill-chain order, each listing the alerts that map
+to it. Incidents that span three or more tactics are marked escalated.
+
+Errors are JSON: unknown alert → 404 `alert not found`; unknown incident → 404 `incident not found`.
 
 ## Rules, feedback, and reviewed changes
 
 | Endpoint | Role | Notes |
 |---|---|---|
-| `GET /api/rules` | viewer | Params, version, `performance` (from verdicts), latest `evaluation` |
+| `GET /api/rules` | viewer | Params, version, `techniques` (`[{id, name, tactic}]`), `performance` (from verdicts), latest `evaluation` |
 | `GET /api/rules/{id}/history` | viewer | Every version, with who proposed and who approved it |
 | `POST /api/rules/{id}/proposals` | analyst | `{params?: {...partial}, enabled?: bool, reason}`; validated, then scored against scenarios |
 | `POST /api/rules/suggestions` | analyst | Generates proposals from false-positive feedback (deduplicated) |
@@ -140,3 +160,11 @@ Errors are JSON: unknown alert or incident → 404; `/api/incidents/{id}/report.
 | `GET /api/tokens` / `POST /api/tokens` | admin | `{name}` → `{token}` (shown once; only a SHA-256 hash is stored) |
 | `POST /api/tokens/{id}/revoke` | admin | |
 | `GET /api/audit` | admin | Last 200 audit entries |
+
+## Correlation
+
+After every detection run, alerts that are not resolved are grouped into incidents. Two alerts are related when
+evidence events of both carry the same source IP, account, or host within 30 minutes of each other; relations chain.
+A new incident needs two related alerts or one critical alert. An alert belongs to at most one incident; new related
+alerts join an open incident; resolved incidents are never reopened by detection (new activity starts a new one).
+Incident severity is the highest alert severity, raised one level when the alerts span three or more ATT&CK tactics.
