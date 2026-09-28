@@ -214,11 +214,23 @@ The dashboard also reads `GET /api/incidents`, `GET /api/attack/coverage`, and `
 
 | Endpoint | Role | Notes |
 |---|---|---|
-| `GET /api/health` | public | `{status, checks: {name: status}}`; HTTP 503 when failing. `checks` includes `syslog` while the listener is enabled |
+| `GET /api/health` | public | `{status, checks: {name: status}}`; HTTP 503 when failing. `checks` includes `syslog` while the listener is enabled and always includes `storyline` |
 | `GET /api/health/details` | viewer | Full checks with guidance, recent redacted errors, recent detection runs |
 | `GET /api/tokens` / `POST /api/tokens` | admin | `{name}` → `{token}` (shown once; only a SHA-256 hash is stored) |
 | `POST /api/tokens/{id}/revoke` | admin | |
 | `GET /api/audit` | admin | Last 200 audit entries |
+
+## Attack storyline (synthetic demo)
+
+A scripted six-stage intrusion (recon → credential attack → foothold → escalation → lateral movement and cloud IAM → exfiltration) replayed over wall-clock time so a viewer can watch the dashboard react. Every record is stored with `synthetic=1`, `source=demo:storyline`, and uses RFC 5737 addresses (`203.0.113.80`, `198.51.100.140`) plus fictional hosts and users. One attacker address, one victim account (`dave`), and one rogue cloud principal (`svc-deploy-tmp`) tie the alerts together so correlation builds multi-stage incidents. Baseline traffic from other employees runs alongside so the attack stands out against a living system.
+
+| Endpoint | Role | Notes |
+|---|---|---|
+| `POST /api/storyline/start` | admin | `{speed?: 0.1–10000 (default 1 = about 2 minutes), seed?: int}` → 202 with the status below. 409 while a run is active. Audited as `storyline_started` |
+| `POST /api/storyline/stop` | admin | Stops the current run after the batch in flight; audited as `storyline_stopped` |
+| `GET /api/storyline/status` | viewer | `{running, stage, progress (0–1), events_sent, alerts_created, started_at, finished_at, error, speed, seed, started_by, stages: [{name, starts_at, description}], synthetic: true}` |
+
+Only one run per process. Events are fed through the normal ingest path, so the SSE stream, detection, correlation, and reports all see them. With `SIEM_DEMO_LOOP=<minutes>` (and optional `SIEM_DEMO_LOOP_SPEED`) `main.py` restarts the storyline on that interval for unattended public demos.
 
 ## Correlation
 
