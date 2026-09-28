@@ -74,6 +74,29 @@ class SyslogParsingTests(unittest.TestCase):
         with self.assertRaises(EventError):
             frame_to_event("<13>1 2126-09-28T10:00:05Z host app - - - from the future")
 
+    def test_nginx_access_line_gets_web_event_type(self):
+        scan = frame_to_event('<190>Sep 28 10:00:02 web01 nginx: 203.0.113.5 - - [28/Sep/2026:10:00:02 +0000] '
+                              '"GET /.env HTTP/1.1" 404 153 "-" "curl/8.0"', "127.0.0.1")
+        self.assertEqual((scan["event_type"], scan["host"], scan["src_ip"], scan["source"]),
+                         ("web_scan", "web01", "203.0.113.5", "syslog"))
+        self.assertEqual(scan["ts"], "2026-09-28T10:00:02.000Z")
+        self.assertTrue(scan["raw"].startswith("<190>"))
+        ok = frame_to_event('<190>1 2026-09-28T10:00:03Z web01 nginx - - - 198.51.100.7 - - '
+                            '[28/Sep/2026:10:00:03 +0000] "GET / HTTP/1.1" 200 612 "-" "Mozilla/5.0"')
+        self.assertEqual((ok["event_type"], ok["bytes"]), ("web_request", 612))
+        error = frame_to_event('<187>Sep 28 10:00:04 web01 nginx: 198.51.100.7 - - [28/Sep/2026:10:00:04 +0000] '
+                               '"POST /api HTTP/1.1" 502 0 "-" "-"')
+        self.assertEqual(error["event_type"], "web_error")
+
+    def test_firewall_deny_line_gets_fw_event_type(self):
+        event = frame_to_event("<4>Sep 28 10:00:01 fw01 kernel: [12345.678901] [UFW BLOCK] IN=eth0 OUT= MAC=00 "
+                               "SRC=203.0.113.9 DST=192.0.2.10 LEN=60 PROTO=TCP SPT=40000 DPT=22 WINDOW=1024")
+        self.assertEqual((event["event_type"], event["host"], event["src_ip"], event["dest_ip"], event["dest_port"]),
+                         ("fw_deny", "fw01", "203.0.113.9", "192.0.2.10", 22))
+        allow = frame_to_event("<6>1 2026-09-28T10:00:05Z fw01 kernel - - - [UFW ALLOW] IN=eth0 OUT= "
+                               "SRC=198.51.100.3 DST=192.0.2.10 LEN=60 PROTO=TCP SPT=40001 DPT=443")
+        self.assertEqual(allow["event_type"], "fw_allow")
+
     def test_tcp_framing_octet_counting_and_newlines(self):
         import io
         msg = b"<13>1 2026-09-28T10:00:00Z h a - - - one\nstill one"
@@ -143,6 +166,22 @@ class SyslogListenerTests(unittest.TestCase):
         check = self.health()["syslog"]
         self.assertEqual(check["status"], "ok")
         self.assertEqual(check["details"]["events_ingested"], 3)
+
+    def test_nginx_and_firewall_frames_land_with_specific_types(self):
+        listener = self.listener()
+        self.assertTrue(listener.start())
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+            udp.sendto(b'<190>Sep 28 10:00:02 web01 nginx: 203.0.113.5 - - [28/Sep/2026:10:00:02 +0000] '
+                       b'"GET /wp-login.php HTTP/1.1" 404 153 "-" "curl/8.0"', ("127.0.0.1", listener.udp_port))
+        with socket.create_connection(("127.0.0.1", listener.tcp_port)) as tcp:
+            tcp.sendall(b"<4>Sep 28 10:00:01 fw01 kernel: [UFW BLOCK] IN=eth0 OUT= SRC=203.0.113.9 "
+                        b"DST=192.0.2.10 LEN=60 PROTO=TCP SPT=40000 DPT=3389 WINDOW=1024\n")
+        events = wait_for(lambda: len(self.rows()) == 2 and self.rows())
+        self.assertTrue(events, "frames did not reach the database")
+        by_host = {e["host"]: e for e in events}
+        self.assertEqual((by_host["web01"]["event_type"], by_host["web01"]["src_ip"]), ("web_scan", "203.0.113.5"))
+        self.assertEqual((by_host["fw01"]["event_type"], by_host["fw01"]["dest_port"]), ("fw_deny", 3389))
+        self.assertNotIn("syslog", {e["event_type"] for e in events})
 
     def test_rejected_frames_are_counted_not_stored(self):
         listener = self.listener(tcp=False)
@@ -431,6 +470,25 @@ class ShipperEndToEndTests(ServerTestCase):
         self.assertEqual(data["total"], 2)
         self.assertEqual({e["event_type"] for e in data["events"]}, {"auth_failure", "auth_success"})
         self.assertEqual(json.loads(state.read_text())[str(log_path)]["offset"], log_path.stat().st_size)
+
+    def test_shipper_cli_delivers_nginx_access_log_as_web_events(self):
+        admin = self.client("admin")
+        status, token, _ = admin.post("/api/tokens", {"name": "shipper"})
+        self.assertEqual(status, 201)
+        log_path = Path(self.tmp.name) / "access.log"
+        log_path.write_text(
+            '203.0.113.60 - - [28/Sep/2026:10:00:01 +0000] "GET /.env HTTP/1.1" 404 153 "-" "curl/8.0"\n'
+            '198.51.100.21 - - [28/Sep/2026:10:00:02 +0000] "GET / HTTP/1.1" 200 612 "-" "Mozilla/5.0"\n')
+        token_file = Path(self.tmp.name) / "token"
+        token_file.write_text(token["token"] + "\n")
+        for fmt in ("weblog", "auto"):
+            source = f"web01-{fmt}"
+            code = shipper.main(["--url", self.base, "--file", f"{log_path}:{fmt}:{source}",
+                                 "--state", str(Path(self.tmp.name) / f"pos-{fmt}.json"),
+                                 "--token-file", str(token_file), "--from-start", "--once", "--max-retries", "0"])
+            self.assertEqual(code, 0)
+            status, data, _ = self.client("analyst").get(f"/api/events?source={source}")
+            self.assertEqual({e["event_type"] for e in data["events"]}, {"web_scan", "web_request"}, fmt)
 
 
 if __name__ == "__main__":

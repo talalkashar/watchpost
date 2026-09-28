@@ -1,0 +1,20 @@
+Sep 14 09:00:05 mail01 sshd[4100]: Accepted password for erin from 10.0.1.24 port 51022 ssh2
+Sep 14 09:20:41 vpn01 openvpn[812]: 203.0.113.150:51234 [erin] Peer Connection Initiated with [AF_INET]203.0.113.150:51234
+Sep 14 12:20:00 fw01 kernel: [81234.0] [UFW BLOCK] IN=eth0 OUT= MAC=00:00:00:00:00:00 SRC=198.51.100.141 DST=10.0.0.10 LEN=44 TOS=0x00 PREC=0x00 TTL=50 ID=0 PROTO=TCP SPT=40000 DPT=22 WINDOW=1024 RES=0x00 SYN URGP=0
+Sep 14 12:20:02 fw01 kernel: [81234.1] [UFW BLOCK] IN=eth0 OUT= MAC=00:00:00:00:00:00 SRC=198.51.100.141 DST=10.0.0.10 LEN=44 TOS=0x00 PREC=0x00 TTL=50 ID=0 PROTO=TCP SPT=40000 DPT=80 WINDOW=1024 RES=0x00 SYN URGP=0
+Sep 14 12:20:04 fw01 kernel: [81234.2] [UFW BLOCK] IN=eth0 OUT= MAC=00:00:00:00:00:00 SRC=198.51.100.141 DST=10.0.0.10 LEN=44 TOS=0x00 PREC=0x00 TTL=50 ID=0 PROTO=TCP SPT=40000 DPT=443 WINDOW=1024 RES=0x00 SYN URGP=0
+Sep 14 12:20:06 fw01 kernel: [81234.3] [UFW BLOCK] IN=eth0 OUT= MAC=00:00:00:00:00:00 SRC=198.51.100.141 DST=10.0.0.10 LEN=44 TOS=0x00 PREC=0x00 TTL=50 ID=0 PROTO=TCP SPT=40000 DPT=3306 WINDOW=1024 RES=0x00 SYN URGP=0
+Sep 14 12:20:08 fw01 kernel: [81234.4] [UFW BLOCK] IN=eth0 OUT= MAC=00:00:00:00:00:00 SRC=198.51.100.141 DST=10.0.0.10 LEN=44 TOS=0x00 PREC=0x00 TTL=50 ID=0 PROTO=TCP SPT=40000 DPT=5432 WINDOW=1024 RES=0x00 SYN URGP=0
+Sep 14 12:21:00 fw01 kernel: [81240.1] [UFW ALLOW] IN=eth0 OUT= SRC=10.0.1.20 DST=10.0.0.10 LEN=60 PROTO=TCP SPT=50000 DPT=443
+Sep 14 16:00:00 web01 sshd[5000]: Accepted publickey for grace from 10.0.1.26 port 50100 ssh2
+Sep 14 16:05:00 web01 sudo:    grace : TTY=pts/1 ; PWD=/home/grace ; USER=root ; COMMAND=/usr/bin/systemctl restart nginx
+Sep 14 17:30:00 web01 sshd[5100]: Failed password for frank from 192.0.2.140 port 40100 ssh2
+Sep 14 17:30:20 web01 sshd[5101]: Failed password for frank from 192.0.2.140 port 40101 ssh2
+Sep 14 17:30:40 web01 sshd[5102]: Failed password for frank from 192.0.2.140 port 40102 ssh2
+Sep 14 17:31:00 web01 sshd[5103]: Accepted password for frank from 192.0.2.140 port 40103 ssh2
+Sep 14 17:36:00 web01 sudo:    frank : TTY=pts/0 ; PWD=/home/frank ; USER=root ; COMMAND=/bin/bash
+Sep 14 17:37:10 web01 useradd[5200]: new user: name=svc-backup2, UID=1002, GID=1002, home=/home/svc-backup2, shell=/bin/bash
+Sep 14 17:38:00 web01 audit[5300]: type=SYSCALL arch=c000003e syscall=59 success=yes exe="/usr/bin/curl" AUID="frank"
+Sep 14 17:38:05 web01 audit[5300]: type=PATH item=0 name="/etc/shadow" nametype=NORMAL
+Sep 14 17:40:00 web01 su: (to root) frank on pts/0
+this is not a syslog line

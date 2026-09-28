@@ -1,0 +1,26 @@
+timestamp,action,src_ip,dest_ip,dest_port,proto,bytes,host,message
+2026-09-14T12:05:00Z,allow,10.0.1.20,10.0.0.10,443,tcp,48000,fw01,[SYNTHETIC] allowed HTTPS
+2026-09-14T12:06:00Z,allow,10.0.1.21,10.0.0.10,443,tcp,48000,fw01,[SYNTHETIC] allowed HTTPS
+2026-09-14T12:07:00Z,allow,10.0.1.22,10.0.0.10,443,tcp,48000,fw01,[SYNTHETIC] allowed HTTPS
+2026-09-14T12:08:00Z,allow,10.0.1.23,10.0.0.10,443,tcp,48000,fw01,[SYNTHETIC] allowed HTTPS
+2026-09-14T12:09:00Z,allow,10.0.1.24,10.0.0.10,443,tcp,48000,fw01,[SYNTHETIC] allowed HTTPS
+2026-09-14T12:15:00Z,deny,198.51.100.140,10.0.0.10,21,tcp,0,fw01,[SYNTHETIC] blocked inbound probe
+2026-09-14T12:15:02Z,deny,198.51.100.140,10.0.0.10,22,tcp,0,fw01,[SYNTHETIC] blocked inbound probe
+2026-09-14T12:15:04Z,deny,198.51.100.140,10.0.0.10,23,tcp,0,fw01,[SYNTHETIC] blocked inbound probe
+2026-09-14T12:15:06Z,deny,198.51.100.140,10.0.0.10,25,tcp,0,fw01,[SYNTHETIC] blocked inbound probe
+2026-09-14T12:15:08Z,deny,198.51.100.140,10.0.0.10,53,tcp,0,fw01,[SYNTHETIC] blocked inbound probe
+2026-09-14T12:15:10Z,deny,198.51.100.140,10.0.0.10,80,tcp,0,fw01,[SYNTHETIC] blocked inbound probe
+2026-09-14T12:15:12Z,deny,198.51.100.140,10.0.0.10,110,tcp,0,fw01,[SYNTHETIC] blocked inbound probe
+2026-09-14T12:15:14Z,deny,198.51.100.140,10.0.0.10,139,tcp,0,fw01,[SYNTHETIC] blocked inbound probe
+2026-09-14T12:15:16Z,deny,198.51.100.140,10.0.0.10,443,tcp,0,fw01,[SYNTHETIC] blocked inbound probe
+2026-09-14T12:15:18Z,deny,198.51.100.140,10.0.0.10,445,tcp,0,fw01,[SYNTHETIC] blocked inbound probe
+2026-09-14T12:15:20Z,deny,198.51.100.140,10.0.0.10,1433,tcp,0,fw01,[SYNTHETIC] blocked inbound probe
+2026-09-14T12:15:22Z,deny,198.51.100.140,10.0.0.10,3306,tcp,0,fw01,[SYNTHETIC] blocked inbound probe
+2026-09-14T12:15:24Z,deny,198.51.100.140,10.0.0.10,3389,tcp,0,fw01,[SYNTHETIC] blocked inbound probe
+2026-09-14T12:15:26Z,deny,198.51.100.140,10.0.0.10,5432,tcp,0,fw01,[SYNTHETIC] blocked inbound probe
+2026-09-14T12:15:28Z,deny,198.51.100.140,10.0.0.10,5900,tcp,0,fw01,[SYNTHETIC] blocked inbound probe
+2026-09-14T12:15:30Z,deny,198.51.100.140,10.0.0.10,8080,tcp,0,fw01,[SYNTHETIC] blocked inbound probe
+2026-09-14T12:16:00Z,deny,198.51.100.140,10.0.0.10,http,tcp,0,fw01,[SYNTHETIC] malformed port
+2026-09-14T18:30:00Z,allow,10.0.3.15,198.51.100.200,443,tcp,600000000,fw01,[SYNTHETIC] large outbound upload
+2026-09-14T18:35:00Z,allow,10.0.3.15,198.51.100.200,443,tcp,600001000,fw01,[SYNTHETIC] large outbound upload
+2026-09-14T18:40:00Z,allow,10.0.3.15,198.51.100.200,443,tcp,600002000,fw01,[SYNTHETIC] large outbound upload

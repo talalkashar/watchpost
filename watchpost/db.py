@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -211,7 +211,40 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 
 CREATE TABLE IF NOT EXISTS health_probe (id INTEGER PRIMARY KEY, written_at TEXT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS incidents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    entities TEXT NOT NULL,
+    stages TEXT NOT NULL,
+    alert_count INTEGER NOT NULL DEFAULT 0,
+    synthetic INTEGER NOT NULL DEFAULT 0,
+    assignee TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    resolved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status);
+
+CREATE TABLE IF NOT EXISTS incident_alerts (
+    alert_id INTEGER PRIMARY KEY,
+    incident_id INTEGER NOT NULL,
+    added_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_incident_alerts_incident ON incident_alerts(incident_id);
 """
+
+# Columns added after 1.0. Existing databases gain them in place on startup.
+ADDED_COLUMNS = [
+    ("rules", "techniques", "TEXT"),
+    ("events", "dest_port", "INTEGER"),
+    ("events", "bytes", "INTEGER"),
+    ("detection_runs", "correlation", "TEXT"),
+]
 
 
 def utcnow():
@@ -257,8 +290,13 @@ def transaction(conn):
 
 def init_schema(conn):
     conn.executescript(SCHEMA)
+    for table, column, kind in ADDED_COLUMNS:
+        existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
     conn.execute(
-        "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),)
+        "INSERT INTO meta(key, value) VALUES ('schema_version', ?)"
+        " ON CONFLICT(key) DO UPDATE SET value = excluded.value", (str(SCHEMA_VERSION),)
     )
 
 

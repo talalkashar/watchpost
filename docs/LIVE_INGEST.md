@@ -7,7 +7,7 @@ Watchpost can take real logs as they are written, in two ways:
 | **Syslog listener** (`SIEM_SYSLOG=1`) | UDP or TCP syslog, RFC 3164 and RFC 5424 | none (address allow list only) | the Watchpost host itself, or boxes on a private network or SSH tunnel |
 | **File shipper** (`scripts/shipper.py`) | HTTPS `POST /api/ingest/upload` | ingest-only API token | any box, including over the internet behind HTTPS |
 
-Events from both paths are real, so they are stored with `synthetic=0`. They go through the same parser as uploaded files: sshd and sudo lines become `auth_failure`, `auth_success`, and `privilege_use`, and detection runs on every batch.
+Events from both paths are real, so they are stored with `synthetic=0`. They go through the same parsers as uploaded files: sshd and sudo lines become `auth_failure`, `auth_success`, `privilege_use`, and `privilege_escalation`; UFW/iptables lines become `fw_deny` and `fw_allow`; OpenVPN logins become `vpn_login`; nginx/Apache access lines become `web_request`, `web_scan`, and `web_error`. Detection runs on every batch.
 
 Both paths use only the Python standard library. The instructions below were written for Debian 12 and Ubuntu 22.04/24.04.
 
@@ -34,7 +34,7 @@ What the listener does with each message:
 
 1. It reads the frame. UDP takes one message per datagram. TCP accepts newline-terminated messages and RFC 6587 octet-counted messages (`LEN SP MSG`). Frames longer than 16 KB are truncated.
 2. It parses PRI and the RFC 5424 or RFC 3164 header. A missing hostname falls back to the sender's IP, and a missing timestamp falls back to the receive time.
-3. It tries the existing auth.log parser first. Lines it does not recognize become `event_type=syslog`. Their severity comes from PRI: emerg, alert, and crit map to `critical`, err to `high`, warning to `medium`, notice to `low`, and info and debug to `info`.
+3. It tries the auth.log parser first (sshd, sudo/su, useradd, auditd, UFW/iptables firewall, OpenVPN). A message that parser does not recognize is tried as an nginx/Apache combined access line, so `access_log syslog:server=127.0.0.1:5514 combined;` in nginx gives `web_request`/`web_scan`/`web_error` events with the host from the syslog header and the time from the access line. Lines neither parser recognizes become `event_type=syslog`. Their severity comes from PRI: emerg, alert, and crit map to `critical`, err to `high`, warning to `medium`, notice to `low`, and info and debug to `info`.
 4. Every 2 seconds, everything queued is handed to the engine as one batch. The batch source is `syslog` and the submitter is `syslog-listener`, so it shows up under **Ingest > Recent batches**.
 
 The listener shows up as the `syslog` component on the Health page and in `GET /api/health`:
@@ -187,7 +187,7 @@ journalctl -u watchpost-shipper -f
 | Option | Meaning |
 |---|---|
 | `--url` | Watchpost base URL. Use `https://` for anything that is not loopback |
-| `--file PATH[:FORMAT[:SOURCE]]` | Repeatable. `FORMAT` is passed through to the server (`auto`, `authlog`, `json`, `jsonl`, `csv`, and any format the server adds later). `SOURCE` defaults to `<hostname>-<file stem>` |
+| `--file PATH[:FORMAT[:SOURCE]]` | Repeatable. `FORMAT` is passed through to the server (`auto`, `authlog`, `weblog`, `json`, `jsonl`, `csv`, and any format the server adds later). `SOURCE` defaults to `<hostname>-<file stem>` |
 | `--state` | Position file (default `./watchpost-shipper-positions.json`) |
 | `--token-env` / `--token-file` | Where the token comes from (default env `WATCHPOST_TOKEN`) |
 | `--from-start` | Ship the existing content of a file seen for the first time. Default: only lines written from now on |
@@ -196,7 +196,7 @@ journalctl -u watchpost-shipper -f
 | `--cafile` | CA bundle, e.g. for a self-signed HTTPS certificate on the demo VM |
 | `--interval`, `--batch-lines` | Poll interval (default 2 s) and lines per request (default 500) |
 
-**nginx access logs:** `--file /var/log/nginx/access.log:<format>` works once the server has a web access log parser; workstream A adds one. Until then, the server refuses those batches with 400 ("could not detect format"), and the shipper logs and skips them.
+**nginx access logs:** `--file /var/log/nginx/access.log:weblog` ships nginx/Apache combined access lines as `web_request`, `web_scan`, and `web_error` events (`auto` detects the format too). The combined format has no host field, so give the file a `SOURCE` that names the box, e.g. `--file /var/log/nginx/access.log:weblog:web01-nginx`. **Firewall logs:** UFW and iptables write to syslog (`/var/log/ufw.log` or `kern.log`), so ship them as `authlog`; firewall CSV exports go as `csv`.
 
 ---
 

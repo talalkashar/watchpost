@@ -1,7 +1,9 @@
 """Live syslog receiver over UDP and TCP (RFC 3164 and RFC 5424 messages, RFC 6587 TCP framing).
 
-Each frame first goes through the existing auth.log parser, so sshd and sudo lines
-become auth events exactly as uploaded files do. Anything else becomes a generic
+Each frame first goes through the existing auth.log parser, so sshd, sudo, UFW/iptables
+firewall and OpenVPN lines get the same event types as uploaded files. A message the
+auth.log parser does not recognize is then tried as an nginx/Apache combined access
+line (web_request, web_scan, web_error). Anything else becomes a generic
 `syslog` event whose severity comes from the PRI field. Frames are queued and
 handed to engine.ingest in one batch every `flush_interval` seconds.
 
@@ -22,7 +24,7 @@ from collections import deque
 from . import engine, health
 from .db import connect, iso, now_iso, utcnow
 from .diagnostics import describe_exception, log, record_error, redact
-from .normalize import MAX_LEN, EventError, clean_text, normalize_authlog_line
+from .normalize import MAX_LEN, EventError, clean_text, normalize_authlog_line, normalize_weblog_line
 
 SOURCE = "syslog"
 SUBMITTED_BY = "syslog-listener"
@@ -98,10 +100,22 @@ def frame_to_event(frame, peer_ip=None, now=None):
     line = f"{parsed['ts'] or iso(now)} {host} {prog}: {msg}"
     event = normalize_authlog_line(line, SOURCE, now=now)
     if event["event_type"] == "other":
+        event = _web_event(msg, host, now) or event
+    if event["event_type"] == "other":
         event["event_type"] = "syslog"
         event["severity"] = PRI_SEVERITY[parsed["level"]]
         event["message"] = redact(clean_text(f"{app}: {msg}" if app else msg, "message"))
     event["raw"] = redact(frame.strip("\r\n\x00"))[: MAX_LEN["raw"]]
+    return event
+
+
+def _web_event(msg, host, now):
+    """An access log line forwarded by nginx/Apache (access_log syslog:...), or None."""
+    try:
+        event = normalize_weblog_line(msg, SOURCE, now=now)
+    except EventError:
+        return None
+    event["host"] = clean_text(host, "host")  # access log lines carry no host; use the syslog header's
     return event
 
 

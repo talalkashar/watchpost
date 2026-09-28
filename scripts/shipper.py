@@ -270,7 +270,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Tail log files and ship them to Watchpost.")
     parser.add_argument("--url", required=True, help="Watchpost base URL, e.g. https://siem.example.internal")
     parser.add_argument("--file", action="append", required=True, metavar="PATH[:FORMAT[:SOURCE]]",
-                        help="file to tail; repeat for several (FORMAT: auto, authlog, json, jsonl, csv, ...)")
+                        help="file to tail; repeat for several (FORMAT: auto, authlog, weblog, json, jsonl, csv, ...)")
     parser.add_argument("--state", default=DEFAULT_STATE, help="position file (default: %(default)s)")
     parser.add_argument("--token-env", default="WATCHPOST_TOKEN", help="env var holding the token")
     parser.add_argument("--token-file", help="file holding the token (mode 0600 recommended)")
