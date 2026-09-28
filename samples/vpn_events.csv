@@ -1,0 +1,6 @@
+timestamp,event_type,user,src_ip,host,message
+2026-09-14T08:55:00Z,login,carol,192.0.2.10,vpn01,[SYNTHETIC] VPN session established
+2026-09-14T09:05:00Z,login_failed,dave,192.0.2.11,vpn01,[SYNTHETIC] bad OTP
+2026-09-14T09:05:30Z,login,dave,192.0.2.11,vpn01,[SYNTHETIC] VPN session established
+2026-09-15T02:30:00Z,login,administrator,192.0.2.99,vpn01,[SYNTHETIC] VPN session established at 02:30 UTC
+2026-09-15T02:31:00Z,login,erin,999.0.0.1,vpn01,[SYNTHETIC] malformed IP - will be rejected

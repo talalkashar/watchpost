@@ -1,0 +1,7 @@
+data/
+*.db
+*.db-wal
+*.db-shm
+initial_credentials.txt
+__pycache__/
+*.pyc

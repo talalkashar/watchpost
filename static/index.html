@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Watchpost SIEM</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo">◉</span> Watchpost <small>SIEM lab</small></div>
+    <nav id="nav" hidden>
+      <button data-view="dashboard">Dashboard</button>
+      <button data-view="alerts">Alerts</button>
+      <button data-view="events">Events</button>
+      <button data-view="ingest">Ingest</button>
+      <button data-view="rules">Rules</button>
+      <button data-view="health">Health</button>
+      <button data-view="admin" data-role="admin">Admin</button>
+    </nav>
+    <div class="who" id="who" hidden>
+      <span id="who-name"></span>
+      <button id="logout" class="ghost">Sign out</button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" hidden></div>
+
+  <main id="main">
+    <section id="login-view" class="card narrow" hidden>
+      <h1>Sign in</h1>
+      <form id="login-form">
+        <label>Username <input name="username" autocomplete="username" required maxlength="64"></label>
+        <label>Password <input name="password" type="password" autocomplete="current-password" required maxlength="256"></label>
+        <button type="submit">Sign in</button>
+        <p class="error" id="login-error"></p>
+      </form>
+      <p class="muted">Initial passwords come from <code>SIEM_ADMIN_PASSWORD</code> / <code>SIEM_ANALYST_PASSWORD</code>,
+        or were generated into <code>data/initial_credentials.txt</code> on first start.</p>
+    </section>
+    <div id="view"></div>
+  </main>
+
+  <dialog id="modal"><div id="modal-body"></div></dialog>
+</body>
+</html>

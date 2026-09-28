@@ -1,0 +1,9 @@
+{"TimeCreated": "2026-09-14T15:10:00Z", "EventID": 4625, "Computer": "dc01.corp.example", "TargetUserName": "jsmith", "IpAddress": "198.51.100.60", "Channel": "Security", "message": "[SYNTHETIC] An account failed to log on."}
+{"TimeCreated": "2026-09-14T15:10:15Z", "EventID": 4625, "Computer": "dc01.corp.example", "TargetUserName": "jsmith", "IpAddress": "198.51.100.60", "Channel": "Security", "message": "[SYNTHETIC] An account failed to log on."}
+{"TimeCreated": "2026-09-14T15:10:30Z", "EventID": 4625, "Computer": "dc01.corp.example", "TargetUserName": "jsmith", "IpAddress": "198.51.100.60", "Channel": "Security", "message": "[SYNTHETIC] An account failed to log on."}
+{"TimeCreated": "2026-09-14T15:10:45Z", "EventID": 4625, "Computer": "dc01.corp.example", "TargetUserName": "jsmith", "IpAddress": "198.51.100.60", "Channel": "Security", "message": "[SYNTHETIC] An account failed to log on."}
+{"TimeCreated": "2026-09-14T15:11:00Z", "EventID": 4625, "Computer": "dc01.corp.example", "TargetUserName": "jsmith", "IpAddress": "198.51.100.60", "Channel": "Security", "message": "[SYNTHETIC] An account failed to log on."}
+{"TimeCreated": "2026-09-14T15:11:15Z", "EventID": 4625, "Computer": "dc01.corp.example", "TargetUserName": "jsmith", "IpAddress": "198.51.100.60", "Channel": "Security", "message": "[SYNTHETIC] An account failed to log on."}
+{"TimeCreated": "2026-09-14T15:11:40Z", "EventID": 4624, "Computer": "dc01.corp.example", "TargetUserName": "jsmith", "IpAddress": "198.51.100.60", "Channel": "Security", "message": "[SYNTHETIC] An account was successfully logged on."}
+{"TimeCreated": "2026-09-14T15:14:02Z", "EventID": 4720, "Computer": "dc01.corp.example", "TargetUserName": "svc_backup2", "SubjectUserName": "jsmith", "Channel": "Security", "message": "[SYNTHETIC] A user account was created."}
+{"TimeCreated": "not a date", "EventID": 4625}

@@ -1,0 +1,8 @@
+# Replit configuration. The app binds to 0.0.0.0 only here so the Replit webview can reach it.
+# Set SIEM_ADMIN_PASSWORD and SIEM_ANALYST_PASSWORD in Replit Secrets before first run.
+run = "SIEM_HOST=0.0.0.0 SIEM_SECURE_COOKIES=1 python3 main.py"
+modules = ["python-3.11"]
+
+[[ports]]
+localPort = 8080
+externalPort = 80
