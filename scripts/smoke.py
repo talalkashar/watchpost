@@ -57,6 +57,15 @@ class Session:
             with exc:
                 return exc.code, json.loads(exc.read() or b"null")
 
+    def download(self, path):
+        req = urllib.request.Request(self.base + path)
+        try:
+            with self.opener.open(req, timeout=60) as resp:
+                return resp.status, resp.read(), resp.headers
+        except urllib.error.HTTPError as exc:
+            with exc:
+                return exc.code, exc.read(), exc.headers
+
     def login(self, user, password):
         status, data = self.call("POST", "/api/auth/login", {"username": user, "password": password})
         check(status == 200, f"login as {user} returned {status}: {data}")
@@ -171,6 +180,27 @@ def main():
                                    {"status": "resolved", "disposition": "true_positive"})
         check(status == 200 and res["status"] == "resolved", f"resolve: {status} {res}")
 
+        step("incident report downloads as PDF and Markdown")
+        status, pdf, headers = analyst.download(f"/api/alerts/{target['id']}/report.pdf")
+        check(status == 200 and pdf.startswith(b"%PDF-1.4") and pdf.rstrip().endswith(b"%%EOF"),
+              f"alert report.pdf: {status} {pdf[:80]!r}")
+        check("attachment" in headers.get("Content-Disposition", ""), "report.pdf is not an attachment")
+        status, md, _ = analyst.download(f"/api/alerts/{target['id']}/report.md")
+        check(status == 200 and target["title"] in md.decode() and "SYNTHETIC DATA" in md.decode(),
+              f"alert report.md: {status}")
+        print(f"      alert #{target['id']} report: {len(pdf)} bytes PDF, {len(md)} bytes Markdown")
+        incident = multi[0]
+        status, ipdf, headers = analyst.download(f"/api/incidents/{incident['id']}/report.pdf")
+        check(status == 200 and ipdf.startswith(b"%PDF-1.4") and "attachment" in headers.get("Content-Disposition", ""),
+              f"incident report.pdf: {status}")
+        status, imd, _ = analyst.download(f"/api/incidents/{incident['id']}/report.md")
+        text = imd.decode()
+        check(status == 200 and text.startswith("# Incident report: ") and "SYNTHETIC DATA" in text
+              and all(f"**{stage}:**" in text for stage in incident["stages"]),
+              f"incident report.md lacks ATT&CK tactics {incident['stages']}: {status}")
+        print(f"      incident #{incident['id']} report: {len(ipdf)} bytes PDF, {len(imd)} bytes Markdown,"
+              f" tactics {', '.join(incident['stages'])}")
+
         step("false-positive feedback produces a reviewed rule change")
         for a in alerts:
             if a["rule_id"] == "brute_force_ip":
@@ -214,6 +244,23 @@ def main():
         status, h = admin.call("GET", "/api/health/details")
         check(h["status"] == "ok", f"health after flow: {[(c['name'], c['status'], c['message']) for c in h['checks']]}")
         check(any(c["name"] == "syslog" and c["status"] == "ok" for c in h["checks"]), "syslog health missing")
+
+        step("SOC dashboard: aggregates, synthetic geo, and the live SSE stream")
+        status, dash = analyst.call("GET", "/api/dashboard")
+        check(status == 200 and dash["attackers"] and dash["alert_timeline"]["bins"], f"dashboard: {status}")
+        status, located = analyst.call("GET", "/api/geo?ips=203.0.113.45,8.8.8.8")
+        check(located["ips"]["203.0.113.45"]["synthetic"] and located["ips"]["8.8.8.8"] is None, f"geo: {located}")
+        cookie = "; ".join(f"{c.name}={c.value}" for h in analyst.opener.handlers
+                           for c in getattr(h, "cookiejar", []))
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+            sock.sendall(f"GET /api/stream HTTP/1.1\r\nHost: x\r\nCookie: {cookie}\r\n\r\n".encode())
+            buf = b""
+            while buf.count(b"\n\n") < 2:  # the hello and health frames (headers end in CRLF CRLF)
+                chunk = sock.recv(65536)
+                check(chunk, "stream closed early")
+                buf += chunk
+        check(b"text/event-stream" in buf and b"event: hello" in buf and b"event: health" in buf, "stream frames")
+        print(f"      {len(dash['attackers'])} attacker IPs, stream sent hello + health")
 
         step("server log contains no secrets")
         log_text = Path(log_path).read_text()

@@ -104,6 +104,7 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 | `q` | Substring of `message` (`%` and `_` are literal) |
 | `synthetic` | `0` or `1` |
 | `limit` (1–1000, default 100), `offset` | Paging; response includes `total` |
+| `since_id` | Only events stored after that event id, newest stored first (ignores event time). Used by the dashboard's polling fallback |
 
 | Endpoint | Role | Notes |
 |---|---|---|
@@ -118,6 +119,32 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 | `GET /api/attack/coverage` | viewer | `{tactics, techniques: [{id, name, tactic, rules: [{id, name, enabled}], hits, covered}], summary}` over the built-in ATT&CK subset; `hits` counts alerts from the covering rules |
 | `GET /api/metrics?hours=24` | viewer | Counts, severity/rule breakdowns, MTTR, top failing IPs/users, and a 24-hour histogram ending at the newest event |
 
+## Reports
+
+Incident and alert reports are downloads (`Content-Disposition: attachment`), not JSON. Analyst and admin only;
+viewers get 403. Each download is written to the audit log as `report_downloaded`.
+
+| Endpoint | Role | Notes |
+|---|---|---|
+| `GET /api/alerts/{id}/report.md` | analyst | Markdown report for one alert. `text/markdown; charset=utf-8` |
+| `GET /api/alerts/{id}/report.pdf` | analyst | The same report as PDF 1.4. `application/pdf` |
+| `GET /api/incidents/{id}/report.md` | analyst | Markdown report for a correlated incident and all its alerts |
+| `GET /api/incidents/{id}/report.pdf` | analyst | The same report as PDF 1.4 |
+
+Both formats carry the same sections: header (id, severity, status, first/last seen, generation time), summary,
+kill-chain stages (incidents only), entities (IPs, accounts, hosts), MITRE ATT&CK techniques grouped
+by tactic, a merged timeline (evidence events marked), each alert with its explanation and up to 25 evidence events,
+analyst notes, and recommended actions keyed by technique (generic actions when no technique is mapped).
+Reports built from synthetic data open with a "SYNTHETIC DATA" banner and repeat it in the PDF page footer.
+Log-derived text is escaped in Markdown so it cannot inject tables, links, or HTML.
+
+Incident reports are built from the correlated incident (`GET /api/incidents/{id}`): its status, severity
+(including escalation), span, kill-chain stages, and entities come from the `incidents` row; ATT&CK techniques
+come from the member alerts' rule metadata, grouped by tactic in kill-chain order, each listing the alerts that map
+to it. Incidents that span three or more tactics are marked escalated.
+
+Errors are JSON: unknown alert → 404 `alert not found`; unknown incident → 404 `incident not found`.
+
 ## Rules, feedback, and reviewed changes
 
 | Endpoint | Role | Notes |
@@ -131,6 +158,32 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 | `GET /api/changes?status=pending` | viewer | Change requests |
 | `POST /api/changes/{id}/review` | admin | `{decision: approve\|reject, note}`. Self-review → 403; already reviewed → 409 |
 | `GET /api/evaluations` / `POST /api/evaluations` | viewer / analyst | Evaluation history / run one now |
+
+## SOC dashboard and live stream
+
+| Endpoint | Role | Notes |
+|---|---|---|
+| `GET /api/dashboard` | viewer | One read for the dashboard: counts (`events_total`, `synthetic_events`, `alerts_open`, `alerts_investigating`, `alerts_critical_open`, `alerts_total`), `events_per_minute` (60 one-minute buckets by ingest time, ending now), `alert_timeline` (`bucket_minutes` 60 or 5, and 24 `bins` of `{start, critical, high, medium, low, events}` by event time, ending at the newest alert; 5-minute buckets when all recent alerts fall in the last 2 hours), `attackers` (source IPs in alert evidence: `{ip, events, alerts, open_alerts, max_severity, last_seen}`, top 40), `top_rules`, `alerts` (up to 60, for the board), `recent_events` (60 newest by event time, no `raw`) |
+| `GET /api/geo?ips=a,b,c` | viewer | Up to 200 IPs. `{label: "synthetic geo", ips: {ip: {city, lat, lon, synthetic: true, internal} \| null}}`. Only RFC 5737 documentation ranges (fictional cities) and RFC 1918 ranges (internal sites) have entries; every other address is `null` ("unknown") and is never guessed. 400 on an invalid address |
+| `GET /api/stream` | viewer | Server-Sent Events (`text/event-stream`), see below |
+
+### `GET /api/stream`
+
+Session cookie required (EventSource sends it). One thread per connection; at most 64 concurrent streams (503 after that). The first frame sets `retry: 3000`. Every frame is `id`, `event`, and one JSON `data` line:
+
+| `event` | When | `data` |
+|---|---|---|
+| `hello` | on connect | `{version, user, heartbeat_seconds}` |
+| `health` | on connect (full), after each detection run (partial) | `{partial: false, status, checked_at, checks: {name: status}}` or `{partial: true, checks: {detection: ok\|failing}, error}` |
+| `event` | after a batch is stored | `{batch_id, count, synthetic, events: [...]}`: the newest 50 events of the batch (no `raw`) |
+| `alert` | after detection, per alert created or extended | alert row fields plus `change: created\|updated` |
+| `incident` | after detection, per incident touched (once the `incidents` table exists) | the incident row |
+| `heartbeat` | every 15 s without other traffic | `{ts, subscribers}` |
+| `resync` | the client fell behind (its 500-message queue overflowed) | `{reason}`: refetch `/api/dashboard` |
+
+Clients that cannot hold a stream can poll `GET /api/events?since_id=<last id>` every few seconds, which is what the dashboard does when SSE fails.
+
+The dashboard also reads `GET /api/incidents`, `GET /api/attack/coverage`, and `GET /api/storyline/status` when the server has them (workstreams A and C). A 404 shows a "pending" panel.
 
 ## Health and administration
 

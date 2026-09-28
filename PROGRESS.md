@@ -64,6 +64,35 @@ The brief asked me to continue an existing SOC/SIEM project on Replit. That proj
 | No ML claims | ✅ stated in UI and docs |
 | README, demo script, LinkedIn text, real/synthetic/future separation | ✅ |
 
+## Watchpost 2.0 / D: incident reports (2026-09-28, branch `ws/d-reports`)
+
+Shipped:
+- `watchpost/pdfwriter.py`: a hand-written PDF 1.4 writer (Helvetica and Helvetica-Bold with WinAnsi encoding,
+  word wrap from the standard AFM widths, headings, rules, a highlighted banner, tables with a repeating header
+  and truncated cells, automatic page breaks, "Page n of N" footers, byte-exact xref table). Under 300 lines.
+- `watchpost/report.py`: `build(conn, incident_id)` and `build_from_alert(conn, alert_id)` return one report model;
+  `to_markdown(model)` and `to_pdf_bytes(model)` render it. Recommended actions come from a static table keyed by
+  ATT&CK technique id (sub-techniques fall back to the parent), with generic actions when no technique is mapped.
+  Techniques come from the `rules.techniques` column (falling back to `DEFAULT_RULES`), resolved through the
+  ATT&CK catalog in `watchpost/attack.py` and grouped by tactic in kill-chain order.
+- After A merged: `build(conn, incident_id)` reads the real incident through `incidents.get_incident` (status,
+  severity with escalation, span, kill-chain stages, entities, techniques per tactic with the alerts behind each),
+  then adds every member alert's evidence, timeline, and notes. Unknown incidents are a 404 `incident not found`.
+- Routes `GET /api/alerts/{id}/report.{md,pdf}` and `GET /api/incidents/{id}/report.{md,pdf}` (analyst+), audited.
+- UI: "Report (PDF)" and "Report (Markdown)" links on the alert detail view and the incident detail view.
+- Tests: `tests/test_pdfwriter.py` (6), `tests/test_report.py` (15, eight on incidents built by the real
+  correlation engine), `ReportApiTests` in `tests/test_api.py` (3), plus a tiny PDF reader in `tests/pdfparse.py`
+  that follows the xref table and extracts page text. The smoke check downloads alert and incident reports in both
+  formats and checks the incident Markdown lists every kill-chain tactic.
+- Verified outside the test suite (scratch venv, not a project dependency): qpdf (via pikepdf) reports no syntax
+  problems, pypdf opens the files in strict mode, and PDFium (the engine inside Chrome) renders every page.
+
+Not done:
+- The HTML print view from the spec ("third option via the dashboard") belongs with the dashboard rework (B).
+- Not opened in macOS Preview (no Mac in the cloud session). The file passes qpdf's checks and renders in PDFium.
+
+Decision for the owner: none required.
+
 ## Open items and blockers
 
 - **Not yet done by a human:** deploying to the user's Replit account (needs their login) and recording the demo video.
@@ -135,3 +164,20 @@ The brief asked me to continue an existing SOC/SIEM project on Replit. That proj
 **Decisions for the owner**
 - Default syslog port is 5514, not 514, so Watchpost never needs root. Change it with `SIEM_SYSLOG_PORT`.
 - For the public demo VM (workstream F), the recommended live feed is the VM's own rsyslog forwarding to `127.0.0.1:5514`. It needs no open port.
+## Watchpost 2.0 / B: SOC dashboard (2026-09-28, branch `ws/b-soc-dashboard`)
+
+**Shipped**
+- `GET /api/stream` (SSE): `watchpost/stream.py` broker with bounded per-client queues (overflow turns into a `resync` frame), 64-connection cap, heartbeat every 15 s, clean unsubscribe on disconnect. The engine publishes `event` after each stored batch and `alert`, `incident` (once A's `incidents` table exists), and partial `health` after each detection run. Publishing is skipped when nobody is connected and can never fail an ingest.
+- `GET /api/dashboard` (one aggregate read) and `GET /api/geo`. `GET /api/events` gained an additive `since_id` filter for the polling fallback.
+- `watchpost/geo.py`: A merged first, so A's table and `locate()` are kept unchanged (its `impossible_geo_login` rule and tests depend on them). B adds `LABEL` and `is_internal(ip)` (RFC 1918 only); `/api/geo` adds an `internal` flag per address so the map can draw internal sites as the HQ target.
+- Merged with A: A's incident detail view in `app.js` is kept (built on the real payload); B adds the Incidents board page, and the dashboard reads A's `/api/incidents` and `/api/attack/coverage`, including A's `covered` flag (enabled rules only).
+- `static/charts.js` (sparkline, line, bars, stacked bars, ranked bars, heat matrix: pure data-to-SVG-string functions), `static/map.js` (hand-drawn continent rings, dot-matrix world map, arcs), `static/dashboard.js` (panels, live client, incident board, incidents pages), dark theme in `static/style.css`. All earlier views are still in the left nav; the 1.0 dashboard is now "Metrics".
+- Graceful degradation: `/api/incidents`, `/api/attack/coverage`, `/api/storyline/status` returning 404 show "pending" panels; the incident board falls back to alerts by status. Checked in a browser both ways (real 404s, and mocked A/C payloads).
+- Tests: `tests/test_dashboard.py` (raw-socket SSE reads of the first frames, ingest → event/health/alert frames, heartbeat and disconnect cleanup, broker overflow and cap, geo table and route, dashboard aggregates, `since_id`, static-asset/CSP checks for the JS). Smoke step 12 checks dashboard, geo, and the stream's first frames.
+
+**Verification.** `./run_tests.sh` ends with SMOKE OK and no failures when run as a non-root user. Browser check with Playwright/Chromium at 1280×800: no page errors on any view; SSE mode shows LIVE, and blocking `/api/stream` switches to POLLING 3s and still delivers new events.
+
+**Not done / notes for the owner**
+- `tests/test_workflow.py::test_storage_unavailable_is_failing_not_a_crash` fails when the suite runs as **root** (as in the cloud container), on `main` too: it relies on `chmod` blocking writes, which root ignores. Not changed here. Decide whether to skip it under root or run CI as a normal user.
+- The tolerant readers for A's `/api/incidents` and `/api/attack/coverage` accept a list or `{incidents|techniques: [...]}` and several field spellings (`kill_chain`/`stages`/`tactics`, `hits`/`hit_count`/`alerts`). Check them against A's final shapes after merge.
+- C's storyline status tile appears only when `/api/storyline/status` exists; it reads `running`, `stage`, `progress`.

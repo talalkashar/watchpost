@@ -24,7 +24,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 ### Tests
 
 ```bash
-./run_tests.sh      # 130 unit/integration tests + a 15-step end-to-end smoke check
+./run_tests.sh      # unit/integration tests + a 15-step end-to-end smoke check
 ```
 
 ### Replit
@@ -78,6 +78,8 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 | `watchpost/syslog_listener.py` | Optional UDP/TCP syslog receiver (RFC 3164, RFC 5424, RFC 6587 framing). Runs each line through the auth.log parser, falls back to a generic `syslog` event with severity from PRI, and batches into the engine every 2 seconds. Reports itself as the `syslog` health component. |
 | `scripts/shipper.py` | Stdlib-only file tailer for Linux boxes: batches new lines to `/api/ingest/upload` with an ingest token, with backoff, rotation handling, and a position file. |
 | `watchpost/simulate.py` | Labeled synthetic scenarios and a CLI that sends only to loopback unless you explicitly allow otherwise. |
+| `watchpost/report.py` | Incident and alert reports: one model (summary, timeline, entities, alerts with evidence, ATT&CK techniques by tactic, notes, recommended actions) rendered as Markdown or PDF. |
+| `watchpost/pdfwriter.py` | Minimal hand-written PDF 1.4 writer (Helvetica, wrapping, tables, page breaks, xref). |
 | `watchpost/server.py` | `http.server` routing, security headers (CSP, frame denial, nosniff), CSRF checks, body limits, and the static UI. |
 
 ### Normalized event schema
@@ -136,6 +138,12 @@ This is **not machine learning**. It is transparent, deterministic tuning suppor
 
 ---
 
+## SOC dashboard
+
+The landing view is a dark SOC console built for a 1280×800 screen: a status strip (events per minute, open and critical alerts, incidents, stored events, health checks, stream state, UTC clock), an attacker world map, a live event stream, alerts over time, top attacker IPs, the MITRE ATT&CK coverage heat matrix, an incident board, top rules, and health. Live updates arrive over Server-Sent Events (`GET /api/stream`); if the stream fails, the page polls every 3 seconds. Charts and the map are inline SVG drawn by `static/charts.js` and `static/map.js`, with no libraries and no external tiles.
+
+**The map positions are synthetic.** `watchpost/geo.py` maps only the RFC 5737 documentation ranges to fictional city names at fixed coordinates, and the RFC 1918 ranges to internal sites. It is not a geo lookup. Any other address is listed as "unknown" and never guessed. The map is labeled "synthetic geo".
+
 ## What is real vs. synthetic vs. future
 
 **Real, working, and tested:** everything in the architecture section. That includes the ingestion API and file upload, normalization, persistence, search, the eleven rules, ATT&CK mapping and coverage, incident correlation, alerts with evidence and timelines, notes, status and verdicts, metrics, health checks and recovery, authentication, roles, CSRF protection, API tokens, redaction, feedback-driven suggestions, two-person review, evaluation history, and the audit log.
@@ -161,7 +169,7 @@ This is **not machine learning**. It is transparent, deterministic tuning suppor
 labs/siem/
 ├── main.py, start.sh, run_tests.sh, .replit
 ├── watchpost/          application package
-├── static/             UI (index.html, app.js, style.css; no inline scripts)
+├── static/             UI: SOC dashboard (dashboard.js, charts.js, map.js) and views (app.js); no inline scripts
 ├── samples/            synthetic log files for upload
 ├── scripts/smoke.py    end-to-end smoke check against a real server process
 ├── scripts/shipper.py  log file shipper for Linux boxes (stdlib only)
