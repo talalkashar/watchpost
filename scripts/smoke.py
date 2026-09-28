@@ -57,6 +57,15 @@ class Session:
             with exc:
                 return exc.code, json.loads(exc.read() or b"null")
 
+    def download(self, path):
+        req = urllib.request.Request(self.base + path)
+        try:
+            with self.opener.open(req, timeout=60) as resp:
+                return resp.status, resp.read(), resp.headers
+        except urllib.error.HTTPError as exc:
+            with exc:
+                return exc.code, exc.read(), exc.headers
+
     def login(self, user, password):
         status, data = self.call("POST", "/api/auth/login", {"username": user, "password": password})
         check(status == 200, f"login as {user} returned {status}: {data}")
@@ -149,6 +158,25 @@ def main():
         status, res = analyst.call("POST", f"/api/alerts/{target['id']}/status",
                                    {"status": "resolved", "disposition": "true_positive"})
         check(status == 200 and res["status"] == "resolved", f"resolve: {status} {res}")
+
+        step("incident report downloads as PDF and Markdown")
+        status, pdf, headers = analyst.download(f"/api/alerts/{target['id']}/report.pdf")
+        check(status == 200 and pdf.startswith(b"%PDF-1.4") and pdf.rstrip().endswith(b"%%EOF"),
+              f"alert report.pdf: {status} {pdf[:80]!r}")
+        check("attachment" in headers.get("Content-Disposition", ""), "report.pdf is not an attachment")
+        status, md, _ = analyst.download(f"/api/alerts/{target['id']}/report.md")
+        check(status == 200 and target["title"] in md.decode() and "SYNTHETIC DATA" in md.decode(),
+              f"alert report.md: {status}")
+        status, incidents = analyst.call("GET", "/api/incidents")
+        items = incidents if isinstance(incidents, list) else (incidents or {}).get("incidents") or []
+        if status == 200 and items:
+            first = items[0]
+            status, pdf, _ = analyst.download(f"/api/incidents/{first['id']}/report.pdf")
+            check(status == 200 and pdf.startswith(b"%PDF-1.4"), f"incident report.pdf: {status}")
+            print(f"      incident #{first['id']} report: {len(pdf)} bytes")
+        else:
+            print("      no incidents endpoint yet; alert report only")
+        print(f"      alert #{target['id']} report: {len(pdf)} bytes PDF, {len(md)} bytes Markdown")
 
         step("false-positive feedback produces a reviewed rule change")
         for a in alerts:

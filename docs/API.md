@@ -95,6 +95,28 @@ curl -X POST "http://127.0.0.1:8080/api/ingest/upload?format=authlog&source=bast
 | `POST /api/alerts/{id}/status` | analyst | `{status: open\|investigating\|resolved, disposition?, note?}`. `resolved` requires `disposition` (`true_positive`, `false_positive`, or `benign`); reopening clears it |
 | `GET /api/metrics?hours=24` | viewer | Counts, severity/rule breakdowns, MTTR, top failing IPs/users, and a 24-hour histogram ending at the newest event |
 
+## Reports
+
+Incident and alert reports are downloads (`Content-Disposition: attachment`), not JSON. Analyst and admin only;
+viewers get 403. Each download is written to the audit log as `report_downloaded`.
+
+| Endpoint | Role | Notes |
+|---|---|---|
+| `GET /api/alerts/{id}/report.md` | analyst | Markdown report for one alert. `text/markdown; charset=utf-8` |
+| `GET /api/alerts/{id}/report.pdf` | analyst | The same report as PDF 1.4. `application/pdf` |
+| `GET /api/incidents/{id}/report.md` | analyst | Markdown report for a correlated incident and all its alerts |
+| `GET /api/incidents/{id}/report.pdf` | analyst | The same report as PDF 1.4 |
+
+Both formats carry the same sections: header (id, severity, status, first/last seen, generation time), summary,
+kill-chain stages (incidents only, when recorded), entities (IPs, accounts, hosts), MITRE ATT&CK techniques grouped
+by tactic, a merged timeline (evidence events marked), each alert with its explanation and up to 25 evidence events,
+analyst notes, and recommended actions keyed by technique (generic actions when no technique is mapped).
+Reports built from synthetic data open with a "SYNTHETIC DATA" banner and repeat it in the PDF page footer.
+Log-derived text is escaped in Markdown so it cannot inject tables, links, or HTML.
+
+Errors are JSON: unknown alert or incident → 404; `/api/incidents/{id}/report.*` on a database without the
+`incidents` tables (before the correlation engine is installed) → 404 `incidents are not available on this server yet`.
+
 ## Rules, feedback, and reviewed changes
 
 | Endpoint | Role | Notes |

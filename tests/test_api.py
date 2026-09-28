@@ -233,5 +233,81 @@ class SearchTests(ServerTestCase):
         self.assertEqual(self.c.get("/api/events/999999")[0], 404)
 
 
+class ReportApiTests(ServerTestCase):
+    def download(self, client, path):
+        import urllib.error
+        import urllib.request
+        try:
+            with client.opener.open(urllib.request.Request(self.base + path), timeout=30) as resp:
+                return resp.status, resp.read(), resp.headers
+        except urllib.error.HTTPError as exc:
+            with exc:
+                return exc.code, exc.read(), exc.headers
+
+    def setUp(self):
+        super().setUp()
+        self.assertEqual(self.client("admin").post("/api/demo/load")[0], 200)
+        self.analyst = self.client("analyst")
+        alerts = self.analyst.get("/api/alerts?rule_id=success_after_failures")[1]
+        self.alert = alerts[0]
+
+    def test_alert_reports_download(self):
+        from tests.pdfparse import ParsedPDF
+        aid = self.alert["id"]
+        status, body, headers = self.download(self.analyst, f"/api/alerts/{aid}/report.pdf")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "application/pdf")
+        self.assertEqual(headers["Content-Disposition"], f'attachment; filename="watchpost-alert-{aid}-report.pdf"')
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertIn(self.alert["title"], ParsedPDF(body).text())
+
+        status, body, headers = self.download(self.analyst, f"/api/alerts/{aid}/report.md")
+        self.assertEqual(status, 200)
+        self.assertTrue(headers["Content-Type"].startswith("text/markdown"))
+        self.assertIn("attachment;", headers["Content-Disposition"])
+        text = body.decode("utf-8")
+        self.assertTrue(text.startswith("# Alert report: "))
+        self.assertIn("SYNTHETIC DATA", text)
+        audit = self.client("admin").get("/api/audit")[1]
+        self.assertEqual({(a["action"], a["target"]) for a in audit if a["action"] == "report_downloaded"},
+                         {("report_downloaded", f"alert:{aid}")})
+
+    def test_report_access_and_errors(self):
+        aid = self.alert["id"]
+        self.assertEqual(self.download(self.client(), f"/api/alerts/{aid}/report.pdf")[0], 401)
+        with sqlite3.connect(self.db_path) as db:
+            from watchpost.auth import hash_password
+            db.execute("INSERT INTO users(username, pw_hash, role, created_at) VALUES "
+                       "('viewer1', ?, 'viewer', '2026-01-01')", (hash_password("viewer-password-1"),))
+        viewer = self.client()
+        self.assertEqual(viewer.login("viewer1", "viewer-password-1")[0], 200)
+        self.assertEqual(self.download(viewer, f"/api/alerts/{aid}/report.md")[0], 403)
+        status, body, _ = self.download(self.analyst, "/api/alerts/999999/report.pdf")
+        self.assertEqual((status, json.loads(body)["error"]), (404, "alert not found"))
+        self.assertEqual(self.download(self.analyst, f"/api/alerts/{aid}/report.html")[0], 404)
+        # Before the correlation engine lands there is no incidents table: clean 404 JSON.
+        status, body, _ = self.download(self.analyst, "/api/incidents/1/report.pdf")
+        self.assertEqual(status, 404)
+        self.assertIn("incidents are not available", json.loads(body)["error"])
+
+    def test_incident_report_when_tables_exist(self):
+        from tests.pdfparse import ParsedPDF
+        with sqlite3.connect(self.db_path) as db:
+            db.executescript("""
+                CREATE TABLE incidents (id INTEGER PRIMARY KEY, title TEXT, severity TEXT, status TEXT,
+                    first_seen TEXT, last_seen TEXT);
+                CREATE TABLE incident_alerts (incident_id INTEGER, alert_id INTEGER);
+            """)
+            db.execute("INSERT INTO incidents VALUES (7, 'Dave account takeover', 'critical', 'open', NULL, NULL)")
+            db.execute("INSERT INTO incident_alerts VALUES (7, ?)", (self.alert["id"],))
+        status, body, headers = self.download(self.analyst, "/api/incidents/7/report.pdf")
+        self.assertEqual(status, 200, body[:200])
+        self.assertIn("watchpost-incident-7-report.pdf", headers["Content-Disposition"])
+        self.assertIn("Dave account takeover", ParsedPDF(body).text())
+        status, body, _ = self.download(self.analyst, "/api/incidents/7/report.md")
+        self.assertIn("# Incident report: Dave account takeover", body.decode())
+        self.assertEqual(self.download(self.analyst, "/api/incidents/8/report.md")[0], 404)
+
+
 if __name__ == "__main__":
     unittest.main()

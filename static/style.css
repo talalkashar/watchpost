@@ -59,6 +59,8 @@ textarea { width: 100%; min-height: 70px; resize: vertical; }
 button { font: inherit; cursor: pointer; border-radius: 6px; padding: 6px 12px; border: 1px solid var(--accent);
   background: var(--accent); color: var(--accent-ink); }
 button.ghost { background: transparent; color: var(--accent); }
+a.button { display: inline-block; text-decoration: none; border-radius: 6px; padding: 6px 12px;
+  border: 1px solid var(--accent); background: transparent; color: var(--accent); }
 button.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
 button:disabled { opacity: .5; cursor: default; }
 

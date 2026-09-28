@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import __version__, auth, engine, improve, queries, simulate
+from . import __version__, auth, engine, improve, queries, report, simulate
 from .config import Config
 from .db import audit, connect, init_schema, now_iso, row_to_dict
 from .diagnostics import configure_logging, log, record_error
@@ -24,6 +24,13 @@ class ApiError(Exception):
     def __init__(self, status, message):
         super().__init__(message)
         self.status = status
+
+
+class Download:
+    """A non-JSON response body sent as a file attachment."""
+
+    def __init__(self, body, content_type, filename):
+        self.body, self.content_type, self.filename = body, content_type, filename
 
 
 class App:
@@ -248,6 +255,27 @@ def alert_status(req, alert_id):
                                  data.get("disposition"), data.get("note"))
 
 
+# Reports ---------------------------------------------------------------------------------
+
+def _report(req, kind, ident, fmt):
+    model = report.build(req.conn, ident) if kind == "incident" else report.build_from_alert(req.conn, ident)
+    audit(req.conn, req.user["username"], "report_downloaded", f"{kind}:{ident}", {"format": fmt})
+    name = f"watchpost-{kind}-{ident}-report.{fmt}"
+    if fmt == "pdf":
+        return Download(report.to_pdf_bytes(model), "application/pdf", name)
+    return Download(report.to_markdown(model).encode("utf-8"), "text/markdown; charset=utf-8", name)
+
+
+@route("GET", r"/api/alerts/(\d+)/report\.(md|pdf)", role="analyst")
+def alert_report(req, alert_id, fmt):
+    return _report(req, "alert", int(alert_id), fmt)
+
+
+@route("GET", r"/api/incidents/(\d+)/report\.(md|pdf)", role="analyst")
+def incident_report(req, incident_id, fmt):
+    return _report(req, "incident", int(incident_id), fmt)
+
+
 @route("GET", "/api/metrics")
 def metrics(req):
     return queries.metrics(req.conn, req.query.get("hours"))
@@ -437,6 +465,9 @@ class Handler(BaseHTTPRequestHandler):
             headers = {"Cache-Control": "no-store"}
             if self.set_cookie is not None:
                 headers["Set-Cookie"] = self._cookie_header(self.set_cookie)
+            if isinstance(result, Download):
+                headers["Content-Disposition"] = f'attachment; filename="{result.filename}"'
+                return self._send(self.status, result.body, result.content_type, headers)
             self._send(self.status, result, extra_headers=headers)
         except ApiError as exc:
             self._send(exc.status, {"error": str(exc)})
