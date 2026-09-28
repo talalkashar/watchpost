@@ -28,6 +28,9 @@ class Config:
     syslog_bind: str = "127.0.0.1"
     syslog_port: int = 5514
     syslog_allow: str = ""
+    # Attack storyline auto-replay for public demos (off unless SIEM_DEMO_LOOP=<minutes between runs>).
+    demo_loop_minutes: int = 0
+    demo_loop_speed: float = 1.0
 
     @classmethod
     def from_env(cls, **overrides):
@@ -46,6 +49,8 @@ class Config:
             syslog_bind=os.environ.get("SIEM_SYSLOG_BIND", "127.0.0.1"),
             syslog_port=int(os.environ.get("SIEM_SYSLOG_PORT", "5514")),
             syslog_allow=os.environ.get("SIEM_SYSLOG_ALLOW", ""),
+            demo_loop_minutes=int(os.environ.get("SIEM_DEMO_LOOP", "0")),
+            demo_loop_speed=float(os.environ.get("SIEM_DEMO_LOOP_SPEED", "1")),
         )
         values.update(overrides)
         return cls(**values)

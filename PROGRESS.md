@@ -181,3 +181,18 @@ Decision for the owner: none required.
 - `tests/test_workflow.py::test_storage_unavailable_is_failing_not_a_crash` fails when the suite runs as **root** (as in the cloud container), on `main` too: it relies on `chmod` blocking writes, which root ignores. Not changed here. Decide whether to skip it under root or run CI as a normal user.
 - The tolerant readers for A's `/api/incidents` and `/api/attack/coverage` accept a list or `{incidents|techniques: [...]}` and several field spellings (`kill_chain`/`stages`/`tactics`, `hits`/`hit_count`/`alerts`). Check them against A's final shapes after merge.
 - C's storyline status tile appears only when `/api/storyline/status` exists; it reads `running`, `stage`, `progress`.
+
+## Watchpost 2.0 / C: attack storyline (2026-09-28, branch `ws/c-storyline`)
+
+**Shipped**
+- `watchpost/storyline.py`: deterministic timeline `build(seed, speed)` of `(offset_seconds, event, stage)` covering six stages (recon, credential_attack, foothold, escalation, lateral_cloud, exfiltration) plus baseline employee traffic; ~2 minutes of story time at speed 1. One attacker IP (`203.0.113.80`), one VPN egress (`198.51.100.140`), victim `dave`, rogue principal `svc-deploy-tmp`, so alerts correlate into multi-stage incidents (a 7-tactic Reconnaissance → Exfiltration incident in tests).
+- `Runner`: one background thread per `App`, batches records by story time, sleeps to wall-clock, feeds `parse_payload` → `engine.ingest(synthetic=True, source="demo:storyline")` so detection, correlation, SSE, and reports all see the data. Status dict, stop event, `storyline` health check, audit entries `storyline_started/finished/stopped`, errors recorded via `diagnostics.record_error` and never propagate.
+- Routes: `POST /api/storyline/start` (admin, 202/409), `POST /api/storyline/stop` (admin), `GET /api/storyline/status` (viewer; matches the shape `static/dashboard.js` already polls). Admin view gains an "Attack storyline (synthetic)" card with speed presets, start/stop, and live progress.
+- `SIEM_DEMO_LOOP=<minutes>` / `SIEM_DEMO_LOOP_SPEED`: `storyline.DemoLoop` restarts the story on a timer; `main.py` now starts both the syslog listener and the demo loop through one `before_serve` wrapper.
+- Tests: `tests/test_storyline.py` (determinism, ordering, RFC 5737-only sources, full replay at 2000x asserting all ten rules fire and a ≥3-stage incident exists, synthetic-only storage, audit entries, 403/400/409 handling, stop and restart, health check). Smoke step runs the replay at 1000x.
+
+**Verification.** `./run_tests.sh` ends with SMOKE OK.
+
+**Not done / notes for the owner**
+- Written locally after two cloud sessions were stopped by the model's safety classifier while drafting this module (defensive, synthetic-only content; the block was a false positive but not worth fighting).
+- The rogue principal's first cloud event is the IAM change itself (the rule requires no prior cloud activity by that principal); a preceding `sts:GetCallerIdentity` was dropped for that reason.

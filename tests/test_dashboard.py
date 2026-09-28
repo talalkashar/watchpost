@@ -103,7 +103,7 @@ class StreamTests(ServerTestCase):
         self.assertEqual(fields.get("retry"), "3000")
         kind, data, _ = s.frame()
         self.assertEqual(kind, "health")
-        self.assertEqual(set(data["checks"]), {"storage", "ingestion", "detection", "dependencies"})
+        self.assertEqual(set(data["checks"]), {"storage", "ingestion", "detection", "dependencies", "storyline"})
         self.assertFalse(data["partial"])
 
     def test_ingest_publishes_events_alerts_and_health(self):
