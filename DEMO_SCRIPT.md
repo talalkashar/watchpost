@@ -1,10 +1,10 @@
 # Watchpost 2.0 demo script
 
 Two cuts: a **30-second shot list** for the LinkedIn video, and a **2-minute walkthrough** for a live demo or a
-longer recording. Both assume the attack storyline from workstream C: a **Run attack storyline** button in the
-admin view that streams a six-stage synthetic intrusion (recon → credential attack → foothold → escalation → lateral
-and cloud → exfiltration) with baseline noise throughout, while the dashboard's **Storyline** tile shows the current
-stage.
+longer recording. Both use the attack storyline (workstream C): **Admin → Attack storyline (synthetic) → Start
+storyline** streams a six-stage synthetic intrusion (`recon` → `credential_attack` → `foothold` → `escalation` →
+`lateral_cloud` → `exfiltration`) with baseline noise throughout, while the dashboard's **Storyline** tile shows the
+current stage and progress. The speed selector next to the button sets the pace (1× is about two minutes).
 
 Everything on screen is synthetic. Say so out loud in the walkthrough. The UI also says it (the **SYNTHETIC DATA**
 chip, the "synthetic geo" label on the map, and the banner on every report).
@@ -25,10 +25,10 @@ chip, the "synthetic geo" label on the map, and the banner on every report).
 | # | Time | Shot | On screen | Caption / voice-over (optional) |
 |---|---|---|---|---|
 | 1 | 0:00–0:03 | Dashboard, idle | Dark SOC dashboard: status strip, empty attack map, live stream ticking with baseline noise, clock running | "A SIEM I built from scratch." |
-| 2 | 0:03–0:05 | Admin view | Cursor clicks **Run attack storyline** | "Synthetic intrusion, streamed live." |
-| 3 | 0:05–0:10 | Dashboard, recon | Storyline tile reads *Recon*. Map pulses at attacker cities. Web scan and firewall deny events scroll by in the live stream. First alerts: `web_scanner`, `firewall_port_sweep` | "Recon: web scanning and a port sweep." |
-| 4 | 0:10–0:14 | Dashboard, credential attack → foothold | *Credential attack*, then *Foothold*. Red auth failures flood the stream; password spray and brute force alerts; the Critical counter ticks up | "Password spray, then a VPN foothold." |
-| 5 | 0:14–0:18 | Dashboard, escalation → cloud → exfil | *Escalation* → *Lateral & cloud* → *Exfiltration*. Alerts-over-time bars stack; ATT&CK heat matrix cells light up across tactics | "Root, a new cloud key, data out." |
+| 2 | 0:03–0:05 | Admin view | Cursor clicks **Start storyline** in the *Attack storyline (synthetic)* card | "Synthetic intrusion, streamed live." |
+| 3 | 0:05–0:10 | Dashboard, recon | Storyline tile reads `recon`. Map pulses at attacker cities. Web scan and firewall deny events scroll by in the live stream. First alerts: `web_scanner`, `firewall_port_sweep` | "Recon: web scanning and a port sweep." |
+| 4 | 0:10–0:14 | Dashboard, credential attack → foothold | `credential_attack`, then `foothold`. Red auth failures flood the stream; password spray and brute force alerts; the Critical counter ticks up | "Password spray, then a VPN foothold." |
+| 5 | 0:14–0:18 | Dashboard, escalation → cloud → exfil | `escalation` → `lateral_cloud` → `exfiltration`. Alerts-over-time bars stack; ATT&CK heat matrix cells light up across tactics | "Root, a new cloud key, data out." |
 | 6 | 0:18–0:23 | Incident board → incident detail | Click the critical incident: kill-chain stages across the top, **escalated: 3+ tactics** pill, techniques grouped by tactic, alert timeline | "Every alert chained into one incident, mapped to MITRE ATT&CK." |
 | 7 | 0:23–0:27 | Report | Click **Report (PDF)**; the PDF opens with the SYNTHETIC DATA banner, summary, timeline, and techniques | "One-click incident report." |
 | 8 | 0:27–0:30 | End card | Dashboard in the background; overlay: "Watchpost · Python standard library only · github.com/talalkashar/watchpost · read-only demo: `<DEMO_URL>`" | — |
@@ -44,7 +44,7 @@ readable for at least a second per stage. Burn in captions, since most LinkedIn 
 data: IPs from reserved documentation ranges, and map positions from a labeled synthetic table."* Point at the
 **SYNTHETIC DATA** chip and the **SYNTHETIC GEO** label.
 
-**0:15–0:25 · Start the attack.** **Admin → Run attack storyline**, then back to **Dashboard**.
+**0:15–0:25 · Start the attack.** **Admin → Attack storyline (synthetic) → Start storyline**, then back to **Dashboard**.
 *"This replays a six-stage intrusion against a living system. Normal logins and traffic keep flowing the whole time,
 so the attack has to stand out from noise."*
 
@@ -82,5 +82,7 @@ portfolio project: synthetic data, no machine learning, single node. Code and de
   click **Run detection (full scan)**.
 - **The live badge shows POLLING 3s instead of LIVE · SSE:** the SSE stream dropped and the page fell back to polling every
   3 seconds. It still updates. Behind nginx, check that `/api/stream` has `proxy_buffering off`.
-- **The storyline button is missing:** you're not signed in as admin, or workstream C isn't deployed yet. Fall back to
-  **Admin → Load synthetic demo data**, which loads the same kinds of scenarios at once.
+- **The storyline card is missing:** you're not signed in as admin (viewers and analysts can't start it). **Admin → Load
+  synthetic demo data** is a fallback that loads the same kinds of scenarios at once.
+- **Start storyline answers 409:** a run is already in progress (possibly the `SIEM_DEMO_LOOP` timer). Click **Stop**,
+  then start again.

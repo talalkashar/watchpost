@@ -21,7 +21,7 @@ It uses only the Python standard library (3.10+). No packages to install, no pai
 | **D · Incident reports** | One-click **Markdown and PDF** reports for incidents and alerts, with a timeline, entities, techniques by tactic, evidence, notes, and recommended actions per technique. The PDF writer is hand-written PDF 1.4. |
 | **E · Live ingestion** | A UDP/TCP **syslog listener** (RFC 3164/5424) and `scripts/shipper.py`, a file tailer that posts to the ingest API with a token. See [docs/LIVE_INGEST.md](docs/LIVE_INGEST.md). |
 | **F · Demo kit** | A read-only **viewer** role that the server enforces on every route, with a public demo account from `SIEM_VIEWER_PASSWORD`. **Per-IP rate limiting** (strict on login). A **`deploy/`** kit for Debian 12: a hardened systemd unit, an idempotent installer, and Caddy or nginx HTTPS. A LinkedIn kit and demo script. |
-| C · Attack storyline *(separate workstream)* | A button that replays a six-stage synthetic intrusion in real time. Documented in the demo script; its routes land with that workstream. |
+| **C · Attack storyline** | **Admin → Start storyline** replays a six-stage synthetic intrusion in real time (recon → credential attack → foothold → escalation → lateral and cloud → exfiltration) over baseline noise; the dashboard shows the current stage. `SIEM_DEMO_LOOP=<minutes>` replays it on a timer for unattended public demos. |
 
 ### 2.0 architecture
 
@@ -68,7 +68,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 ### Tests
 
 ```bash
-./run_tests.sh      # ~200 unit/integration tests + an 18-step end-to-end smoke check
+./run_tests.sh      # ~200 unit/integration tests + a 19-step end-to-end smoke check
 ```
 
 ### Replit
@@ -89,6 +89,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 | `SIEM_SYSLOG` | `0` | `1` also starts the UDP/TCP syslog listener ([docs/LIVE_INGEST.md](docs/LIVE_INGEST.md)) |
 | `SIEM_SYSLOG_BIND` / `SIEM_SYSLOG_PORT` | `127.0.0.1` / `5514` | Syslog listener address (same port for UDP and TCP) |
 | `SIEM_SYSLOG_ALLOW` | empty (any) | Comma-separated IPs/CIDRs allowed to send syslog |
+| `SIEM_DEMO_LOOP` / `SIEM_DEMO_LOOP_SPEED` | `0` / `1` | Minutes between automatic replays of the synthetic attack storyline (0 = off) and its speed multiplier |
 | `SIEM_RATE_LIMIT` | `1` | `0` turns off per-IP rate limiting |
 | `SIEM_LOGIN_RATE_BURST` / `SIEM_LOGIN_RATE_PER_MIN` | `10` / `10` | Token bucket for `POST /api/auth/login`, per client IP |
 | `SIEM_RATE_BURST` / `SIEM_RATE_PER_MIN` | `300` / `1200` | Token bucket for every other request (API and static), per client IP |
@@ -99,7 +100,6 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 [`deploy/`](deploy/README.md) installs Watchpost on a Debian 12 VM as a hardened systemd service on loopback, with
 Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in front:
 `sudo ./deploy/install.sh --caddy demo.example.org`. Publish only the `viewer` login.
-| `SIEM_DEMO_LOOP` / `SIEM_DEMO_LOOP_SPEED` | `0` / `1` | Minutes between automatic replays of the synthetic attack storyline (0 = off) and its speed multiplier |
 
 ---
 
