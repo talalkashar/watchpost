@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import __version__, auth, engine, geo, improve, incidents, queries, report, simulate, stream
+from . import __version__, auth, engine, geo, improve, incidents, queries, report, simulate, storyline, stream
 from .config import Config
 from .db import audit, connect, init_schema, now_iso, row_to_dict
 from .diagnostics import configure_logging, log, record_error
@@ -46,6 +46,7 @@ class App:
             self.credentials_file = auth.bootstrap_users(conn, config, Path(config.db_path).parent)
         finally:
             conn.close()
+        self.storyline = storyline.Runner(self.conn)
 
     def conn(self):
         return connect(self.config.db_path)
@@ -220,6 +221,36 @@ def demo_simulate(req):
     req.status = 201
     return engine.ingest(req.conn, normalized, rejections, f"demo:{name}", "json",
                          req.user["username"], synthetic=True)
+
+
+@route("POST", "/api/storyline/start", role="admin")
+def storyline_start(req):
+    """Replay the scripted six-stage synthetic intrusion over wall-clock time (one run at a time)."""
+    data = body_json(req)
+    speed, seed = data.get("speed", 1.0), data.get("seed", 7)
+    if not isinstance(speed, (int, float)) or isinstance(speed, bool) or not (0.1 <= speed <= 10000):
+        raise ApiError(400, "speed must be a number between 0.1 and 10000")
+    if not isinstance(seed, int) or isinstance(seed, bool):
+        raise ApiError(400, "seed must be an integer")
+    if not req.app.storyline.start(speed=speed, seed=seed, started_by=req.user["username"]):
+        raise ApiError(409, "a storyline is already running; stop it first")
+    audit(req.conn, req.user["username"], "storyline_started", None, {"speed": speed, "seed": seed})
+    req.status = 202
+    return req.app.storyline.snapshot()
+
+
+@route("POST", "/api/storyline/stop", role="admin")
+def storyline_stop(req):
+    req.app.storyline.stop()
+    return req.app.storyline.snapshot()
+
+
+@route("GET", "/api/storyline/status")
+def storyline_status(req):
+    status = req.app.storyline.snapshot()
+    status["stages"] = [{"name": n, "starts_at": t, "description": d} for n, t, d in storyline.STAGES]
+    status["synthetic"] = True
+    return status
 
 
 # Events and alerts ---------------------------------------------------------------------
@@ -662,6 +693,7 @@ def main(before_serve=None):
     finally:
         if service is not None:
             service.stop()
+        app.storyline.stop()
         server.server_close()
 
 

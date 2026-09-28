@@ -163,6 +163,19 @@ def main():
         check(status == 200 and detail["alerts"] and detail["timeline"] and detail["techniques"], "incident detail")
         print(f"      {len(incidents)} incidents; e.g. #{detail['id']} {detail['title']} ({detail['severity']})")
 
+        step("attack storyline replays end to end at high speed (admin only)")
+        check(analyst.call("POST", "/api/storyline/start", {"speed": 1000})[0] == 403, "analyst could start the storyline")
+        status, story = admin.call("POST", "/api/storyline/start", {"speed": 1000})
+        check(status == 202 and story["running"], f"storyline start: {status} {story}")
+        for _ in range(300):
+            status, story = analyst.call("GET", "/api/storyline/status")
+            if not story["running"]:
+                break
+            time.sleep(0.1)
+        check(not story["running"] and story["error"] is None and story["progress"] == 1.0, f"storyline: {story}")
+        check(story["events_sent"] > 100 and story["alerts_created"] > 0, f"storyline output: {story}")
+        print(f"      {story['events_sent']} synthetic events, {story['alerts_created']} alerts, last stage {story['stage']}")
+
         step("ATT&CK coverage lists every catalog technique")
         status, coverage = analyst.call("GET", "/api/attack/coverage")
         hit = [t["id"] for t in coverage["techniques"] if t["hits"]]
