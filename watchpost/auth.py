@@ -67,10 +67,20 @@ def bootstrap_users(conn, config, data_dir):
     """Create the initial admin and analyst accounts on an empty database.
 
     Passwords come from environment variables; otherwise they are generated and
-    written to a 0600 file, never printed to logs.
+    written to a 0600 file, never printed to logs. The read-only `viewer` account is
+    created only when SIEM_VIEWER_PASSWORD is set, on any start where no user named
+    `viewer` exists yet (so an existing database can gain one). It is never generated.
     """
-    if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]:
-        return None
+    path = None
+    if not conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]:
+        path = _bootstrap_initial(conn, config, data_dir)
+    viewer_password = getattr(config, "viewer_password", None)
+    if viewer_password and conn.execute("SELECT 1 FROM users WHERE username = 'viewer'").fetchone() is None:
+        create_user(conn, "viewer", viewer_password, "viewer")
+    return path
+
+
+def _bootstrap_initial(conn, config, data_dir):
     generated = {}
     for username, role, supplied in (("admin", "admin", config.admin_password),
                                      ("analyst", "analyst", config.analyst_password)):

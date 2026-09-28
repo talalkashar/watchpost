@@ -1,31 +1,90 @@
-# LinkedIn project entry
+# LinkedIn kit: Watchpost 2.0
 
-**Title:** Watchpost: a working mini-SIEM built from scratch (Python)
-
-**Short description (project section):**
-
-I built a small Security Information and Event Management (SIEM) system to learn how detection pipelines work end to end. It ingests authentication logs (Linux auth.log, Windows Security events, JSON, CSV) through an authenticated API or a file upload, normalizes them into one schema, and stores them in SQLite. It runs five explainable detection rules: brute force, password spraying, repeated account failures, a successful login after failures, and off-hours privileged logins. Each alert carries its evidence events, a plain-English explanation, and a related-activity timeline. Analysts can investigate, add notes, and resolve alerts with a true-positive or false-positive verdict.
-
-Those verdicts feed per-rule precision tracking. From them, Watchpost proposes rule tuning, such as excluding an authorized scanner. Each proposal is scored against labeled test scenarios, and a second person must approve it before it takes effect. The app also monitors itself: health checks for storage, ingestion, detection, and dependencies surface failures with recovery steps, and events are never lost while detection is broken.
-
-Security basics are built in: salted PBKDF2 password hashing, account lockout, role-based access, CSRF protection, a strict Content-Security-Policy, hashed ingest-only API tokens, input validation, parameterized SQL, and redaction of secrets from stored logs and error records.
-
-Python standard library only. 57 automated tests plus an end-to-end smoke check.
-
-**Being upfront:** all demo data is synthetic, generated with reserved documentation IP ranges. The detection accuracy numbers come from my own labeled scenarios, not real-world traffic. The tuning suggestions are rule-based heuristics, not machine learning. It's a single-node learning project, not a production SIEM.
-
-**Skills:** Python · SIEM / log analysis · detection engineering · SOC analyst workflow · secure web application design · SQLite · automated testing
+Placeholders to fill in before posting: `<DEMO_URL>` (the deployed demo, see `deploy/README.md`),
+`<VIEWER_PASSWORD>` (the `SIEM_VIEWER_PASSWORD` you set on the VM), and `<VIDEO>` (the 30-second recording from
+`DEMO_SCRIPT.md`). The repository is https://github.com/talalkashar/watchpost.
 
 ---
 
-**Optional post text:**
+## 1. Project section entry
 
-> I wanted to understand what actually happens between "a log line arrives" and "an analyst closes an alert," so I built a small SIEM from scratch.
+**Title:** Watchpost: a SIEM with incident correlation and MITRE ATT&CK mapping, built from scratch in Python
+
+**Dates / association:** Personal project
+
+**Link:** https://github.com/talalkashar/watchpost (demo: `<DEMO_URL>`, read-only login `viewer`)
+
+**Description:**
+
+Watchpost is a Security Information and Event Management (SIEM) system I built from scratch to learn how a
+detection pipeline works from the raw log line to the incident report.
+
+- **Ingest:** Linux auth.log, Windows Security events, nginx/Apache access logs, firewall and VPN logs, and
+  CloudTrail-style cloud audit records. Logs arrive through a token-authenticated API, file upload, a live syslog
+  listener (UDP/TCP, RFC 3164/5424), or a file-tailing shipper. Everything is normalized into one schema in SQLite.
+- **Detect:** eleven explainable rules (brute force, password spray, web scanning, port sweeps, impossible travel,
+  privilege escalation after a suspicious login, IAM changes by new principals, data exfiltration volume, and more).
+  Each one maps to MITRE ATT&CK techniques.
+- **Correlate:** related alerts are chained into incidents by shared IP, account, or host, with a kill-chain stage
+  list. Severity escalates when an incident spans three or more ATT&CK tactics.
+- **Respond:** a dark SOC dashboard with a live Server-Sent Events stream, an attacker map, ATT&CK coverage, and an
+  incident board. Analysts triage, annotate, and resolve alerts, then download a one-click incident report in
+  Markdown or a hand-written PDF.
+- **Secure by default:** PBKDF2 hashing, lockout, per-IP rate limiting, admin/analyst/read-only viewer roles, CSRF
+  tokens, a strict CSP, hashed ingest-only API tokens, secret redaction, and two-person review for rule changes. It
+  runs as a hardened systemd service behind HTTPS.
+
+Python standard library only: no frameworks, no packages. Covered by about 200 automated tests plus an end-to-end
+smoke check.
+
+**Skills:** Python · SIEM · Detection engineering · MITRE ATT&CK · Incident response · Log analysis · Secure web
+application design · Linux / systemd · SQLite · Automated testing
+
+---
+
+## 2. Post (under 1,300 characters)
+
+> I built a SIEM from scratch to understand what happens between "a log line arrives" and "an analyst closes the
+> incident."
 >
-> Watchpost ingests SSH and Windows authentication logs, detects brute force, password spraying, and logins that succeed after repeated failures, and walks an analyst through investigation and resolution.
+> In the 30-second clip, a synthetic intrusion plays out live: web recon, a password spray, a VPN foothold, sudo to
+> root, a new cloud access key, and a data exfiltration burst. Watchpost detects each stage and chains the alerts
+> into one incident tagged with MITRE ATT&CK techniques. One click produces the incident report as a PDF.
 >
-> Two parts I learned the most from:
-> 1. **Feedback without magic.** When analysts mark alerts as false positives (in my demo, an authorized vulnerability scanner), the system proposes a specific tuning change and shows its effect on labeled test scenarios. A second person has to approve it before it takes effect.
-> 2. **Failing honestly.** If a rule breaks, the app keeps ingesting and storing events, reports "detection failing" with recovery steps, and processes the backlog once it's fixed.
+> What's under the hood:
+> • 11 explainable detection rules, each mapped to ATT&CK
+> • Correlation into incidents, with severity escalated when an attack spans 3+ tactics
+> • Live SOC dashboard over Server-Sent Events
+> • Syslog listener and a log shipper for real Linux hosts
+> • Roles, CSRF, rate limiting, and two-person review for rule changes
+> • Python standard library only, about 200 tests
 >
-> All the data is synthetic, and it's a learning project, not a product. Demo video and code below. Feedback from SOC folks welcome!
+> Being upfront: the attack data is synthetic, there's no machine learning, and it's a single-node portfolio
+> project, not a product.
+>
+> Try the read-only demo: <DEMO_URL> (user: viewer / <VIEWER_PASSWORD>)
+> Code: github.com/talalkashar/watchpost
+>
+> Feedback from SOC analysts and detection engineers is very welcome.
+>
+> #cybersecurity #SOC #SIEM #detectionengineering #MITREATTACK #blueteam
+
+Length check: 1,220 characters as written, about 1,245 with a typical URL and password filled in. Re-count after
+you fill them. LinkedIn cuts at "see more" after roughly 210 characters, so the first two lines are the hook.
+
+---
+
+## 3. Honest limits (say these if asked; the post already says the first three)
+
+- **Synthetic data.** The attack storyline, demo scenarios, and sample files are invented. External IPs come from the
+  reserved documentation ranges (RFC 5737), and every synthetic event is stored with `synthetic=1` and labeled in the
+  UI and in reports. The map positions come from a labeled synthetic table, not a geo lookup.
+- **No machine learning.** Detection is threshold rules. Rule tuning is fixed heuristics over analyst verdicts, and a
+  second person must approve every change. Precision and recall numbers measure my own labeled scenarios, not
+  real-world traffic.
+- **Single node.** One Python process and SQLite, sized for thousands to low millions of events. There is no
+  clustering, retention, or high availability. Rate limits and SSE subscribers live in memory.
+- **Portfolio project.** Built to learn and to show how the pieces fit, not hardened or supported for production
+  use. The live syslog listener is unauthenticated and bound to loopback by default. The public demo is read-only.
+- **Scope.** The rules are fixed thresholds over authentication, web, firewall/VPN, cloud audit, and host events.
+  There is no Sigma import, threat-intel enrichment, or case management beyond incidents.

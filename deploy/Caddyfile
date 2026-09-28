@@ -1,0 +1,23 @@
+# Caddy (Debian 12: `apt install caddy`) in front of Watchpost, with an automatic
+# Let's Encrypt certificate. install.sh --caddy DOMAIN writes this to /etc/caddy/Caddyfile
+# with the placeholder replaced. By hand: replace watchpost.example.com with a domain whose
+# A/AAAA record points at this VM, and open TCP 80 and 443 in the VM firewall.
+
+watchpost.example.com {
+	# Watchpost sets its own CSP and other security headers; add HSTS and hide the proxy.
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+
+	# No `encode` here: compression would buffer the Server-Sent Events stream.
+	# Caddy sets X-Forwarded-For to the connecting client; SIEM_TRUST_PROXY=1 reads it.
+	reverse_proxy 127.0.0.1:8080 {
+		# Flush immediately so /api/stream events reach the browser without delay.
+		flush_interval -1
+	}
+
+	log {
+		output file /var/log/caddy/watchpost.log
+	}
+}

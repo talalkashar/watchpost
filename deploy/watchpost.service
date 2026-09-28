@@ -1,0 +1,52 @@
+# Watchpost systemd unit for a Debian 12 VM. Installed by deploy/install.sh to
+# /etc/systemd/system/watchpost.service. The app listens on loopback only; a reverse
+# proxy (Caddy or nginx, see deploy/README.md) terminates HTTPS in front of it.
+
+[Unit]
+Description=Watchpost SIEM (portfolio demo)
+Documentation=file:///opt/watchpost/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=watchpost
+Group=watchpost
+WorkingDirectory=/opt/watchpost
+# Settings and secrets (SIEM_*_PASSWORD) live here, root:watchpost 0640. Never in the repo.
+EnvironmentFile=/etc/watchpost.env
+Environment=PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+# SIEM_HOST is forced to loopback here so the env file cannot expose the plain-HTTP port.
+ExecStart=/usr/bin/env SIEM_HOST=127.0.0.1 /usr/bin/python3 /opt/watchpost/main.py
+Restart=on-failure
+RestartSec=5
+
+# State: the SQLite database and any generated initial_credentials.txt.
+StateDirectory=watchpost
+StateDirectoryMode=0750
+UMask=0077
+
+# Hardening. The app needs only to read /opt/watchpost, write /var/lib/watchpost, and use TCP/UDP.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

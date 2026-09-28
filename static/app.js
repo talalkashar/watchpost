@@ -108,7 +108,7 @@ function onLogin(data) {
   $("#login-view").hidden = true;
   document.body.classList.add("authed");
   $("#rail").hidden = false; $("#strip").hidden = false; $("#who").hidden = false;
-  $("#who-name").textContent = `${data.user.username} · ${data.user.role}`;
+  $("#who-name").textContent = `${data.user.username} · ${data.user.role}${data.user.role === "viewer" ? " (read-only)" : ""}`;
   document.querySelectorAll("#nav [data-role]").forEach((b) => { b.hidden = !can(b.dataset.role); });
   route();
   refreshBanner();
@@ -234,8 +234,8 @@ async function alertDetail(id) {
     if (a.status === "open") actions.append(el("button", { onclick: () => setStatus(id, { status: "investigating" }) }, "Start investigating"));
     if (a.status !== "resolved") actions.append(el("button", { onclick: () => resolveDialog(id) }, "Resolve…"));
     else actions.append(el("button", { class: "ghost", onclick: () => setStatus(id, { status: "open" }) }, "Reopen"));
-    actions.append(reportLinks("alerts", id));
   }
+  actions.append(reportLinks("alerts", id));
   const noteForm = can("analyst") ? el("form", {},
     el("textarea", { name: "body", maxlength: 5000, required: true, placeholder: "Add an investigation note…" }),
     el("button", { type: "submit" }, "Add note")) : null;
@@ -279,9 +279,8 @@ async function alertDetail(id) {
   );
 }
 
-// Report downloads (analyst and admin). kind is "alerts" or "incidents"; plain GET links carry the session cookie.
+// Report downloads (every role, viewers included). kind is "alerts" or "incidents"; plain GET links carry the session cookie.
 function reportLinks(kind, id) {
-  if (!can("analyst")) return null;
   return el("span", { class: "row" },
     el("a", { class: "button", href: `/api/${kind}/${id}/report.pdf`, download: "" }, "Report (PDF)"),
     el("a", { class: "button", href: `/api/${kind}/${id}/report.md`, download: "" }, "Report (Markdown)"));
@@ -296,8 +295,8 @@ async function incidentDetail(id) {
     if (i.status === "open") actions.append(el("button", { onclick: () => setIncident({ status: "investigating" }) }, "Start investigating"));
     if (i.status !== "resolved") actions.append(el("button", { onclick: () => setIncident({ status: "resolved" }) }, "Resolve"));
     else actions.append(el("button", { class: "ghost", onclick: () => setIncident({ status: "open" }) }, "Reopen"));
-    actions.append(reportLinks("incidents", id));
   }
+  actions.append(reportLinks("incidents", id));
   render(
     el("p", {}, el("a", { href: "#incidents" }, "← Incidents")),
     el("div", { class: "split" },
