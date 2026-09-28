@@ -90,6 +90,7 @@ function normCoverage(payload) {
     tactics: asList(t.tactics ?? t.tactic).map((x) => (typeof x === "string" ? x : x.name)).filter(Boolean),
     rules: asList(t.rules ?? t.rule_ids).map((r) => (typeof r === "string" ? r : r.id || r.rule_id)).filter(Boolean),
     hits: Number(t.hits ?? t.hit_count ?? t.alerts ?? t.alert_count ?? 0) || 0,
+    covered: t.covered,  // A: true only when an enabled rule covers the technique
   }));
 }
 const tacticKey = (name) => String(name).toLowerCase().replace(/[^a-z]/g, "");
@@ -556,7 +557,7 @@ const Dash = {
   renderAttackers() {
     const box = $("#atk-chart");
     if (!box || !this.data) return;
-    const rows = this.data.attackers.slice(0, 7).map((a) => {
+    const rows = this.data.attackers.slice(0, 6).map((a) => {
       const loc = Geo.get(a.ip);
       return { label: a.ip, value: a.events, cls: sevOf(a.max_severity),
         sub: loc === undefined ? "…" : loc === null ? "unknown · no geo entry" : `${loc.city}${loc.internal ? "" : " · synthetic geo"}`,
@@ -590,7 +591,7 @@ const Dash = {
         for (const tac of t.tactics.length ? t.tactics : ["Unmapped"]) {
           const key = tacticKey(tac);
           if (!byTactic.has(key)) byTactic.set(key, { name: tac, short: tac, cells: [] });
-          byTactic.get(key).cells.push({ id: t.id, name: t.name, value: t.hits, covered: t.rules.length > 0, rules: t.rules });
+          byTactic.get(key).cells.push({ id: t.id, name: t.name, value: t.hits, covered: t.covered ?? t.rules.length > 0, rules: t.rules });
         }
       }
       for (const col of byTactic.values()) col.cells.sort((a, b) => b.value - a.value || a.id.localeCompare(b.id));
@@ -599,7 +600,7 @@ const Dash = {
     if (w < 900 && cov.state === "ok") columns = columns.filter((c) => c.cells.length);
     const meta = $("#attack-meta");
     if (cov.state === "ok") {
-      const covered = cov.list.filter((t) => t.rules.length).length;
+      const covered = cov.list.filter((t) => t.covered ?? t.rules.length > 0).length;
       const hot = cov.list.filter((t) => t.hits > 0).length;
       meta.textContent = `${covered}/${cov.list.length} techniques covered · ${hot} observed`;
       mountSvg(box, WPCharts.heatMatrix(columns, { w, cellH: 21, maxRows: Math.max(3, Math.min(7, ...[Math.max(...columns.map((c) => c.cells.length))])), label: "ATT&CK coverage heat matrix" }));
@@ -688,52 +689,4 @@ async function incidentsView() {
     inc.state !== "ok" ? el("p", { class: "muted" }, inc.state === "error" ? inc.error
       : "Alerts become incidents once the correlation engine ships (GET /api/incidents). Until then this board groups alerts by status.") : null,
     el("div", { class: "board big" }, ...incidentBoard(inc, alerts, 50)));
-}
-
-async function incidentDetail(id) {
-  let i;
-  try { i = await api(`/api/incidents/${id}`); }
-  catch (e) {
-    if (e.status !== 404) throw e;
-    return render(el("p", {}, el("a", { href: "#incidents" }, "← Incidents")),
-      el("div", { class: "card" }, el("h1", {}, `Incident #${id}`), el("p", { class: "muted" }, "Not found, or incidents are not available on this server yet.")));
-  }
-  const inc = i.incident || i;
-  const [norm] = normIncidents([inc]);
-  const alerts = asList(i.alerts ?? inc.alerts);
-  const timeline = asList(i.timeline ?? i.events ?? inc.timeline);
-  const techniques = asList(i.techniques ?? inc.techniques);
-  const actions = el("div", { class: "row" });
-  if (can("analyst")) {
-    for (const s of ["investigating", "resolved", "open"]) {
-      if (boardColumn(norm.status) === s) continue;
-      actions.append(el("button", { class: s === "open" ? "ghost" : "", onclick: () => guarded(async () => {
-        await api(`/api/incidents/${id}/status`, { method: "POST", body: { status: s } });
-        incidentDetail(id); Live.refreshIncidents();
-      }) }, s === "open" ? "Reopen" : s === "investigating" ? "Start investigating" : "Resolve"));
-    }
-  }
-  const entities = norm.entities && typeof norm.entities === "object" ? Object.entries(norm.entities) : [];
-  render(
-    el("p", {}, el("a", { href: "#incidents" }, "← Incidents")),
-    el("div", { class: "split" },
-      el("div", {},
-        el("div", { class: "card" },
-          el("div", { class: "row" }, sev(norm.severity), status(norm.status), synth(norm.synthetic)),
-          el("h1", { class: "mt8" }, norm.title),
-          norm.tactics.length ? el("div", { class: "killchain" }, ...norm.tactics.map((t, n) => el("span", { class: "kc" }, `${n + 1}. ${t}`))) : null,
-          actions),
-        el("div", { class: "card" }, el("h2", {}, `Alerts (${alerts.length})`),
-          table(["Severity", "Alert", "Rule", "Status", "Last seen"], alerts.map((a) => ({ id: a.id, cells: [sev(a.severity), a.title, el("code", {}, a.rule_id), status(a.status), fmtTime(a.last_seen)] })),
-            (r) => go("alerts", r.id))),
-        el("div", { class: "card" }, el("h2", {}, "Timeline"),
-          table(["Time", "Type", "User", "Source IP", "Host", "Message"], timeline.slice(0, 300).map((e) => ({ cells: [fmtTime(e.ts), e.event_type || e.kind || "", e.user ?? "—", el("code", {}, e.src_ip ?? "—"), e.host ?? "—", e.message ?? e.title ?? ""] }))))),
-      el("div", {},
-        el("div", { class: "card" }, el("h2", {}, "Details"), el("dl", { class: "kv" },
-          ...[["Incident", `#${id}`], ["First seen", fmtTime(norm.first_seen)], ["Last seen", fmtTime(norm.last_seen)], ["Alerts", norm.alert_count]]
-            .concat(entities.map(([k, v]) => [k, Array.isArray(v) ? v.join(", ") : typeof v === "object" ? JSON.stringify(v) : String(v)]))
-            .flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]))),
-        el("div", { class: "card" }, el("h2", {}, "ATT&CK techniques"),
-          techniques.length ? techniques.map((t) => el("div", { class: "note" }, el("code", {}, t.id || t.technique_id || t), " ", t.name || "", t.tactic ? el("span", { class: "muted" }, ` · ${t.tactic}`) : null))
-            : el("p", { class: "muted" }, "None listed.")))));
 }

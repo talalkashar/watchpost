@@ -104,7 +104,9 @@ def main():
         check(status == 201 and tok["token"].startswith("wp_"), f"token: {status}")
 
         step("sample files upload through the API")
-        for name, fmt in [("auth.log", "authlog"), ("windows_security.jsonl", "jsonl"), ("vpn_events.csv", "csv")]:
+        for name, fmt in [("auth.log", "authlog"), ("windows_security.jsonl", "jsonl"), ("vpn_events.csv", "csv"),
+                          ("nginx_access.log", "weblog"), ("firewall.csv", "csv"), ("cloudtrail.json", "json"),
+                          ("linux_host.log", "authlog")]:
             text = (ROOT / "samples" / name).read_bytes()
             status, res = analyst.call("POST", f"/api/ingest/upload?format={fmt}&source=sample-{fmt}&synthetic=1&year=2026",
                                        raw=text, ctype="text/plain")
@@ -136,9 +138,27 @@ def main():
         status, alerts = analyst.call("GET", "/api/alerts")
         rules_fired = {a["rule_id"] for a in alerts}
         expected = {"brute_force_ip", "password_spray", "account_repeated_failures",
-                    "success_after_failures", "off_hours_privileged_login"}
+                    "success_after_failures", "off_hours_privileged_login", "web_scanner", "firewall_port_sweep",
+                    "impossible_geo_login", "privilege_escalation_after_login", "cloud_iam_change_by_new_principal",
+                    "data_exfil_volume"}
         check(expected <= rules_fired, f"missing rules: {expected - rules_fired}")
         print(f"      {len(alerts)} alerts across {len(rules_fired)} rules")
+
+        step("alerts are correlated into incidents with ATT&CK stages")
+        status, incidents = analyst.call("GET", "/api/incidents")
+        check(status == 200 and incidents, f"incidents: {status} {incidents}")
+        multi = [i for i in incidents if len(i["stages"]) >= 2]
+        check(multi, f"no multi-stage incident: {[i['title'] for i in incidents]}")
+        status, detail = analyst.call("GET", f"/api/incidents/{multi[0]['id']}")
+        check(status == 200 and detail["alerts"] and detail["timeline"] and detail["techniques"], "incident detail")
+        print(f"      {len(incidents)} incidents; e.g. #{detail['id']} {detail['title']} ({detail['severity']})")
+
+        step("ATT&CK coverage lists every catalog technique")
+        status, coverage = analyst.call("GET", "/api/attack/coverage")
+        hit = [t["id"] for t in coverage["techniques"] if t["hits"]]
+        check(status == 200 and coverage["summary"]["covered"] == coverage["summary"]["techniques"] and hit,
+              f"coverage: {coverage.get('summary')}")
+        print(f"      {coverage['summary']['techniques']} techniques covered, {len(hit)} with alerts")
 
         step("analyst investigates and resolves the compromise alert")
         target = next(a for a in alerts if a["rule_id"] == "success_after_failures" and "dave" in a["group_key"])

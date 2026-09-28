@@ -5,13 +5,16 @@ import threading
 import uuid
 from datetime import timedelta
 
+from . import correlate as correlate_mod
 from . import rules as rules_mod
 from . import stream
 from .db import audit, iso, now_iso, parse_iso, row_to_dict, transaction
 from .diagnostics import describe_exception, record_error
 
 EVENT_COLUMNS = ["ts", "source", "host", "event_type", "outcome", "severity",
-                 "user", "src_ip", "dest_ip", "message", "raw"]
+                 "user", "src_ip", "dest_ip", "dest_port", "bytes", "message", "raw"]
+# Fields detection rules can read.
+RULE_EVENT_FIELDS = "id, ts, event_type, user, src_ip, host, dest_ip, dest_port, bytes, message, synthetic"
 
 # Detection runs are serialized so concurrent ingests cannot create duplicate alerts.
 _detection_lock = threading.Lock()
@@ -20,14 +23,18 @@ _detection_lock = threading.Lock()
 def seed_rules(conn, actor="system"):
     now = now_iso()
     for rule in rules_mod.DEFAULT_RULES:
+        techniques = json.dumps(rule["techniques"])
         exists = conn.execute("SELECT 1 FROM rules WHERE id = ?", (rule["id"],)).fetchone()
         if exists:
+            # ATT&CK mappings are static metadata, not tunable: keep stored rules in step with the code.
+            conn.execute("UPDATE rules SET techniques = ? WHERE id = ? AND techniques IS NOT ?",
+                         (techniques, rule["id"], techniques))
             continue
         params = json.dumps(rule["params"])
         conn.execute(
-            "INSERT INTO rules(id, name, description, severity, enabled, params, version, updated_at, updated_by)"
-            " VALUES (?,?,?,?,1,?,1,?,?)",
-            (rule["id"], rule["name"], rule["description"], rule["severity"], params, now, actor),
+            "INSERT INTO rules(id, name, description, severity, enabled, params, version, updated_at, updated_by,"
+            " techniques) VALUES (?,?,?,?,1,?,1,?,?,?)",
+            (rule["id"], rule["name"], rule["description"], rule["severity"], params, now, actor, techniques),
         )
         conn.execute(
             "INSERT INTO rule_history(rule_id, version, enabled, params, changed_at, changed_by, note)"
@@ -38,7 +45,10 @@ def seed_rules(conn, actor="system"):
 
 def load_rules(conn, enabled_only=True):
     sql = "SELECT * FROM rules" + (" WHERE enabled = 1" if enabled_only else "") + " ORDER BY id"
-    return [row_to_dict(r, ["params"]) for r in conn.execute(sql)]
+    rules = [row_to_dict(r, ["params", "techniques"]) for r in conn.execute(sql)]
+    for rule in rules:
+        rule["techniques"] = rule.get("techniques") or []
+    return rules
 
 
 # --- Ingestion ------------------------------------------------------------------
@@ -168,11 +178,14 @@ def run_detection(conn, trigger="manual", start=None, end=None):
                 rule["params"] = rules_mod.validate_params(rule["id"], rule["params"])
 
             max_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
-            sql, args = "SELECT id, ts, event_type, user, src_ip, synthetic FROM events WHERE id <= ?", [max_id]
+            sql, args = f"SELECT {RULE_EVENT_FIELDS} FROM events WHERE id <= ?", [max_id]
+            scan_start = None
             if start and end:
                 pad = timedelta(seconds=rules_mod.lookback_seconds(active))
+                history = timedelta(seconds=rules_mod.history_seconds(active))
+                scan_start = iso(parse_iso(start) - pad)
                 sql += " AND ts >= ? AND ts <= ?"
-                args += [iso(parse_iso(start) - pad), iso(parse_iso(end) + pad)]
+                args += [iso(parse_iso(start) - pad - history), iso(parse_iso(end) + pad)]
             events = [dict(r) for r in conn.execute(sql, args)]
             synthetic_ids = {e["id"] for e in events if e["synthetic"]}
             summary["events_scanned"] = len(events)
@@ -180,6 +193,8 @@ def run_detection(conn, trigger="manual", start=None, end=None):
             with transaction(conn):
                 for rule in active:
                     for finding in rules_mod.RULE_FUNCTIONS[rule["id"]](events, rule["params"]):
+                        if scan_start and finding["last_seen"] < scan_start:
+                            continue  # built only from history context; outside this scan
                         synthetic = all(i in synthetic_ids for i in finding["event_ids"])
                         outcome = _apply_finding(conn, rule, finding, synthetic)
                         if outcome == "created":
@@ -198,6 +213,16 @@ def run_detection(conn, trigger="manual", start=None, end=None):
                 conn.execute(
                     "UPDATE ingest_batches SET detection_status = 'recovered'"
                     " WHERE detection_status = 'failed' AND created_at <= ?", (started,))
+            # Correlation runs after the alerts are safely stored; if it fails, alerts stay as they are.
+            try:
+                summary["correlation"] = {"status": "ok", **correlate_alerts(conn)}
+            except Exception as exc:
+                summary["correlation"] = {"status": "failed", "error": describe_exception(exc)}
+                record_error(conn, "correlation", exc,
+                             guidance="Alerts are unaffected. Fix the cause, then use 'Run detection' to "
+                                      "correlate again.")
+            conn.execute("UPDATE detection_runs SET correlation = ? WHERE id = ?",
+                         (summary["correlation"]["status"], run_id))
         except Exception as exc:
             message = describe_exception(exc)
             summary.update(status="failed", error=message)
@@ -208,6 +233,76 @@ def run_detection(conn, trigger="manual", start=None, end=None):
                          (now_iso(), message, run_id))
         _publish_detection(conn, started, summary)
         return summary
+
+
+# --- Correlation into incidents -----------------------------------------------------
+
+_CANDIDATE_FILTER = (
+    " LEFT JOIN incident_alerts ia ON ia.alert_id = a.id LEFT JOIN incidents i ON i.id = ia.incident_id"
+    " WHERE (ia.incident_id IS NULL AND a.status != 'resolved') OR (ia.incident_id IS NOT NULL AND i.status != 'resolved')"
+)
+
+
+def _candidate_alerts(conn):
+    """Unassigned alerts that are not resolved, plus every alert of an incident that is not resolved."""
+    alerts = {r["id"]: {**dict(r), "entities": {k: set() for k in correlate_mod.ENTITY_TYPES}, "sightings": set()}
+              for r in conn.execute("SELECT a.*, ia.incident_id FROM alerts a" + _CANDIDATE_FILTER)}
+    rows = conn.execute("SELECT a.id AS alert_id, e.ts, e.src_ip, e.user, e.host FROM alerts a"
+                        " JOIN alert_events ae ON ae.alert_id = a.id JOIN events e ON e.id = ae.event_id"
+                        + _CANDIDATE_FILTER)
+    for row in rows:
+        alert = alerts[row["alert_id"]]
+        for kind in correlate_mod.ENTITY_TYPES:
+            if row[kind]:
+                value = row[kind].lower() if kind == "user" else row[kind]
+                alert["entities"][kind].add(value)
+                alert["sightings"].add((kind, value, row["ts"]))
+    tactics = {r["id"]: [t["tactic"] for t in r["techniques"]] for r in load_rules(conn, enabled_only=False)}
+    for alert in alerts.values():
+        alert["entities"] = {k: sorted(v) for k, v in alert["entities"].items()}
+        alert["sightings"] = sorted(alert["sightings"])
+        alert["tactics"] = tactics.get(alert["rule_id"], [])
+    return alerts
+
+
+def _incident_values(summary):
+    return (summary["title"], summary["severity"], summary["first_seen"], summary["last_seen"],
+            json.dumps(summary["entities"], sort_keys=True), json.dumps(summary["stages"]),
+            summary["alert_count"], summary["synthetic"])
+
+
+def correlate_alerts(conn, window_seconds=correlate_mod.DEFAULT_WINDOW_SECONDS):
+    """Group related alerts into incidents and persist them. Safe to rerun: nothing changes twice."""
+    result = {"incidents_created": 0, "incidents_updated": 0}
+    with transaction(conn):
+        alerts = _candidate_alerts(conn)
+        now = now_iso()
+        for group in correlate_mod.correlate(list(alerts.values()), window_seconds):
+            members = [alerts[i] for i in group["alert_ids"]]
+            incident_id = group["incident_id"]
+            if incident_id is None and not correlate_mod.should_open(members):
+                continue
+            values = _incident_values(correlate_mod.summarize(members))
+            if incident_id is None:
+                incident_id = conn.execute(
+                    "INSERT INTO incidents(title, severity, first_seen, last_seen, entities, stages, alert_count,"
+                    " synthetic, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,'open',?,?)",
+                    (*values, now, now)).lastrowid
+                result["incidents_created"] += 1
+            else:
+                current = conn.execute(
+                    "SELECT title, severity, first_seen, last_seen, entities, stages, alert_count, synthetic"
+                    " FROM incidents WHERE id = ?", (incident_id,)).fetchone()
+                if tuple(current) != values:
+                    conn.execute(
+                        "UPDATE incidents SET title = ?, severity = ?, first_seen = ?, last_seen = ?, entities = ?,"
+                        " stages = ?, alert_count = ?, synthetic = ?, updated_at = ? WHERE id = ?",
+                        (*values, now, incident_id))
+                    result["incidents_updated"] += 1
+            new = group["alert_ids"] if group["incident_id"] is None else group["new_alert_ids"]
+            conn.executemany("INSERT OR IGNORE INTO incident_alerts(alert_id, incident_id, added_at) VALUES (?,?,?)",
+                             [(i, incident_id, now) for i in new])
+    return result
 
 
 # --- Live stream (SSE) ------------------------------------------------------------

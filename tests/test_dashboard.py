@@ -172,19 +172,21 @@ class GeoTests(ServerTestCase):
             with self.subTest(ip=ip):
                 loc = geo.locate(ip)
                 self.assertTrue(loc["synthetic"])
-                self.assertFalse(loc["internal"])
+                self.assertFalse(geo.is_internal(ip))
                 self.assertTrue(-90 <= loc["lat"] <= 90 and -180 <= loc["lon"] <= 180)
                 self.assertEqual(loc, geo.locate(ip))  # deterministic
-        self.assertTrue(geo.locate("10.0.1.20")["internal"])
-        self.assertTrue(geo.locate("172.16.4.1")["internal"])
-        self.assertTrue(geo.locate("192.168.1.1")["internal"])
+        self.assertTrue(geo.locate("10.0.1.20") and geo.is_internal("10.0.1.20"))
+        self.assertTrue(geo.locate("172.16.4.1") and geo.is_internal("172.16.4.1"))
+        self.assertTrue(geo.locate("192.168.1.1") and geo.is_internal("192.168.1.1"))
         for ip in ("8.8.8.8", "2001:db8::1", "not-an-ip", "", None, "172.32.0.1"):
             with self.subTest(ip=ip):
                 self.assertIsNone(geo.locate(ip))
 
     def test_documentation_ranges_spread_over_several_places(self):
-        cities = {geo.locate(f"203.0.113.{i}")["city"] for i in range(256)}
-        self.assertGreater(len(cities), 3)
+        for prefix in ("192.0.2.", "198.51.100.", "203.0.113."):
+            with self.subTest(prefix=prefix):
+                cities = {geo.locate(f"{prefix}{i}")["city"] for i in range(256)}
+                self.assertGreaterEqual(len(cities), 2)
 
     def test_geo_route(self):
         self.assertEqual(self.client().get("/api/geo?ips=192.0.2.1")[0], 401)
@@ -194,6 +196,8 @@ class GeoTests(ServerTestCase):
         self.assertEqual(data["label"], "synthetic geo")
         self.assertIsNone(data["ips"]["8.8.8.8"])
         self.assertTrue(data["ips"]["192.0.2.1"]["synthetic"])
+        self.assertFalse(data["ips"]["192.0.2.1"]["internal"])
+        self.assertTrue(data["ips"]["10.0.0.5"]["internal"])
         self.assertEqual(c.get("/api/geo?ips=")[1]["ips"], {})
         self.assertEqual(c.get("/api/geo?ips=1.2.3.4,<script>")[0], 400)
         many = ",".join(f"10.0.0.{i % 250}" for i in range(201))

@@ -355,3 +355,7 @@ dialog::backdrop { background: rgb(0 0 0 / .6); }
   #p-map { height: 240px; } .map-side { display: none; }
   .board { grid-template-columns: 1fr; }
 }
+
+/* ATT&CK technique and kill-chain stage chips (alert, rule, and incident detail views) */
+.pill.technique { color: #9fb6ff; border-color: rgb(159 182 255 / .45); background: rgb(159 182 255 / .07); white-space: normal; text-transform: none; }
+.pill.stage { color: var(--high); border-color: rgb(255 138 48 / .45); background: rgb(255 138 48 / .07); text-transform: none; }
