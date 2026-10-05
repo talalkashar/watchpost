@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -236,6 +236,21 @@ CREATE TABLE IF NOT EXISTS incident_alerts (
     added_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_incident_alerts_incident ON incident_alerts(incident_id);
+
+CREATE TABLE IF NOT EXISTS assets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    kind TEXT NOT NULL,
+    criticality TEXT NOT NULL,
+    data_tags TEXT NOT NULL,
+    addresses TEXT NOT NULL,
+    owner TEXT,
+    description TEXT,
+    synthetic INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    updated_by TEXT NOT NULL
+);
 """
 
 # Columns added after 1.0. Existing databases gain them in place on startup.
@@ -244,6 +259,10 @@ ADDED_COLUMNS = [
     ("events", "dest_port", "INTEGER"),
     ("events", "bytes", "INTEGER"),
     ("detection_runs", "correlation", "TEXT"),
+    # Asset weighting: the rule's severity, the matched assets (JSON), and why the severity changed.
+    ("alerts", "base_severity", "TEXT"),
+    ("alerts", "assets", "TEXT"),
+    ("alerts", "severity_note", "TEXT"),
 ]
 
 

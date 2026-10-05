@@ -2,6 +2,8 @@
 
 from datetime import timedelta
 
+import json
+
 from .db import iso, now_iso, parse_iso, row_to_dict, transaction, utcnow
 from .normalize import EVENT_TYPES, SEVERITIES, EventError, parse_timestamp
 
@@ -129,14 +131,21 @@ def list_alerts(conn, params):
              "WHEN 'low' THEN 3 ELSE 4 END, last_seen DESC")
     rows = conn.execute(f"SELECT * FROM alerts{clause} ORDER BY status = 'resolved', {order} LIMIT ?",
                         args + [limit])
-    return [dict(r) for r in rows]
+    return [alert_row(r) for r in rows]
+
+
+def alert_row(row):
+    """An alert with its matched assets decoded (alerts created before asset modeling have none)."""
+    alert = dict(row)
+    alert["assets"] = json.loads(alert["assets"]) if alert.get("assets") else []
+    return alert
 
 
 def get_alert(conn, alert_id):
     alert = conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone()
     if alert is None:
         raise QueryError("alert not found", 404)
-    alert = dict(alert)
+    alert = alert_row(alert)
     alert["rule"] = row_to_dict(conn.execute("SELECT id, name, description, version, techniques FROM rules"
                                              " WHERE id = ?", (alert["rule_id"],)).fetchone(), ["techniques"])
     alert["evidence"] = [dict(r) for r in conn.execute(

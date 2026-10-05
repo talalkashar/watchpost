@@ -134,11 +134,11 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 |---|---|---|
 | `GET /api/events/{id}` | viewer | Includes the redacted `raw` record and linked alerts |
 | `GET /api/alerts?status=open,investigating&severity=&rule_id=&limit=` | viewer | Sorted by active first, then severity, then recency |
-| `GET /api/alerts/{id}` | viewer | Adds `rule`, `evidence`, `timeline` (events involving the same IPs or users, ±30 min), `notes`, `activity` |
+| `GET /api/alerts/{id}` | viewer | Adds `rule`, `evidence`, `timeline` (events involving the same IPs or users, ±30 min), `notes`, `activity`. Every alert also carries `base_severity` (the rule's), `assets` (matched inventory entries, see [Asset inventory](#asset-inventory)), and `severity_note` |
 | `POST /api/alerts/{id}/notes` | analyst | `{body}` (≤ 5000 chars) |
 | `POST /api/alerts/{id}/status` | analyst | `{status: open\|investigating\|resolved, disposition?, note?}`. `resolved` requires `disposition` (`true_positive`, `false_positive`, or `benign`); reopening clears it |
 | `GET /api/incidents?status=open,investigating&severity=&limit=` | viewer | Correlated incidents: `title`, `severity`, `status`, `first_seen`, `last_seen`, `entities` (`{src_ip, user, host}` lists), `stages` (ATT&CK tactics in kill-chain order), `alert_count`, `synthetic`. Active first, then severity, then recency |
-| `GET /api/incidents/{id}` | viewer | Adds `alerts` (each with `techniques`), `events` (evidence, each with `alert_ids`), `timeline` (one entry per alert with tactics and technique ids), `techniques`, `techniques_by_tactic`, `escalated`. 404 if missing |
+| `GET /api/incidents/{id}` | viewer | Adds `alerts` (each with `techniques`), `events` (evidence, each with `alert_ids`), `timeline` (one entry per alert with tactics and technique ids), `techniques`, `techniques_by_tactic`, `escalated`, `assets` (inventory entries behind the incident's hosts and addresses). 404 if missing |
 | `POST /api/incidents/{id}/status` | analyst | `{status: open\|investigating\|resolved, note?}`; audited as `incident_status_changed` |
 | `GET /api/attack/coverage` | viewer | `{tactics, techniques: [{id, name, tactic, rules: [{id, name, enabled}], hits, covered}], summary}` over the built-in ATT&CK subset; `hits` counts alerts from the covering rules |
 | `GET /api/metrics?hours=24` | viewer | Counts, severity/rule breakdowns, MTTR, top failing IPs/users, and a 24-hour histogram ending at the newest event |
@@ -157,7 +157,8 @@ viewers included (since 2.0 / F; before that, analyst and admin only). Each down
 | `GET /api/incidents/{id}/report.pdf` | viewer | The same report as PDF 1.4 |
 
 Both formats carry the same sections: header (id, severity, status, first/last seen, generation time), summary,
-kill-chain stages (incidents only), entities (IPs, accounts, hosts), MITRE ATT&CK techniques grouped
+kill-chain stages (incidents only), entities (IPs, accounts, hosts), assets (inventory entries with criticality and
+sensitive-data tags; each alert also shows its asset weighting when it changed the severity), MITRE ATT&CK techniques grouped
 by tactic, a merged timeline (evidence events marked), each alert with its explanation and up to 25 evidence events,
 analyst notes, and recommended actions keyed by technique (generic actions when no technique is mapped).
 Reports built from synthetic data open with a "SYNTHETIC DATA" banner and repeat it in the PDF page footer.
@@ -169,6 +170,36 @@ come from the member alerts' rule metadata, grouped by tactic in kill-chain orde
 to it. Incidents that span three or more tactics are marked escalated.
 
 Errors are JSON: unknown alert → 404 `alert not found`; unknown incident → 404 `incident not found`.
+
+## Asset inventory
+
+Assets give hosts a weight of importance and tag the systems that process sensitive data. Detection matches each
+alert's evidence events to the inventory by `host` name (case-insensitive) and by `dest_ip`/`src_ip` against an
+asset's `addresses`, then raises the alert's severity:
+
+| Matched asset | Levels added |
+|---|---|
+| criticality `high` | +1 |
+| criticality `critical` | +2 |
+| any sensitive-data tag (`pii`, `pci`, `phi`, `credentials`, `financial`, `confidential`) | +1 |
+
+The total is capped at two levels and never passes `critical`. The rule's own severity is kept in the alert's
+`base_severity`, the matched assets in `assets`, and the reason in `severity_note`; a `severity_changed` entry is
+written to the alert's activity. Incident severity follows the weighted alert severities, so one alert on a critical
+asset is enough to open an incident. Changing the inventory re-weighs every unresolved alert at once and refreshes
+incident severities; resolved alerts keep the severity they were closed with. **Admin → Load synthetic demo data**
+seeds a fictional inventory (marked `synthetic`) for the demo hosts; existing names are never overwritten.
+
+| Endpoint | Role | Notes |
+|---|---|---|
+| `GET /api/assets` | viewer | `{assets: [...], criticalities, kinds, data_tags: {tag: description}}`, most critical first |
+| `POST /api/assets` | admin | `{name, kind?, criticality?, data_tags?, addresses?, owner?, description?}` → 201 `{asset, alerts_rescored}`. `name` is unique ignoring case (409 on a clash); `data_tags` and `addresses` accept a list or a comma-separated string. Audited as `asset_created` |
+| `POST /api/assets/{id}` | admin | Same body; replaces the asset. Audited as `asset_updated` |
+| `POST /api/assets/{id}/delete` | admin | → `{ok, alerts_rescored}`. Audited as `asset_deleted` |
+
+Asset fields: `id`, `name`, `kind` (`server`, `workstation`, `network`, `cloud`, `database`, `other`), `criticality`
+(`low`, `medium`, `high`, `critical`), `data_tags`, `addresses`, `owner`, `description`, `synthetic`, `created_at`,
+`updated_at`, `updated_by`.
 
 ## Rules, feedback, and reviewed changes
 
