@@ -202,7 +202,7 @@ class TechniqueMappingTests(unittest.TestCase):
     def test_lookback_covers_escalation_and_history(self):
         active = [{"params": rules.validate_params(r["id"], {})} for r in rules.DEFAULT_RULES]
         self.assertGreaterEqual(rules.lookback_seconds(active), 600 + 1800)
-        self.assertEqual(rules.history_seconds(active), 86400)
+        self.assertEqual(rules.history_seconds(active), 604800)  # data_exfil_volume baseline
 
 
 class ValidationTests(unittest.TestCase):
@@ -239,7 +239,8 @@ class EvaluationTests(unittest.TestCase):
                 self.assertEqual(r["recall"], 1.0)
         # The internal scanner is a deliberate false-positive source for the feedback demo.
         self.assertIn("noisy_scanner", result["brute_force_ip"]["false_positives"])
-        self.assertEqual(result["password_spray"]["fp"], 0)
+        # 3.0 look-alike: a branch NAT after a password-expiry day is the spray rule's only noise.
+        self.assertEqual(result["password_spray"]["false_positives"], ["password_expiry_nat"])
 
     def test_allowlisting_scanner_removes_false_positive(self):
         defaults = {r["id"]: r["params"] for r in rules.DEFAULT_RULES}

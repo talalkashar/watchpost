@@ -251,6 +251,18 @@ CREATE TABLE IF NOT EXISTS assets (
     updated_at TEXT NOT NULL,
     updated_by TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS suppressions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id TEXT NOT NULL,
+    group_key TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    proposed_by TEXT NOT NULL,
+    approved_by TEXT NOT NULL,
+    change_request_id INTEGER,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_suppressions_rule ON suppressions(rule_id, group_key);
 """
 
 # Columns added after 1.0. Existing databases gain them in place on startup.
@@ -263,6 +275,7 @@ ADDED_COLUMNS = [
     ("alerts", "base_severity", "TEXT"),
     ("alerts", "assets", "TEXT"),
     ("alerts", "severity_note", "TEXT"),
+    ("detection_runs", "alerts_suppressed", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 

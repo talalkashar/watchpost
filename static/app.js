@@ -31,6 +31,12 @@ const status = (s) => pill(s, `st-${s}`);
 const synth = (flag) => (flag ? pill("synthetic", "synthetic") : null);
 const pct = (v) => (v === null || v === undefined ? "—" : `${Math.round(v * 100)}%`);
 const technique = (t) => el("span", { class: "pill technique", title: `${t.name} (${t.tactic})` }, `${t.id} ${t.name}`);
+// Entity pages (user, src_ip, host). Values can hold dots, colons, pipes, or slashes, so they are
+// always percent-encoded on the way into the hash and the API path.
+const ENTITY_KINDS = { user: "Account", src_ip: "Source IP", host: "Host" };
+const entityLink = (kind, value) => (value === null || value === undefined || value === "" ? "—"
+  : el("a", { href: `#entity/${kind}/${encodeURIComponent(value)}`, title: `${ENTITY_KINDS[kind]} risk and history` }, value));
+const entityLinks = (kind, list) => (list && list.length ? el("span", {}, list.flatMap((v, n) => [n ? ", " : null, entityLink(kind, v)])) : "—");
 const techniques = (list) => (list && list.length ? el("span", { class: "row" }, list.map(technique)) : "—");
 const assetChip = (a) => el("span", { class: `pill asset crit-${a.criticality}`,
   title: `${a.kind || "asset"} · ${a.criticality} criticality${a.data_tags?.length ? ` · sensitive data: ${a.data_tags.join(", ")}` : ""}` },
@@ -123,13 +129,14 @@ function go(view, id) { location.hash = id ? `${view}/${id}` : view; }
 
 function route() {
   if (!state.user) return;
-  const [view, id] = (location.hash.slice(1) || "dashboard").split("/");
+  const [view, id, ...rest] = (location.hash.slice(1) || "dashboard").split("/");
   state.view = view;
   document.body.dataset.view = view;
   document.querySelectorAll("#nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   if (view !== "dashboard") Dash.unmount();
   const views = { dashboard: socDashboard, incidents: () => (id ? incidentDetail(Number(id)) : incidentsView()),
-    alerts: () => (id ? alertDetail(Number(id)) : alerts()), events, overview, ingest, rules, health, admin };
+    alerts: () => (id ? alertDetail(Number(id)) : alerts()), events, overview, ingest, rules, noise: noiseLab, health, admin,
+    entity: () => entityDetail(id, decodeURIComponent(rest.join("/"))) };
   guarded(views[view] || socDashboard);
 }
 
@@ -195,6 +202,17 @@ async function overview() {
       el("div", { class: "card" }, el("h2", {}, "Most targeted accounts"), hbars(m.top_failure_users, "user")),
       el("div", { class: "card" }, el("h2", {}, "Analyst verdicts"), hbars(m.dispositions, "disposition")),
       el("div", { class: "card" }, el("h2", {}, "Events by type"), hbars(m.events_by_type, "event_type"))),
+    el("h2", {}, "SOC metrics"),
+    el("div", { class: "grid" },
+      el("div", { class: "card" }, el("h2", {}, "Time to resolve by severity"),
+        table(["Severity", "Resolved", "Mean", "Longest"], m.time_to_resolve_by_severity.map((r) => ({ cells: [sev(r.severity), { num: r.resolved }, { num: `${r.mean_minutes}m` }, { num: `${r.max_minutes}m` }] })))),
+      el("div", { class: "card" }, el("h2", {}, "False-positive rate by rule"),
+        table(["Rule", "Reviewed", "False positive", "Benign", "FP rate"], m.false_positive_rate_by_rule.map((r) => ({ cells: [el("code", {}, r.rule_id), { num: r.reviewed }, { num: r.false_positive }, { num: r.benign }, { num: pct(r.false_positive_rate) }] })))),
+      el("div", { class: "card" }, el("h2", {}, "Open-alert aging"), hbars(m.open_alert_aging.buckets, "label"),
+        el("p", { class: "muted" }, m.open_alert_aging.oldest_minutes === null ? "No open alerts." : `Oldest open alert has waited ${Math.round(m.open_alert_aging.oldest_minutes)} minutes.`))),
+    el("div", { class: "card" }, el("h2", {}, "Left out on purpose"),
+      el("p", { class: "muted" }, "The numbers above use the times this instance created and resolved each alert, and verdicts analysts recorded. These metrics are not shown because replayed synthetic timestamps would make them misleading:"),
+      el("ul", { class: "muted" }, m.omitted_metrics.map((o) => el("li", {}, el("code", {}, o.metric), `: ${o.reason}`)))),
   );
 }
 
@@ -266,11 +284,11 @@ async function alertDetail(id) {
           actions),
         el("div", { class: "card" }, el("h2", {}, `Evidence (${a.evidence.length} events)`),
           table(["Time", "Type", "User", "Source IP", "Host", "Message"],
-            a.evidence.map((e) => ({ cells: [fmtTime(e.ts), e.event_type, e.user ?? "—", el("code", {}, e.src_ip ?? "—"), e.host ?? "—", e.message ?? ""] })))),
+            a.evidence.map((e) => ({ cells: [fmtTime(e.ts), e.event_type, entityLink("user", e.user), el("code", {}, entityLink("src_ip", e.src_ip)), entityLink("host", e.host), e.message ?? ""] })))),
         el("div", { class: "card" }, el("h2", {}, "Related timeline"),
           el("p", { class: "muted" }, "Every event involving these IPs or accounts from 30 minutes before to 30 minutes after. Highlighted rows are evidence."),
           table(["Time", "Type", "User", "Source IP", "Source", "Message"],
-            a.timeline.map((e) => ({ cls: e.is_evidence ? "evidence" : "", cells: [fmtTime(e.ts), e.event_type, e.user ?? "—", el("code", {}, e.src_ip ?? "—"), e.source, e.message ?? ""] }))))),
+            a.timeline.map((e) => ({ cls: e.is_evidence ? "evidence" : "", cells: [fmtTime(e.ts), e.event_type, entityLink("user", e.user), el("code", {}, entityLink("src_ip", e.src_ip)), e.source, e.message ?? ""] }))))),
       el("div", {},
         el("div", { class: "card" }, el("h2", {}, "Details"), el("dl", { class: "kv" },
           ...[["Alert", `#${a.id}`], ["Group", a.group_key], ["First seen", fmtTime(a.first_seen)], ["Last seen", fmtTime(a.last_seen)],
@@ -318,18 +336,50 @@ async function incidentDetail(id) {
             (r) => go("alerts", r.id))),
         el("div", { class: "card" }, el("h2", {}, `Evidence (${i.events.length} events)`),
           table(["Time", "Type", "User", "Source IP", "Host", "Message"],
-            i.events.map((e) => ({ cells: [fmtTime(e.ts), e.event_type, e.user ?? "—", el("code", {}, e.src_ip ?? "—"), e.host ?? "—", e.message ?? ""] }))))),
+            i.events.map((e) => ({ cells: [fmtTime(e.ts), e.event_type, entityLink("user", e.user), el("code", {}, entityLink("src_ip", e.src_ip)), entityLink("host", e.host), e.message ?? ""] }))))),
       el("div", {},
         el("div", { class: "card" }, el("h2", {}, "Details"), el("dl", { class: "kv" },
           ...[["Incident", `#${i.id}`], ["First seen", fmtTime(i.first_seen)], ["Last seen", fmtTime(i.last_seen)],
-            ["Source IPs", i.entities.src_ip.join(", ") || "—"], ["Accounts", i.entities.user.join(", ") || "—"],
-            ["Hosts", i.entities.host.join(", ") || "—"], ["Assignee", i.assignee ?? "—"], ["Resolved", fmtTime(i.resolved_at)]]
+            ["Source IPs", entityLinks("src_ip", i.entities.src_ip)], ["Accounts", entityLinks("user", i.entities.user)],
+            ["Hosts", entityLinks("host", i.entities.host)], ["Assignee", i.assignee ?? "—"], ["Resolved", fmtTime(i.resolved_at)]]
             .flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]))),
         el("div", { class: "card" }, el("h2", {}, "Assets involved"),
           el("p", { class: "muted" }, "Inventoried systems reached by this incident. Alerts touching high or critical assets, or systems that process sensitive data, carry a raised severity."),
           assetChips(i.assets)),
         el("div", { class: "card" }, el("h2", {}, "MITRE ATT&CK"),
           i.techniques_by_tactic.map((g) => el("div", { class: "note" }, el("h3", {}, g.tactic), techniques(g.techniques)))))),
+  );
+}
+
+// ---------- entity page ----------
+async function entityDetail(kind, value) {
+  if (!Object.hasOwn(ENTITY_KINDS, kind)) throw new Error("Unknown entity kind");
+  const e = await api(`/api/entities/${kind}/${encodeURIComponent(value)}`);
+  const kpi = (v, l) => el("div", { class: "kpi" }, el("div", { class: "v" }, v ?? "—"), el("div", { class: "l" }, l));
+  const counted = e.contributions.filter((c) => c.counted);
+  const weights = Object.entries(e.severity_weights).map(([s, w]) => `${s} ${w}`).join(", ");
+  render(
+    el("p", {}, el("a", { href: "#dashboard" }, "← Dashboard")),
+    el("div", { class: "card" },
+      el("div", { class: "row" }, pill(ENTITY_KINDS[e.kind], "stage"), synth(e.synthetic)),
+      el("h1", { style: { marginTop: "8px" } }, e.value),
+      el("div", { class: "kpis" },
+        kpi(e.score, "Risk score"), kpi(counted.length, "Alerts counted"), kpi(e.incidents.length, "Incidents"),
+        kpi(e.event_count.toLocaleString(), "Events"), kpi(fmtTime(e.first_seen), "First seen"), kpi(fmtTime(e.last_seen), "Last seen"))),
+    el("div", { class: "card" }, el("h2", {}, "Why this score"),
+      el("p", { class: "muted" }, `Each alert whose evidence includes this ${ENTITY_KINDS[e.kind].toLowerCase()} adds its severity weight (${weights}), halved for every ${e.half_life_hours} hours between the alert and the newest event in the data (${fmtTime(e.anchor)}). Alerts closed as ${e.excluded_dispositions.map((d) => d.replace("_", " ")).join(" or ")} add nothing. The weights below sum to the score.`),
+      table(["Alert", "Severity", "Status", "Last seen", "Base weight", "Age (h)", "Decay", "Weight"],
+        e.contributions.map((c) => ({ id: c.alert_id, cells: [`#${c.alert_id} ${c.title}`, sev(c.severity),
+          el("span", {}, status(c.status), c.disposition ? ` ${c.disposition.replace("_", " ")}` : ""), fmtTime(c.last_seen),
+          { num: c.base_weight }, { num: c.age_hours }, { num: c.decay }, { num: c.counted ? c.weight : "not counted" }] })),
+        (r) => go("alerts", r.id))),
+    el("div", { class: "card" }, el("h2", {}, `Incidents (${e.incidents.length})`),
+      table(["Severity", "Incident", "Alerts", "Status", "Last seen", ""],
+        e.incidents.map((i) => ({ id: i.id, cells: [sev(i.severity), i.title, { num: i.alert_count }, status(i.status), fmtTime(i.last_seen), synth(i.synthetic)] })),
+        (r) => go("incidents", r.id))),
+    el("div", { class: "card" }, el("h2", {}, `Recent events (latest ${e.recent_events.length} of ${e.event_count.toLocaleString()})`),
+      table(["Time", "Severity", "Type", "User", "Source IP", "Host", "Source", "Message"],
+        e.recent_events.map((x) => ({ cells: [fmtTime(x.ts), sev(x.severity), x.event_type, entityLink("user", x.user), el("code", {}, entityLink("src_ip", x.src_ip)), entityLink("host", x.host), el("span", {}, x.source, " ", synth(x.synthetic)), x.message ?? ""] })))),
   );
 }
 
@@ -491,7 +541,7 @@ function ingestSummary(r) {
 
 // ---------- rules ----------
 async function rules() {
-  const [list, changes, settings, evals] = await Promise.all([api("/api/rules"), api("/api/changes"), api("/api/settings"), api("/api/evaluations")]);
+  const [list, changes, settings, evals, exceptions] = await Promise.all([api("/api/rules"), api("/api/changes"), api("/api/settings"), api("/api/evaluations"), api("/api/suppressions")]);
   const pending = changes.filter((c) => c.status === "pending");
   const ruleCards = list.map((r) => {
     const p = r.performance || {};
@@ -512,11 +562,12 @@ async function rules() {
             .flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)])) : el("p", { class: "muted" }, "Not evaluated yet — use 'Run evaluation'."))),
       el("div", { class: "row" },
         can("analyst") ? el("button", { class: "ghost", onclick: () => proposeDialog(r) }, "Propose change…") : null,
+        can("analyst") ? el("button", { class: "ghost", onclick: () => exceptionDialog(r) }, "Propose exception…") : null,
         el("button", { class: "ghost", onclick: () => guarded(() => historyDialog(r)) }, "History")));
   });
 
   const changeRows = changes.slice(0, 30).map((c) => ({ cells: [
-    `#${c.id}`, status(c.status), el("code", {}, `${c.kind === "rule_update" ? "rule" : "setting"}:${c.target}`),
+    `#${c.id}`, status(c.status), el("code", {}, `${{ rule_update: "rule", suppression_add: "exception" }[c.kind] || "setting"}:${c.target}`),
     el("pre", {}, JSON.stringify(c.payload)), c.reason,
     c.evaluation ? `FP ${c.evaluation.before.fp}→${c.evaluation.after.fp}, TP ${c.evaluation.before.tp}→${c.evaluation.after.tp}, missed ${c.evaluation.after.missed.join(", ") || "none"}` : "—",
     c.proposed_by, c.reviewed_by ? `${c.reviewed_by}${c.review_note ? `: ${c.review_note}` : ""}` : "—",
@@ -537,6 +588,11 @@ async function rules() {
         el("span", { class: "muted" }, evals[0] ? `Last evaluation ${fmtTime(evals[0].created_at)} (${evals[0].trigger})` : "No evaluations yet"))),
     el("div", { class: "card" }, el("h2", {}, `Change requests (${pending.length} pending)`),
       table(["ID", "Status", "Target", "Change", "Reason", "Scenario impact (before→after)", "Proposed by", "Reviewed", ""], changeRows)),
+    el("div", { class: "card" }, el("h2", {}, `Tuning exceptions (${exceptions.filter((x) => x.active).length} active)`),
+      el("p", { class: "muted" }, "An exception skips findings of one rule for one group key until it expires. The rule itself is not edited. An analyst proposes it, a different admin approves it, and each detection run counts what it skipped. One rule differs: for data_exfil_volume nothing is skipped. The exception turns on a baseline for that principal, which then alerts only when a burst is baseline_multiplier times its own recent normal or more."),
+      table(["Rule", "Group key", "Reason", "Expires", "Proposed by", "Approved by", "Change", ""], exceptions.map((x) => ({ cells: [
+        el("code", {}, x.rule_id), el("code", {}, x.group_key), x.reason, fmtTime(x.expires_at), x.proposed_by, x.approved_by,
+        x.change_request_id ? `#${x.change_request_id}` : "—", x.active ? pill("active", "st-ok") : pill("expired", "st-rejected")] })))),
     ...ruleCards,
     el("div", { class: "card" }, el("h2", {}, "Security settings"),
       table(["Setting", "Value", "Allowed", "Last changed", ""], settings.map((s) => ({ cells: [
@@ -582,6 +638,27 @@ function proposeDialog(rule) {
   $("#modal").showModal();
 }
 
+function exceptionDialog(rule) {
+  const form = el("form", {},
+    el("h2", {}, `Propose exception: ${rule.id}`),
+    el("p", { class: "muted" }, "Findings of this rule with exactly this group key are skipped until the exception expires. Copy the group key from an alert of this rule. Use it for known, authorized activity such as the internal scanner 10.0.50.5. For data_exfil_volume the principal is not skipped: the exception makes the rule compare it with its own history, so it still alerts on a burst several times its normal."),
+    el("label", {}, "Group key", el("input", { name: "group_key", class: "mono", required: true, maxlength: 256 })),
+    el("label", {}, "Expires after (days, 1–90)", el("input", { name: "days", type: "number", min: 1, max: 90, value: 30, required: true })),
+    el("label", {}, "Reason (required)", el("textarea", { name: "reason", required: true, minlength: 5, maxlength: 2000 })),
+    el("p", { class: "error", id: "exception-error" }),
+    el("div", { class: "row" }, el("button", { type: "submit" }, "Submit for review"), el("button", { type: "button", class: "ghost", onclick: () => $("#modal").close() }, "Cancel")));
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const f = new FormData(form);
+    try {
+      await api(`/api/rules/${rule.id}/suppressions`, { method: "POST", body: { group_key: f.get("group_key").trim(), days: Number(f.get("days")), reason: f.get("reason") } });
+      $("#modal").close(); toast("Exception submitted; an admin must approve it"); rules();
+    } catch (e) { $("#exception-error").textContent = e.message; }
+  });
+  $("#modal-body").replaceChildren(form);
+  $("#modal").showModal();
+}
+
 function settingDialog(s) {
   const form = el("form", {},
     el("h2", {}, `Propose: ${s.key}`), el("p", { class: "muted" }, s.description),
@@ -610,6 +687,32 @@ async function historyDialog(rule) {
   $("#modal").showModal();
 }
 
+// ---------- noise lab ----------
+const VERDICT_CLASS = { quiet: "st-ok", noisy: "st-degraded", blind: "st-failing", disabled: "st-rejected", untested: "st-rejected" };
+
+async function noiseLab() {
+  const lab = await api("/api/noise-lab");
+  const names = (list) => (list.length ? list.join(", ") : "none");
+  const rows = lab.rules.map((r) => ({ cells: [
+    el("span", {}, r.name, el("div", { class: "muted" }, el("code", {}, r.rule_id))),
+    pct(r.recall), pct(r.precision), names(r.lookalikes_tested),
+    names(r.lookalikes_fired.concat(r.other_benign_fired)),
+    { num: r.suppressed }, pill(r.verdict, VERDICT_CLASS[r.verdict] || "st-rejected"), r.summary] }));
+  const lookalikes = lab.scenarios.filter((s) => s.lookalike_of);
+  render(
+    el("h1", {}, "Noise lab"),
+    el("div", { class: "card" },
+      el("h2", {}, "Where the rules get noisy"),
+      el("p", {}, `Every rule runs against every labeled synthetic scenario, each in isolation: the attacks it should catch and ${lab.summary.lookalikes} benign look-alikes written to resemble them. ${lab.summary.noisy} of ${lab.summary.rules} rules fire on benign activity. That is shown here, not tuned away: a rule is only changed when there is a principled fix that keeps its attack detected.`),
+      el("p", { class: "muted" }, "Recall is attacks caught out of attacks labeled. Precision is true detections out of everything the rule fired on, counted on these scenarios only: it says nothing about real traffic. Results use the current rule parameters and approved tuning exceptions (seed ", lab.seed, "). data_exfil_volume uses flat thresholds, so the nightly backup fires here until a tuning exception for the backup server is approved; only then is that one principal compared with its own history.")),
+    el("div", { class: "card" }, el("h2", {}, "Rules against their look-alikes"),
+      table(["Rule", "Recall", "Precision", "Look-alikes tested", "Benign scenarios that fired", "Excepted", "Verdict", "Reading"], rows)),
+    el("div", { class: "card" }, el("h2", {}, "The benign look-alikes"),
+      table(["Scenario", "Written for", "What happens"], lookalikes.map((s) => ({ cells: [
+        el("span", {}, el("code", {}, s.name), " ", synth(true)), el("code", {}, s.lookalike_of), s.description] })))),
+  );
+}
+
 // ---------- health ----------
 async function health() {
   const h = await api("/api/health/details");
@@ -630,9 +733,9 @@ async function health() {
     el("div", { class: "card" }, el("h2", {}, "Recent errors (redacted)"),
       table(["When", "Component", "Error", "Guidance"], h.recent_errors.map((e) => ({ cells: [fmtTime(e.created_at), e.component, el("code", {}, e.message), e.guidance ?? ""] })))),
     el("div", { class: "card" }, el("h2", {}, "Recent detection runs"),
-      table(["#", "Started", "Trigger", "Status", "Scanned", "Created", "Updated", "Error"], h.recent_detection_runs.map((r) => ({ cells: [
+      table(["#", "Started", "Trigger", "Status", "Scanned", "Created", "Updated", "Suppressed", "Error"], h.recent_detection_runs.map((r) => ({ cells: [
         r.id, fmtTime(r.started_at), r.trigger, pill(r.status, r.status === "ok" ? "st-ok" : r.status === "failed" ? "st-failing" : "st-degraded"),
-        { num: r.events_scanned }, { num: r.alerts_created }, { num: r.alerts_updated }, r.error ?? ""] })))),
+        { num: r.events_scanned }, { num: r.alerts_created }, { num: r.alerts_updated }, { num: r.alerts_suppressed ?? 0 }, r.error ?? ""] })))),
   );
 }
 

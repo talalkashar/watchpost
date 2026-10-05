@@ -4,7 +4,7 @@
 // client polls every 3 seconds and retries the stream every 30. Routes that other
 // workstreams add (/api/incidents, /api/attack/coverage, /api/storyline/status) are
 // optional: a 404 renders a "pending" panel and the rest keeps working.
-// Uses el(), api(), can(), go(), render(), fmtTime() from app.js (loaded after this file,
+// Uses el(), api(), can(), go(), render(), fmtTime(), entityLink() from app.js (loaded after this file,
 // called only at runtime).
 
 const SEV_ORDER = ["critical", "high", "medium", "low", "info"];
@@ -337,6 +337,7 @@ const Dash = {
       panel("p-board", "Incident board", [el("span", { id: "board-meta" })], el("div", { class: "board", id: "board" })),
       panel("p-rules", "Top rules", [el("span", { class: "muted" }, "alerts all time")], el("div", { class: "chartbox", id: "rules-chart" })),
       panel("p-health", "Health", [el("a", { href: "#health", class: "muted" }, "details →")], el("div", { id: "health-body" })),
+      panel("p-entities", "Riskiest entities", [el("span", { class: "muted" }, "alert weight, decayed by age")], el("div", { id: "ent-list" })),
     ));
     this.timers.drip = setInterval(() => this.drip(), 110);
     this.timers.details = setInterval(() => this.loadHealthDetails(), 30000);
@@ -373,7 +374,7 @@ const Dash = {
   },
   redraw() {
     if (!this.mounted || !this.data) return;
-    this.renderMap(); this.renderTimeline(); this.renderAttackers(); this.renderRules(); this.renderMatrix(); this.renderBoard(); this.renderHealth();
+    this.renderMap(); this.renderTimeline(); this.renderAttackers(); this.renderRules(); this.renderEntities(); this.renderMatrix(); this.renderBoard(); this.renderHealth();
   },
   width(id, fallback = 300) { const n = $(id); return n ? Math.max(120, n.clientWidth) : fallback; },
 
@@ -572,6 +573,15 @@ const Dash = {
     const rows = this.data.top_rules.map((r) => ({ label: r.name || r.rule_id, sub: `${r.rule_id} · ${r.open} open`, value: r.alerts, cls: sevOf(r.severity) }));
     if (!rows.length) { box.replaceChildren(el("p", { class: "empty-note" }, "No rule has fired yet.")); return; }
     mountSvg(box, WPCharts.hbars(rows.slice(0, 7), { w: this.width("#rules-chart"), rowH: 25, labelW: 150, label: "alerts by rule" }));
+  },
+  renderEntities() {
+    const box = $("#ent-list");
+    if (!box) return;
+    const rows = this.data.risky_entities || [];
+    if (!rows.length) { box.replaceChildren(el("p", { class: "empty-note" }, "No entity has a counted alert yet.")); return; }
+    box.replaceChildren(...rows.map((r) => el("div", { class: "erow", title: `${r.alerts} counted alert(s), ${r.open_alerts} open` },
+      sevTag(r.max_severity), el("span", { class: "tag" }, ENTITY_KINDS[r.kind] || r.kind), entityLink(r.kind, r.value),
+      el("b", {}, r.score))));
   },
 
   // --- ATT&CK matrix ---
