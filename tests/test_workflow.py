@@ -6,10 +6,12 @@ import sqlite3
 import stat
 import unittest
 
+from datetime import timedelta
+
 from tests.helpers import ServerTestCase
 from watchpost.config import Config
 from watchpost.health import run_health_checks
-from watchpost.db import connect
+from watchpost.db import connect, iso, utcnow
 
 
 class EndToEndTests(ServerTestCase):
@@ -382,6 +384,74 @@ class ChangeEvidenceTests(ServerTestCase):
                                           {"params": {"ignore_ips": []}, "reason": "stop ignoring it"})
         self.assertEqual((status, removal["evaluation"]["ignore_additions"]), (201, []))
         self.assertEqual(self.approve(admin, removal)[0], 200)
+
+    def confirmed(self, analyst, scenario, rule):
+        """Replay a scenario and close the rule's alert as a true positive. Returns the alert."""
+        analyst.post("/api/demo/simulate", {"scenario": scenario})
+        alert = analyst.get(f"/api/alerts?rule_id={rule}&status=open")[1][0]
+        analyst.post(f"/api/alerts/{alert['id']}/status", {"status": "resolved", "disposition": "true_positive"})
+        return alert
+
+    def propose(self, client, rule, **params):
+        return client.post(f"/api/rules/{rule}/proposals", {"params": params, "reason": "gate check"})
+
+    def test_the_gate_reads_a_sanctioned_service_entry_the_way_the_rule_does(self):
+        analyst = self.client("analyst")
+        self.confirmed(analyst, "shadow_it", "unsanctioned_cloud_service")
+        base = ["amazonaws.com", "corp-drive.example"]
+        # The rule strips leading dots, lowercases, and honours a parent domain; so must the refusal.
+        for entry in ("personal-drive.example", ".personal-drive.example", "..Personal-Drive.EXAMPLE", "example"):
+            with self.subTest(entry=entry):
+                status, data, _ = self.propose(analyst, "unsanctioned_cloud_service", sanctioned_services=base + [entry])
+                self.assertEqual(status, 400, data)
+                self.assertIn("true positive", data["error"])
+        # The rule gives % and _ no special meaning, and neither does the gate.
+        for entry in ("personal-drive.exampl_", "%", "drive.example"):
+            with self.subTest(entry=entry):
+                status, change, _ = self.propose(analyst, "unsanctioned_cloud_service", sanctioned_services=base + [entry])
+                self.assertEqual(status, 201, change)
+                self.assertEqual([(x["value"], x["live_impact"]["alerts"]) for x in change["evaluation"]["ignore_additions"]],
+                                 [(entry, 0)])
+        # An entry that is only a respelling of one already on the list adds nothing.
+        change = self.propose(analyst, "unsanctioned_cloud_service", sanctioned_services=base + [".CORP-drive.example"])[1]
+        self.assertEqual(change["evaluation"]["ignore_additions"], [])
+
+    def test_the_gate_folds_user_names_the_way_the_rule_does(self):
+        analyst = self.client("analyst")
+        now = iso(utcnow() - timedelta(minutes=5))
+        status, data, _ = analyst.post("/api/ingest", {"source": "auth01", "events": [
+            {"ts": now, "type": "login_failed", "user": "\u00c1dmin", "src_ip": "198.51.100.77"} for _ in range(12)]})
+        self.assertEqual(status, 201, data)
+        alert = analyst.get("/api/alerts?rule_id=brute_force_ip&status=open")[1][0]
+        analyst.post(f"/api/alerts/{alert['id']}/status", {"status": "resolved", "disposition": "true_positive"})
+        # Python lowercases the non-ASCII capital, so the rule would skip these events for either spelling.
+        for names in (["\u00e1dmin"], ["\u00c1DMIN"], ["someone", "\u00e1dmin", "\u00c1dmin"]):
+            with self.subTest(names=names):
+                status, data, _ = self.propose(analyst, "brute_force_ip", ignore_users=names)
+                self.assertEqual(status, 400, data)
+                self.assertIn("true positive", data["error"])
+        # Spellings that fold to one name are one addition, not two.
+        change = self.propose(analyst, "brute_force_ip", ignore_users=["Bob", "bob", "BOB"])[1]
+        self.assertEqual([(x["param"], x["value"]) for x in change["evaluation"]["ignore_additions"]],
+                         [("ignore_users", "Bob")])
+
+    def test_removing_a_privileged_user_is_gated_like_ignoring_them(self):
+        analyst, admin = self.client("analyst"), self.client("admin")
+        # Narrowing the list while root has no confirmed history is allowed, and the impact is in the evidence.
+        analyst.post("/api/demo/simulate", {"scenario": "off_hours_admin"})
+        alert = analyst.get("/api/alerts?rule_id=off_hours_privileged_login&status=open")[1][0]
+        pending = self.propose(analyst, "off_hours_privileged_login", privileged_users=["admin", "administrator"])[1]
+        self.assertEqual([(x["param"], x["change"], x["value"], x["live_impact"]["alerts"])
+                          for x in pending["evaluation"]["ignore_additions"]], [("privileged_users", "removed", "root", 1)])
+        analyst.post(f"/api/alerts/{alert['id']}/status", {"status": "resolved", "disposition": "true_positive"})
+        status, data, _ = self.approve(admin, pending, acknowledge_detection_loss=True)
+        self.assertEqual(status, 400)
+        self.assertIn("true positive", data["error"])
+        self.assertEqual(self.propose(analyst, "off_hours_privileged_login", privileged_users=["admin"])[0], 400)
+        # Adding a user widens the rule, and a respelling removes nobody.
+        change = self.propose(analyst, "off_hours_privileged_login",
+                              privileged_users=["ROOT", "admin", "administrator", "dbadmin"])[1]
+        self.assertEqual(change["evaluation"]["ignore_additions"], [])
 
     def test_a_rule_change_that_loses_a_labeled_detection_needs_an_acknowledgement(self):
         analyst, admin = self.client("analyst"), self.client("admin")

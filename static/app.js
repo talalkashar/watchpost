@@ -582,7 +582,7 @@ async function rules() {
     `#${c.id}`, status(c.status), el("code", {}, `${{ rule_update: "rule", suppression_add: "exception" }[c.kind] || "setting"}:${c.target}`),
     el("pre", {}, JSON.stringify(c.payload)), c.reason,
     c.evaluation ? el("span", {}, `FP ${c.evaluation.before.fp}→${c.evaluation.after.fp}, TP ${c.evaluation.before.tp}→${c.evaluation.after.tp}, missed ${c.evaluation.after.missed.join(", ") || "none"}`, lostNote(c), liveImpact(c.evaluation.live_impact),
-      (c.evaluation.ignore_additions || []).map((x) => el("div", {}, el("strong", {}, `Adds ${x.value} to ${x.param} (permanent, no expiry).`), liveImpact(x.live_impact)))) : "—",
+      (c.evaluation.ignore_additions || []).map((x) => el("div", {}, el("strong", {}, `${x.change === "removed" ? "Removes" : "Adds"} ${x.value} ${x.change === "removed" ? "from" : "to"} ${x.param} (permanent, no expiry).`), liveImpact(x.live_impact)))) : "—",
     c.proposed_by, c.reviewed_by ? `${c.reviewed_by}${c.review_note ? `: ${c.review_note}` : ""}` : "—",
     c.status === "pending" && can("admin") ? el("span", { class: "row" },
       el("button", { disabled: c.proposed_by === state.user.username, title: c.proposed_by === state.user.username ? "A different admin must review your own proposal" : "", onclick: () => review(c, "approve") }, "Approve"),
