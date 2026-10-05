@@ -38,6 +38,10 @@ const entityLink = (kind, value) => (value === null || value === undefined || va
   : el("a", { href: `#entity/${kind}/${encodeURIComponent(value)}`, title: `${ENTITY_KINDS[kind]} risk and history` }, value));
 const entityLinks = (kind, list) => (list && list.length ? el("span", {}, list.flatMap((v, n) => [n ? ", " : null, entityLink(kind, v)])) : "—");
 const techniques = (list) => (list && list.length ? el("span", { class: "row" }, list.map(technique)) : "—");
+const assetChip = (a) => el("span", { class: `pill asset crit-${a.criticality}`,
+  title: `${a.kind || "asset"} · ${a.criticality} criticality${a.data_tags?.length ? ` · sensitive data: ${a.data_tags.join(", ")}` : ""}` },
+  `${a.name} · ${a.criticality}${a.data_tags?.length ? ` · ${a.data_tags.join(" ")}` : ""}`);
+const assetChips = (list) => (list && list.length ? el("span", { class: "row" }, list.map(assetChip)) : el("span", { class: "muted" }, "none inventoried"));
 
 function toast(msg) {
   const t = el("div", { class: "toast", role: "status" }, msg);
@@ -275,6 +279,8 @@ async function alertDetail(id) {
           el("div", { class: "explain" }, el("strong", {}, "Why this fired: "), a.explanation),
           el("p", { class: "muted" }, `Rule: ${a.rule?.name ?? a.rule_id} (v${a.rule_version}). ${a.rule?.description ?? ""}`),
           el("p", {}, el("strong", {}, "MITRE ATT&CK: "), techniques(a.rule?.techniques)),
+          el("p", {}, el("strong", {}, "Assets: "), assetChips(a.assets),
+            a.base_severity && a.base_severity !== a.severity ? el("span", { class: "muted" }, ` Rule severity ${a.base_severity}; ${a.severity_note}.`) : null),
           actions),
         el("div", { class: "card" }, el("h2", {}, `Evidence (${a.evidence.length} events)`),
           table(["Time", "Type", "User", "Source IP", "Host", "Message"],
@@ -337,6 +343,9 @@ async function incidentDetail(id) {
             ["Source IPs", entityLinks("src_ip", i.entities.src_ip)], ["Accounts", entityLinks("user", i.entities.user)],
             ["Hosts", entityLinks("host", i.entities.host)], ["Assignee", i.assignee ?? "—"], ["Resolved", fmtTime(i.resolved_at)]]
             .flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]))),
+        el("div", { class: "card" }, el("h2", {}, "Assets involved"),
+          el("p", { class: "muted" }, "Inventoried systems reached by this incident. Alerts touching high or critical assets, or systems that process sensitive data, carry a raised severity."),
+          assetChips(i.assets)),
         el("div", { class: "card" }, el("h2", {}, "MITRE ATT&CK"),
           i.techniques_by_tactic.map((g) => el("div", { class: "note" }, el("h3", {}, g.tactic), techniques(g.techniques)))))),
   );
@@ -732,7 +741,7 @@ async function health() {
 // ---------- admin ----------
 async function admin() {
   if (!can("admin")) return render(el("p", {}, "Admins only."));
-  const [tokens, audit] = await Promise.all([api("/api/tokens"), api("/api/audit")]);
+  const [tokens, audit, inventory] = await Promise.all([api("/api/tokens"), api("/api/audit"), api("/api/assets")]);
   const tokenOut = el("div");
   const tokenForm = el("form", { class: "row" },
     el("label", {}, "Token name", el("input", { name: "name", required: true, maxlength: 64, placeholder: "e.g. web01-forwarder" })),
@@ -761,6 +770,7 @@ async function admin() {
         refreshBanner();
       }) }, "Load synthetic demo data"), demoOut),
     storyCard(),
+    assetsCard(inventory),
     el("div", { class: "card" }, el("h2", {}, "API tokens (ingest only)"), tokenForm, tokenOut,
       table(["Name", "Prefix", "Created", "Last used", "Status", ""], tokens.map((t) => ({ cells: [t.name, el("code", {}, `${t.prefix}…`), `${fmtTime(t.created_at)} by ${t.created_by}`, fmtTime(t.last_used_at),
         t.revoked_at ? pill("revoked", "st-rejected") : pill("active", "st-ok"),
@@ -768,6 +778,57 @@ async function admin() {
     el("div", { class: "card" }, el("h2", {}, "Audit log"),
       table(["When", "Actor", "Action", "Target", "Detail"], audit.map((a) => ({ cells: [fmtTime(a.created_at), a.actor, a.action, a.target ?? "", el("code", {}, a.detail ?? "")] })))),
   );
+}
+
+// ---------- asset inventory ----------
+function assetsCard(inv) {
+  const remove = (a) => confirm(`Delete asset "${a.name}"? Open alerts will be re-weighed without it.`) && guarded(async () => {
+    const r = await api(`/api/assets/${a.id}/delete`, { method: "POST" });
+    toast(`Asset deleted; ${r.alerts_rescored} open alert(s) changed severity`);
+    admin();
+  });
+  return el("div", { class: "card" }, el("h2", {}, "Asset inventory"),
+    el("p", { class: "muted" }, "Give systems a weight of importance and tag the ones that process sensitive data. Alerts whose evidence touches a ",
+      el("strong", {}, "high"), " asset gain one severity level, a ", el("strong", {}, "critical"), " asset two, and any sensitive-data tag one more (capped at two, never past critical). The rule's own severity stays visible on the alert. Changing the inventory re-weighs open alerts at once."),
+    el("div", { class: "row" }, el("button", { onclick: () => assetDialog(inv) }, "Add asset")),
+    table(["Asset", "Kind", "Criticality", "Sensitive data", "Addresses", "Owner", "Updated", ""], inv.assets.map((a) => ({ cells: [
+      el("span", {}, el("strong", {}, a.name), a.synthetic ? el("span", {}, " ", synth(true)) : null, a.description ? el("div", { class: "muted" }, a.description) : null),
+      a.kind, pill(a.criticality, `crit-${a.criticality}`),
+      a.data_tags.length ? el("span", { class: "row" }, a.data_tags.map((t) => el("span", { class: "pill tag", title: inv.data_tags[t] || t }, t))) : el("span", { class: "muted" }, "—"),
+      a.addresses.length ? el("code", {}, a.addresses.join(", ")) : "—", a.owner ?? "—", `${fmtTime(a.updated_at)} by ${a.updated_by}`,
+      el("span", { class: "row" }, el("button", { class: "ghost", onclick: () => assetDialog(inv, a) }, "Edit"), el("button", { class: "danger", onclick: () => remove(a) }, "Delete"))] }))));
+}
+
+function assetDialog(inv, asset = null) {
+  const opt = (values, current) => values.map((v) => el("option", { value: v, selected: v === current }, v));
+  const tags = Object.entries(inv.data_tags).map(([t, help]) => el("label", { class: "check", title: help },
+    el("input", { type: "checkbox", name: "data_tags", value: t, checked: asset?.data_tags.includes(t) || null }), ` ${t}`));
+  const form = el("form", {},
+    el("h2", {}, asset ? `Edit asset: ${asset.name}` : "Add asset"),
+    el("label", {}, "Host name (matches the event host field)", el("input", { name: "name", required: true, maxlength: 128, pattern: "[A-Za-z0-9_.:\\-]+", value: asset?.name ?? "", placeholder: "e.g. db01" })),
+    el("div", { class: "row" },
+      el("label", {}, "Kind", el("select", { name: "kind" }, opt(inv.kinds, asset?.kind ?? "server"))),
+      el("label", {}, "Criticality (weight of importance)", el("select", { name: "criticality" }, opt(inv.criticalities, asset?.criticality ?? "medium")))),
+    el("fieldset", {}, el("legend", {}, "Processes sensitive data"), el("div", { class: "row" }, tags)),
+    el("label", {}, "IP addresses (optional, comma-separated; match src/dest IP)", el("input", { name: "addresses", value: asset?.addresses.join(", ") ?? "", placeholder: "10.0.0.10, 10.0.0.11" })),
+    el("label", {}, "Owner (optional)", el("input", { name: "owner", maxlength: 128, value: asset?.owner ?? "" })),
+    el("label", {}, "Description (optional)", el("input", { name: "description", maxlength: 500, value: asset?.description ?? "" })),
+    el("p", { class: "error", id: "asset-error" }),
+    el("div", { class: "row" }, el("button", { type: "submit" }, asset ? "Save" : "Add"), el("button", { type: "button", class: "ghost", onclick: () => $("#modal").close() }, "Cancel")));
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const f = new FormData(form);
+    const body = { name: f.get("name"), kind: f.get("kind"), criticality: f.get("criticality"), data_tags: f.getAll("data_tags"),
+      addresses: f.get("addresses"), owner: f.get("owner"), description: f.get("description"), synthetic: asset?.synthetic ? true : false };
+    try {
+      const r = await api(asset ? `/api/assets/${asset.id}` : "/api/assets", { method: "POST", body });
+      $("#modal").close();
+      toast(`Asset saved; ${r.alerts_rescored} open alert(s) changed severity`);
+      admin();
+    } catch (e) { $("#asset-error").textContent = e.message; }
+  });
+  $("#modal-body").replaceChildren(form);
+  $("#modal").showModal();
 }
 
 function storyCard() {

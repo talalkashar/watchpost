@@ -1,10 +1,10 @@
 """Read-side incident queries, incident status changes, and ATT&CK coverage."""
 
-from . import attack
+from . import assets, attack
 from .db import audit, now_iso, row_to_dict, transaction
 from .engine import load_rules
 from .normalize import SEVERITIES
-from .queries import EVENT_FIELDS, QueryError, _int
+from .queries import EVENT_FIELDS, QueryError, _int, alert_row
 
 INCIDENT_STATUSES = ("open", "investigating", "resolved")
 _SEVERITY_ORDER = ("CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 "
@@ -42,7 +42,7 @@ def get_incident(conn, incident_id):
     incident = _incident(row)
     rules = {r["id"]: r for r in load_rules(conn, enabled_only=False)}
 
-    alerts = [dict(r) for r in conn.execute(
+    alerts = [alert_row(r) for r in conn.execute(
         "SELECT a.* FROM alerts a JOIN incident_alerts ia ON ia.alert_id = a.id WHERE ia.incident_id = ?"
         " ORDER BY a.first_seen, a.id", (incident_id,))]
     techniques = {}
@@ -78,6 +78,10 @@ def get_incident(conn, incident_id):
         for tactic in incident["stages"]
     ]
     incident["escalated"] = len(incident["stages"]) >= 3
+    # Assets behind the incident: by host name and by the addresses its evidence reached.
+    incident["assets"] = assets.for_entities(
+        conn, incident["entities"].get("host"),
+        sorted({e["dest_ip"] for e in events if e.get("dest_ip")} | set(incident["entities"].get("src_ip") or [])))
     return incident
 
 

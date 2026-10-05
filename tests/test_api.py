@@ -274,6 +274,9 @@ class IncidentApiTests(ServerTestCase):
             db.execute("ALTER TABLE rules DROP COLUMN techniques")
             db.execute("ALTER TABLE events DROP COLUMN bytes")
             db.execute("DELETE FROM rules WHERE id = 'web_scanner'")
+            # A 2.0 database: no asset inventory and no asset weighting on alerts.
+            db.execute("DROP TABLE assets")
+            db.execute("ALTER TABLE alerts DROP COLUMN base_severity")
         from watchpost.server import App
         App(self.config)
         with sqlite3.connect(self.db_path) as db:
@@ -283,7 +286,9 @@ class IncidentApiTests(ServerTestCase):
             self.assertIn("web_scanner", techniques)
             self.assertTrue(all(json.loads(t) for t in techniques.values()))
             self.assertEqual(db.execute("SELECT COUNT(*) FROM incidents").fetchone()[0], 0)
-            self.assertEqual(db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0], "2")
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM assets").fetchone()[0], 0)
+            self.assertIn("base_severity", {r[1] for r in db.execute("PRAGMA table_info(alerts)")})
+            self.assertEqual(db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0], "3")
 
 
 class SearchTests(ServerTestCase):

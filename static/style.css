@@ -367,4 +367,10 @@ dialog::backdrop { background: rgb(0 0 0 / .6); }
 
 /* ATT&CK technique and kill-chain stage chips (alert, rule, and incident detail views) */
 .pill.technique { color: #9fb6ff; border-color: rgb(159 182 255 / .45); background: rgb(159 182 255 / .07); white-space: normal; text-transform: none; }
+.pill.asset { text-transform: none; white-space: normal; }
+.crit-critical { color: var(--crit); } .crit-high { color: var(--high); } .crit-medium { color: var(--med); } .crit-low { color: var(--low); }
+.pill.tag { color: #e3a3ff; border-color: rgb(227 163 255 / .45); background: rgb(227 163 255 / .07); }
+label.check { display: inline-flex; align-items: center; gap: 4px; margin: 0; font-weight: normal; }
+fieldset { border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; margin: 8px 0; }
+legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
 .pill.stage { color: var(--high); border-color: rgb(255 138 48 / .45); background: rgb(255 138 48 / .07); text-transform: none; }

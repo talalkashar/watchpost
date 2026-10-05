@@ -7,7 +7,7 @@ Both return the same model shape.
 
 import json
 
-from . import __version__, attack, incidents
+from . import __version__, assets as assets_mod, attack, incidents
 from .db import now_iso
 from .pdfwriter import Document
 from .queries import QueryError, get_alert
@@ -132,14 +132,19 @@ def _assemble(conn, kind, ident, title, alerts, extra):
     severity = max((a["severity"] for a in alerts), key=lambda s: SEVERITY_ORDER.get(s, -1), default="low")
     first = min((a["first_seen"] for a in alerts), default=None)
     last = max((a["last_seen"] for a in alerts), default=None)
+    matched = {}
+    for a in alerts:
+        for asset in a.get("assets") or []:
+            matched.setdefault(asset["name"], asset)
     model = {
         "kind": kind, "id": ident, "title": title, "severity": severity, "status": None,
+        "assets": [matched[k] for k in sorted(matched)],
         "synthetic": any(a["synthetic"] for a in alerts), "first_seen": first, "last_seen": last,
         "generated_at": now_iso(), "generator": f"Watchpost {__version__}",
         "entities": {"ips": sorted(ips), "users": sorted(users), "hosts": sorted(hosts)},
-        "alerts": [{k: a.get(k) for k in ("id", "title", "rule_id", "rule_version", "severity", "status",
-                                          "disposition", "explanation", "first_seen", "last_seen",
-                                          "event_count", "techniques")}
+        "alerts": [{k: a.get(k) for k in ("id", "title", "rule_id", "rule_version", "severity", "base_severity",
+                                          "severity_note", "status", "disposition", "explanation", "first_seen",
+                                          "last_seen", "event_count", "techniques", "assets")}
                    | {"evidence": a["evidence"][:EVIDENCE_PER_ALERT]} for a in alerts],
         "timeline": sorted(timeline.values(), key=lambda e: (e["ts"], e["id"]))[:TIMELINE_LIMIT],
         "techniques_by_tactic": by_tactic,
@@ -166,6 +171,15 @@ def _summary(m):
                      f"across {len(m['techniques_by_tactic'])} tactic(s).")
     if m.get("escalated"):
         parts.append(f"Escalated: the alerts span {len(m['stages'])} ATT&CK tactics.")
+    if m.get("assets"):
+        sensitive = [a for a in m["assets"] if a.get("data_tags")]
+        critical = [a for a in m["assets"] if a.get("criticality") in ("high", "critical")]
+        bits = [f"{len(m['assets'])} inventoried asset(s)"]
+        if critical:
+            bits.append(f"{len(critical)} of high or critical importance ({', '.join(a['name'] for a in critical[:3])})")
+        if sensitive:
+            bits.append(f"{len(sensitive)} processing sensitive data ({', '.join(a['name'] for a in sensitive[:3])})")
+        parts.append("Assets involved: " + ", ".join(bits) + ".")
     parts.append(f"Highest severity: {m['severity']}. Status: {m['status'] or 'unknown'}.")
     return " ".join(parts)
 
@@ -196,6 +210,10 @@ def build(conn, incident_id):
         model["severity"] = incident["severity"]
     for key, name in (("ips", "src_ip"), ("users", "user"), ("hosts", "host")):
         model["entities"][key] = sorted(set(model["entities"][key]) | set(incident["entities"].get(name) or []))
+    known = {a["name"]: a for a in model["assets"]}
+    for a in incident.get("assets") or []:
+        known.setdefault(a["name"], a)
+    model["assets"] = [known[k] for k in sorted(known)]
     # ATT&CK techniques by tactic in kill-chain order, each with the alerts that map to it.
     by_tactic = {}
     for t in incident["techniques"]:
@@ -245,6 +263,13 @@ def to_markdown(m):
     out += ["## Entities", ""]
     for key, label_ in (("ips", "IP addresses"), ("users", "Accounts"), ("hosts", "Hosts")):
         out.append(f"- **{label_}:** " + (", ".join(f"`{md(v)}`" for v in m["entities"][key]) or "none"))
+    out += ["", "## Assets", ""]
+    if m.get("assets"):
+        out += _md_table(["Asset", "Kind", "Criticality", "Sensitive data"],
+                         [[a["name"], a.get("kind"), a.get("criticality"), ", ".join(a.get("data_tags") or []) or "none"]
+                          for a in m["assets"]])
+    else:
+        out.append("No inventoried asset is involved.")
     out += ["", "## MITRE ATT&CK techniques", ""]
     if m["techniques_by_tactic"]:
         for tactic, items in m["techniques_by_tactic"].items():
@@ -263,7 +288,10 @@ def to_markdown(m):
                 f"- **Rule:** `{md(a['rule_id'])}` v{a['rule_version']} · **Severity:** {md(a['severity'])} · "
                 f"**Status:** {md(a['status'])}" + (f" ({md(a['disposition'])})" if a["disposition"] else ""),
                 f"- **Window:** {md(a['first_seen'])} to {md(a['last_seen'])} · **Events:** {a['event_count']}",
-                f"- **Techniques:** {md(techs)}", "", f"**Why it fired:** {md(a['explanation'])}", ""]
+                f"- **Techniques:** {md(techs)}"]
+        if a.get("severity_note") and a.get("base_severity") and a["base_severity"] != a["severity"]:
+            out.append(f"- **Asset weighting:** rule severity {md(a['base_severity'])}; {md(a['severity_note'])}")
+        out += ["", f"**Why it fired:** {md(a['explanation'])}", ""]
         shown = len(a["evidence"])
         out += _md_table(["Time", "Type", "User", "Source IP", "Host", "Message"],
                          [[e["ts"], e["event_type"], e.get("user"), e.get("src_ip"), e.get("host"), e.get("message")]
@@ -305,6 +333,14 @@ def to_pdf_bytes(m):
     doc.heading("Entities")
     for key, name in (("ips", "IP addresses"), ("users", "Accounts"), ("hosts", "Hosts")):
         doc.text(f"{name}: " + (", ".join(m["entities"][key]) or "none"))
+    doc.heading("Assets")
+    if m.get("assets"):
+        doc.table(["Asset", "Kind", "Criticality", "Sensitive data"],
+                  [[a["name"], a.get("kind") or "-", a.get("criticality") or "-",
+                    ", ".join(a.get("data_tags") or []) or "none"] for a in m["assets"]],
+                  widths=[2, 1.5, 1.5, 3], size=9)
+    else:
+        doc.text("No inventoried asset is involved.")
     doc.heading("MITRE ATT&CK techniques")
     if m["techniques_by_tactic"]:
         doc.table(["Tactic", "Technique", "Name", "Alerts"],
@@ -324,6 +360,8 @@ def to_pdf_bytes(m):
         doc.text(f"Rule {a['rule_id']} v{a['rule_version']} | severity {a['severity']} | status {a['status']}"
                  + (f" ({a['disposition']})" if a["disposition"] else "") + f" | {a['event_count']} events | "
                  f"techniques: {', '.join(t['id'] for t in a['techniques']) or 'none'}", size=9)
+        if a.get("severity_note") and a.get("base_severity") and a["base_severity"] != a["severity"]:
+            doc.text(f"Asset weighting: rule severity {a['base_severity']}; {a['severity_note']}", size=9, indent=8)
         doc.text("Why it fired: " + (a["explanation"] or ""), size=9, indent=8)
         doc.space(3)
         doc.table(["Time", "Type", "User", "Source IP", "Host", "Message"],
