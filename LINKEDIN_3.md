@@ -12,7 +12,7 @@ Last week I posted a SIEM I built from scratch and asked what you would add. You
 The most useful comment came from Charles Vosburgh: test the rules against benign activity that looks like an
 attack, and see where they get noisy. I did. The result was humbling.
 
-Every rule still catches its attack. But 7 of my 12 rules also fire on at least one harmless look-alike: an
+Every rule still catches its attack. But 8 of my 12 rules also fire on at least one harmless look-alike: an
 authorized scanner, an on-call admin logging in at 3 AM, a whole office failing logins the morning after a
 password-expiry day.
 
@@ -22,8 +22,8 @@ What changed, and who asked:
 
 • Noise lab: every rule is scored against benign look-alikes, with recall and precision side by side
   (Charles Vosburgh)
-• Baseline-aware exfiltration: an account is compared with its own history, so the nightly backup stays quiet and
-  a new 2 GB pull does not (Abderrazak Benarous)
+• Baseline-aware exfiltration: once a second person approves an exception for it, the nightly backup is compared
+  with its own history and stays quiet, while everything else keeps the flat threshold (Abderrazak Benarous)
 • Tuning exceptions: a reviewed, expiring allowlist for known-benign sources, approved by a second person
   (Issouf D. Dayo)
 • A shadow IT rule for cloud services that are not on the sanctioned list (Issouf D. Dayo)

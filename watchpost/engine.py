@@ -227,21 +227,15 @@ def run_detection(conn, trigger="manual", start=None, end=None):
             summary["events_scanned"] = len(events)
             assets_idx = assets_mod.load_index(conn)
             suppressed = active_suppressions(conn)
-            # Exfil history that was already flagged and not cleared by an analyst is no baseline.
-            flagged = {r[0] for r in conn.execute(
-                "SELECT ae.event_id FROM alert_events ae JOIN alerts a ON a.id = ae.alert_id"
-                " WHERE a.rule_id = 'data_exfil_volume'"
-                " AND (a.disposition IS NULL OR a.disposition = 'true_positive')")}
-            for event in events:
-                if event["id"] in flagged:
-                    event["alerted"] = True
-
             with transaction(conn):
                 for rule in active:
-                    for finding in rules_mod.RULE_FUNCTIONS[rule["id"]](events, rule["params"]):
+                    # For the exfil rule an exception is passed in as a baseline principal, not skipped here.
+                    params = rules_mod.exception_params(rule["id"], rule["params"], suppressed)
+                    skips = rule["id"] not in rules_mod.EXCEPTION_ENABLES_BASELINE
+                    for finding in rules_mod.RULE_FUNCTIONS[rule["id"]](events, params):
                         if scan_start and finding["last_seen"] < scan_start:
                             continue  # built only from history context; outside this scan
-                        if (rule["id"], finding["group_key"]) in suppressed:
+                        if skips and (rule["id"], finding["group_key"]) in suppressed:
                             summary["alerts_suppressed"] += 1  # a reviewed tuning exception covers it
                             continue
                         synthetic = all(i in synthetic_ids for i in finding["event_ids"])

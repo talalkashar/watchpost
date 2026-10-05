@@ -234,8 +234,8 @@ def main():
         rows = {r["rule_id"]: r for r in lab["rules"]}
         check(status == 200 and len(rows) == lab["summary"]["rules"] and all(r["lookalikes_tested"] for r in rows.values()),
               f"noise lab: {status} {lab.get('summary')}")
-        check(rows["data_exfil_volume"]["verdict"] == "quiet" and rows["data_exfil_volume"]["recall"] == 1.0,
-              f"baseline-aware exfil: {rows['data_exfil_volume']}")
+        check(rows["data_exfil_volume"]["lookalikes_fired"] == ["nightly_backup"]
+              and rows["data_exfil_volume"]["recall"] == 1.0, f"flat exfil without an exception: {rows['data_exfil_volume']}")
         check(rows["firewall_port_sweep"]["lookalikes_fired"] == ["authorized_port_scan"],
               f"port sweep look-alike: {rows['firewall_port_sweep']}")
         for r in rows.values():

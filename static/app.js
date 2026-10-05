@@ -353,6 +353,7 @@ async function incidentDetail(id) {
 
 // ---------- entity page ----------
 async function entityDetail(kind, value) {
+  if (!Object.hasOwn(ENTITY_KINDS, kind)) throw new Error("Unknown entity kind");
   const e = await api(`/api/entities/${kind}/${encodeURIComponent(value)}`);
   const kpi = (v, l) => el("div", { class: "kpi" }, el("div", { class: "v" }, v ?? "—"), el("div", { class: "l" }, l));
   const counted = e.contributions.filter((c) => c.counted);
@@ -588,7 +589,7 @@ async function rules() {
     el("div", { class: "card" }, el("h2", {}, `Change requests (${pending.length} pending)`),
       table(["ID", "Status", "Target", "Change", "Reason", "Scenario impact (before→after)", "Proposed by", "Reviewed", ""], changeRows)),
     el("div", { class: "card" }, el("h2", {}, `Tuning exceptions (${exceptions.filter((x) => x.active).length} active)`),
-      el("p", { class: "muted" }, "An exception skips findings of one rule for one group key until it expires. The rule itself is not edited. An analyst proposes it, a different admin approves it, and each detection run counts what it skipped."),
+      el("p", { class: "muted" }, "An exception skips findings of one rule for one group key until it expires. The rule itself is not edited. An analyst proposes it, a different admin approves it, and each detection run counts what it skipped. One rule differs: for data_exfil_volume nothing is skipped. The exception turns on a baseline for that principal, which then alerts only when a burst is baseline_multiplier times its own recent normal or more."),
       table(["Rule", "Group key", "Reason", "Expires", "Proposed by", "Approved by", "Change", ""], exceptions.map((x) => ({ cells: [
         el("code", {}, x.rule_id), el("code", {}, x.group_key), x.reason, fmtTime(x.expires_at), x.proposed_by, x.approved_by,
         x.change_request_id ? `#${x.change_request_id}` : "—", x.active ? pill("active", "st-ok") : pill("expired", "st-rejected")] })))),
@@ -640,7 +641,7 @@ function proposeDialog(rule) {
 function exceptionDialog(rule) {
   const form = el("form", {},
     el("h2", {}, `Propose exception: ${rule.id}`),
-    el("p", { class: "muted" }, "Findings of this rule with exactly this group key are skipped until the exception expires. Copy the group key from an alert of this rule. Use it for known, authorized activity such as the internal scanner 10.0.50.5."),
+    el("p", { class: "muted" }, "Findings of this rule with exactly this group key are skipped until the exception expires. Copy the group key from an alert of this rule. Use it for known, authorized activity such as the internal scanner 10.0.50.5. For data_exfil_volume the principal is not skipped: the exception makes the rule compare it with its own history, so it still alerts on a burst several times its normal."),
     el("label", {}, "Group key", el("input", { name: "group_key", class: "mono", required: true, maxlength: 256 })),
     el("label", {}, "Expires after (days, 1–90)", el("input", { name: "days", type: "number", min: 1, max: 90, value: 30, required: true })),
     el("label", {}, "Reason (required)", el("textarea", { name: "reason", required: true, minlength: 5, maxlength: 2000 })),
@@ -703,7 +704,7 @@ async function noiseLab() {
     el("div", { class: "card" },
       el("h2", {}, "Where the rules get noisy"),
       el("p", {}, `Every rule runs against every labeled synthetic scenario, each in isolation: the attacks it should catch and ${lab.summary.lookalikes} benign look-alikes written to resemble them. ${lab.summary.noisy} of ${lab.summary.rules} rules fire on benign activity. That is shown here, not tuned away: a rule is only changed when there is a principled fix that keeps its attack detected.`),
-      el("p", { class: "muted" }, "Recall is attacks caught out of attacks labeled. Precision is true detections out of everything the rule fired on, counted on these scenarios only: it says nothing about real traffic. Results use the current rule parameters and approved tuning exceptions (seed ", lab.seed, "). The lab scores the steady state: with a baseline-aware rule, the first-ever large transfer of a new job such as the nightly backup still alerts in the live engine until an analyst closes it as benign.")),
+      el("p", { class: "muted" }, "Recall is attacks caught out of attacks labeled. Precision is true detections out of everything the rule fired on, counted on these scenarios only: it says nothing about real traffic. Results use the current rule parameters and approved tuning exceptions (seed ", lab.seed, "). data_exfil_volume uses flat thresholds, so the nightly backup fires here until a tuning exception for the backup server is approved; only then is that one principal compared with its own history.")),
     el("div", { class: "card" }, el("h2", {}, "Rules against their look-alikes"),
       table(["Rule", "Recall", "Precision", "Look-alikes tested", "Benign scenarios that fired", "Excepted", "Verdict", "Reading"], rows)),
     el("div", { class: "card" }, el("h2", {}, "The benign look-alikes"),

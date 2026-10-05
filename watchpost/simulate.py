@@ -415,8 +415,8 @@ SCENARIOS.update({
     "nightly_backup": {
         "build": nightly_backup, "malicious": False, "expected": {}, "lookalike_of": "data_exfil_volume",
         "description": "The backup server ships about 5 GB off site at 01:00, as on each of the three nights before. "
-                       "The lab scores this steady state; the first-ever transfer of a new job alerts until an "
-                       "analyst closes it as benign."},
+                       "The flat threshold alerts on it every night. With an approved tuning exception for "
+                       "10.0.5.10 the rule compares it with its own history and stays quiet."},
     "sanctioned_saas": {
         "build": sanctioned_saas, "malicious": False, "expected": {}, "lookalike_of": "unsanctioned_cloud_service",
         "description": "A team uploads to the sanctioned corporate drive through its regional endpoint."},

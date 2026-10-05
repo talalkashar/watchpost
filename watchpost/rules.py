@@ -129,13 +129,13 @@ DEFAULT_RULES = [
         "description": "Fires when one account (or, without an account, one source IP) moves at least "
                        "`bytes_threshold` bytes out through allowed firewall connections and cloud storage "
                        "reads, or makes at least `access_threshold` cloud data reads, within `window_seconds`. "
-                       "Baseline-aware: the burst must also be at least `baseline_multiplier` times that "
-                       "principal's own busiest `window_seconds` in the preceding `history_seconds`, so a nightly "
-                       "backup that always moves this much stays quiet (0 turns the baseline off). A principal's "
-                       "first large transfer has no baseline and alerts. History this rule already alerted on "
-                       "does not count as normal unless an analyst closed that alert as benign or false positive, "
-                       "so a new job keeps alerting until one of its alerts is closed that way, and a repeated "
-                       "attack alerts again.",
+                       "By default the thresholds are flat: history and analyst verdicts never quiet this rule. "
+                       "A principal that has an approved, unexpired tuning exception for this rule is not skipped: "
+                       "the exception turns on a baseline for it instead. Its burst must then also be at least "
+                       "`baseline_multiplier` times its own busiest `window_seconds` in the preceding "
+                       "`history_seconds` (all of that history counts), so an excepted nightly backup that always "
+                       "moves this much stays quiet and still alerts when it moves several times more. "
+                       "`baseline_multiplier` 0 keeps the thresholds flat even for an excepted principal.",
         "techniques": techniques("T1530", "T1048"),
         "severity": "high",
         "params": {"bytes_threshold": 1_000_000_000, "access_threshold": 100, "window_seconds": 3600,
@@ -542,40 +542,42 @@ def data_exfil_volume(events, params):
         if key:
             groups[key].append(e)
     multiplier, history = params["baseline_multiplier"], params["history_seconds"]
+    # Supplied by the engine from approved, unexpired tuning exceptions (see exception_params); never saved.
+    excepted = set(params.get("baseline_principals", ()))
     findings = []
     volume = lambda w: sum(e.get("bytes") or 0 for e in w)
     accesses = lambda w: sum(e["event_type"] == "cloud_data_access" for e in w)
     for principal, group in groups.items():
         for cluster in _clusters(group, window, lambda w: volume(w) >= limit or accesses(w) >= reads):
             total, count = volume(cluster), accesses(cluster)
-            # Baseline: this principal's own busiest window before the burst, inside the history span.
-            # Events the engine marks `alerted` (evidence of an earlier alert of this rule that nobody
-            # closed as benign or false positive) are left out: flagged history is not normal.
-            t0 = _epoch(cluster[0])
-            before = [e for e in group if 0 < t0 - _epoch(e) <= history and not e.get("alerted")]
-            peak_bytes, peak_reads = _peak(cluster, window, volume), _peak(cluster, window, accesses)
-            base_bytes, base_reads = _peak(before, window, volume), _peak(before, window, accesses)
-            if not ((peak_bytes >= limit and peak_bytes >= multiplier * base_bytes)
-                    or (peak_reads >= reads and peak_reads >= multiplier * base_reads)):
-                continue  # comparable to what this principal normally moves
-            if not multiplier:
-                baseline = "Baseline comparison is off."
-            elif not before:
-                baseline = (f"Baseline: no earlier transfers by {principal} in the preceding {history}s count as "
-                            f"normal (transfers already flagged by this rule are left out), so there is nothing "
-                            f"to compare against.")
+            if not multiplier or principal not in excepted:
+                mode = ("Flat thresholds applied: " + ("baseline_multiplier is 0." if principal in excepted else
+                        f"{principal} has no approved tuning exception, so its history is not compared."))
             else:
-                ratio = f"{peak_bytes / base_bytes:,.1f}x" if base_bytes else "no bytes before"
-                baseline = (f"Baseline: its busiest {window}s in the preceding {history}s moved "
-                            f"{_human_bytes(base_bytes)} ({base_reads} reads); this burst peaked at "
-                            f"{_human_bytes(peak_bytes)} ({peak_reads} reads), {ratio} the baseline "
-                            f"(alerts at {multiplier}x or more).")
+                # Baseline: this principal's own busiest window before the burst, inside the history span.
+                t0 = _epoch(cluster[0])
+                before = [e for e in group if 0 < t0 - _epoch(e) <= history]
+                peak_bytes, peak_reads = _peak(cluster, window, volume), _peak(cluster, window, accesses)
+                base_bytes, base_reads = _peak(before, window, volume), _peak(before, window, accesses)
+                if not ((peak_bytes >= limit and peak_bytes >= multiplier * base_bytes)
+                        or (peak_reads >= reads and peak_reads >= multiplier * base_reads)):
+                    continue  # comparable to what this excepted principal normally moves
+                mode = f"Baseline mode (approved tuning exception for {principal}): "
+                if not before:
+                    mode += (f"no earlier transfers by {principal} in the preceding {history}s, so there is "
+                             f"nothing to compare against.")
+                else:
+                    ratio = f"{peak_bytes / base_bytes:,.1f}x" if base_bytes else "no bytes before"
+                    mode += (f"its busiest {window}s in the preceding {history}s moved "
+                             f"{_human_bytes(base_bytes)} ({base_reads} reads); this burst peaked at "
+                             f"{_human_bytes(peak_bytes)} ({peak_reads} reads), {ratio} the baseline "
+                             f"(alerts at {multiplier}x or more).")
             findings.append(_finding(
                 principal, cluster,
                 f"Large data transfer by {principal}: {_human_bytes(total)}",
                 f"{principal} moved {_human_bytes(total)} across {len(cluster)} events ({count} cloud data "
                 f"reads) between {cluster[0]['ts']} and {cluster[-1]['ts']}. Thresholds: "
-                f"{_human_bytes(limit)} or {reads} reads within {window}s. {baseline}",
+                f"{_human_bytes(limit)} or {reads} reads within {window}s. {mode}",
             ))
     return findings
 
@@ -626,6 +628,20 @@ RULE_FUNCTIONS = {
     "data_exfil_volume": data_exfil_volume,
     "unsanctioned_cloud_service": unsanctioned_cloud_service,
 }
+
+
+# Rules where a tuning exception does not skip findings but turns on the principal's baseline instead.
+EXCEPTION_ENABLES_BASELINE = ("data_exfil_volume",)
+
+
+def exception_params(rule_id, params, suppressions):
+    """The params to hand a rule function, given active exceptions as a set of (rule_id, group_key).
+
+    `baseline_principals` exists only here: validate_params rejects it, so it cannot be saved or proposed.
+    """
+    if rule_id not in EXCEPTION_ENABLES_BASELINE:
+        return params
+    return {**params, "baseline_principals": sorted(key for rid, key in suppressions if rid == rule_id)}
 
 
 # The largest time span a rule can look across; used to pick the rescan window after ingest.
