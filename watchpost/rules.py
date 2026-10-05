@@ -360,7 +360,8 @@ def success_after_failures(events, params):
         cluster = prior + [success]
         findings.append(_finding(
             f"{user}|{success.get('src_ip') or 'unknown'}", cluster,
-            f"Possible compromise of {success.get('user')}: login after {len(prior)} failures",
+            f"Possible compromise of {success.get('user')}: login from "
+            f"{success.get('src_ip') or 'an unknown IP'} after {len(prior)} failures",
             f"{success.get('user')} logged in successfully from {success.get('src_ip') or 'an unknown IP'} "
             f"at {success['ts']} after {len(prior)} failed attempts in the preceding {window}s "
             f"(threshold {needed}). The failures came from {', '.join(ips[:5])}"

@@ -5,6 +5,7 @@ from datetime import timedelta
 
 from tests.helpers import ADMIN_PW, ServerTestCase
 from watchpost.db import iso, utcnow
+from watchpost.health import STATIC_DIR
 
 
 def recent(minutes_ago=30):
@@ -265,6 +266,21 @@ class IncidentApiTests(ServerTestCase):
         self.assertEqual(by_id["T1548.003"]["hits"], 1)
         self.assertEqual(by_id["T1110.003"]["hits"], 0)
         self.assertEqual([r["id"] for r in by_id["T1046"]["rules"]], ["firewall_port_sweep"])
+
+    def test_navigator_layer_export(self):
+        viewer = self.client("viewer")
+        self.assertEqual(self.client().get("/api/attack/navigator.json")[0], 401)
+        self.load_intrusion(self.client("analyst"))
+        status, layer, headers = viewer.get("/api/attack/navigator.json")
+        self.assertEqual((status, headers["Content-Type"].split(";")[0]), (200, "application/json"))
+        self.assertEqual((layer["domain"], layer["versions"]), ("enterprise-attack", {"layer": "4.5"}))
+        self.assertIn("synthetic", layer["description"].lower())
+        coverage = {t["id"]: t for t in viewer.get("/api/attack/coverage")[1]["techniques"]}
+        self.assertEqual({t["techniqueID"]: t["score"] for t in layer["techniques"]},
+                         {i: t["hits"] for i, t in coverage.items() if t["covered"]})
+        self.assertIn("firewall_port_sweep", {t["techniqueID"]: t for t in layer["techniques"]}["T1046"]["comment"])
+        self.assertEqual(layer["gradient"]["maxValue"], max(t["hits"] for t in coverage.values()))
+        self.assertIn('href: "/api/attack/navigator.json"', (STATIC_DIR / "dashboard.js").read_text())
 
     def test_existing_database_upgrades_in_place(self):
         # A 1.0 database: no techniques column, no new event columns, no incidents tables.

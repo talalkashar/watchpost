@@ -59,7 +59,7 @@ def evaluate(rule_params, seed=7, suppressions=()):
     # Events dated before the scenario day are history context, as in the engine's rescan.
     day_start = iso(datetime.combine(simulate.demo_day(now), time.min, tzinfo=timezone.utc))
     results = {rid: {"tp": 0, "fn": 0, "fp": 0, "detected": [], "missed": [], "false_positives": [],
-                     "lookalikes": [], "lookalikes_fired": [], "suppressed": 0}
+                     "lookalikes": [], "lookalikes_fired": [], "suppressed": 0, "group_keys": set()}
                for rid in rule_params}
     next_id = 1
     for name, raw_events in scenarios.items():
@@ -74,6 +74,7 @@ def evaluate(rule_params, seed=7, suppressions=()):
             findings = [f for f in rules_mod.RULE_FUNCTIONS[rule_id](copy.deepcopy(events), run_params)
                         if f["last_seen"] >= day_start]
             r = results[rule_id]
+            r["group_keys"].update(f["group_key"] for f in findings)  # every key the scenarios exercise
             skips = rule_id not in rules_mod.EXCEPTION_ENABLES_BASELINE  # exfil: baseline, not a skip
             kept = [f for f in findings if not (skips and (rule_id, f["group_key"]) in suppressions)]
             r["suppressed"] += len(findings) - len(kept)
@@ -98,6 +99,7 @@ def evaluate(rule_params, seed=7, suppressions=()):
                 r["fp"] += extra
                 r["false_positives"].append(name)
     for r in results.values():
+        r["group_keys"] = sorted(r["group_keys"])
         r["recall"] = round(r["tp"] / (r["tp"] + r["fn"]), 3) if r["tp"] + r["fn"] else None
         r["precision"] = round(r["tp"] / (r["tp"] + r["fp"]), 3) if r["tp"] + r["fp"] else None
     return {"seed": seed, "scenarios": list(scenarios), "rules": results}
@@ -269,9 +271,38 @@ def _validate_change(conn, kind, target, payload):
     raise ChangeError("kind must be rule_update, setting_update or suppression_add")
 
 
-def propose_change(conn, kind, target, payload, reason, actor):
-    if not isinstance(reason, str) or not 5 <= len(reason.strip()) <= 2000:
-        raise ChangeError("a reason of 5-2000 characters is required")
+LIVE_IMPACT_RECENT = 5  # newest matching alerts listed in an exception's evidence
+
+
+def _live_impact(conn, rule_id, group_key, scenario_keys):
+    """What an exception would touch in this database, which the labeled scenarios cannot show."""
+    rows = [dict(r) for r in conn.execute(
+        "SELECT id, title, status, disposition FROM alerts WHERE rule_id = ? AND group_key = ? ORDER BY id DESC",
+        (rule_id, group_key))]
+    by_status, by_disposition = {}, {}
+    for row in rows:
+        by_status[row["status"]] = by_status.get(row["status"], 0) + 1
+        if row["disposition"]:
+            by_disposition[row["disposition"]] = by_disposition.get(row["disposition"], 0) + 1
+    baseline = rule_id in rules_mod.EXCEPTION_ENABLES_BASELINE
+    return {
+        "alerts": len(rows), "by_status": by_status, "by_disposition": by_disposition,
+        "recent": rows[:LIVE_IMPACT_RECENT],
+        # False means before/after below say nothing about this key: no labeled scenario contains it.
+        "in_labeled_scenario": group_key in scenario_keys,
+        "effect": "baseline" if baseline else "skip",
+        "effect_note": ("Nothing is hidden: the exception enables baseline mode for this principal, which then "
+                        "alerts only on a burst several times its own recent normal." if baseline else
+                        "Every finding of this rule for this group key is hidden until the exception expires "
+                        "or is revoked."),
+    }
+
+
+def _evidence(conn, kind, target, payload):
+    """Validate a change and compute what a reviewer is shown for it, from the current state.
+
+    Used at proposal time and again at approval, so an approval can be refused when the two differ.
+    """
     merged = _validate_change(conn, kind, target, payload)
     evaluation = None
     if kind == "rule_update":
@@ -285,9 +316,35 @@ def propose_change(conn, kind, target, payload, reason, actor):
     elif kind == "suppression_add":
         params = {target: current_params(conn, include_disabled=True)[target]}
         active = active_suppressions(conn)
-        evaluation = {"rule": target, "before": evaluate(params, suppressions=active)["rules"][target],
+        base = evaluate(params, suppressions=active)["rules"][target]
+        evaluation = {"rule": target, "before": base,
                       "after": evaluate(params, suppressions=active | {(target, payload["group_key"])})
-                      ["rules"][target]}
+                      ["rules"][target],
+                      "live_impact": _live_impact(conn, target, payload["group_key"], base["group_keys"])}
+    return json.loads(json.dumps(evaluation))  # as it reads back from storage, so the two compare equal
+
+
+def _refusal(kind, evaluation):
+    """Why an exception may not be approved at all, or None. Confirmed-malicious activity is never excepted."""
+    if kind != "suppression_add":
+        return None
+    lost = sorted(set(evaluation["before"]["detected"]) & set(evaluation["after"]["missed"]))
+    if lost:
+        return (f"this exception would make the rule miss a labeled attack it detects today ({', '.join(lost)}); "
+                f"confirmed-malicious activity cannot be excepted")
+    if evaluation["live_impact"]["by_disposition"].get("true_positive"):
+        return ("an alert of this rule with this group key was closed as a true positive; "
+                "confirmed-malicious activity cannot be excepted")
+    return None
+
+
+def propose_change(conn, kind, target, payload, reason, actor):
+    if not isinstance(reason, str) or not 5 <= len(reason.strip()) <= 2000:
+        raise ChangeError("a reason of 5-2000 characters is required")
+    evaluation = _evidence(conn, kind, target, payload)
+    refusal = _refusal(kind, evaluation)
+    if refusal:
+        raise ChangeError(refusal)
     cur = conn.execute(
         "INSERT INTO change_requests(kind, target, payload, reason, proposed_by, evaluation, created_at)"
         " VALUES (?,?,?,?,?,?,?)",
@@ -325,8 +382,23 @@ def review_change(conn, change_id, decision, reviewer, note=""):
         if change["proposed_by"] == reviewer:
             raise ChangeError("you cannot review your own change request; a second person must approve it", 403)
         note = (note or "").strip()[:2000]
+        problem = None
         if decision == "approve":
-            _validate_change(conn, change["kind"], change["target"], change["payload"])  # re-check at apply time
+            # Re-check at apply time: approval acts on the evidence the reviewer saw, or not at all.
+            fresh = _evidence(conn, change["kind"], change["target"], change["payload"])
+            refusal = _refusal(change["kind"], fresh)
+            if fresh != change["evaluation"]:
+                conn.execute("UPDATE change_requests SET evaluation = ? WHERE id = ?",
+                             (json.dumps(fresh), change_id))
+                audit(conn, reviewer, "change_evidence_refreshed", f"{change['kind']}:{change['target']}",
+                      {"id": change_id})
+                problem = ChangeError("the evidence changed since this request was last shown; nothing was "
+                                      "applied. Review the updated evidence and approve again", 409)
+            if refusal:
+                problem = ChangeError(refusal)
+        if problem is not None:
+            pass  # left pending; raised once the refreshed evidence is committed
+        elif decision == "approve":
             if change["kind"] == "rule_update":
                 apply_rule_change(conn, change["target"], change["payload"], change["proposed_by"], reviewer,
                                   change_id, change["reason"][:500])
@@ -345,24 +417,44 @@ def review_change(conn, change_id, decision, reviewer, note=""):
                              (str(change["payload"]["value"]), now_iso(), reviewer, change["target"]))
                 audit(conn, reviewer, "setting_changed", change["target"],
                       {"value": change["payload"]["value"], "change_request": change_id})
-        status = "approved" if decision == "approve" else "rejected"
-        conn.execute(
-            "UPDATE change_requests SET status = ?, reviewed_by = ?, reviewed_at = ?, review_note = ? WHERE id = ?",
-            (status, reviewer, now_iso(), note, change_id),
-        )
-        audit(conn, reviewer, f"change_{status}", f"{change['kind']}:{change['target']}", {"id": change_id})
-        if decision == "approve" and change["kind"] == "rule_update":
-            record_evaluation(conn, evaluate(current_params(conn)), "post_change", reviewer, change_id)
+        if problem is None:
+            status = "approved" if decision == "approve" else "rejected"
+            conn.execute(
+                "UPDATE change_requests SET status = ?, reviewed_by = ?, reviewed_at = ?, review_note = ? WHERE id = ?",
+                (status, reviewer, now_iso(), note, change_id),
+            )
+            audit(conn, reviewer, f"change_{status}", f"{change['kind']}:{change['target']}", {"id": change_id})
+            if decision == "approve" and change["kind"] == "rule_update":
+                record_evaluation(conn, evaluate(current_params(conn)), "post_change", reviewer, change_id)
+    if problem is not None:
+        raise problem
     return get_change(conn, change_id)
 
 
 # --- Tuning exceptions and the noise lab ------------------------------------------------
 
 def list_suppressions(conn):
-    """Every approved tuning exception, newest first; `active` is false once it has expired."""
+    """Every approved tuning exception, newest first; `active` is false once it has expired or been revoked."""
     now = now_iso()
-    return [{**dict(r), "active": r["expires_at"] > now}
+    return [{**dict(r), "active": r["expires_at"] > now and r["revoked_at"] is None}
             for r in conn.execute("SELECT * FROM suppressions ORDER BY id DESC")]
+
+
+def revoke_suppression(conn, suppression_id, actor):
+    """End a tuning exception early. The row stays as history; detection ignores it from the next run."""
+    with transaction(conn):
+        row = conn.execute("SELECT * FROM suppressions WHERE id = ?", (suppression_id,)).fetchone()
+        if row is None:
+            raise ChangeError("tuning exception not found", 404)
+        if row["revoked_at"] is not None:
+            raise ChangeError("tuning exception is already revoked", 409)
+        if row["expires_at"] <= now_iso():
+            raise ChangeError("tuning exception has already expired", 409)
+        conn.execute("UPDATE suppressions SET revoked_at = ?, revoked_by = ? WHERE id = ?",
+                     (now_iso(), actor, suppression_id))
+        audit(conn, actor, "suppression_revoked", row["rule_id"],
+              {"id": suppression_id, "group_key": row["group_key"], "change_request": row["change_request_id"]})
+    return next(s for s in list_suppressions(conn) if s["id"] == suppression_id)
 
 
 def _verdict(rule, r, other):

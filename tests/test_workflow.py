@@ -184,6 +184,125 @@ class EndToEndTests(ServerTestCase):
         self.assertEqual(victim.login("analyst", "analyst-test-password-1")[0], 429)
 
 
+class ChangeEvidenceTests(ServerTestCase):
+    """What the admin reviews is what approval does: stale evidence is refreshed, never applied."""
+
+    def exception(self, client, key="10.0.50.5", rule="brute_force_ip"):
+        return client.post(f"/api/rules/{rule}/suppressions",
+                           {"group_key": key, "days": 30, "reason": "Authorized internal scanner."})
+
+    def approve(self, client, change):
+        return client.post(f"/api/changes/{change['id']}/review", {"decision": "approve"})
+
+    def stored(self, client, change):
+        return {c["id"]: c for c in client.get("/api/changes")[1]}[change["id"]]
+
+    def scanner_alert(self, analyst, **sim):
+        analyst.post("/api/demo/simulate", {"scenario": "noisy_scanner", **sim})
+        return analyst.get("/api/alerts?rule_id=brute_force_ip&status=open")[1][0]
+
+    def test_stale_rule_evidence_is_refreshed_then_applies_on_the_second_approve(self):
+        analyst, admin = self.client("analyst"), self.client("admin")
+        first = analyst.post("/api/rules/brute_force_ip/proposals",
+                             {"params": {"ignore_ips": ["10.0.50.5"]}, "reason": "authorized scanner"})[1]
+        second = analyst.post("/api/rules/brute_force_ip/proposals",
+                              {"params": {"threshold": 12}, "reason": "slightly less noise"})[1]
+        self.assertEqual(second["evaluation"]["before"]["fp"], 2)
+        self.assertEqual(self.approve(admin, first)[0], 200)
+
+        # The rule changed under the second proposal: its evidence no longer describes the action.
+        status, data, _ = self.approve(admin, second)
+        self.assertEqual(status, 409)
+        self.assertIn("evidence changed", data["error"])
+        change = self.stored(admin, second)
+        self.assertEqual((change["status"], change["reviewed_by"]), ("pending", None))
+        self.assertEqual(change["evaluation"]["before"]["fp"], 0)
+        rule = lambda: {r["id"]: r for r in analyst.get("/api/rules")[1]}["brute_force_ip"]
+        self.assertEqual((rule()["version"], rule()["params"]["threshold"]), (2, 10))
+        self.assertIn("change_evidence_refreshed", [a["action"] for a in admin.get("/api/audit")[1]])
+
+        status, reviewed, _ = self.approve(admin, second)
+        self.assertEqual((status, reviewed["status"]), (200, "approved"))
+        self.assertEqual(reviewed["evaluation"], change["evaluation"])
+        self.assertEqual((rule()["version"], rule()["params"]["threshold"]), (3, 12))
+
+    def test_stale_exception_evidence_is_refreshed_then_applies_on_the_second_approve(self):
+        analyst, admin = self.client("analyst"), self.client("admin")
+        change = self.exception(analyst)[1]
+        self.assertEqual(change["evaluation"]["live_impact"]["alerts"], 0)
+        alert = self.scanner_alert(analyst)  # a live alert now matches the key
+
+        self.assertEqual(self.approve(admin, change)[0], 409)
+        self.assertEqual(analyst.get("/api/suppressions")[1], [])
+        fresh = self.stored(admin, change)
+        self.assertEqual(fresh["status"], "pending")
+        self.assertEqual(fresh["evaluation"]["live_impact"]["alerts"], 1)
+        self.assertEqual(fresh["evaluation"]["live_impact"]["recent"][0]["id"], alert["id"])
+
+        self.assertEqual(self.approve(admin, change)[0], 200)
+        self.assertEqual(len(analyst.get("/api/suppressions")[1]), 1)
+
+    def test_exception_evidence_counts_matching_live_alerts(self):
+        analyst = self.client("analyst")
+        old = self.scanner_alert(analyst)
+        analyst.post(f"/api/alerts/{old['id']}/status", {"status": "resolved", "disposition": "false_positive"})
+        new = self.scanner_alert(analyst, seed=3)
+        self.assertNotEqual(new["id"], old["id"])
+        impact = self.exception(analyst)[1]["evaluation"]["live_impact"]
+        self.assertEqual((impact["alerts"], impact["by_status"], impact["by_disposition"]),
+                         (2, {"open": 1, "resolved": 1}, {"false_positive": 1}))
+        self.assertEqual([(a["id"], a["title"], a["status"], a["disposition"]) for a in impact["recent"]],
+                         [(new["id"], new["title"], "open", None), (old["id"], old["title"], "resolved", "false_positive")])
+        self.assertEqual((impact["in_labeled_scenario"], impact["effect"]), (True, "skip"))
+
+        # A key no labeled scenario contains: before == after says nothing about it, and the evidence says so.
+        status, change, _ = self.exception(analyst, key="10.9.9.9")
+        self.assertEqual(status, 201)
+        evidence = change["evaluation"]
+        self.assertEqual(evidence["before"], evidence["after"])
+        self.assertEqual((evidence["live_impact"]["alerts"], evidence["live_impact"]["in_labeled_scenario"]), (0, False))
+
+        # For the exfil rule nothing is hidden; the evidence states the baseline mode.
+        impact = self.exception(analyst, key="10.0.5.10", rule="data_exfil_volume")[1]["evaluation"]["live_impact"]
+        self.assertEqual((impact["effect"], impact["in_labeled_scenario"]), ("baseline", True))
+        self.assertIn("baseline", impact["effect_note"])
+
+    def test_confirmed_malicious_activity_cannot_be_excepted(self):
+        analyst, admin = self.client("analyst"), self.client("admin")
+        # The key of a labeled attack: the exception would make the rule miss it.
+        status, data, _ = self.exception(analyst, key="203.0.113.45")
+        self.assertEqual(status, 400)
+        self.assertIn("labeled attack", data["error"])
+        self.assertEqual(admin.get("/api/changes")[1], [])
+
+        # A key whose live alert an analyst closed as a true positive.
+        pending = self.exception(analyst)[1]
+        alert = self.scanner_alert(analyst)
+        analyst.post(f"/api/alerts/{alert['id']}/status", {"status": "resolved", "disposition": "true_positive"})
+        status, data, _ = self.exception(analyst)
+        self.assertEqual(status, 400)
+        self.assertIn("true positive", data["error"])
+        # The same refusal at approve time, for a request proposed before the verdict; it can still be rejected.
+        status, data, _ = self.approve(admin, pending)
+        self.assertEqual(status, 400)
+        self.assertIn("true positive", data["error"])
+        self.assertEqual(analyst.get("/api/suppressions")[1], [])
+        self.assertEqual(self.stored(admin, pending)["status"], "pending")
+        self.assertEqual(admin.post(f"/api/changes/{pending['id']}/review", {"decision": "reject"})[1]["status"],
+                         "rejected")
+
+    def test_review_roles_are_unchanged(self):
+        analyst, admin, viewer = self.client("analyst"), self.client("admin"), self.client("viewer")
+        change = self.exception(analyst)[1]
+        self.assertEqual(self.approve(viewer, change)[0], 403)
+        self.assertEqual(self.approve(analyst, change)[0], 403)
+        own = self.exception(admin, key="10.9.9.9")[1]
+        status, data, _ = self.approve(admin, own)
+        self.assertEqual(status, 403)
+        self.assertIn("second person", data["error"])
+        self.assertEqual(self.approve(admin, change)[0], 200)
+
+
 class HealthRecoveryTests(ServerTestCase):
     def details(self, client):
         status, data, _ = client.get("/api/health/details")

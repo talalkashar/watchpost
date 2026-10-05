@@ -99,3 +99,29 @@ def coverage(rules, hits_by_rule):
         "summary": {"techniques": len(items), "covered": sum(i["covered"] for i in items),
                     "with_hits": sum(1 for i in items if i["hits"])},
     }
+
+
+NAVIGATOR_LAYER_VERSION = "4.5"  # the layer file format; this module states no ATT&CK release, so none is claimed
+
+
+def navigator_layer(cov):
+    """An ATT&CK Navigator layer from `coverage()` output: one entry per technique an enabled rule covers.
+
+    The score is the number of alerts raised by the rules mapped to the technique.
+    """
+    covered = [t for t in cov["techniques"] if t["covered"]]
+    return {
+        "name": "Watchpost rule coverage",
+        "versions": {"layer": NAVIGATOR_LAYER_VERSION},
+        "domain": "enterprise-attack",
+        "description": "Techniques covered by enabled Watchpost detection rules. Scores count alerts raised "
+                       "from synthetic demo data; they are not observations of real attacks.",
+        "techniques": [{
+            "techniqueID": t["id"],
+            "tactic": t["tactic"].lower().replace(" ", "-"),
+            "score": t["hits"],
+            "comment": "Rules: " + ", ".join(r["id"] + ("" if r["enabled"] else " (disabled)") for r in t["rules"]),
+        } for t in covered],
+        "gradient": {"colors": ["#cfe2f3", "#1f4e79"], "minValue": 0,
+                     "maxValue": max([t["hits"] for t in covered] + [1])},
+    }
