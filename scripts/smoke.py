@@ -19,6 +19,7 @@ import urllib.error
 import urllib.request
 from http.cookiejar import CookieJar
 from pathlib import Path
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parent.parent
 ADMIN_PW, ANALYST_PW, VIEWER_PW = "smoke-admin-password", "smoke-analyst-password", "smoke-viewer-password"
@@ -151,7 +152,7 @@ def main():
         expected = {"brute_force_ip", "password_spray", "account_repeated_failures",
                     "success_after_failures", "off_hours_privileged_login", "web_scanner", "firewall_port_sweep",
                     "impossible_geo_login", "privilege_escalation_after_login", "cloud_iam_change_by_new_principal",
-                    "data_exfil_volume"}
+                    "data_exfil_volume", "unsanctioned_cloud_service"}
         check(expected <= rules_fired, f"missing rules: {expected - rules_fired}")
         print(f"      {len(alerts)} alerts across {len(rules_fired)} rules")
 
@@ -228,6 +229,42 @@ def main():
         status, res = admin.call("POST", f"/api/changes/{change['id']}/review", {"decision": "approve", "note": "smoke"})
         check(status == 200 and res["status"] == "approved", f"approve: {status} {res}")
 
+        step("noise lab scores every rule against benign look-alikes")
+        status, lab = analyst.call("GET", "/api/noise-lab")
+        rows = {r["rule_id"]: r for r in lab["rules"]}
+        check(status == 200 and len(rows) == lab["summary"]["rules"] and all(r["lookalikes_tested"] for r in rows.values()),
+              f"noise lab: {status} {lab.get('summary')}")
+        check(rows["data_exfil_volume"]["lookalikes_fired"] == ["nightly_backup"]
+              and rows["data_exfil_volume"]["recall"] == 1.0, f"flat exfil without an exception: {rows['data_exfil_volume']}")
+        check(rows["firewall_port_sweep"]["lookalikes_fired"] == ["authorized_port_scan"],
+              f"port sweep look-alike: {rows['firewall_port_sweep']}")
+        for r in rows.values():
+            fired = r["lookalikes_fired"] + r["other_benign_fired"]
+            print(f"      {r['rule_id']:34} recall {r['recall']} precision {r['precision']} {r['verdict']:6}"
+                  f" fired on: {', '.join(fired) or 'none'}")
+
+        step("tuning exception: proposed by an analyst, approved by an admin, counted by the engine")
+        status, change = analyst.call("POST", "/api/rules/firewall_port_sweep/suppressions",
+                                      {"group_key": "10.0.50.5", "days": 30,
+                                       "reason": "Authorized internal scanner (smoke test)."})
+        check(status == 201 and change["status"] == "pending" and change["evaluation"]["after"]["fp"] == 0
+              and not change["evaluation"]["after"]["missed"], f"exception proposal: {status} {change}")
+        check(analyst.call("GET", "/api/suppressions")[1] == [], "exception applied before review")
+        status, res = admin.call("POST", f"/api/changes/{change['id']}/review", {"decision": "approve", "note": "smoke"})
+        check(status == 200 and res["status"] == "approved", f"exception approve: {status} {res}")
+        status, listed = analyst.call("GET", "/api/suppressions")
+        check(status == 200 and [(s["rule_id"], s["group_key"], s["active"]) for s in listed]
+              == [("firewall_port_sweep", "10.0.50.5", True)], f"suppressions: {listed}")
+        status, sim = analyst.call("POST", "/api/demo/simulate", {"scenario": "authorized_port_scan"})
+        status2, sweeps = analyst.call("GET", "/api/alerts?rule_id=firewall_port_sweep")
+        check(status == 201 and sim["detection"]["alerts_suppressed"] >= 1
+              and "10.0.50.5" not in [a["group_key"] for a in sweeps], f"exception not applied: {sim['detection']}")
+        status, lab = analyst.call("GET", "/api/noise-lab")
+        row = {r["rule_id"]: r for r in lab["rules"]}["firewall_port_sweep"]
+        check(row["verdict"] == "quiet" and row["suppressed"] == 1, f"lab after exception: {row}")
+        print(f"      exception #{listed[0]['id']} until {listed[0]['expires_at']}: "
+              f"{sim['detection']['alerts_suppressed']} finding(s) suppressed")
+
         step("live ingestion: syslog listener and file shipper")
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
             udp.sendto(b"<11>1 2026-09-28T10:00:00Z smoke-host smokeapp 1 - - live syslog frame",
@@ -258,10 +295,28 @@ def main():
         status, h = admin.call("GET", "/api/health/details")
         check(h["status"] == "ok", f"health after flow: {[(c['name'], c['status'], c['message']) for c in h['checks']]}")
         check(any(c["name"] == "syslog" and c["status"] == "ok" for c in h["checks"]), "syslog health missing")
+        check(m["time_to_resolve_by_severity"] and m["false_positive_rate_by_rule"]
+              and len(m["open_alert_aging"]["buckets"]) == 5 and m["omitted_metrics"], f"SOC metrics: {m}")
+        print(f"      time to resolve for {len(m['time_to_resolve_by_severity'])} severities, false-positive rate for "
+              f"{len(m['false_positive_rate_by_rule'])} rules, {sum(b['count'] for b in m['open_alert_aging']['buckets'])} "
+              f"open alerts aged")
+
+        step("entity risk: ranked list and an explainable entity page")
+        status, top = analyst.call("GET", "/api/entities?limit=5")
+        check(status == 200 and top["entities"], f"entities: {status} {top}")
+        first = top["entities"][0]
+        check(first["score"] == round(sum(c["weight"] for c in first["contributions"]), 2), f"score not explained: {first}")
+        status, ent = analyst.call("GET", f"/api/entities/{first['kind']}/{quote(first['value'], safe='')}")
+        check(status == 200 and ent["score"] == first["score"] and ent["recent_events"] and ent["first_seen"],
+              f"entity page: {status} {ent}")
+        check(analyst.call("GET", "/api/entities/src_ip/2001%3Adb8%3A%3A1")[1]["score"] == 0, "unknown entity")
+        check(analyst.call("GET", "/api/entities?kind=planet")[0] == 400, "bad entity kind accepted")
+        print(f"      riskiest: {first['kind']} {first['value']} scores {first['score']} from {first['alerts']} alerts")
 
         step("SOC dashboard: aggregates, synthetic geo, and the live SSE stream")
         status, dash = analyst.call("GET", "/api/dashboard")
-        check(status == 200 and dash["attackers"] and dash["alert_timeline"]["bins"], f"dashboard: {status}")
+        check(status == 200 and dash["attackers"] and dash["alert_timeline"]["bins"] and dash["risky_entities"],
+              f"dashboard: {status}")
         status, located = analyst.call("GET", "/api/geo?ips=203.0.113.45,8.8.8.8")
         check(located["ips"]["203.0.113.45"]["synthetic"] and located["ips"]["8.8.8.8"] is None, f"geo: {located}")
         cookie = "; ".join(f"{c.name}={c.value}" for h in analyst.opener.handlers

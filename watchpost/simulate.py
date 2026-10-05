@@ -187,6 +187,147 @@ def exfiltration(day, rng):
     return events
 
 
+def shadow_it(day, rng):
+    """judy uploads customer exports to a personal file-sharing service nobody approved."""
+    ip, start = "10.0.1.40", _at(day, 13, 30)
+    events = [_event(start + timedelta(seconds=i * 40 + rng.randint(0, 5)), "shadow_it", "cloud_data_access",
+                     "judy", ip, host="proxy01", bytes=4_000_000,
+                     message="[SYNTHETIC] UploadFile on personal-drive.example (customer-exports)")
+              for i in range(6)]
+    # The sanctioned corporate drive alongside. Must not alert.
+    events += [_event(_at(day, 10, i * 7), "shadow_it", "cloud_data_access", "judy", ip, host="proxy01",
+                      bytes=2_000_000, message="[SYNTHETIC] UploadFile on corp-drive.example (team-share)")
+               for i in range(3)]
+    return events
+
+
+# --- Benign look-alikes (noise lab) ------------------------------------------------------
+# Each one is ordinary activity that resembles what one rule looks for. Whether the rule
+# fires on it is measured, not assumed: several of these do trip their rule.
+
+def password_typo(day, rng):
+    ip, start = "10.0.1.22", _at(day, 8, 50)
+    events = [_event(start + timedelta(seconds=i * 9), "password_typo", "auth_failure", "carol", ip,
+                     message="[SYNTHETIC] Failed password for carol (mistyped)") for i in range(3)]
+    events.append(_event(start + timedelta(seconds=40), "password_typo", "auth_success", "carol", ip))
+    return events
+
+
+def stale_password_device(day, rng):
+    """A phone mail client keeps retrying an old password until its owner fixes it."""
+    ip, start = "10.0.1.27", _at(day, 9, 30)
+    events = [_event(start + timedelta(seconds=i * 60), "stale_password_device", "auth_failure", "heidi", ip,
+                     host="mail01", message="[SYNTHETIC] Failed password for heidi (phone retrying an old password)")
+              for i in range(10)]
+    events.append(_event(start + timedelta(seconds=630), "stale_password_device", "auth_success", "heidi", ip,
+                         host="mail01", message="[SYNTHETIC] Accepted password for heidi (password updated on phone)"))
+    return events
+
+
+def password_expiry_nat(day, rng):
+    """The morning after a password-expiry day: a whole branch office behind one NAT address."""
+    ip, start = "172.16.4.1", _at(day, 8, 50)
+    events = []
+    for i, user in enumerate(EMPLOYEES):
+        t = start + timedelta(seconds=i * 110)
+        for attempt in range(2 if i % 3 == 0 else 1):
+            events.append(_event(t + timedelta(seconds=attempt * 12), "password_expiry_nat", "auth_failure", user,
+                                 ip, message=f"[SYNTHETIC] Failed password for {user} (expired password)"))
+        events.append(_event(t + timedelta(seconds=75), "password_expiry_nat", "auth_success", user, ip,
+                             message=f"[SYNTHETIC] Accepted password for {user} (after reset)"))
+    return events
+
+
+def oncall_admin(day, rng):
+    return [_event(_at(day, 3, 0), "oncall_admin", "auth_success", "admin", "10.0.1.26", host="db01",
+                   message="[SYNTHETIC] Accepted publickey for admin at 03:00 UTC (on-call, paged for a disk alert)")]
+
+
+MONITOR_PATHS = ["/", "/health", "/login", "/app/dashboard", "/api/v1/status", "/static/app.css",
+                 "/robots.txt", "/server-status"]
+
+
+def uptime_monitor(day, rng):
+    """An uptime monitor walks eight paths every five minutes for an hour.
+
+    /server-status is on the scanner path list, so that request is a web_scan event just as
+    the web log parser would classify it. At this pace the rule stays quiet; a monitor
+    polling every minute would trip it.
+    """
+    ip, start = "10.0.60.7", _at(day, 10, 0)
+    events = []
+    for walk in range(12):
+        for i, path in enumerate(MONITOR_PATHS):
+            kind = "web_scan" if path == "/server-status" else "web_request"
+            events.append(_event(start + timedelta(seconds=walk * 300 + i), "uptime_monitor", kind, None, ip,
+                                 message=f"GET {path} -> 200 [SYNTHETIC uptime monitor]", bytes=512))
+    return events
+
+
+def authorized_port_scan(day, rng):
+    """The authorized internal scanner's weekly port sweep, denied by the firewall like any other."""
+    ip, start = "10.0.50.5", _at(day, 2, 0)
+    ports = [21, 22, 23, 25, 80, 110, 139, 443, 445, 1433, 3306, 3389, 5432, 5900, 8080]
+    return [_event(start + timedelta(seconds=i * 3), "authorized_port_scan", "fw_deny", None, ip, host="fw01",
+                   message=f"[SYNTHETIC] firewall deny {ip} -> 10.0.0.10:{port}/tcp (authorized scan)",
+                   dest_port=port) for i, port in enumerate(ports)]
+
+
+def vpn_traveler(day, rng):
+    """grace logs in at HQ, flies to the remote site, and connects over VPN four and a half hours later."""
+    return [
+        _event(_at(day, 8, 0), "vpn_traveler", "auth_success", "grace", "10.0.1.26", host="mail01",
+               message="[SYNTHETIC] Accepted password for grace (office, Riverton HQ)"),
+        _event(_at(day, 12, 30), "vpn_traveler", "vpn_login", "grace", "192.168.40.12", host="vpn01",
+               message="[SYNTHETIC] VPN session for grace from Hillcrest remote site after a morning flight"),
+    ]
+
+
+def typo_then_sudo(day, rng):
+    """An administrator mistypes a password three times, logs in, and restarts a service."""
+    ip, start = "10.0.1.26", _at(day, 14, 30)
+    events = [_event(start + timedelta(seconds=i * 8), "typo_then_sudo", "auth_failure", "grace", ip,
+                     message="[SYNTHETIC] Failed password for grace (mistyped)") for i in range(3)]
+    events.append(_event(start + timedelta(seconds=35), "typo_then_sudo", "auth_success", "grace", ip))
+    events.append(_event(start + timedelta(minutes=2), "typo_then_sudo", "privilege_escalation", "grace", ip,
+                         message="[SYNTHETIC] grace : TTY=pts/1 ; PWD=/home/grace ; USER=root ; "
+                                 "COMMAND=/usr/bin/systemctl restart nginx"))
+    return events
+
+
+def ci_key_rotation(day, rng):
+    """The CI role deploys every night, then rotates its own access key in the morning."""
+    events = [_event(_at(day, 2, i * 3), "ci_key_rotation", "cloud_api_call", "ci-deploy", "10.0.7.20", host=None,
+                     message=f"[SYNTHETIC] {action} on {service}")
+              for i, (action, service) in enumerate([("DescribeInstances", "ec2.amazonaws.com"),
+                                                     ("UpdateFunctionCode", "lambda.amazonaws.com"),
+                                                     ("ListBuckets", "s3.amazonaws.com")])]
+    for i, action in enumerate(["CreateAccessKey", "DeleteAccessKey"]):
+        events.append(_event(_at(day, 10, 0) + timedelta(seconds=i * 20), "ci_key_rotation", "cloud_iam_change",
+                             "ci-deploy", "10.0.7.20", host=None,
+                             message=f"[SYNTHETIC] {action} on iam.amazonaws.com (scheduled key rotation)"))
+    return events
+
+
+def nightly_backup(day, rng):
+    """The backup server ships about 5 GB off site at 01:00, as it did on each of the three nights before."""
+    ip, events = "10.0.5.10", []
+    for back in (3, 2, 1, 0):
+        start = _at(day - timedelta(days=back), 1, 0)
+        events += [_event(start + timedelta(seconds=i * 150), "nightly_backup", "fw_allow", None, ip, host="fw01",
+                          message=f"[SYNTHETIC] firewall allow {ip} -> 198.51.100.200:443/tcp (nightly backup)",
+                          dest_ip="198.51.100.200", dest_port=443, bytes=400_000_000 + rng.randint(0, 40_000_000))
+                   for i in range(12)]
+    return events
+
+
+def sanctioned_saas(day, rng):
+    """A team uses the sanctioned corporate drive through its regional endpoint."""
+    return [_event(_at(day, 11, i * 6), "sanctioned_saas", "cloud_data_access", "bob", "10.0.1.21", host="proxy01",
+                   bytes=3_000_000, message="[SYNTHETIC] UploadFile on eu.corp-drive.example (team-share)")
+            for i in range(6)]
+
+
 # expected: rule_id -> group_key the alert should be keyed on. Anything else firing is a false positive.
 SCENARIOS = {
     "baseline": {"build": baseline, "malicious": False, "expected": {},
@@ -224,14 +365,69 @@ SCENARIOS = {
     "exfiltration": {"build": exfiltration, "malicious": True,
                      "expected": {"data_exfil_volume": "svc-deploy-tmp"},
                      "description": "About 2 GB read from cloud storage in 10 minutes; normal report reads alongside."},
+    "shadow_it": {"build": shadow_it, "malicious": True,
+                  "expected": {"unsanctioned_cloud_service": "judy|personal-drive.example"},
+                  "description": "judy uploads customer exports to a file-sharing service that is not sanctioned; "
+                                 "her uploads to the corporate drive do not alert."},
 }
+
+# What "Load demo data" and `--scenario all` send. The look-alikes below are kept out of the demo
+# dataset: the noise lab evaluates them, and any one can be replayed by name.
+DEMO_SCENARIOS = list(SCENARIOS)
+
+# Benign look-alikes: `lookalike_of` names the rule each one is written to test.
+for _name in ("noisy_scanner", "noisy_scanner_repeat"):
+    SCENARIOS[_name]["lookalike_of"] = "brute_force_ip"
+
+SCENARIOS.update({
+    "password_typo": {
+        "build": password_typo, "malicious": False, "expected": {}, "lookalike_of": "success_after_failures",
+        "description": "carol mistypes her password three times, then logs in."},
+    "stale_password_device": {
+        "build": stale_password_device, "malicious": False, "expected": {},
+        "lookalike_of": "account_repeated_failures",
+        "description": "heidi's phone retries an old password ten times in ten minutes until she updates it."},
+    "password_expiry_nat": {
+        "build": password_expiry_nat, "malicious": False, "expected": {}, "lookalike_of": "password_spray",
+        "description": "The morning after a password-expiry day: eight users behind one branch NAT address "
+                       "each fail once or twice, then log in."},
+    "oncall_admin": {
+        "build": oncall_admin, "malicious": False, "expected": {}, "lookalike_of": "off_hours_privileged_login",
+        "description": "The on-call administrator answers a page and logs in as admin at 03:00 UTC."},
+    "uptime_monitor": {
+        "build": uptime_monitor, "malicious": False, "expected": {}, "lookalike_of": "web_scanner",
+        "description": "An uptime monitor walks eight paths, /server-status among them, every five minutes."},
+    "authorized_port_scan": {
+        "build": authorized_port_scan, "malicious": False, "expected": {}, "lookalike_of": "firewall_port_sweep",
+        "description": "The authorized internal scanner (10.0.50.5) sweeps 15 ports and the firewall denies them."},
+    "vpn_traveler": {
+        "build": vpn_traveler, "malicious": False, "expected": {}, "lookalike_of": "impossible_geo_login",
+        "description": "grace logs in at HQ, takes a morning flight, and connects over VPN from the remote site "
+                       "four and a half hours later."},
+    "typo_then_sudo": {
+        "build": typo_then_sudo, "malicious": False, "expected": {},
+        "lookalike_of": "privilege_escalation_after_login",
+        "description": "An administrator mistypes a password three times, logs in, and restarts a service with sudo."},
+    "ci_key_rotation": {
+        "build": ci_key_rotation, "malicious": False, "expected": {},
+        "lookalike_of": "cloud_iam_change_by_new_principal",
+        "description": "The CI role, active every night, rotates its own access key."},
+    "nightly_backup": {
+        "build": nightly_backup, "malicious": False, "expected": {}, "lookalike_of": "data_exfil_volume",
+        "description": "The backup server ships about 5 GB off site at 01:00, as on each of the three nights before. "
+                       "The flat threshold alerts on it every night. With an approved tuning exception for "
+                       "10.0.5.10 the rule compares it with its own history and stays quiet."},
+    "sanctioned_saas": {
+        "build": sanctioned_saas, "malicious": False, "expected": {}, "lookalike_of": "unsanctioned_cloud_service",
+        "description": "A team uploads to the sanctioned corporate drive through its regional endpoint."},
+})
 
 
 def build(scenario_names=None, seed=7, now=None):
-    """Return {scenario: [events]} for the requested scenarios (default: all)."""
+    """Return {scenario: [events]} for the requested scenarios (default: the demo dataset)."""
     rng = random.Random(seed)
     day = demo_day(now)
-    names = scenario_names or list(SCENARIOS)
+    names = scenario_names or DEMO_SCENARIOS
     unknown = [n for n in names if n not in SCENARIOS]
     if unknown:
         raise ValueError(f"unknown scenario(s): {', '.join(unknown)}")

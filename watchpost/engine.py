@@ -186,6 +186,12 @@ def _apply_finding(conn, rule, finding, synthetic, assets_idx):
     return "created"
 
 
+def active_suppressions(conn):
+    """Approved, unexpired tuning exceptions as a set of (rule_id, group_key)."""
+    return {(r["rule_id"], r["group_key"]) for r in conn.execute(
+        "SELECT rule_id, group_key FROM suppressions WHERE expires_at > ?", (now_iso(),))}
+
+
 def run_detection(conn, trigger="manual", start=None, end=None):
     """Run all enabled rules over a time range (default: all events).
 
@@ -199,7 +205,7 @@ def run_detection(conn, trigger="manual", start=None, end=None):
             (started, trigger),
         ).lastrowid
         summary = {"run_id": run_id, "status": "running", "events_scanned": 0,
-                   "alerts_created": 0, "alerts_updated": 0}
+                   "alerts_created": 0, "alerts_updated": 0, "alerts_suppressed": 0}
         try:
             active = load_rules(conn)
             for rule in active:
@@ -220,12 +226,18 @@ def run_detection(conn, trigger="manual", start=None, end=None):
             synthetic_ids = {e["id"] for e in events if e["synthetic"]}
             summary["events_scanned"] = len(events)
             assets_idx = assets_mod.load_index(conn)
-
+            suppressed = active_suppressions(conn)
             with transaction(conn):
                 for rule in active:
-                    for finding in rules_mod.RULE_FUNCTIONS[rule["id"]](events, rule["params"]):
+                    # For the exfil rule an exception is passed in as a baseline principal, not skipped here.
+                    params = rules_mod.exception_params(rule["id"], rule["params"], suppressed)
+                    skips = rule["id"] not in rules_mod.EXCEPTION_ENABLES_BASELINE
+                    for finding in rules_mod.RULE_FUNCTIONS[rule["id"]](events, params):
                         if scan_start and finding["last_seen"] < scan_start:
                             continue  # built only from history context; outside this scan
+                        if skips and (rule["id"], finding["group_key"]) in suppressed:
+                            summary["alerts_suppressed"] += 1  # a reviewed tuning exception covers it
+                            continue
                         synthetic = all(i in synthetic_ids for i in finding["event_ids"])
                         outcome = _apply_finding(conn, rule, finding, synthetic, assets_idx)
                         if outcome == "created":
@@ -235,9 +247,9 @@ def run_detection(conn, trigger="manual", start=None, end=None):
             summary["status"] = "ok"
             conn.execute(
                 "UPDATE detection_runs SET status='ok', finished_at=?, events_scanned=?, alerts_created=?,"
-                " alerts_updated=?, max_event_id=? WHERE id=?",
+                " alerts_updated=?, alerts_suppressed=?, max_event_id=? WHERE id=?",
                 (now_iso(), summary["events_scanned"], summary["alerts_created"],
-                 summary["alerts_updated"], max_id, run_id),
+                 summary["alerts_updated"], summary["alerts_suppressed"], max_id, run_id),
             )
             if not (start and end):
                 # A full scan covers every stored event, including batches whose detection failed.
