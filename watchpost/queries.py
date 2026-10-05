@@ -224,6 +224,19 @@ def update_status(conn, alert_id, actor, status, disposition=None, note=None):
     return dict(conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone())
 
 
+# Open-alert age buckets in minutes since the alert was created: (label, from, up to).
+AGING_BUCKETS = (("under 1h", 0, 60), ("1-4h", 60, 240), ("4-24h", 240, 1440), ("1-7d", 1440, 10080),
+                 ("over 7d", 10080, float("inf")))
+# Left out on purpose: they compare an event's own timestamp with this instance's clock, and demo
+# and simulated events are replayed with timestamps from the previous business day.
+OMITTED_METRICS = [
+    {"metric": "time_to_detect", "reason": "Event time to alert creation. Replayed synthetic events carry older"
+                                           " timestamps, so this would measure the replay offset, not detection."},
+    {"metric": "dwell_time", "reason": "First malicious event to resolution. It starts from the same replayed"
+                                       " event timestamps, so it would be inflated by the replay offset."},
+]
+
+
 def metrics(conn, hours=24):
     hours = _int(hours, "hours", 24, 1, 24 * 90)
     since = iso(utcnow() - timedelta(hours=hours))
@@ -249,6 +262,26 @@ def metrics(conn, hours=24):
 
     mttr = one("SELECT AVG((julianday(resolved_at) - julianday(created_at)) * 1440) FROM alerts"
                " WHERE resolved_at IS NOT NULL")
+    # SOC metrics (3.0). All three use created_at/resolved_at, which are wall-clock times of this
+    # instance, so they stay honest when the events themselves are replayed with older timestamps.
+    minutes = "(julianday(resolved_at) - julianday(created_at)) * 1440"
+    resolve_by_severity = [
+        {"severity": r["severity"], "resolved": r["resolved"], "mean_minutes": round(r["mean"], 1),
+         "max_minutes": round(r["longest"], 1)} for r in conn.execute(
+            f"SELECT severity, COUNT(*) AS resolved, AVG({minutes}) AS mean, MAX({minutes}) AS longest FROM alerts"
+            f" WHERE resolved_at IS NOT NULL GROUP BY severity ORDER BY {SEVERITY_RANK_SQL.format(col='severity')}"
+            " DESC")]
+    fp_by_rule = [
+        {**dict(r), "false_positive_rate": round(r["false_positive"] / r["reviewed"], 3)} for r in conn.execute(
+            "SELECT rule_id, COUNT(*) AS reviewed, SUM(disposition = 'false_positive') AS false_positive,"
+            " SUM(disposition = 'benign') AS benign FROM alerts WHERE disposition IS NOT NULL GROUP BY rule_id"
+            " ORDER BY SUM(disposition = 'false_positive') * 1.0 / COUNT(*) DESC, rule_id")]
+    now = utcnow()
+    ages = [(now - parse_iso(r["created_at"])).total_seconds() / 60 for r in conn.execute(
+        "SELECT created_at FROM alerts WHERE status != 'resolved'")]
+    aging = {"buckets": [{"label": label, "count": sum(low <= a < high for a in ages)}
+                         for label, low, high in AGING_BUCKETS],
+             "oldest_minutes": round(max(ages), 1) if ages else None}
     return {
         "window_hours": hours,
         "events_total": one("SELECT COUNT(*) FROM events"),
@@ -270,6 +303,10 @@ def metrics(conn, hours=24):
         "events_by_type": by("SELECT event_type, COUNT(*) AS count FROM events GROUP BY event_type"
                              " ORDER BY count DESC"),
         "activity_last_24h_of_data": histogram,
+        "time_to_resolve_by_severity": resolve_by_severity,
+        "false_positive_rate_by_rule": fp_by_rule,
+        "open_alert_aging": aging,
+        "omitted_metrics": OMITTED_METRICS,
     }
 
 

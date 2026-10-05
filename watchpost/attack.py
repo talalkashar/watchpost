@@ -40,6 +40,7 @@ TECHNIQUES = {
     "T1046": ("Network Service Discovery", "Discovery"),
     "T1530": ("Data from Cloud Storage", "Collection"),
     "T1048": ("Exfiltration Over Alternative Protocol", "Exfiltration"),
+    "T1567": ("Exfiltration Over Web Service", "Exfiltration"),
 }
 
 _TACTIC_ORDER = {name: i for i, (_, name) in enumerate(TACTICS)}

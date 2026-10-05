@@ -156,6 +156,12 @@ def _apply_finding(conn, rule, finding, synthetic):
     return "created"
 
 
+def active_suppressions(conn):
+    """Approved, unexpired tuning exceptions as a set of (rule_id, group_key)."""
+    return {(r["rule_id"], r["group_key"]) for r in conn.execute(
+        "SELECT rule_id, group_key FROM suppressions WHERE expires_at > ?", (now_iso(),))}
+
+
 def run_detection(conn, trigger="manual", start=None, end=None):
     """Run all enabled rules over a time range (default: all events).
 
@@ -169,7 +175,7 @@ def run_detection(conn, trigger="manual", start=None, end=None):
             (started, trigger),
         ).lastrowid
         summary = {"run_id": run_id, "status": "running", "events_scanned": 0,
-                   "alerts_created": 0, "alerts_updated": 0}
+                   "alerts_created": 0, "alerts_updated": 0, "alerts_suppressed": 0}
         try:
             active = load_rules(conn)
             for rule in active:
@@ -189,12 +195,24 @@ def run_detection(conn, trigger="manual", start=None, end=None):
             events = [dict(r) for r in conn.execute(sql, args)]
             synthetic_ids = {e["id"] for e in events if e["synthetic"]}
             summary["events_scanned"] = len(events)
+            suppressed = active_suppressions(conn)
+            # Exfil history that was already flagged and not cleared by an analyst is no baseline.
+            flagged = {r[0] for r in conn.execute(
+                "SELECT ae.event_id FROM alert_events ae JOIN alerts a ON a.id = ae.alert_id"
+                " WHERE a.rule_id = 'data_exfil_volume'"
+                " AND (a.disposition IS NULL OR a.disposition = 'true_positive')")}
+            for event in events:
+                if event["id"] in flagged:
+                    event["alerted"] = True
 
             with transaction(conn):
                 for rule in active:
                     for finding in rules_mod.RULE_FUNCTIONS[rule["id"]](events, rule["params"]):
                         if scan_start and finding["last_seen"] < scan_start:
                             continue  # built only from history context; outside this scan
+                        if (rule["id"], finding["group_key"]) in suppressed:
+                            summary["alerts_suppressed"] += 1  # a reviewed tuning exception covers it
+                            continue
                         synthetic = all(i in synthetic_ids for i in finding["event_ids"])
                         outcome = _apply_finding(conn, rule, finding, synthetic)
                         if outcome == "created":
@@ -204,9 +222,9 @@ def run_detection(conn, trigger="manual", start=None, end=None):
             summary["status"] = "ok"
             conn.execute(
                 "UPDATE detection_runs SET status='ok', finished_at=?, events_scanned=?, alerts_created=?,"
-                " alerts_updated=?, max_event_id=? WHERE id=?",
+                " alerts_updated=?, alerts_suppressed=?, max_event_id=? WHERE id=?",
                 (now_iso(), summary["events_scanned"], summary["alerts_created"],
-                 summary["alerts_updated"], max_id, run_id),
+                 summary["alerts_updated"], summary["alerts_suppressed"], max_id, run_id),
             )
             if not (start and end):
                 # A full scan covers every stored event, including batches whose detection failed.

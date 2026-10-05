@@ -10,9 +10,10 @@ from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
-from . import __version__, auth, engine, geo, improve, incidents, queries, report, simulate, storyline, stream
+from . import __version__, auth, engine, entities, geo, improve, incidents, queries, report, simulate, storyline, \
+    stream
 from .ratelimit import TokenBucketLimiter
 from .config import Config
 from .db import audit, connect, init_schema, now_iso, row_to_dict
@@ -350,11 +351,29 @@ def metrics(req):
 # SOC dashboard ---------------------------------------------------------------------------
 
 GEO_MAX_IPS = 200
+DASHBOARD_ENTITIES = 8
 
 
 @route("GET", "/api/dashboard")
 def dashboard(req):
-    return queries.dashboard(req.conn)
+    return {**queries.dashboard(req.conn),
+            "risky_entities": entities.list_entities(req.conn, {"limit": DASHBOARD_ENTITIES})["entities"]}
+
+
+@route("GET", "/api/entities")
+def entity_list(req):
+    return entities.list_entities(req.conn, req.query)
+
+
+def _entity_route(kind):
+    # One literal route per kind; the value is percent-encoded in the path (it may hold dots, colons, pipes).
+    @route("GET", rf"/api/entities/{kind}/([^/]+)")
+    def entity_detail(req, value):
+        return entities.get_entity(req.conn, kind, unquote(value))
+
+
+for _kind in entities.KINDS:
+    _entity_route(_kind)
 
 
 @route("GET", "/api/geo")
@@ -409,6 +428,26 @@ def rule_propose(req, rule_id):
     req.status = 201
     return improve.propose_change(req.conn, "rule_update", rule_id, payload, data.get("reason"),
                                   req.user["username"])
+
+
+@route("POST", r"/api/rules/([a-z_]+)/suppressions", role="analyst")
+def suppression_propose(req, rule_id):
+    """Propose a tuning exception; nothing is suppressed until an admin approves the change request."""
+    data = body_json(req)
+    req.status = 201
+    return improve.propose_change(req.conn, "suppression_add", rule_id,
+                                  {"group_key": data.get("group_key"), "days": data.get("days")},
+                                  data.get("reason"), req.user["username"])
+
+
+@route("GET", "/api/suppressions")
+def suppressions(req):
+    return improve.list_suppressions(req.conn)
+
+
+@route("GET", "/api/noise-lab")
+def noise_lab(req):
+    return improve.noise_lab(req.conn)
 
 
 @route("POST", "/api/rules/suggestions", role="analyst")
