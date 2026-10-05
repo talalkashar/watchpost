@@ -52,7 +52,7 @@ def evaluate(rule_params, seed=7, suppressions=()):
     Returns per-rule true positives, false negatives, and false positives, plus which benign
     look-alikes written for the rule were tested and which of them fired. `suppressions` is a set
     of (rule_id, group_key) tuning exceptions: matching findings are dropped and counted, as the
-    engine does.
+    engine does. For data_exfil_volume an exception drops nothing; it turns on that principal's baseline.
     """
     now = utcnow()
     scenarios = simulate.build(list(simulate.SCENARIOS), seed=seed, now=now)
@@ -70,10 +70,12 @@ def evaluate(rule_params, seed=7, suppressions=()):
         expected = simulate.SCENARIOS[name]["expected"]
         lookalike_of = simulate.SCENARIOS[name].get("lookalike_of")
         for rule_id, params in rule_params.items():
-            findings = [f for f in rules_mod.RULE_FUNCTIONS[rule_id](copy.deepcopy(events), params)
+            run_params = rules_mod.exception_params(rule_id, params, suppressions)
+            findings = [f for f in rules_mod.RULE_FUNCTIONS[rule_id](copy.deepcopy(events), run_params)
                         if f["last_seen"] >= day_start]
             r = results[rule_id]
-            kept = [f for f in findings if (rule_id, f["group_key"]) not in suppressions]
+            skips = rule_id not in rules_mod.EXCEPTION_ENABLES_BASELINE  # exfil: baseline, not a skip
+            kept = [f for f in findings if not (skips and (rule_id, f["group_key"]) in suppressions)]
             r["suppressed"] += len(findings) - len(kept)
             findings = kept
             if lookalike_of == rule_id:

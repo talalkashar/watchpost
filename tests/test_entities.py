@@ -207,6 +207,9 @@ class EntityUiTests(unittest.TestCase):
         self.assertIn("#entity/${kind}/${encodeURIComponent(value)}", app)
         self.assertIn("/api/entities/${kind}/${encodeURIComponent(value)}", app)
         self.assertIn("entityLink(", (STATIC / "dashboard.js").read_text())
+        # The kind comes from location.hash: it is checked before it reaches the API path ("#entity/../audit").
+        self.assertIn('if (!Object.hasOwn(ENTITY_KINDS, kind)) throw new Error("Unknown entity kind");\n'
+                      "  const e = await api(`/api/entities/${kind}/", app)
         self.assertIn("#p-entities", (STATIC / "style.css").read_text())
 
 

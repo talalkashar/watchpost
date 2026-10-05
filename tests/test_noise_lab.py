@@ -75,18 +75,24 @@ class EvaluateLookalikeTests(unittest.TestCase):
         self.assertEqual(bf["lookalikes"], ["noisy_scanner", "noisy_scanner_repeat"])
         self.assertEqual(bf["lookalikes_fired"], ["noisy_scanner", "noisy_scanner_repeat"])
 
-    def test_nightly_backup_is_quiet_and_exfiltration_still_fires(self):
+    def test_without_an_exception_the_backup_is_noise_and_exfiltration_fires(self):
         exfil = self.result["rules"]["data_exfil_volume"]
         self.assertEqual(exfil["lookalikes"], ["nightly_backup"])
-        self.assertEqual(exfil["lookalikes_fired"], [])
-        self.assertEqual(exfil["fp"], 0)
-        self.assertEqual(exfil["detected"], ["exfiltration"])
-
-    def test_without_a_baseline_the_backup_is_noise(self):
-        flat = rules.validate_params("data_exfil_volume", {"baseline_multiplier": 0})
-        exfil = improve.evaluate({"data_exfil_volume": flat})["rules"]["data_exfil_volume"]
         self.assertEqual(exfil["lookalikes_fired"], ["nightly_backup"])
         self.assertEqual(exfil["detected"], ["exfiltration"])
+
+    def test_an_exception_for_the_backup_principal_turns_on_its_baseline(self):
+        params = {"data_exfil_volume": DEFAULTS["data_exfil_volume"]}
+        exfil = improve.evaluate(params, suppressions={("data_exfil_volume", "10.0.5.10")})["rules"]["data_exfil_volume"]
+        self.assertEqual((exfil["lookalikes_fired"], exfil["fp"], exfil["detected"]), ([], 0, ["exfiltration"]))
+        self.assertEqual(exfil["suppressed"], 0)  # nothing is skipped: the rule itself stays quiet
+        # An exception for the attacker's principal does not skip its findings either.
+        exfil = improve.evaluate(params, suppressions={("data_exfil_volume", "svc-deploy-tmp")})["rules"]["data_exfil_volume"]
+        self.assertEqual((exfil["missed"], exfil["suppressed"]), ([], 0))
+        # baseline_multiplier 0 keeps the rule flat even with the exception.
+        flat = {"data_exfil_volume": rules.validate_params("data_exfil_volume", {"baseline_multiplier": 0})}
+        exfil = improve.evaluate(flat, suppressions={("data_exfil_volume", "10.0.5.10")})["rules"]["data_exfil_volume"]
+        self.assertEqual(exfil["lookalikes_fired"], ["nightly_backup"])
 
     def test_noise_is_reported_not_hidden(self):
         # No principled fix exists for these, so they stay noisy and the lab says so.
@@ -108,48 +114,75 @@ class EvaluateLookalikeTests(unittest.TestCase):
         self.assertEqual(r["missed"], ["brute_force"])
 
 
+def exfil_params(principals=(), **overrides):
+    """Params as the engine hands them to the rule: saved params plus the excepted principals."""
+    return rules.exception_params("data_exfil_volume", rules.validate_params("data_exfil_volume", overrides),
+                                  {("data_exfil_volume", p) for p in principals})
+
+
 class BaselineExfilTests(unittest.TestCase):
+    """The baseline applies only to principals with an approved tuning exception."""
+
     def nightly(self, nights, per_event):
         return [ev(-86400 * back + i * 60, "fw_allow", bytes=per_event) for back in nights for i in range(5)]
 
-    def test_comparable_history_does_not_alert(self):
-        p = rules.validate_params("data_exfil_volume", {})
-        self.assertEqual(p["baseline_multiplier"], 3)
+    def test_sub_threshold_priming_does_not_hide_a_burst_without_an_exception(self):
+        # 0.9 GB a night never alerts; 2.6 GB is under 3x that, and must alert on the flat threshold.
+        events = make(self.nightly((3, 2, 1), 180_000_000) + self.nightly((0,), 520_000_000))
+        found = rules.data_exfil_volume(events, exfil_params())
+        self.assertEqual([f["first_seen"] for f in found], [iso(BASE)])
+        self.assertIn("Flat thresholds", found[0]["explanation"])
+        self.assertNotIn("Baseline mode", found[0]["explanation"])
+
+    def test_without_an_exception_history_never_quiets_the_rule(self):
         events = make(self.nightly((3, 2, 1, 0), 400_000_000))
-        found = rules.data_exfil_volume(events, p)
+        self.assertEqual(len(rules.data_exfil_volume(events, exfil_params())), 4)
+        # The saved params alone (no engine-supplied principals) behave the same.
+        self.assertEqual(len(rules.data_exfil_volume(events, rules.validate_params("data_exfil_volume", {}))), 4)
+        # Someone else's exception changes nothing for this principal.
+        self.assertEqual(len(rules.data_exfil_volume(events, exfil_params(["10.0.9.99"]))), 4)
+
+    def test_an_exception_turns_on_the_baseline_for_that_principal(self):
+        events = make(self.nightly((3, 2, 1, 0), 400_000_000))
+        found = rules.data_exfil_volume(events, exfil_params(["10.0.5.10"]))
         # Only the first night, which has no history of its own yet, stands out.
         self.assertEqual([f["first_seen"] for f in found], [iso(BASE - timedelta(days=3))])
+        self.assertIn("Baseline mode", found[0]["explanation"])
         self.assertIn("no earlier transfers", found[0]["explanation"])
 
-    def test_jump_above_own_baseline_alerts_and_explains_the_ratio(self):
-        p = rules.validate_params("data_exfil_volume", {})
-        events = make(self.nightly((3, 2, 1), 40_000_000) + self.nightly((0,), 400_000_000))
-        found = rules.data_exfil_volume(events, p)
-        self.assertEqual(len(found), 1)
-        self.assertEqual(found[0]["first_seen"], iso(BASE))
-        self.assertIn("200.0 MB", found[0]["explanation"])  # the baseline
-        self.assertIn("10.0x", found[0]["explanation"])     # the ratio
-        self.assertIn("3x", found[0]["explanation"])        # the multiplier
+    def test_excepted_principal_bursting_over_its_baseline_alerts_and_explains_the_ratio(self):
+        events = make(self.nightly((3, 2, 1), 400_000_000) + self.nightly((0,), 1_200_000_000))
+        found = rules.data_exfil_volume(events, exfil_params(["10.0.5.10"]))
+        self.assertEqual([f["first_seen"] for f in found][1:], [iso(BASE)])
+        text = found[-1]["explanation"]
+        self.assertIn("Baseline mode", text)
+        self.assertIn("2.0 GB", text)   # the baseline
+        self.assertIn("3.0x", text)     # the ratio
+        self.assertIn("3x", text)       # the multiplier
+        # Just under 3x its own normal stays quiet.
+        events = make(self.nightly((3, 2, 1), 400_000_000) + self.nightly((0,), 1_190_000_000))
+        self.assertEqual(len(rules.data_exfil_volume(events, exfil_params(["10.0.5.10"]))), 1)
+
+    def test_baseline_multiplier_zero_is_flat_even_with_an_exception(self):
+        events = make(self.nightly((3, 2, 1, 0), 400_000_000))
+        found = rules.data_exfil_volume(events, exfil_params(["10.0.5.10"], baseline_multiplier=0))
+        self.assertEqual(len(found), 4)
+        self.assertIn("Flat thresholds", found[0]["explanation"])
 
     def test_history_outside_the_window_is_not_a_baseline(self):
-        p = rules.validate_params("data_exfil_volume", {"history_seconds": 86400})
         events = make(self.nightly((3, 0), 400_000_000))
-        self.assertEqual(len(rules.data_exfil_volume(events, p)), 2)
-
-    def test_another_principals_history_is_not_a_baseline(self):
-        p = rules.validate_params("data_exfil_volume", {})
-        events = make(self.nightly((1,), 400_000_000)
-                      + [ev(i * 60, "fw_allow", ip="10.0.9.99", bytes=400_000_000) for i in range(5)])
-        self.assertEqual({f["group_key"] for f in rules.data_exfil_volume(events, p)}, {"10.0.5.10", "10.0.9.99"})
+        self.assertEqual(len(rules.data_exfil_volume(events, exfil_params(["10.0.5.10"], history_seconds=86400))), 2)
 
     def test_param_validation(self):
-        for bad in ({"baseline_multiplier": -1}, {"baseline_multiplier": "3"}, {"history_seconds": 5}):
+        for bad in ({"baseline_multiplier": -1}, {"baseline_multiplier": "3"}, {"history_seconds": 5},
+                    {"baseline_principals": ["10.0.5.10"]}):  # engine-supplied, never a saved or proposed param
             with self.assertRaises(rules.RuleConfigError):
                 rules.validate_params("data_exfil_volume", bad)
+        self.assertNotIn("baseline_principals", rules.validate_params("data_exfil_volume", {}))
 
 
-class FlaggedHistoryTests(unittest.TestCase):
-    """History the engine already alerted on, and nobody cleared, is not a baseline."""
+class EngineExfilExceptionTests(unittest.TestCase):
+    """Through the engine: only an approved, unexpired exception changes how the exfil rule behaves."""
 
     def setUp(self):
         self.conn = connect(":memory:")
@@ -171,24 +204,38 @@ class FlaggedHistoryTests(unittest.TestCase):
             found.setdefault(r["group_key"], set()).add(r["id"])
         return found
 
-    def night(self, days_ago):
+    def night(self, days_ago, per_event=400_000_000):
         start = utcnow().replace(microsecond=0) - timedelta(days=days_ago, hours=1)
         return [{"ts": iso(start + timedelta(seconds=i * 150)), "event_type": "fw_allow", "src_ip": "10.0.5.10",
-                 "host": "fw01", "bytes": 400_000_000, "message": "[SYNTHETIC] firewall allow (nightly backup)"}
-                for i in range(12)], iso(start)
+                 "host": "fw01", "bytes": per_event, "message": "[SYNTHETIC] firewall allow (nightly backup)"}
+                for i in range(12)]
 
-    def test_rule_ignores_flagged_history_and_multiplier_zero_still_disables_the_baseline(self):
-        p = rules.validate_params("data_exfil_volume", {})
-        nightly = lambda back: [ev(-86400 * back + i * 60, "fw_allow", bytes=400_000_000) for i in range(5)]
-        events = make(nightly(1) + nightly(0))
-        self.assertEqual([f["first_seen"] for f in rules.data_exfil_volume(events, p)], [iso(BASE - timedelta(days=1))])
-        for e in events[:5]:
-            e["alerted"] = True
-        found = rules.data_exfil_volume(events, p)
-        self.assertEqual(len(found), 2)
-        self.assertIn("already flagged", found[1]["explanation"])
-        off = rules.validate_params("data_exfil_volume", {"baseline_multiplier": 0})
-        self.assertEqual(len(rules.data_exfil_volume(make(nightly(1) + nightly(0)), off)), 2)
+    def allow(self, expires_in_days):
+        self.conn.execute(
+            "INSERT INTO suppressions(rule_id, group_key, reason, expires_at, proposed_by, approved_by, created_at)"
+            " VALUES ('data_exfil_volume', '10.0.5.10', 'nightly backup', ?, 'analyst', 'admin', ?)",
+            (iso(utcnow() + timedelta(days=expires_in_days)), iso(utcnow())))
+        self.conn.commit()
+
+    def test_an_analyst_verdict_alone_never_quiets_the_rule(self):
+        self.assertEqual(self.ingest(self.night(3))["alerts_created"], 1)
+        for verdict in ("benign", "false_positive"):
+            for row in self.conn.execute("SELECT id FROM alerts WHERE status != 'resolved'").fetchall():
+                queries.update_status(self.conn, row["id"], "analyst", "resolved", disposition=verdict)
+            with self.subTest(verdict=verdict):
+                self.assertEqual(self.ingest(self.night({"benign": 2, "false_positive": 1}[verdict]))["alerts_created"], 1)
+
+    def test_exception_enables_the_baseline_and_expiry_reverts_to_flat(self):
+        self.allow(30)
+        self.assertEqual(self.ingest(self.night(4))["alerts_created"], 1)   # no history yet
+        run = self.ingest(self.night(3))
+        self.assertEqual((run["alerts_created"], run["alerts_updated"], run["alerts_suppressed"]), (0, 0, 0))
+        # Three times its own normal still alerts: the exception is not a blanket skip.
+        self.assertEqual(self.ingest(self.night(2, 1_200_000_000))["alerts_created"], 1)
+        # Expired: back to the flat threshold, whatever the history.
+        self.conn.execute("UPDATE suppressions SET expires_at = ?", (iso(utcnow() - timedelta(minutes=1)),))
+        self.conn.commit()
+        self.assertEqual(self.ingest(self.night(0))["alerts_created"], 1)
 
     def test_storyline_replayed_into_one_database_alerts_on_exfil_every_time(self):
         timeline = storyline.build(7, 1.0)
@@ -215,22 +262,6 @@ class FlaggedHistoryTests(unittest.TestCase):
             self.ingest(events)
             with self.subTest(day=str(simulate.demo_day(now))):
                 self.assertIn("svc-deploy-tmp", self.exfil_alerts(min(e["ts"] for e in events)))
-
-    def test_nightly_backup_alerts_until_an_analyst_closes_one_as_benign(self):
-        (first, t1), (second, t2), (third, t3), (fourth, t4) = (self.night(d) for d in (3, 2, 1, 0))
-        self.assertEqual(self.ingest(first)["alerts_created"], 1)   # no baseline yet
-        # Left open, the flagged first night is no baseline, so the second night alerts as well.
-        self.assertEqual(self.ingest(second)["alerts_created"], 1)
-        first_id = min(self.exfil_alerts(t1)["10.0.5.10"])
-        # Confirmed as a true positive it is still no baseline.
-        queries.update_status(self.conn, first_id, "analyst", "resolved", disposition="true_positive")
-        self.assertEqual(self.ingest(third)["alerts_created"], 1)
-        # Closed as benign, the first night is this job's normal: the next night stays quiet.
-        self.conn.execute("UPDATE alerts SET disposition = 'benign' WHERE id = ?", (first_id,))
-        self.conn.commit()
-        run = self.ingest(fourth)
-        self.assertEqual((run["alerts_created"], run["alerts_updated"]), (0, 0))
-        self.assertEqual(self.exfil_alerts(t4), {})
 
 
 class ShadowItTests(unittest.TestCase):
@@ -402,7 +433,8 @@ class NoiseLabApiTests(ServerTestCase):
                 self.assertIn(row["verdict"], ("quiet", "noisy"))
                 self.assertEqual(row["verdict"] == "noisy",
                                  bool(row["lookalikes_fired"] or row["other_benign_fired"]))
-        self.assertEqual(rows["data_exfil_volume"]["verdict"], "quiet")
+        self.assertEqual(rows["data_exfil_volume"]["verdict"], "noisy")
+        self.assertEqual(rows["data_exfil_volume"]["lookalikes_fired"], ["nightly_backup"])
         self.assertEqual(rows["brute_force_ip"]["verdict"], "noisy")
         self.assertEqual(rows["success_after_failures"]["other_benign_fired"], ["stale_password_device"])
         self.assertIn("password_expiry_nat", rows["password_spray"]["summary"])
@@ -419,6 +451,19 @@ class NoiseLabApiTests(ServerTestCase):
         row = {r["rule_id"]: r for r in analyst.get("/api/noise-lab")[1]["rules"]}["brute_force_ip"]
         self.assertEqual((row["verdict"], row["lookalikes_fired"], row["suppressed"]), ("quiet", [], 2))
         self.assertIn("exception", row["summary"])
+
+    def test_an_approved_exception_gives_the_backup_a_baseline(self):
+        analyst, admin = self.client("analyst"), self.client("admin")
+        change = analyst.post("/api/rules/data_exfil_volume/suppressions",
+                              {"group_key": "10.0.5.10", "days": 30, "reason": "Nightly off-site backup."})[1]
+        self.assertEqual((change["evaluation"]["before"]["fp"], change["evaluation"]["after"]["fp"]), (1, 0))
+        self.assertEqual(change["evaluation"]["after"]["missed"], [])
+        exfil = lambda: {r["rule_id"]: r for r in analyst.get("/api/noise-lab")[1]["rules"]}["data_exfil_volume"]
+        self.assertEqual(exfil()["verdict"], "noisy")  # proposed is not approved
+        admin.post(f"/api/changes/{change['id']}/review", {"decision": "approve"})
+        row = exfil()
+        self.assertEqual((row["verdict"], row["lookalikes_fired"], row["detected"], row["suppressed"]),
+                         ("quiet", [], ["exfiltration"], 0))
 
     def test_a_disabled_rule_is_a_blind_spot_not_a_quiet_rule(self):
         analyst, admin = self.client("analyst"), self.client("admin")
