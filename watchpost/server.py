@@ -493,7 +493,8 @@ def changes(req):
 def change_review(req, change_id):
     data = body_json(req)
     return improve.review_change(req.conn, int(change_id), data.get("decision"), req.user["username"],
-                                 data.get("note", ""))
+                                 data.get("note", ""), data.get("evidence_digest"),
+                                 data.get("acknowledge_detection_loss"))
 
 
 @route("GET", "/api/evaluations")

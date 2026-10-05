@@ -355,7 +355,7 @@ class SuppressionApiTests(ServerTestCase):
         self.assertEqual(analyst.get("/api/suppressions")[1], [])
         self.assertEqual(analyst.post(f"/api/changes/{change['id']}/review", {"decision": "approve"})[0], 403)
         status, reviewed, _ = admin.post(f"/api/changes/{change['id']}/review",
-                                         {"decision": "approve", "note": "Confirmed with the scan owner."})
+                                         {"decision": "approve", "note": "Confirmed with the scan owner.", "evidence_digest": change["evidence_digest"]})
         self.assertEqual((status, reviewed["status"]), (200, "approved"))
 
         listed = self.client("viewer").get("/api/suppressions")[1]
@@ -401,7 +401,8 @@ class SuppressionApiTests(ServerTestCase):
         analyst, admin, viewer = self.client("analyst"), self.client("admin"), self.client("viewer")
         brute = lambda: [a["group_key"] for a in analyst.get("/api/alerts?rule_id=brute_force_ip&status=open")[1]]
         change = self.propose(analyst)[1]
-        admin.post(f"/api/changes/{change['id']}/review", {"decision": "approve"})
+        self.assertEqual(admin.post(f"/api/changes/{change['id']}/review",
+                                    {"decision": "approve", "evidence_digest": change["evidence_digest"]})[0], 200)
         sup = analyst.get("/api/suppressions")[1][0]
         self.assertEqual((sup["active"], sup["revoked_at"], sup["revoked_by"]), (True, None, None))
         sim = analyst.post("/api/demo/simulate", {"scenario": "noisy_scanner"})[1]
@@ -508,7 +509,8 @@ class NoiseLabApiTests(ServerTestCase):
         analyst, admin = self.client("analyst"), self.client("admin")
         change = analyst.post("/api/rules/brute_force_ip/suppressions",
                               {"group_key": "10.0.50.5", "days": 7, "reason": "Authorized scanner."})[1]
-        admin.post(f"/api/changes/{change['id']}/review", {"decision": "approve"})
+        self.assertEqual(admin.post(f"/api/changes/{change['id']}/review",
+                                    {"decision": "approve", "evidence_digest": change["evidence_digest"]})[0], 200)
         row = {r["rule_id"]: r for r in analyst.get("/api/noise-lab")[1]["rules"]}["brute_force_ip"]
         self.assertEqual((row["verdict"], row["lookalikes_fired"], row["suppressed"]), ("quiet", [], 2))
         self.assertIn("exception", row["summary"])
@@ -521,7 +523,8 @@ class NoiseLabApiTests(ServerTestCase):
         self.assertEqual(change["evaluation"]["after"]["missed"], [])
         exfil = lambda: {r["rule_id"]: r for r in analyst.get("/api/noise-lab")[1]["rules"]}["data_exfil_volume"]
         self.assertEqual(exfil()["verdict"], "noisy")  # proposed is not approved
-        admin.post(f"/api/changes/{change['id']}/review", {"decision": "approve"})
+        self.assertEqual(admin.post(f"/api/changes/{change['id']}/review",
+                                    {"decision": "approve", "evidence_digest": change["evidence_digest"]})[0], 200)
         row = exfil()
         self.assertEqual((row["verdict"], row["lookalikes_fired"], row["detected"], row["suppressed"]),
                          ("quiet", [], ["exfiltration"], 0))
@@ -529,7 +532,9 @@ class NoiseLabApiTests(ServerTestCase):
     def test_a_disabled_rule_is_a_blind_spot_not_a_quiet_rule(self):
         analyst, admin = self.client("analyst"), self.client("admin")
         change = analyst.post("/api/rules/web_scanner/proposals", {"enabled": False, "reason": "testing the lab"})[1]
-        admin.post(f"/api/changes/{change['id']}/review", {"decision": "approve"})
+        self.assertEqual(admin.post(f"/api/changes/{change['id']}/review",
+                                    {"decision": "approve", "evidence_digest": change["evidence_digest"],
+                                     "acknowledge_detection_loss": True})[0], 200)
         row = {r["rule_id"]: r for r in analyst.get("/api/noise-lab")[1]["rules"]}["web_scanner"]
         self.assertEqual((row["enabled"], row["verdict"]), (False, "disabled"))
 
