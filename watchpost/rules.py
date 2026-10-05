@@ -128,10 +128,31 @@ DEFAULT_RULES = [
         "name": "Large data transfer by one principal",
         "description": "Fires when one account (or, without an account, one source IP) moves at least "
                        "`bytes_threshold` bytes out through allowed firewall connections and cloud storage "
-                       "reads, or makes at least `access_threshold` cloud data reads, within `window_seconds`.",
+                       "reads, or makes at least `access_threshold` cloud data reads, within `window_seconds`. "
+                       "Baseline-aware: the burst must also be at least `baseline_multiplier` times that "
+                       "principal's own busiest `window_seconds` in the preceding `history_seconds`, so a nightly "
+                       "backup that always moves this much stays quiet (0 turns the baseline off). A principal's "
+                       "first large transfer has no baseline and alerts. History this rule already alerted on "
+                       "does not count as normal unless an analyst closed that alert as benign or false positive, "
+                       "so a new job keeps alerting until one of its alerts is closed that way, and a repeated "
+                       "attack alerts again.",
         "techniques": techniques("T1530", "T1048"),
         "severity": "high",
         "params": {"bytes_threshold": 1_000_000_000, "access_threshold": 100, "window_seconds": 3600,
+                   "baseline_multiplier": 3, "history_seconds": 604800, "ignore_ips": [], "ignore_users": []},
+    },
+    {
+        "id": "unsanctioned_cloud_service",
+        "name": "Use of an unsanctioned cloud service (shadow IT)",
+        "description": "Fires when an account uses a cloud service that is not in `sanctioned_services`. A "
+                       "listed name also covers its subdomains. The service is read from cloud audit events of "
+                       "the form '<action> on <service>' (CloudTrail-style JSON, or a proxy/CASB feed sent as "
+                       "JSON); events that name no service are skipped. Uses of one service by one account "
+                       "within `window_seconds` join the same alert. Unsanctioned is not the same as hostile: "
+                       "a newly approved tool alerts until the list is changed through review.",
+        "techniques": techniques("T1567"),
+        "severity": "medium",
+        "params": {"sanctioned_services": ["amazonaws.com", "corp-drive.example"], "window_seconds": 3600,
                    "ignore_ips": [], "ignore_users": []},
     },
 ]
@@ -154,6 +175,8 @@ PARAM_SCHEMA = {
     "history_seconds": ("int", 60, 86400 * 30),
     "bytes_threshold": ("int", 1, 10 ** 15),
     "access_threshold": ("int", 2, 1_000_000),
+    "baseline_multiplier": ("int", 0, 1000),
+    "sanctioned_services": ("list", 1, 500),
 }
 
 
@@ -491,6 +514,17 @@ def cloud_iam_change_by_new_principal(events, params):
     return findings
 
 
+def _peak(events, window, measure):
+    """The largest `measure` over any `window`-second span of time-ordered events (0 if none)."""
+    best, dq = 0, deque()
+    for event in events:
+        dq.append(event)
+        while _epoch(event) - _epoch(dq[0]) > window:
+            dq.popleft()
+        best = max(best, measure(dq))
+    return best
+
+
 def _human_bytes(n):
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1000 or unit == "TB":
@@ -507,18 +541,73 @@ def data_exfil_volume(events, params):
         key = (e.get("user") or "").lower() or e.get("src_ip")
         if key:
             groups[key].append(e)
+    multiplier, history = params["baseline_multiplier"], params["history_seconds"]
     findings = []
     volume = lambda w: sum(e.get("bytes") or 0 for e in w)
     accesses = lambda w: sum(e["event_type"] == "cloud_data_access" for e in w)
     for principal, group in groups.items():
         for cluster in _clusters(group, window, lambda w: volume(w) >= limit or accesses(w) >= reads):
             total, count = volume(cluster), accesses(cluster)
+            # Baseline: this principal's own busiest window before the burst, inside the history span.
+            # Events the engine marks `alerted` (evidence of an earlier alert of this rule that nobody
+            # closed as benign or false positive) are left out: flagged history is not normal.
+            t0 = _epoch(cluster[0])
+            before = [e for e in group if 0 < t0 - _epoch(e) <= history and not e.get("alerted")]
+            peak_bytes, peak_reads = _peak(cluster, window, volume), _peak(cluster, window, accesses)
+            base_bytes, base_reads = _peak(before, window, volume), _peak(before, window, accesses)
+            if not ((peak_bytes >= limit and peak_bytes >= multiplier * base_bytes)
+                    or (peak_reads >= reads and peak_reads >= multiplier * base_reads)):
+                continue  # comparable to what this principal normally moves
+            if not multiplier:
+                baseline = "Baseline comparison is off."
+            elif not before:
+                baseline = (f"Baseline: no earlier transfers by {principal} in the preceding {history}s count as "
+                            f"normal (transfers already flagged by this rule are left out), so there is nothing "
+                            f"to compare against.")
+            else:
+                ratio = f"{peak_bytes / base_bytes:,.1f}x" if base_bytes else "no bytes before"
+                baseline = (f"Baseline: its busiest {window}s in the preceding {history}s moved "
+                            f"{_human_bytes(base_bytes)} ({base_reads} reads); this burst peaked at "
+                            f"{_human_bytes(peak_bytes)} ({peak_reads} reads), {ratio} the baseline "
+                            f"(alerts at {multiplier}x or more).")
             findings.append(_finding(
                 principal, cluster,
                 f"Large data transfer by {principal}: {_human_bytes(total)}",
                 f"{principal} moved {_human_bytes(total)} across {len(cluster)} events ({count} cloud data "
                 f"reads) between {cluster[0]['ts']} and {cluster[-1]['ts']}. Thresholds: "
-                f"{_human_bytes(limit)} or {reads} reads within {window}s.",
+                f"{_human_bytes(limit)} or {reads} reads within {window}s. {baseline}",
+            ))
+    return findings
+
+
+def _service(event):
+    """The cloud service named by an '<action> on <service>' message, or None. Never guessed."""
+    _, found, rest = (event.get("message") or "").partition(" on ")
+    name = rest.split()[0].strip(".,;()").lower() if found and rest.split() else ""
+    return name if "." in name else None
+
+
+def unsanctioned_cloud_service(events, params):
+    sanctioned = [s.lower().lstrip(".") for s in params["sanctioned_services"]]
+    window = params["window_seconds"]
+    groups = defaultdict(list)
+    for e in _filtered(events, params, CLOUD_TYPES):
+        service, user = _service(e), (e.get("user") or "").lower()
+        if not service or not user or any(service == s or service.endswith("." + s) for s in sanctioned):
+            continue
+        groups[(user, service)].append(e)
+    findings = []
+    for (user, service), group in groups.items():
+        for cluster in _clusters(group, window, lambda w: True):
+            total = sum(e.get("bytes") or 0 for e in cluster)
+            ips = sorted({e.get("src_ip") or "unknown" for e in cluster})
+            findings.append(_finding(
+                f"{user}|{service}", cluster,
+                f"Unsanctioned cloud service: {cluster[0]['user']} used {service}",
+                f"{cluster[0]['user']} used {service} {len(cluster)} time(s) between {cluster[0]['ts']} and "
+                f"{cluster[-1]['ts']} from {', '.join(ips[:5])}, moving {_human_bytes(total)}. {service} is "
+                f"not on the sanctioned list ({', '.join(sanctioned[:8])}{'…' if len(sanctioned) > 8 else ''}). "
+                f"This is a policy finding: it shows use of an unapproved service, not intent.",
             ))
     return findings
 
@@ -535,6 +624,7 @@ RULE_FUNCTIONS = {
     "privilege_escalation_after_login": privilege_escalation_after_login,
     "cloud_iam_change_by_new_principal": cloud_iam_change_by_new_principal,
     "data_exfil_volume": data_exfil_volume,
+    "unsanctioned_cloud_service": unsanctioned_cloud_service,
 }
 
 

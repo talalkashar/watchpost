@@ -6,11 +6,32 @@ It uses only the Python standard library (3.10+). No packages to install, no pai
 
 > **Honesty note.** This is a portfolio/learning project, not a production SIEM. All bundled data is synthetic. See [What is real vs. synthetic vs. future](#what-is-real-vs-synthetic-vs-future).
 
-![Watchpost SOC dashboard](docs/screenshots/soc-dashboard.png)
+**Live demo:** https://watchpost-nxxu.onrender.com (read-only login `viewer` / `watchpost-viewer-demo`; free tier, first load may take a minute).
 
-<!-- Screenshot placeholders for 2.0; capture at 1280x800 and save under docs/screenshots/:
+![Watchpost SOC dashboard](docs/screenshots/01-dashboard.png)
+
+| Incident board | Alerts and correlated incidents |
+|---|---|
+| ![Incidents](docs/screenshots/02-incidents.png) | ![Alerts](docs/screenshots/03-alerts.png) |
+
+<!-- Still to capture for 2.0 (1280x800, save under docs/screenshots/):
      incident-detail.png (kill-chain stages, techniques by tactic), incident-report-pdf.png (first page of the PDF),
      storyline-running.png (dashboard mid-storyline with the stage tile). -->
+
+## What's new in 3.0
+
+3.0 came out of the feedback on the 2.0 post. Each item answers something a reader asked for.
+
+| Feature | Asked by | What it adds |
+|---|---|---|
+| **Noise lab** | Charles Vosburgh, Issouf D. Dayo | Benign look-alike scenarios for the rules (an authorized scanner, an on-call admin at 03:00, an office NAT after a password-expiry day, a nightly backup, and more). `GET /api/noise-lab` and the **Noise lab** view show, per rule, recall, precision, the look-alikes it was tested against, and the ones that fired. Rules that are noisy are shown as noisy: with default settings, 7 of the 12 rules fire on at least one benign look-alike. |
+| **Baseline-aware exfiltration** | Abderrazak Benarous | `data_exfil_volume` now compares a principal with its own history (`baseline_multiplier`, 7-day window), so a nightly backup that always moves several GB does not alert while a new 2 GB pull does. The alert states the baseline and the ratio. A job's first large transfer still alerts and keeps alerting until an analyst closes one of its alerts as benign or false positive, because history the rule already flagged does not count as normal, so a repeated attack alerts again. |
+| **Tuning exceptions** | Issouf D. Dayo | A reviewed, expiring allowlist (rule + group key + reason, 1 to 90 days). An analyst proposes one, an admin approves it through the existing two-person review, and the engine skips matching findings and counts them as suppressed. There is no revoke route yet; exceptions end by expiring. |
+| **Shadow IT rule** | Issouf D. Dayo | A twelfth rule, `unsanctioned_cloud_service`, flags use of a cloud service that is not on the rule's sanctioned list (mapped to T1567). It is not part of the attack storyline. |
+| **Entity risk** | (added) | Every user, source IP, and host gets a risk score: each alert adds a severity weight (critical 40, high 20, medium 10, low 5, info 1) that halves every 24 hours, and alerts closed as false positive or benign add nothing. `GET /api/entities` and an entity page list the contributing alerts and their weights, so the score can be checked by hand. The dashboard has a **Riskiest entities** panel. |
+| **SOC metrics** | (added) | Time to resolve by severity, false-positive rate by rule, and open-alert aging. Time to detect and dwell time are deliberately left out: the demo replays synthetic events with old timestamps, which would make both numbers meaningless. |
+
+Left for a contributor's pull requests ([issue #8](https://github.com/talalkashar/watchpost/issues/8)): encrypted syslog, more log sources, orchestration, hot/warm/cold retention, stronger correlation, and threat intelligence.
 
 ## What's new in 2.0
 
@@ -207,7 +228,7 @@ Admin → "Attack storyline (synthetic)" replays a scripted six-stage intrusion 
 
 ## What is real vs. synthetic vs. future
 
-**Real, working, and tested:** everything in the architecture section. That includes the ingestion API and file upload, normalization, persistence, search, the eleven rules, ATT&CK mapping and coverage, incident correlation, Markdown and PDF reports, the SSE dashboard, the syslog listener and shipper, alerts with evidence and timelines, notes, status and verdicts, metrics, health checks and recovery, authentication, roles (including the read-only viewer), per-IP rate limiting, CSRF protection, API tokens, redaction, feedback-driven suggestions, two-person review, evaluation history, and the audit log.
+**Real, working, and tested:** everything in the architecture section. That includes the ingestion API and file upload, normalization, persistence, search, the twelve rules, the noise lab, tuning exceptions, entity risk scores, ATT&CK mapping and coverage, incident correlation, Markdown and PDF reports, the SSE dashboard, the syslog listener and shipper, alerts with evidence and timelines, notes, status and verdicts, metrics, health checks and recovery, authentication, roles (including the read-only viewer), per-IP rate limiting, CSRF protection, API tokens, redaction, feedback-driven suggestions, two-person review, evaluation history, and the audit log.
 
 **Synthetic:** all bundled data. The demo dataset and simulator scenarios (`watchpost/simulate.py`) and the files in `samples/` are invented. External IPs come from the RFC 5737 documentation ranges. Synthetic events are stored with `synthetic=1`, sourced `demo:*`, and tagged in the UI. The evaluation scores (recall and precision) measure the rules against these hand-labeled scenarios only. They say nothing about real-world accuracy.
 

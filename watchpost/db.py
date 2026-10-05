@@ -236,6 +236,19 @@ CREATE TABLE IF NOT EXISTS incident_alerts (
     added_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_incident_alerts_incident ON incident_alerts(incident_id);
+
+CREATE TABLE IF NOT EXISTS suppressions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id TEXT NOT NULL,
+    group_key TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    proposed_by TEXT NOT NULL,
+    approved_by TEXT NOT NULL,
+    change_request_id INTEGER,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_suppressions_rule ON suppressions(rule_id, group_key);
 """
 
 # Columns added after 1.0. Existing databases gain them in place on startup.
@@ -244,6 +257,7 @@ ADDED_COLUMNS = [
     ("events", "dest_port", "INTEGER"),
     ("events", "bytes", "INTEGER"),
     ("detection_runs", "correlation", "TEXT"),
+    ("detection_runs", "alerts_suppressed", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 

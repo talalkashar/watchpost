@@ -7,17 +7,19 @@ feedback, and no rule or security setting changes until a second person approves
 import copy
 import json
 from collections import Counter
+from datetime import datetime, time, timedelta, timezone
 
 from . import rules as rules_mod
 from . import simulate
-from .db import audit, now_iso, row_to_dict, transaction
-from .engine import apply_rule_change, load_rules
+from .db import audit, iso, now_iso, row_to_dict, transaction, utcnow
+from .engine import active_suppressions, apply_rule_change, load_rules
 
 SECURITY_SETTINGS = {
     "login_lockout_threshold": (3, 20, 5, "Failed logins before an account is temporarily locked"),
     "login_lockout_minutes": (1, 1440, 15, "Minutes an account stays locked"),
 }
 MIN_FEEDBACK_FOR_SUGGESTION = 2
+MAX_SUPPRESSION_DAYS = 90  # tuning exceptions always expire
 
 
 class ChangeError(ValueError):
@@ -44,13 +46,20 @@ def list_settings(conn):
 
 # --- Evaluation against labeled synthetic scenarios -----------------------------------
 
-def evaluate(rule_params, seed=7):
+def evaluate(rule_params, seed=7, suppressions=()):
     """Run each labeled scenario in isolation against the given {rule_id: params}.
 
-    Returns per-rule true positives, false negatives, and false positives.
+    Returns per-rule true positives, false negatives, and false positives, plus which benign
+    look-alikes written for the rule were tested and which of them fired. `suppressions` is a set
+    of (rule_id, group_key) tuning exceptions: matching findings are dropped and counted, as the
+    engine does.
     """
-    scenarios = simulate.build(seed=seed)
-    results = {rid: {"tp": 0, "fn": 0, "fp": 0, "detected": [], "missed": [], "false_positives": []}
+    now = utcnow()
+    scenarios = simulate.build(list(simulate.SCENARIOS), seed=seed, now=now)
+    # Events dated before the scenario day are history context, as in the engine's rescan.
+    day_start = iso(datetime.combine(simulate.demo_day(now), time.min, tzinfo=timezone.utc))
+    results = {rid: {"tp": 0, "fn": 0, "fp": 0, "detected": [], "missed": [], "false_positives": [],
+                     "lookalikes": [], "lookalikes_fired": [], "suppressed": 0}
                for rid in rule_params}
     next_id = 1
     for name, raw_events in scenarios.items():
@@ -59,9 +68,18 @@ def evaluate(rule_params, seed=7):
             events.append({"id": next_id, **e})
             next_id += 1
         expected = simulate.SCENARIOS[name]["expected"]
+        lookalike_of = simulate.SCENARIOS[name].get("lookalike_of")
         for rule_id, params in rule_params.items():
-            findings = rules_mod.RULE_FUNCTIONS[rule_id](copy.deepcopy(events), params)
+            findings = [f for f in rules_mod.RULE_FUNCTIONS[rule_id](copy.deepcopy(events), params)
+                        if f["last_seen"] >= day_start]
             r = results[rule_id]
+            kept = [f for f in findings if (rule_id, f["group_key"]) not in suppressions]
+            r["suppressed"] += len(findings) - len(kept)
+            findings = kept
+            if lookalike_of == rule_id:
+                r["lookalikes"].append(name)
+                if findings:
+                    r["lookalikes_fired"].append(name)
             if rule_id in expected:
                 want = expected[rule_id]
                 hit = [f for f in findings if want is None or f["group_key"] == want]
@@ -237,7 +255,16 @@ def _validate_change(conn, kind, target, payload):
                 or not low <= value <= high:
             raise ChangeError(f"{target} must be an integer between {low} and {high}")
         return None
-    raise ChangeError("kind must be rule_update or setting_update")
+    if kind == "suppression_add":
+        if conn.execute("SELECT 1 FROM rules WHERE id = ?", (target,)).fetchone() is None:
+            raise ChangeError(f"unknown rule {target!r}", 404)
+        key, days = payload.get("group_key"), payload.get("days")
+        if set(payload) != {"group_key", "days"} or not isinstance(key, str) or not 0 < len(key) <= 256:
+            raise ChangeError("group_key must be the alert group key to suppress (1-256 characters)")
+        if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= MAX_SUPPRESSION_DAYS:
+            raise ChangeError(f"days must be an integer between 1 and {MAX_SUPPRESSION_DAYS}")
+        return None
+    raise ChangeError("kind must be rule_update, setting_update or suppression_add")
 
 
 def propose_change(conn, kind, target, payload, reason, actor):
@@ -253,6 +280,12 @@ def propose_change(conn, kind, target, payload, reason, actor):
         base = evaluate({target: before[target]})["rules"][target]
         new = evaluate({target: after[target]})["rules"][target]
         evaluation = {"rule": target, "before": base, "after": new}
+    elif kind == "suppression_add":
+        params = {target: current_params(conn, include_disabled=True)[target]}
+        active = active_suppressions(conn)
+        evaluation = {"rule": target, "before": evaluate(params, suppressions=active)["rules"][target],
+                      "after": evaluate(params, suppressions=active | {(target, payload["group_key"])})
+                      ["rules"][target]}
     cur = conn.execute(
         "INSERT INTO change_requests(kind, target, payload, reason, proposed_by, evaluation, created_at)"
         " VALUES (?,?,?,?,?,?,?)",
@@ -295,6 +328,16 @@ def review_change(conn, change_id, decision, reviewer, note=""):
             if change["kind"] == "rule_update":
                 apply_rule_change(conn, change["target"], change["payload"], change["proposed_by"], reviewer,
                                   change_id, change["reason"][:500])
+            elif change["kind"] == "suppression_add":
+                expires = iso(utcnow() + timedelta(days=change["payload"]["days"]))
+                conn.execute(
+                    "INSERT INTO suppressions(rule_id, group_key, reason, expires_at, proposed_by, approved_by,"
+                    " change_request_id, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                    (change["target"], change["payload"]["group_key"], change["reason"], expires,
+                     change["proposed_by"], reviewer, change_id, now_iso()))
+                audit(conn, reviewer, "suppression_added", change["target"],
+                      {"group_key": change["payload"]["group_key"], "expires_at": expires,
+                       "change_request": change_id})
             else:
                 conn.execute("UPDATE settings SET value = ?, updated_at = ?, updated_by = ? WHERE key = ?",
                              (str(change["payload"]["value"]), now_iso(), reviewer, change["target"]))
@@ -309,3 +352,56 @@ def review_change(conn, change_id, decision, reviewer, note=""):
         if decision == "approve" and change["kind"] == "rule_update":
             record_evaluation(conn, evaluate(current_params(conn)), "post_change", reviewer, change_id)
     return get_change(conn, change_id)
+
+
+# --- Tuning exceptions and the noise lab ------------------------------------------------
+
+def list_suppressions(conn):
+    """Every approved tuning exception, newest first; `active` is false once it has expired."""
+    now = now_iso()
+    return [{**dict(r), "active": r["expires_at"] > now}
+            for r in conn.execute("SELECT * FROM suppressions ORDER BY id DESC")]
+
+
+def _verdict(rule, r, other):
+    """A plain-language reading of one rule's evaluation. Noise is reported, never hidden."""
+    if not rule["enabled"]:
+        return "disabled", "Disabled: this rule is not running, so it detects nothing."
+    if r["missed"]:
+        return "blind", f"Misses a labeled attack ({', '.join(r['missed'])})."
+    fired = r["lookalikes_fired"] + other
+    excepted = f" {r['suppressed']} finding(s) are covered by a reviewed exception." if r["suppressed"] else ""
+    if fired:
+        return "noisy", (f"Noisy: catches its attack but also fires on benign activity ({', '.join(fired)}). "
+                         f"An analyst has to tell them apart.{excepted}")
+    if not r["lookalikes"]:
+        return "untested", "No benign look-alike has been written for this rule yet."
+    return "quiet", (f"Quiet: catches its attack and stays silent on {len(r['lookalikes'])} look-alike(s) "
+                     f"({', '.join(r['lookalikes'])}).{excepted}")
+
+
+def noise_lab(conn):
+    """Each rule against the benign look-alikes, with the current params and active exceptions."""
+    results = evaluate(current_params(conn, include_disabled=True), suppressions=active_suppressions(conn))
+    benign = {n for n, s in simulate.SCENARIOS.items() if not s["malicious"]}
+    rows = []
+    for rule in load_rules(conn, enabled_only=False):
+        r = results["rules"][rule["id"]]
+        other = [n for n in r["false_positives"] if n in benign and n not in r["lookalikes_fired"]]
+        verdict, summary = _verdict(rule, r, other)
+        rows.append({
+            "rule_id": rule["id"], "name": rule["name"], "severity": rule["severity"],
+            "enabled": bool(rule["enabled"]), "recall": r["recall"], "precision": r["precision"],
+            "tp": r["tp"], "fn": r["fn"], "fp": r["fp"], "detected": r["detected"], "missed": r["missed"],
+            "lookalikes_tested": r["lookalikes"], "lookalikes_fired": r["lookalikes_fired"],
+            "other_benign_fired": other, "suppressed": r["suppressed"], "verdict": verdict, "summary": summary,
+        })
+    return {
+        "seed": results["seed"],
+        "rules": rows,
+        "scenarios": [{"name": n, "malicious": s["malicious"], "description": s["description"],
+                       "lookalike_of": s.get("lookalike_of"), "expected_rules": list(s["expected"])}
+                      for n, s in simulate.SCENARIOS.items()],
+        "summary": {"rules": len(rows), "noisy": sum(r["verdict"] == "noisy" for r in rows),
+                    "lookalikes": sum("lookalike_of" in s for s in simulate.SCENARIOS.values())},
+    }

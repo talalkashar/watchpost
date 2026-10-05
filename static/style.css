@@ -186,9 +186,10 @@ dialog::backdrop { background: rgb(0 0 0 / .6); }
 #p-timeline { grid-column: 1 / 8; grid-row: 2; height: 200px; }
 #p-attackers { grid-column: 8 / 15; grid-row: 2; height: 200px; }
 #p-attack { grid-column: 1 / 25; grid-row: 3; }
-#p-board { grid-column: 1 / 17; grid-row: 4 / 6; min-height: 250px; }
+#p-board { grid-column: 1 / 17; grid-row: 4 / 7; min-height: 250px; }
 #p-rules { grid-column: 17 / 25; grid-row: 4; }
 #p-health { grid-column: 17 / 25; grid-row: 5; }
+#p-entities { grid-column: 17 / 25; grid-row: 6; }
 
 .panel { display: flex; flex-direction: column; min-width: 0; background: linear-gradient(180deg, var(--panel-2), var(--panel));
   border: 1px solid var(--line); border-radius: 4px; position: relative; overflow: hidden; }
@@ -328,6 +329,12 @@ dialog::backdrop { background: rgb(0 0 0 / .6); }
 .runs { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 10.5px; }
 .rundots { display: flex; gap: 3px; }
 .rundots i { width: 7px; height: 14px; border-radius: 1px; background: currentColor; opacity: .8; }
+
+/* riskiest entities panel */
+.erow { display: grid; grid-template-columns: 34px max-content minmax(0, 1fr) auto; gap: 6px; align-items: center; font-size: 11.5px; padding: 3px 0;
+  border-bottom: 1px solid rgb(26 40 54 / .6); }
+.erow a { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.erow b { font: 600 11px var(--mono); color: var(--ink); }
 
 /* motion */
 @keyframes blink { 50% { opacity: .45; } }

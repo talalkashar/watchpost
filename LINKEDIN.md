@@ -1,8 +1,7 @@
 # LinkedIn kit: Watchpost 2.0
 
-Placeholders to fill in before posting: `<DEMO_URL>` (the deployed demo, see `deploy/README.md`),
-`<VIEWER_PASSWORD>` (the `SIEM_VIEWER_PASSWORD` you set on the VM), and `<VIDEO>` (the 30-second recording from
-`DEMO_SCRIPT.md`). The repository is https://github.com/talalkashar/watchpost.
+Demo: https://watchpost-nxxu.onrender.com (read-only login `viewer` / `watchpost-viewer-demo`, set in `render.yaml`).
+One placeholder left: `<VIDEO>`, the 30-second recording from `DEMO_SCRIPT.md`. The repository is https://github.com/talalkashar/watchpost.
 
 ---
 
@@ -12,7 +11,7 @@ Placeholders to fill in before posting: `<DEMO_URL>` (the deployed demo, see `de
 
 **Dates / association:** Personal project
 
-**Link:** https://github.com/talalkashar/watchpost (demo: `<DEMO_URL>`, read-only login `viewer`)
+**Link:** https://github.com/talalkashar/watchpost (demo: `https://watchpost-nxxu.onrender.com`, read-only login `viewer`)
 
 **Description:**
 
@@ -62,7 +61,7 @@ application design · Linux / systemd · SQLite · Automated testing
 > Being upfront: the attack data is synthetic, there's no machine learning, and it's a single-node portfolio
 > project, not a product.
 >
-> Try the read-only demo: <DEMO_URL> (user: viewer / <VIEWER_PASSWORD>)
+> Try the read-only demo: https://watchpost-nxxu.onrender.com (user: viewer / watchpost-viewer-demo)
 > Code: github.com/talalkashar/watchpost
 >
 > Feedback from SOC analysts and detection engineers is very welcome.
