@@ -18,6 +18,17 @@ It uses only the Python standard library (3.10+). No packages to install, no pai
      incident-detail.png (kill-chain stages, techniques by tactic), incident-report-pdf.png (first page of the PDF),
      storyline-running.png (dashboard mid-storyline with the stage tile). -->
 
+## What's new in 3.1
+
+A small follow-up round. Nothing here changes how the rules detect.
+
+| Change | What it adds |
+|---|---|
+| **Revoke a tuning exception** | An admin can end an approved exception before it expires (`POST /api/suppressions/<id>/revoke`, admin only, audited as `suppression_revoked`). It stops applying from the next detection run, for both the skip behaviour and the exfil baseline mode. The row stays in the list as history with who revoked it and when. |
+| **Review evidence matches the action** | Approving a rule change or an exception recomputes its evidence first. If it differs from what the reviewer was shown, nothing is applied: the request stays pending with the fresh evidence and the API answers 409 so it is reviewed again. Exception evidence gains a **live impact** section (existing alerts for that rule and group key by status and verdict, the newest few, and whether any labeled scenario contains the key at all), and states that for `data_exfil_volume` the exception enables baseline mode instead of hiding findings. An exception is refused when it would make the rule miss a labeled attack it detects today, or when a matching alert was closed as a true positive. |
+| **Inventory refresh** | In Admin, the asset inventory card redraws after "Load synthetic demo data", without a page reload. |
+| **ATT&CK Navigator export** | `GET /api/attack/navigator.json` (viewer) returns the rule coverage as a MITRE ATT&CK Navigator layer: one entry per covered technique, scored by alert count, with the mapped rules in the comment. The scores come from synthetic demo data and the layer says so. It names no ATT&CK release because the static technique table does not state one. The dashboard coverage panel links to it. |
+
 ## What's new in 3.0
 
 3.0 came out of the feedback on the 2.0 post. Each item answers something a reader asked for.

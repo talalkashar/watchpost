@@ -4,6 +4,7 @@ import json
 import sqlite3
 import unittest
 from datetime import timedelta
+from pathlib import Path
 
 from tests.helpers import ServerTestCase
 from watchpost import assets
@@ -191,6 +192,13 @@ class AssetApiTests(ServerTestCase):
         self.assertTrue(rows)
         self.assertTrue(all(r[1] for r in rows))
         self.assertTrue(any(json.loads(r[2]) for r in rows))
+
+    def test_admin_page_redraws_the_inventory_after_a_demo_load(self):
+        # No JS runtime in CI: the demo-load handler must refetch the inventory and swap the card in place.
+        app = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text()
+        handler = app[app.index('api("/api/demo/load"'):app.index('"Load synthetic demo data"')]
+        self.assertIn('assetsCard(await api("/api/assets"))', handler)
+        self.assertIn("inventoryCard.replaceWith(", handler)
 
 
 if __name__ == "__main__":
