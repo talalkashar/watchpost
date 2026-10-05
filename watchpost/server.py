@@ -12,8 +12,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import __version__, auth, engine, entities, geo, improve, incidents, queries, report, simulate, storyline, \
-    stream
+from . import (__version__, assets, auth, engine, entities, geo, improve, incidents, queries, report, simulate,
+               storyline, stream)
 from .ratelimit import TokenBucketLimiter
 from .config import Config
 from .db import audit, connect, init_schema, now_iso, row_to_dict
@@ -203,11 +203,12 @@ def demo_load(req):
     if not isinstance(seed, int):
         raise ApiError(400, "seed must be an integer")
     results = {}
+    demo_assets = assets.seed_demo_assets(req.conn, req.user["username"])
     for name, events in simulate.build(seed=seed).items():
         normalized, rejections = parse_payload(json.dumps(events), "json", f"demo:{name}")
         results[name] = engine.ingest(req.conn, normalized, rejections, f"demo:{name}", "json",
                                       req.user["username"], synthetic=True)
-    audit(req.conn, req.user["username"], "demo_loaded", None, {"seed": seed})
+    audit(req.conn, req.user["username"], "demo_loaded", None, {"seed": seed, "assets_created": demo_assets})
     return {name: {k: r[k] for k in ("accepted", "rejected", "detection")} for name, r in results.items()}
 
 
@@ -494,6 +495,42 @@ def evaluation_run(req):
     return improve.run_evaluation(req.conn, req.user["username"])
 
 
+# Asset inventory ------------------------------------------------------------------------
+
+@route("GET", "/api/assets")
+def asset_list(req):
+    return {"assets": assets.list_assets(req.conn), "criticalities": list(assets.CRITICALITIES),
+            "kinds": list(assets.KINDS), "data_tags": assets.DATA_TAGS}
+
+
+def _asset_saved(req, asset):
+    """After an inventory change, re-weigh open alerts and refresh incident severities."""
+    changed = assets.rescore_open_alerts(req.conn)
+    if changed:
+        engine.correlate_alerts(req.conn)
+    return {"asset": asset, "alerts_rescored": changed}
+
+
+@route("POST", "/api/assets", role="admin")
+def asset_create(req):
+    req.status = 201
+    return _asset_saved(req, assets.save_asset(req.conn, body_json(req), req.user["username"]))
+
+
+@route("POST", r"/api/assets/(\d+)", role="admin")
+def asset_update(req, asset_id):
+    return _asset_saved(req, assets.save_asset(req.conn, body_json(req), req.user["username"], int(asset_id)))
+
+
+@route("POST", r"/api/assets/(\d+)/delete", role="admin")
+def asset_delete(req, asset_id):
+    assets.delete_asset(req.conn, int(asset_id), req.user["username"])
+    changed = assets.rescore_open_alerts(req.conn)
+    if changed:
+        engine.correlate_alerts(req.conn)
+    return {"ok": True, "alerts_rescored": changed}
+
+
 # Administration ------------------------------------------------------------------------
 
 @route("GET", "/api/tokens", role="admin")
@@ -651,7 +688,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(self.status, result, extra_headers=headers)
         except ApiError as exc:
             self._send(exc.status, {"error": str(exc)})
-        except (auth.AuthError, queries.QueryError, improve.ChangeError) as exc:
+        except (auth.AuthError, queries.QueryError, improve.ChangeError, assets.AssetError) as exc:
             self._send(getattr(exc, "status", 400), {"error": str(exc)})
         except Exception as exc:
             record_error(self.conn, "api", exc, guidance=f"Unhandled error on {self.command} {parsed.path}")

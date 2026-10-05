@@ -5,6 +5,7 @@ import threading
 import uuid
 from datetime import timedelta
 
+from . import assets as assets_mod
 from . import correlate as correlate_mod
 from . import rules as rules_mod
 from . import stream
@@ -106,7 +107,17 @@ def _existing_alert(conn, rule_id, group_key, first_seen, window):
     ).fetchone()
 
 
-def _apply_finding(conn, rule, finding, synthetic):
+def _weigh(conn, rule, alert_id, assets_idx):
+    """Severity after asset weighting, from every evidence event now on the alert."""
+    events = [dict(r) for r in conn.execute(
+        "SELECT e.host, e.src_ip, e.dest_ip FROM events e JOIN alert_events ae ON ae.event_id = e.id"
+        " WHERE ae.alert_id = ?", (alert_id,))]
+    weighed = assets_mod.weigh(rule["severity"], assets_mod.match(assets_idx, events))
+    weighed["assets"] = json.dumps(weighed["assets"])
+    return weighed
+
+
+def _apply_finding(conn, rule, finding, synthetic, assets_idx):
     """Create or extend an alert. Returns 'created', 'updated', or 'unchanged'."""
     ids = finding["event_ids"]
     placeholders = ",".join("?" for _ in ids)
@@ -126,16 +137,25 @@ def _apply_finding(conn, rule, finding, synthetic):
                          [(existing["id"], i) for i in ids])
         count = conn.execute("SELECT COUNT(*) FROM alert_events WHERE alert_id = ?",
                              (existing["id"],)).fetchone()[0]
+        weighed = _weigh(conn, rule, existing["id"], assets_idx)
         conn.execute(
             "UPDATE alerts SET last_seen = MAX(last_seen, ?), first_seen = MIN(first_seen, ?),"
-            " event_count = ?, explanation = ?, title = ?, updated_at = ? WHERE id = ?",
+            " event_count = ?, explanation = ?, title = ?, updated_at = ?, severity = ?, base_severity = ?,"
+            " assets = ?, severity_note = ? WHERE id = ?",
             (finding["last_seen"], finding["first_seen"], count, finding["explanation"],
-             finding["title"], now, existing["id"]),
+             finding["title"], now, weighed["severity"], weighed["base_severity"], weighed["assets"],
+             weighed["severity_note"], existing["id"]),
         )
         conn.execute(
             "INSERT INTO alert_activity(alert_id, actor, action, detail, created_at) VALUES (?,?,?,?,?)",
             (existing["id"], "detection", "evidence_added", f"now {count} related events", now),
         )
+        if weighed["severity"] != existing["severity"]:
+            conn.execute(
+                "INSERT INTO alert_activity(alert_id, actor, action, detail, created_at) VALUES (?,?,?,?,?)",
+                (existing["id"], "assets", "severity_changed",
+                 f"{existing['severity']} -> {weighed['severity']} ({weighed['severity_note']})", now),
+            )
         return "updated"
 
     cur = conn.execute(
@@ -153,6 +173,16 @@ def _apply_finding(conn, rule, finding, synthetic):
         "INSERT INTO alert_activity(alert_id, actor, action, detail, created_at) VALUES (?,?,?,?,?)",
         (alert_id, "detection", "created", f"rule {rule['id']} v{rule['version']}", now),
     )
+    weighed = _weigh(conn, rule, alert_id, assets_idx)
+    conn.execute("UPDATE alerts SET severity = ?, base_severity = ?, assets = ?, severity_note = ? WHERE id = ?",
+                 (weighed["severity"], weighed["base_severity"], weighed["assets"], weighed["severity_note"],
+                  alert_id))
+    if weighed["severity"] != rule["severity"]:
+        conn.execute(
+            "INSERT INTO alert_activity(alert_id, actor, action, detail, created_at) VALUES (?,?,?,?,?)",
+            (alert_id, "assets", "severity_changed",
+             f"{rule['severity']} -> {weighed['severity']} ({weighed['severity_note']})", now),
+        )
     return "created"
 
 
@@ -195,6 +225,7 @@ def run_detection(conn, trigger="manual", start=None, end=None):
             events = [dict(r) for r in conn.execute(sql, args)]
             synthetic_ids = {e["id"] for e in events if e["synthetic"]}
             summary["events_scanned"] = len(events)
+            assets_idx = assets_mod.load_index(conn)
             suppressed = active_suppressions(conn)
             # Exfil history that was already flagged and not cleared by an analyst is no baseline.
             flagged = {r[0] for r in conn.execute(
@@ -214,7 +245,7 @@ def run_detection(conn, trigger="manual", start=None, end=None):
                             summary["alerts_suppressed"] += 1  # a reviewed tuning exception covers it
                             continue
                         synthetic = all(i in synthetic_ids for i in finding["event_ids"])
-                        outcome = _apply_finding(conn, rule, finding, synthetic)
+                        outcome = _apply_finding(conn, rule, finding, synthetic, assets_idx)
                         if outcome == "created":
                             summary["alerts_created"] += 1
                         elif outcome == "updated":
