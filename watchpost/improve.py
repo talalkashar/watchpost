@@ -277,35 +277,26 @@ LIVE_IMPACT_RECENT = 5  # newest matching alerts listed in an exception's eviden
 
 # Every verdict is in alert_activity as "<from> -> resolved (<disposition>)" (queries.update_status), and
 # that log is append-only: re-opening or re-closing an alert adds a row, it never rewrites one.
-_VERDICT_CHANGES = (" FROM alert_activity act JOIN alerts a ON a.id = act.alert_id"
-                    " WHERE act.action = 'status_changed' AND ")
-_BY_GROUP_KEY = "a.rule_id = :rule AND a.group_key = :value"
-# Rule parameters that make a rule skip events: an added value is a permanent exception with no expiry.
-# Each maps to the alerts of the rule that the value touches, by group key or by evidence.
-# (privileged_users is not one: adding to it widens the rule.)
-_HAS_EVIDENCE = "EXISTS (SELECT 1 FROM alert_events ae JOIN events e ON e.id = ae.event_id WHERE ae.alert_id = a.id AND "
-IGNORE_LIST_MATCH = {
-    "ignore_ips": f"a.rule_id = :rule AND (a.group_key = :value OR {_HAS_EVIDENCE} e.src_ip = :value))",
-    "ignore_users": f"a.rule_id = :rule AND (lower(a.group_key) = lower(:value)"
-                    f" OR {_HAS_EVIDENCE} lower(e.user) = lower(:value)))",
-    # Group key is "user|service"; a sanctioned entry covers the service and its subdomains.
-    "sanctioned_services": "a.rule_id = :rule AND (lower(a.group_key) LIKE '%|' || lower(:value)"
-                           " OR lower(a.group_key) LIKE '%.' || lower(:value))",
-}
+def _rule_alerts(conn, rule_id):
+    """A rule's alerts, newest first, and their status-change history. Matching is then done in Python."""
+    alerts = [dict(r) for r in conn.execute(
+        "SELECT id, title, status, disposition, group_key FROM alerts WHERE rule_id = ? ORDER BY id DESC",
+        (rule_id,))]
+    history = [dict(r) for r in conn.execute(
+        "SELECT act.alert_id, act.actor, act.detail, act.created_at FROM alert_activity act"
+        " JOIN alerts a ON a.id = act.alert_id WHERE a.rule_id = ? AND act.action = 'status_changed'"
+        " ORDER BY act.id DESC", (rule_id,))]
+    return alerts, history
 
 
-def _alert_impact(conn, match, rule_id, value, proposer):
-    """Counts and history of the alerts selected by `match` (a condition on alerts `a`)."""
-    args = {"rule": rule_id, "value": value, "proposer": proposer}
-    rows = [dict(r) for r in conn.execute(
-        f"SELECT a.id, a.title, a.status, a.disposition FROM alerts a WHERE {match} ORDER BY a.id DESC", args)]
+def _alert_impact(alerts, history, ids, proposer):
+    """Counts and history of the alerts in `ids`, out of `_rule_alerts`."""
+    rows = [{k: a[k] for k in ("id", "title", "status", "disposition")} for a in alerts if a["id"] in ids]
+    history = [h for h in history if h["alert_id"] in ids]
     # History, not the current verdict: whoever proposes the change can also re-close the alert.
-    ever_true_positive = {r["alert_id"] for r in conn.execute(
-        "SELECT act.alert_id" + _VERDICT_CHANGES + match + " AND act.detail LIKE '%(true_positive)'", args)}
+    ever_true_positive = {h["alert_id"] for h in history if h["detail"].endswith("(true_positive)")}
     ever_true_positive |= {row["id"] for row in rows if row["disposition"] == "true_positive"}
-    own = [dict(r) for r in conn.execute(
-        "SELECT act.alert_id, act.detail, act.created_at" + _VERDICT_CHANGES + match + " AND act.actor = :proposer"
-        " ORDER BY act.id DESC", args)]
+    own = [{k: h[k] for k in ("alert_id", "detail", "created_at")} for h in history if h["actor"] == proposer]
     by_status, by_disposition = {}, {}
     for row in rows:
         by_status[row["status"]] = by_status.get(row["status"], 0) + 1
@@ -321,18 +312,46 @@ def _alert_impact(conn, match, rule_id, value, proposer):
 
 
 def _ignore_additions(conn, rule_id, before, after, proposer):
-    """Live impact of every value a rule change adds to an ignore list (removals are not listed)."""
-    return [{"param": param, "value": value,
-             "live_impact": _alert_impact(conn, match, rule_id, value, proposer)}
-            for param, match in IGNORE_LIST_MATCH.items()
-            for value in after.get(param, []) if value not in before.get(param, [])]
+    """Live impact of every list edit in a rule change that makes the rule skip events.
+
+    That is a value added to an ignore list, or removed from privileged_users (rules.HIDING_EDITS): a
+    permanent exception with no expiry. Entries are compared the way the rules compare them, so a
+    respelling of an existing entry is no edit and two spellings of a new one are listed once. An alert
+    is touched when rules.covers says the rule would skip (or no longer watch) one of its evidence events.
+    """
+    edits = []
+    for param, change in rules_mod.HIDING_EDITS.items():
+        old, new = before.get(param, []), after.get(param, [])
+        source, other = (new, old) if change == "added" else (old, new)
+        seen = {rules_mod.list_entry(param, v) for v in other}
+        for value in source:
+            entry = rules_mod.list_entry(param, value)
+            if entry not in seen:
+                seen.add(entry)
+                edits.append((param, change, value, entry))
+    if not edits:
+        return []
+    alerts, history = _rule_alerts(conn, rule_id)
+    evidence = {}
+    for row in conn.execute(
+            "SELECT ae.alert_id, e.src_ip, e.user, e.message FROM alert_events ae"
+            " JOIN alerts a ON a.id = ae.alert_id JOIN events e ON e.id = ae.event_id WHERE a.rule_id = ?",
+            (rule_id,)):
+        evidence.setdefault(row["alert_id"], []).append(dict(row))
+    return [{"param": param, "change": change, "value": value, "live_impact": _alert_impact(
+                alerts, history,
+                {i for i, events in evidence.items() if any(rules_mod.covers(param, {entry}, e) for e in events)},
+                proposer)}
+            for param, change, value, entry in edits]
 
 
 def _live_impact(conn, rule_id, group_key, scenario_keys, proposer):
     """What an exception would touch in this database, which the labeled scenarios cannot show."""
     baseline = rule_id in rules_mod.EXCEPTION_ENABLES_BASELINE
+    alerts, history = _rule_alerts(conn, rule_id)
     return {
-        **_alert_impact(conn, _BY_GROUP_KEY, rule_id, group_key, proposer),
+        # The engine skips a finding whose group key equals the exception's exactly; so does this.
+        **_alert_impact(alerts, history, {a["id"] for a in alerts if a["group_key"] == group_key}, proposer),
         # False means before/after below say nothing about this key: no labeled scenario contains it.
         "in_labeled_scenario": group_key in scenario_keys,
         "effect": "baseline" if baseline else "skip",
@@ -395,7 +414,8 @@ def evidence_digest(evaluation):
 # Two gates stand between a change and a labeled attack going undetected, and they differ on purpose.
 # An exception hides one group key for good reason or bad, and nothing legitimate needs it for
 # confirmed-malicious activity: `_refusal` is a hard no, at propose and at approve. A value added to an
-# ignore list is the same thing without an expiry, so true-positive history refuses it too. A rule change
+# ignore list (or removed from privileged_users) is the same thing without an expiry, so true-positive
+# history refuses it too. Any other rule change
 # (a looser threshold, or disabling the rule) can be a legitimate trade, so it is not refused: the
 # reviewer must explicitly acknowledge the scenarios in `_detection_loss`, and the audit log names them.
 # Neither reads anything the proposer can edit: the scenario check uses the built-in labeled scenarios
@@ -413,7 +433,7 @@ def _refusal(kind, evaluation):
                    if x["live_impact"]["ever_true_positive"]]
         if blocked:
             return (f"an alert of this rule involving {', '.join(blocked)} has been closed as a true positive; "
-                    "confirmed-malicious activity cannot be added to an ignore list")
+                    "a rule change may not make the rule skip confirmed-malicious activity")
     if kind != "suppression_add":
         return None
     lost = _detection_loss(evaluation)
