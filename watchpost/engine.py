@@ -187,9 +187,9 @@ def _apply_finding(conn, rule, finding, synthetic, assets_idx):
 
 
 def active_suppressions(conn):
-    """Approved, unexpired tuning exceptions as a set of (rule_id, group_key)."""
+    """Approved tuning exceptions that are neither expired nor revoked, as a set of (rule_id, group_key)."""
     return {(r["rule_id"], r["group_key"]) for r in conn.execute(
-        "SELECT rule_id, group_key FROM suppressions WHERE expires_at > ?", (now_iso(),))}
+        "SELECT rule_id, group_key FROM suppressions WHERE expires_at > ? AND revoked_at IS NULL", (now_iso(),))}
 
 
 def run_detection(conn, trigger="manual", start=None, end=None):

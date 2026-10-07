@@ -276,6 +276,9 @@ ADDED_COLUMNS = [
     ("alerts", "assets", "TEXT"),
     ("alerts", "severity_note", "TEXT"),
     ("detection_runs", "alerts_suppressed", "INTEGER NOT NULL DEFAULT 0"),
+    # 3.1: an admin can end a tuning exception before it expires; the row stays as history.
+    ("suppressions", "revoked_at", "TEXT"),
+    ("suppressions", "revoked_by", "TEXT"),
 ]
 
 

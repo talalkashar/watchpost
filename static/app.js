@@ -566,14 +566,27 @@ async function rules() {
         el("button", { class: "ghost", onclick: () => guarded(() => historyDialog(r)) }, "History")));
   });
 
+  // Exception evidence from this database: the labeled scenarios alone cannot show what a key hides.
+  const counts = (o) => Object.entries(o).map(([k, n]) => `${k} ${n}`).join(", ");
+  const liveImpact = (li) => (li ? el("div", { class: "muted" },
+    li.in_labeled_scenario !== false ? null : el("div", {}, el("strong", {}, "The scenario numbers do not cover this group key: "), "no labeled scenario contains it, so before and after say nothing about what it changes."),
+    el("div", {}, `Live impact: ${li.alerts} existing alert(s) match`, li.alerts ? ` (${counts(li.by_status)}${Object.keys(li.by_disposition).length ? `; closed as ${counts(li.by_disposition)}` : ""})` : "", ". ", li.effect_note ?? ""),
+    li.recent.map((a) => el("div", {}, `#${a.id} ${a.title} (${a.disposition || a.status})`)),
+    li.ever_true_positive ? el("div", {}, el("strong", {}, `${li.ever_true_positive} matching alert(s) have been closed as a true positive at some point.`)) : null,
+    li.proposer_verdict_changes?.count ? el("div", {}, el("strong", {}, `The proposer changed the status or verdict of these alerts ${li.proposer_verdict_changes.count} time(s): `),
+      li.proposer_verdict_changes.recent.map((x) => `#${x.alert_id} ${x.detail} at ${fmtTime(x.created_at)}`).join("; ")) : null) : null);
+  const lostNote = (c) => (c.kind === "rule_update" && detectionLoss(c).length
+    ? el("div", {}, el("strong", {}, `Loses detection of labeled attack(s): ${detectionLoss(c).join(", ")}. `), "Approving requires an explicit acknowledgement.") : null);
+
   const changeRows = changes.slice(0, 30).map((c) => ({ cells: [
     `#${c.id}`, status(c.status), el("code", {}, `${{ rule_update: "rule", suppression_add: "exception" }[c.kind] || "setting"}:${c.target}`),
     el("pre", {}, JSON.stringify(c.payload)), c.reason,
-    c.evaluation ? `FP ${c.evaluation.before.fp}→${c.evaluation.after.fp}, TP ${c.evaluation.before.tp}→${c.evaluation.after.tp}, missed ${c.evaluation.after.missed.join(", ") || "none"}` : "—",
+    c.evaluation ? el("span", {}, `FP ${c.evaluation.before.fp}→${c.evaluation.after.fp}, TP ${c.evaluation.before.tp}→${c.evaluation.after.tp}, missed ${c.evaluation.after.missed.join(", ") || "none"}`, lostNote(c), liveImpact(c.evaluation.live_impact),
+      (c.evaluation.ignore_additions || []).map((x) => el("div", {}, el("strong", {}, `${x.change === "removed" ? "Removes" : "Adds"} ${x.value} ${x.change === "removed" ? "from" : "to"} ${x.param} (permanent, no expiry).`), liveImpact(x.live_impact)))) : "—",
     c.proposed_by, c.reviewed_by ? `${c.reviewed_by}${c.review_note ? `: ${c.review_note}` : ""}` : "—",
     c.status === "pending" && can("admin") ? el("span", { class: "row" },
-      el("button", { disabled: c.proposed_by === state.user.username, title: c.proposed_by === state.user.username ? "A different admin must review your own proposal" : "", onclick: () => review(c.id, "approve") }, "Approve"),
-      el("button", { class: "ghost", disabled: c.proposed_by === state.user.username, onclick: () => review(c.id, "reject") }, "Reject")) : "",
+      el("button", { disabled: c.proposed_by === state.user.username, title: c.proposed_by === state.user.username ? "A different admin must review your own proposal" : "", onclick: () => review(c, "approve") }, "Approve"),
+      el("button", { class: "ghost", disabled: c.proposed_by === state.user.username, onclick: () => review(c, "reject") }, "Reject")) : "",
   ] }));
 
   render(
@@ -589,10 +602,13 @@ async function rules() {
     el("div", { class: "card" }, el("h2", {}, `Change requests (${pending.length} pending)`),
       table(["ID", "Status", "Target", "Change", "Reason", "Scenario impact (before→after)", "Proposed by", "Reviewed", ""], changeRows)),
     el("div", { class: "card" }, el("h2", {}, `Tuning exceptions (${exceptions.filter((x) => x.active).length} active)`),
-      el("p", { class: "muted" }, "An exception skips findings of one rule for one group key until it expires. The rule itself is not edited. An analyst proposes it, a different admin approves it, and each detection run counts what it skipped. One rule differs: for data_exfil_volume nothing is skipped. The exception turns on a baseline for that principal, which then alerts only when a burst is baseline_multiplier times its own recent normal or more."),
-      table(["Rule", "Group key", "Reason", "Expires", "Proposed by", "Approved by", "Change", ""], exceptions.map((x) => ({ cells: [
+      el("p", { class: "muted" }, "An exception skips findings of one rule for one group key until it expires or an admin revokes it. The rule itself is not edited. An analyst proposes it, a different admin approves it, and each detection run counts what it skipped. One rule differs: for data_exfil_volume nothing is skipped. The exception turns on a baseline for that principal, which then alerts only when a burst is baseline_multiplier times its own recent normal or more."),
+      table(["Rule", "Group key", "Reason", "Expires", "Proposed by", "Approved by", "Change", "State", ""], exceptions.map((x) => ({ cells: [
         el("code", {}, x.rule_id), el("code", {}, x.group_key), x.reason, fmtTime(x.expires_at), x.proposed_by, x.approved_by,
-        x.change_request_id ? `#${x.change_request_id}` : "—", x.active ? pill("active", "st-ok") : pill("expired", "st-rejected")] })))),
+        x.change_request_id ? `#${x.change_request_id}` : "—",
+        x.revoked_at ? el("span", { title: `Revoked by ${x.revoked_by} at ${fmtTime(x.revoked_at)}` }, pill("revoked", "st-rejected"), ` by ${x.revoked_by} ${fmtTime(x.revoked_at)}`)
+          : x.active ? pill("active", "st-ok") : pill("expired", "st-rejected"),
+        x.active && can("admin") ? el("button", { class: "danger", onclick: () => confirm(`Revoke the exception for ${x.rule_id} / ${x.group_key}? It stops applying at once.`) && guarded(async () => { await api(`/api/suppressions/${x.id}/revoke`, { method: "POST" }); toast("Exception revoked"); rules(); }) }, "Revoke") : ""] })))),
     ...ruleCards,
     el("div", { class: "card" }, el("h2", {}, "Security settings"),
       table(["Setting", "Value", "Allowed", "Last changed", ""], settings.map((s) => ({ cells: [
@@ -605,10 +621,41 @@ async function rules() {
   );
 }
 
-async function review(id, decision) {
-  const note = prompt(`${decision === "approve" ? "Approve" : "Reject"} change #${id}. Review note:`) ?? null;
+// Labeled attacks a rule change stops detecting, from the evidence on the change request.
+const detectionLoss = (c) => (c.evaluation ? c.evaluation.before.detected.filter((n) => c.evaluation.after.missed.includes(n)) : []);
+
+// An approval names the evidence this page rendered by its digest; the server applies nothing if it differs.
+async function sendReview(c, decision, note, acknowledged) {
+  const body = { decision, note };
+  if (decision === "approve") { body.evidence_digest = c.evidence_digest; if (acknowledged) body.acknowledge_detection_loss = true; }
+  try { await api(`/api/changes/${c.id}/review`, { method: "POST", body }); }
+  catch (e) { if (e.status === 409) rules(); throw e; }  // evidence was refreshed: show it, then report why
+  toast(`Change #${c.id} ${decision}d`); rules();
+}
+
+async function review(c, decision) {
+  if (decision === "approve" && c.kind === "rule_update" && detectionLoss(c).length) return lossDialog(c);
+  const note = prompt(`${decision === "approve" ? "Approve" : "Reject"} change #${c.id}. Review note:`) ?? null;
   if (note === null) return;
-  await guarded(async () => { await api(`/api/changes/${id}/review`, { method: "POST", body: { decision, note } }); toast(`Change #${id} ${decision}d`); rules(); });
+  await guarded(() => sendReview(c, decision, note));
+}
+
+function lossDialog(c) {
+  const form = el("form", {},
+    el("h2", {}, `Approve change #${c.id}: ${c.target}`),
+    el("p", {}, "After this change the rule no longer detects these labeled attacks, which it detects today: ", el("strong", {}, detectionLoss(c).join(", ")), "."),
+    el("label", { class: "check" }, el("input", { type: "checkbox", name: "ack", required: true }), " I accept that these attacks will go undetected by this rule"),
+    el("label", {}, "Review note", el("textarea", { name: "note", maxlength: 2000 })),
+    el("p", { class: "error", id: "loss-error" }),
+    el("div", { class: "row" }, el("button", { type: "submit" }, "Approve"), el("button", { type: "button", class: "ghost", onclick: () => $("#modal").close() }, "Cancel")));
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const f = new FormData(form);
+    try { await sendReview(c, "approve", f.get("note"), f.get("ack") === "on"); $("#modal").close(); }
+    catch (e) { if (e.status === 409) { $("#modal").close(); toast(e.message); } else $("#loss-error").textContent = e.message; }
+  });
+  $("#modal-body").replaceChildren(form);
+  $("#modal").showModal();
 }
 
 function proposeDialog(rule) {
@@ -756,6 +803,7 @@ async function admin() {
     });
   });
   const demoOut = el("div");
+  let inventoryCard = assetsCard(inventory);
   render(
     el("h1", {}, "Administration"),
     el("div", { class: "card" }, el("h2", {}, "Demo data"),
@@ -769,9 +817,13 @@ async function admin() {
         }
         demoOut.replaceChildren(table(["Scenario", "Accepted", "Detection", "Alerts created"], Object.entries(r).map(([n, x]) => ({ cells: [n, { num: x.accepted }, x.detection.status, { num: x.detection.alerts_created ?? 0 }] }))));
         refreshBanner();
+        // The load seeds the demo inventory: redraw the card in place so the results above stay visible.
+        const fresh = assetsCard(await api("/api/assets"));
+        inventoryCard.replaceWith(fresh);
+        inventoryCard = fresh;
       }) }, "Load synthetic demo data"), demoOut),
     storyCard(),
-    assetsCard(inventory),
+    inventoryCard,
     el("div", { class: "card" }, el("h2", {}, "API tokens (ingest only)"), tokenForm, tokenOut,
       table(["Name", "Prefix", "Created", "Last used", "Status", ""], tokens.map((t) => ({ cells: [t.name, el("code", {}, `${t.prefix}…`), `${fmtTime(t.created_at)} by ${t.created_by}`, fmtTime(t.last_used_at),
         t.revoked_at ? pill("revoked", "st-rejected") : pill("active", "st-ok"),
