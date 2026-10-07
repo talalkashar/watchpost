@@ -127,6 +127,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 | `SIEM_LOGIN_RATE_BURST` / `SIEM_LOGIN_RATE_PER_MIN` | `10` / `10` | Token bucket for `POST /api/auth/login`, per client IP |
 | `SIEM_RATE_BURST` / `SIEM_RATE_PER_MIN` | `300` / `1200` | Token bucket for every other request (API and static), per client IP |
 | `SIEM_TRUST_PROXY` | `0` | `1` behind a local reverse proxy: the client IP is the last `X-Forwarded-For` entry on loopback connections |
+| `SIEM_AUDIT_KEY` | unset (unkeyed) | HMAC key for the audit log hash chain; see [Tamper-evident audit log](#tamper-evident-audit-log) |
 
 ### Public deployment
 
@@ -226,6 +227,17 @@ If detection fails, the events stay stored, the ingest response says `"detection
 
 This is **not machine learning**. It is transparent, deterministic tuning support.
 
+### Tamper-evident audit log
+
+Each audit entry stores `prev_hash` and `hash`, where `hash = HMAC-SHA256(key, prev_hash + JSON of id, created_at, actor, action, target, detail)`. The first entry links to a fixed genesis value (64 zeros). The previous hash is read and the new entry written in the same write transaction, so concurrent writers cannot fork the chain. `GET /api/audit/verify` (admin only) walks the log once and returns `{ok, entries, keyed, head: {id, hash}, first_break: {id, reason, detail} | null}`; **Admin → Audit log** shows the result as a badge. Upgrading a 3.x database chains the existing entries in id order and records an `audit_chain_started` entry.
+
+**What it detects:** an entry edited in place (`modified`), entries deleted from the middle or the start (`deleted`, from an id gap or a first entry that does not start at genesis), and an entry rewritten together with its own hash (`broken_link` at the entry after it).
+
+**What it does not detect:**
+- Deleting the newest entries. What remains is still a valid, shorter chain (the next append leaves an id gap, but nothing shows it before then). To catch this, record the head (`id` and `hash`) somewhere the database cannot reach, such as a ticket, a log shipped off the box, or a daily note, and compare later.
+- A full rewrite without a key. With `SIEM_AUDIT_KEY` unset the chain uses plain SHA-256 and `keyed` is `false`: anyone who can write the database file can recompute every hash, and verification passes. That mode only catches careless edits.
+- Anyone who has the key. Set `SIEM_AUDIT_KEY` to a long random value kept outside the database (`python3 -c "import secrets; print(secrets.token_hex(32))"`). Set it before the first start and keep it: entries hashed under one key fail verification under another.
+
 ---
 
 ## SOC dashboard
@@ -240,7 +252,7 @@ Admin → "Attack storyline (synthetic)" replays a scripted six-stage intrusion 
 
 ## What is real vs. synthetic vs. future
 
-**Real, working, and tested:** everything in the architecture section. That includes the ingestion API and file upload, normalization, persistence, search, the twelve rules, the noise lab, tuning exceptions, entity risk scores, ATT&CK mapping and coverage, incident correlation, Markdown and PDF reports, the SSE dashboard, the syslog listener and shipper, alerts with evidence and timelines, notes, status and verdicts, metrics, health checks and recovery, authentication, roles (including the read-only viewer), per-IP rate limiting, CSRF protection, API tokens, redaction, feedback-driven suggestions, two-person review, evaluation history, and the audit log.
+**Real, working, and tested:** everything in the architecture section. That includes the ingestion API and file upload, normalization, persistence, search, the twelve rules, the noise lab, tuning exceptions, entity risk scores, ATT&CK mapping and coverage, incident correlation, Markdown and PDF reports, the SSE dashboard, the syslog listener and shipper, alerts with evidence and timelines, notes, status and verdicts, metrics, health checks and recovery, authentication, roles (including the read-only viewer), per-IP rate limiting, CSRF protection, API tokens, redaction, feedback-driven suggestions, two-person review, evaluation history, and the hash-chained audit log.
 
 **Synthetic:** all bundled data. The demo dataset and simulator scenarios (`watchpost/simulate.py`) and the files in `samples/` are invented. External IPs come from the RFC 5737 documentation ranges. Synthetic events are stored with `synthetic=1`, sourced `demo:*`, and tagged in the UI. The evaluation scores (recall and precision) measure the rules against these hand-labeled scenarios only. They say nothing about real-world accuracy.
 

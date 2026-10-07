@@ -789,7 +789,7 @@ async function health() {
 // ---------- admin ----------
 async function admin() {
   if (!can("admin")) return render(el("p", {}, "Admins only."));
-  const [tokens, audit, inventory] = await Promise.all([api("/api/tokens"), api("/api/audit"), api("/api/assets")]);
+  const [tokens, audit, inventory, chain] = await Promise.all([api("/api/tokens"), api("/api/audit"), api("/api/assets"), api("/api/audit/verify")]);
   const tokenOut = el("div");
   const tokenForm = el("form", { class: "row" },
     el("label", {}, "Token name", el("input", { name: "name", required: true, maxlength: 64, placeholder: "e.g. web01-forwarder" })),
@@ -828,9 +828,20 @@ async function admin() {
       table(["Name", "Prefix", "Created", "Last used", "Status", ""], tokens.map((t) => ({ cells: [t.name, el("code", {}, `${t.prefix}…`), `${fmtTime(t.created_at)} by ${t.created_by}`, fmtTime(t.last_used_at),
         t.revoked_at ? pill("revoked", "st-rejected") : pill("active", "st-ok"),
         t.revoked_at ? "" : el("button", { class: "danger", onclick: () => confirm(`Revoke token "${t.name}"?`) && guarded(async () => { await api(`/api/tokens/${t.id}/revoke`, { method: "POST" }); admin(); }) }, "Revoke")] })))),
-    el("div", { class: "card" }, el("h2", {}, "Audit log"),
+    el("div", { class: "card" }, el("h2", {}, "Audit log"), chainBadge(chain),
       table(["When", "Actor", "Action", "Target", "Detail"], audit.map((a) => ({ cells: [fmtTime(a.created_at), a.actor, a.action, a.target ?? "", el("code", {}, a.detail ?? "")] })))),
   );
+}
+
+// Result of GET /api/audit/verify: each entry's hash covers its contents and the hash of the entry before it.
+function chainBadge(c) {
+  const badge = c.ok
+    ? pill(`Chain verified: ${c.entries} entries${c.head ? `, head ${c.head.hash.slice(0, 12)}` : ""}`, "st-ok")
+    : pill(`Chain broken at entry #${c.first_break.id}: ${c.first_break.reason.replace("_", " ")}`, "st-failing");
+  return el("p", {}, badge, " ",
+    el("span", { class: "muted" }, c.ok
+      ? `Edits and deletions inside the log are detected. Record the head hash elsewhere to also catch removal of the newest entries.${c.keyed ? "" : " Unkeyed (no SIEM_AUDIT_KEY): anyone who can write the database could recompute the chain."}`
+      : `${c.first_break.detail}. The log was changed outside the application.`));
 }
 
 // ---------- asset inventory ----------

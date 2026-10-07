@@ -16,7 +16,7 @@ from . import (__version__, assets, attack, auth, engine, entities, geo, improve
                storyline, stream)
 from .ratelimit import TokenBucketLimiter
 from .config import Config
-from .db import audit, connect, init_schema, now_iso, row_to_dict
+from .db import audit, connect, init_schema, now_iso, row_to_dict, set_audit_key, verify_chain
 from .diagnostics import configure_logging, log, record_error
 from .health import STATIC_DIR, run_health_checks
 from .normalize import EventError, parse_payload, validate_source
@@ -40,6 +40,7 @@ class Download:
 class App:
     def __init__(self, config: Config):
         self.config = config
+        set_audit_key(config.audit_key)
         conn = connect(config.db_path)
         try:
             init_schema(conn)
@@ -572,6 +573,11 @@ def token_revoke(req, token_id):
 @route("GET", "/api/audit", role="admin")
 def audit_log(req):
     return [dict(r) for r in req.conn.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT 200")]
+
+
+@route("GET", "/api/audit/verify", role="admin")
+def audit_verify(req):
+    return verify_chain(req.conn)
 
 
 # The only non-GET routes a read-only viewer may call.

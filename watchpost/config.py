@@ -42,6 +42,8 @@ class Config:
     # Attack storyline auto-replay for public demos (off unless SIEM_DEMO_LOOP=<minutes between runs>).
     demo_loop_minutes: int = 0
     demo_loop_speed: float = 1.0
+    # HMAC key for the hash-chained audit log. Unset: plain SHA-256, which detects edits but not a full rewrite.
+    audit_key: str | None = None
 
     @classmethod
     def from_env(cls, **overrides):
@@ -69,6 +71,7 @@ class Config:
             trust_proxy=os.environ.get("SIEM_TRUST_PROXY", "0") == "1",
             demo_loop_minutes=int(os.environ.get("SIEM_DEMO_LOOP", "0")),
             demo_loop_speed=float(os.environ.get("SIEM_DEMO_LOOP_SPEED", "1")),
+            audit_key=os.environ.get("SIEM_AUDIT_KEY") or None,
         )
         values.update(overrides)
         return cls(**values)

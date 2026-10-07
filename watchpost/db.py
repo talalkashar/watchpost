@@ -1,12 +1,18 @@
 """SQLite storage: connection handling and schema."""
 
+import hashlib
+import hmac
 import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+
+# prev_hash of the first audit entry. Every later entry links to the hash of the one before it.
+GENESIS_HASH = "0" * 64
+AUDIT_FIELDS = ("id", "created_at", "actor", "action", "target", "detail")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -207,7 +213,9 @@ CREATE TABLE IF NOT EXISTS audit_log (
     actor TEXT NOT NULL,
     action TEXT NOT NULL,
     target TEXT,
-    detail TEXT
+    detail TEXT,
+    prev_hash TEXT,
+    hash TEXT
 );
 
 CREATE TABLE IF NOT EXISTS health_probe (id INTEGER PRIMARY KEY, written_at TEXT NOT NULL);
@@ -329,6 +337,15 @@ def init_schema(conn):
         existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
         if column not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+    # 4.0: hash-chained audit log. Add the columns and chain the existing rows in one transaction, so a
+    # failed upgrade leaves the old schema rather than a half-chained log.
+    audit_columns = {r["name"] for r in conn.execute("PRAGMA table_info(audit_log)")}
+    if "hash" not in audit_columns:
+        with transaction(conn):
+            for column in ("prev_hash", "hash"):
+                if column not in audit_columns:
+                    conn.execute(f"ALTER TABLE audit_log ADD COLUMN {column} TEXT")
+            _chain_existing_audit_rows(conn)
     conn.execute(
         "INSERT INTO meta(key, value) VALUES ('schema_version', ?)"
         " ON CONFLICT(key) DO UPDATE SET value = excluded.value", (str(SCHEMA_VERSION),)
@@ -345,8 +362,100 @@ def row_to_dict(row, json_fields=()):
     return data
 
 
+# HMAC key for the audit chain, set once at startup from SIEM_AUDIT_KEY (see server.App). Without a key the
+# chain falls back to plain SHA-256, which anyone who can write the database file can recompute.
+_audit_key = None
+
+
+def set_audit_key(key):
+    global _audit_key
+    _audit_key = key or None
+
+
+def audit_hash(prev_hash, row, key):
+    """HMAC-SHA256 (or SHA-256 without a key) over the previous hash and the row's canonical JSON."""
+    canonical = json.dumps({f: row[f] for f in AUDIT_FIELDS}, sort_keys=True, separators=(",", ":"))
+    payload = ((prev_hash or "") + canonical).encode()
+    if key:
+        return hmac.new(key.encode() if isinstance(key, str) else key, payload, hashlib.sha256).hexdigest()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _link_audit_row(conn, row_id, prev_hash):
+    # Hash the row as stored (column affinity may have changed a value's type), then write prev_hash and hash.
+    row = conn.execute(f"SELECT {', '.join(AUDIT_FIELDS)} FROM audit_log WHERE id = ?", (row_id,)).fetchone()
+    digest = audit_hash(prev_hash, dict(zip(AUDIT_FIELDS, row)), _audit_key)
+    conn.execute("UPDATE audit_log SET prev_hash = ?, hash = ? WHERE id = ?", (prev_hash, digest, row_id))
+    return digest
+
+
+def _chain_existing_audit_rows(conn):
+    """Schema 4 upgrade: chain the rows written before 4.0 in id order, then record that it happened.
+
+    Runs only when the hash column is first added, so a row inserted later without a hash is reported by
+    verify_chain instead of being adopted on the next start.
+    """
+    ids = [r[0] for r in conn.execute("SELECT id FROM audit_log ORDER BY id")]
+    prev_hash = GENESIS_HASH
+    for row_id in ids:
+        prev_hash = _link_audit_row(conn, row_id, prev_hash)
+    if ids:
+        audit(conn, "system", "audit_chain_started", None, {"backfilled": len(ids), "keyed": bool(_audit_key)})
+
+
 def audit(conn, actor, action, target=None, detail=None):
-    conn.execute(
-        "INSERT INTO audit_log(created_at, actor, action, target, detail) VALUES (?,?,?,?,?)",
-        (now_iso(), actor, action, target, json.dumps(detail) if detail is not None else None),
-    )
+    # Reading the previous hash and inserting must happen under one write lock, or two writers could link to
+    # the same predecessor. Callers inside transaction() already hold it (BEGIN IMMEDIATE); otherwise take it.
+    own = not conn.in_transaction
+    if own:
+        conn.execute("BEGIN IMMEDIATE")
+    try:
+        last = conn.execute("SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1").fetchone()
+        cur = conn.execute(
+            "INSERT INTO audit_log(created_at, actor, action, target, detail) VALUES (?,?,?,?,?)",
+            (now_iso(), actor, action, target, json.dumps(detail) if detail is not None else None),
+        )
+        _link_audit_row(conn, cur.lastrowid, last[0] if last else GENESIS_HASH)
+    except BaseException:
+        if own:
+            conn.execute("ROLLBACK")
+        raise
+    else:
+        if own:
+            conn.execute("COMMIT")
+
+
+_CONFIGURED_KEY = object()
+
+
+def verify_chain(conn, key=_CONFIGURED_KEY):
+    """Walk the audit log once, oldest first, and report the first entry that breaks the chain.
+
+    Reasons: `deleted` (an id gap, or the first entry does not start from the genesis hash), `modified` (the
+    entry's own hash does not match its contents), `broken_link` (the entry is intact but does not point at the
+    entry before it, e.g. that one was rewritten together with its hash). Deleting the newest entries leaves a
+    valid shorter chain; only a head recorded elsewhere shows that.
+    """
+    key = _audit_key if key is _CONFIGURED_KEY else key
+    entries, prev_id, prev_hash, head, first_break = 0, None, GENESIS_HASH, None, None
+    # One SELECT reads one consistent snapshot, even while other connections append.
+    cur = conn.execute(f"SELECT {', '.join(AUDIT_FIELDS)}, prev_hash, hash FROM audit_log ORDER BY id")
+    for row in cur:
+        entries += 1
+        row_id, stored_prev, stored_hash = row[0], row[6], row[7]
+        head = {"id": row_id, "hash": stored_hash}
+        if first_break is None:
+            if prev_id is not None and row_id != prev_id + 1:
+                first_break = {"id": row_id, "reason": "deleted",
+                               "detail": f"entries #{prev_id + 1} to #{row_id - 1} are missing"}
+            elif stored_hash != audit_hash(stored_prev, dict(zip(AUDIT_FIELDS, row)), key):
+                first_break = {"id": row_id, "reason": "modified",
+                               "detail": "the entry no longer matches its hash"}
+            elif stored_prev != prev_hash:
+                first_break = ({"id": row_id, "reason": "deleted",
+                                "detail": "entries before this one are missing"} if prev_id is None else
+                               {"id": row_id, "reason": "broken_link",
+                                "detail": f"the entry does not link to entry #{prev_id}"})
+        prev_id, prev_hash = row_id, stored_hash
+    return {"ok": first_break is None, "entries": entries, "keyed": bool(key), "head": head,
+            "first_break": first_break}
