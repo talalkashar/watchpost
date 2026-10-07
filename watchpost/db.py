@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # prev_hash of the first audit entry. Every later entry links to the hash of the one before it.
 GENESIS_HASH = "0" * 64
@@ -271,6 +271,16 @@ CREATE TABLE IF NOT EXISTS suppressions (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_suppressions_rule ON suppressions(rule_id, group_key);
+
+-- 5.0: hunting. A saved search stores the query text; time terms like last:24h resolve when it runs.
+CREATE TABLE IF NOT EXISTS saved_searches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    query TEXT NOT NULL,
+    description TEXT,
+    owner TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 # Columns added after 1.0. Existing databases gain them in place on startup.
