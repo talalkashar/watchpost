@@ -4,6 +4,7 @@ import unittest
 from datetime import timedelta
 
 from tests.helpers import ADMIN_PW, ServerTestCase
+from watchpost import attack
 from watchpost.db import iso, utcnow
 from watchpost.health import STATIC_DIR
 
@@ -262,10 +263,46 @@ class IncidentApiTests(ServerTestCase):
         self.assertEqual(status, 200)
         self.assertEqual(coverage["tactics"][0]["name"], "Reconnaissance")
         by_id = {t["id"]: t for t in coverage["techniques"]}
-        self.assertEqual(coverage["summary"]["covered"], len(by_id))
+        # Covered means validated on a labeled scenario; T1190 and T1048 are only mapped.
+        self.assertEqual(coverage["summary"]["covered"], len(by_id) - 3)  # T1190, T1048, T1595.001 are only mapped
         self.assertEqual(by_id["T1548.003"]["hits"], 1)
         self.assertEqual(by_id["T1110.003"]["hits"], 0)
         self.assertEqual([r["id"] for r in by_id["T1046"]["rules"]], ["firewall_port_sweep"])
+
+    def test_attack_coverage_evidence_levels(self):
+        viewer = self.client("viewer")
+        self.assertEqual(self.client().get("/api/attack/coverage")[0], 401)
+        status, coverage, _ = viewer.get("/api/attack/coverage")
+        self.assertEqual(status, 200)
+        # The 2.x shape the dashboard and the Navigator export read is still there.
+        self.assertLessEqual({"tactics", "techniques", "summary"}, set(coverage))
+        self.assertLessEqual({"techniques", "covered", "with_hits"}, set(coverage["summary"]))
+        self.assertEqual(coverage["levels"], ["validated", "mapped", "disabled", "gap"])
+        by_id = {t["id"]: t for t in coverage["techniques"]}
+        for t in by_id.values():
+            with self.subTest(technique=t["id"]):
+                self.assertLessEqual({"id", "name", "tactic", "rules", "hits", "covered", "level", "scenarios"}, set(t))
+                self.assertEqual(t["covered"], t["level"] == "validated")
+                for r in t["rules"]:
+                    self.assertLessEqual({"id", "name", "enabled", "hits", "verdict", "lookalikes_fired", "proves"},
+                                         set(r))
+        self.assertEqual({i for i, t in by_id.items() if t["level"] == "mapped"}, {"T1190", "T1048", "T1595.001"})
+        self.assertEqual(by_id["T1110.003"]["scenarios"], ["password_spray"])
+        web = by_id["T1190"]["rules"][0]
+        self.assertEqual((web["id"], web["verdict"], web["proves"]), ("web_scanner", "quiet", []))
+        summary = coverage["summary"]
+        self.assertEqual(summary["levels"], {"validated": len(by_id) - 3, "mapped": 3, "disabled": 0, "gap": 0})
+        self.assertEqual(summary["covered"], summary["levels"]["validated"])
+
+    def test_disabling_a_rule_moves_its_techniques_off_validated(self):
+        analyst, admin = self.client("analyst"), self.client("admin")
+        change = analyst.post("/api/rules/web_scanner/proposals", {"enabled": False, "reason": "coverage test"})[1]
+        self.assertEqual(admin.post(f"/api/changes/{change['id']}/review",
+                                    {"decision": "approve", "evidence_digest": change["evidence_digest"],
+                                     "acknowledge_detection_loss": True})[0], 200)
+        by_id = {t["id"]: t for t in self.client("viewer").get("/api/attack/coverage")[1]["techniques"]}
+        self.assertEqual([by_id[i]["level"] for i in ("T1595.002", "T1595.003", "T1190")], ["disabled"] * 3)
+        self.assertEqual(by_id["T1595.002"]["rules"][0]["verdict"], "disabled")
 
     def test_navigator_layer_export(self):
         viewer = self.client("viewer")
@@ -276,8 +313,13 @@ class IncidentApiTests(ServerTestCase):
         self.assertEqual((layer["domain"], layer["versions"]), ("enterprise-attack", {"layer": "4.5"}))
         self.assertIn("synthetic", layer["description"].lower())
         coverage = {t["id"]: t for t in viewer.get("/api/attack/coverage")[1]["techniques"]}
+        # Every technique, scored by hits and colored by the same level the Coverage view shows.
         self.assertEqual({t["techniqueID"]: t["score"] for t in layer["techniques"]},
-                         {i: t["hits"] for i, t in coverage.items() if t["covered"]})
+                         {i: t["hits"] for i, t in coverage.items()})
+        self.assertEqual({t["techniqueID"]: t["color"] for t in layer["techniques"]},
+                         {i: attack.LEVEL_COLORS[t["level"]] for i, t in coverage.items()})
+        for t in layer["techniques"]:
+            self.assertTrue(t["comment"].startswith(coverage[t["techniqueID"]]["level"].capitalize()))
         self.assertIn("firewall_port_sweep", {t["techniqueID"]: t for t in layer["techniques"]}["T1046"]["comment"])
         self.assertEqual(layer["gradient"]["maxValue"], max(t["hits"] for t in coverage.values()))
         self.assertIn('href: "/api/attack/navigator.json"', (STATIC_DIR / "dashboard.js").read_text())
