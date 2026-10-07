@@ -371,6 +371,26 @@ SCENARIOS = {
                                  "her uploads to the corporate drive do not alert."},
 }
 
+# ATT&CK techniques each labeled attack's events actually exercise, for the coverage view. A rule that
+# maps a technique only "validates" it by detecting a scenario tagged here. Deliberately narrower than
+# the rules' own mappings: web_scan probes and injects but never exploits (no T1190), and exfiltration
+# reads cloud storage without showing an exfiltration channel (no T1048).
+SCENARIO_TECHNIQUES = {
+    "brute_force": ["T1110", "T1110.001"],
+    "password_spray": ["T1110.003"],
+    "compromise": ["T1110", "T1078"],
+    "off_hours_admin": ["T1078.003"],
+    "web_scan": ["T1595.002", "T1595.003"],
+    "port_sweep": ["T1046"],
+    "impossible_travel": ["T1078", "T1133"],
+    "privilege_escalation": ["T1078", "T1548.003"],
+    "cloud_new_principal": ["T1078.004", "T1098.001", "T1136.003"],
+    "exfiltration": ["T1530"],
+    "shadow_it": ["T1567"],
+}
+for _name, _techniques in SCENARIO_TECHNIQUES.items():
+    SCENARIOS[_name]["techniques"] = _techniques
+
 # What "Load demo data" and `--scenario all` send. The look-alikes below are kept out of the demo
 # dataset: the noise lab evaluates them, and any one can be replayed by name.
 DEMO_SCENARIOS = list(SCENARIOS)
