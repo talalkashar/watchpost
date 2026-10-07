@@ -159,7 +159,7 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | `watchpost/normalize.py` | Parses JSON, JSONL, CSV, Linux `auth.log` (OpenSSH), and Windows Security events (4624/4625/4672/4688/4720/4740). Accepts common field aliases, including ECS-style nesting. Validates timestamps, IPs, severities, and lengths, strips control characters, and redacts secrets. Every rejected record gets a reason and a position. |
 | `watchpost/correlate.py`, `watchpost/incidents.py` | Pure alert-to-incident grouping; incident queries, status changes, and ATT&CK coverage. |
 | `watchpost/attack.py`, `watchpost/geo.py` | Static ATT&CK subset; synthetic geo table for demo IP ranges (never a real lookup). |
-| `watchpost/rules.py` | Eleven threshold rules as pure functions over event lists, each with a plain-English explanation. Also validates rule parameters. |
+| `watchpost/rules.py` | Fourteen explainable rules as pure functions over event lists, each with a plain-English explanation. Also validates rule parameters. |
 | `watchpost/engine.py` | Stores each batch atomically, then runs detection over the batch's time range plus the longest rule window. Deduplicates and extends open alerts, and records every detection run. |
 | `watchpost/queries.py` | Event search (parameterized SQL), alert detail with evidence and a related-events timeline, notes, status changes, and SOC metrics. |
 | `watchpost/hunt.py` | Hunt query parser and compiler (whitelisted fields, bound values) and saved searches. |
@@ -195,8 +195,18 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | `privilege_escalation_after_login` | sudo/su/runas within 30 min of a login that followed ≥ 3 failures | critical |
 | `cloud_iam_change_by_new_principal` | an IAM change by a cloud principal with no activity in the previous 24 h | high |
 | `data_exfil_volume` | one account (or IP) moves ≥ 1 GB out, or makes ≥ 100 cloud data reads, within 1 h | high |
+| `unsanctioned_cloud_service` | an account uses a cloud service that is not on the sanctioned list (or a subdomain of one) | medium |
+| `cloud_logging_disabled` | a cloud audit event records `StopLogging`, `DeleteTrail` or `DeleteFlowLogs` (the `logging_actions` list) | high |
+| `admin_action_from_new_source` | an account makes a privileged action (privilege use/escalation, cloud IAM change) from an IP it used for none of its privileged actions in the previous 7 days, and it made ≥ 3 in that span | medium |
 
-Every rule maps to MITRE ATT&CK techniques from a small static catalog (`watchpost/attack.py`, 18 techniques, no network fetch). `GET /api/attack/coverage` grades each technique by evidence (below) and counts how often its rules fired.
+Every rule maps to MITRE ATT&CK techniques from a small static catalog (`watchpost/attack.py`, 19 techniques, no network fetch). `GET /api/attack/coverage` grades each technique by evidence (below) and counts how often its rules fired.
+
+The two newest rules use only fields the schema already carries, and each has a labeled attack and a benign look-alike in the noise lab (both detect their attack, tp 1 / fn 0 / fp 0, and stay quiet on their look-alike):
+
+- **`cloud_logging_disabled`** (T1562.008). Reads the action from cloud audit messages of the form `<action> on <service>`, as the CloudTrail parser writes them. Attack `logging_disabled`: the rogue principal `svc-deploy-tmp` stops and deletes the trail, so in the demo it joins the cloud-intrusion incident as a Defense Evasion stage. Look-alike `trail_maintenance`: an admin creates a trail, changes event selectors, updates it and starts logging. `UpdateTrail` and `PutEventSelectors` are not listed by default because the event names the action but not the new settings, so the rule cannot tell whether such a change turned logging off. A denied `StopLogging` also alerts.
+- **`admin_action_from_new_source`** (T1078, T1078.004). Attack `admin_new_source`: `ops-admin` changes IAM from the office each morning, then creates an access key from an outside address at 19:10. Look-alike `admin_known_source`: the same admin's IAM change from the usual address, plus a read-only call from a new one. **Cold start:** an account with fewer than `min_prior_actions` privileged actions in `history_seconds` has no baseline and never alerts. That covers every account on a fresh install until it has made three privileged actions, an account that admins less often than that in a week, and an account whose first privileged action is the attack (`cloud_iam_change_by_new_principal` covers a never-seen cloud principal). Events without a source IP, which includes most local sudo lines, are skipped. A legitimate admin on a new laptop address will alert.
+
+MFA push fatigue (T1621) is not built: no event carries an MFA signal (the auth parsers record only success or failure, and the CloudTrail parser does not keep `MFAUsed`), and the rule would need a new log source.
 
 ### ATT&CK coverage
 
@@ -209,7 +219,7 @@ A rule mapping to a technique is a claim, not proof. The **Coverage** view (and 
 | **disabled** | Only disabled rules map to it. |
 | **gap** | No rule maps to it. |
 
-Each malicious scenario in `watchpost/simulate.py` lists the techniques its events actually show (`SCENARIO_TECHNIQUES`), which is narrower than the rules' own mappings. With the default rules, 15 of 18 techniques are validated. T1595.001 (`firewall_port_sweep`: one outside source sweeping one host's ports is not scanning IP blocks), T1190 (`web_scanner`: the scan probes and sends injection strings but never exploits anything) and T1048 (`data_exfil_volume`: the scenario reads cloud storage but shows no exfiltration channel) are only mapped. Each technique lists its rules with their noise-lab verdict, the proving scenarios, and live alert counts; the Navigator layer is colored by the same levels.
+Each malicious scenario in `watchpost/simulate.py` lists the techniques its events actually show (`SCENARIO_TECHNIQUES`), which is narrower than the rules' own mappings. With the default rules, 16 of 19 techniques are validated. T1595.001 (`firewall_port_sweep`: one outside source sweeping one host's ports is not scanning IP blocks), T1190 (`web_scanner`: the scan probes and sends injection strings but never exploits anything) and T1048 (`data_exfil_volume`: the scenario reads cloud storage but shows no exfiltration channel) are only mapped. Each technique lists its rules with their noise-lab verdict, the proving scenarios, and live alert counts; the Navigator layer is colored by the same levels.
 
 The scenarios are synthetic, so "validated" means a rule detected the project's own labeled data, not that it would catch the technique in real traffic. The catalog holds only techniques a Watchpost rule maps to, so the counts are not a measure against all of ATT&CK.
 
@@ -301,7 +311,7 @@ Admin → "Attack storyline (synthetic)" replays a scripted six-stage intrusion 
 
 ## What is real vs. synthetic vs. future
 
-**Real, working, and tested:** everything in the architecture section. That includes the ingestion API and file upload, normalization, persistence, search, the twelve rules, the noise lab, tuning exceptions, entity risk scores, ATT&CK mapping and coverage, incident correlation, Markdown and PDF reports, the SSE dashboard, the syslog listener and shipper, alerts with evidence and timelines, notes, status and verdicts, metrics, health checks and recovery, authentication, roles (including the read-only viewer), per-IP rate limiting, CSRF protection, API tokens, redaction, feedback-driven suggestions, two-person review, evaluation history, and the hash-chained audit log.
+**Real, working, and tested:** everything in the architecture section. That includes the ingestion API and file upload, normalization, persistence, search, the fourteen rules, the noise lab, tuning exceptions, entity risk scores, ATT&CK mapping and coverage, incident correlation, Markdown and PDF reports, the SSE dashboard, the syslog listener and shipper, alerts with evidence and timelines, notes, status and verdicts, metrics, health checks and recovery, authentication, roles (including the read-only viewer), per-IP rate limiting, CSRF protection, API tokens, redaction, feedback-driven suggestions, two-person review, evaluation history, and the hash-chained audit log.
 
 **Synthetic:** all bundled data. The demo dataset and simulator scenarios (`watchpost/simulate.py`) and the files in `samples/` are invented. External IPs come from the RFC 5737 documentation ranges. Synthetic events are stored with `synthetic=1`, sourced `demo:*`, and tagged in the UI. The evaluation scores (recall and precision) measure the rules against these hand-labeled scenarios only. They say nothing about real-world accuracy.
 

@@ -155,6 +155,37 @@ DEFAULT_RULES = [
         "params": {"sanctioned_services": ["amazonaws.com", "corp-drive.example"], "window_seconds": 3600,
                    "ignore_ips": [], "ignore_users": []},
     },
+    {
+        "id": "cloud_logging_disabled",
+        "name": "Cloud audit logging stopped or deleted",
+        "description": "Fires when a cloud audit event records an action in `logging_actions` (by default stopping or "
+                       "deleting a CloudTrail trail, or deleting VPC flow logs). The action is read from messages of "
+                       "the form '<action> on <service>'. A denied attempt is recorded the same way and also alerts: "
+                       "check the trail status to see whether logging is off. UpdateTrail and PutEventSelectors are "
+                       "not listed by default because the event carries only the action name, not the new settings, "
+                       "so the rule cannot tell a change that turns logging off from one that leaves it on. Such "
+                       "actions by one account within `window_seconds` join the same alert.",
+        "techniques": techniques("T1562.008"),
+        "severity": "high",
+        "params": {"logging_actions": ["StopLogging", "DeleteTrail", "DeleteFlowLogs"], "window_seconds": 3600,
+                   "ignore_ips": [], "ignore_users": []},
+    },
+    {
+        "id": "admin_action_from_new_source",
+        "name": "Privileged action from a new source address",
+        "description": "Fires when an account makes a privileged action (privilege use or escalation, or a cloud IAM "
+                       "change) from a source IP it used for none of its privileged actions in the preceding "
+                       "`history_seconds`, and it made at least `min_prior_actions` privileged actions in that span. "
+                       "Cold start: an account with less history has no baseline and never alerts, which includes "
+                       "every account on a new install and an account whose first privileged action is the attack "
+                       "(cloud_iam_change_by_new_principal covers a never-seen cloud principal). Events without a "
+                       "source IP, such as most local sudo lines, are skipped and never guessed. Later privileged "
+                       "actions from the same new source within `window_seconds` join the same alert.",
+        "techniques": techniques("T1078", "T1078.004"),
+        "severity": "medium",
+        "params": {"history_seconds": 604800, "min_prior_actions": 3, "window_seconds": 3600,
+                   "ignore_ips": [], "ignore_users": []},
+    },
 ]
 
 # Allowed parameters and validators, used to reject malformed rule change proposals.
@@ -177,6 +208,8 @@ PARAM_SCHEMA = {
     "access_threshold": ("int", 2, 1_000_000),
     "baseline_multiplier": ("int", 0, 1000),
     "sanctioned_services": ("list", 1, 500),
+    "logging_actions": ("list", 1, 500),
+    "min_prior_actions": ("int", 1, 10000),
 }
 
 
@@ -228,7 +261,7 @@ def _epoch(event):
 # `list_entry` and `covers` are the only definition of what an entry matches: the rules below use them,
 # and so does the review gate in improve.py, so the gate cannot read an entry differently from the rule.
 HIDING_EDITS = {"ignore_ips": "added", "ignore_users": "added", "sanctioned_services": "added",
-                "privileged_users": "removed"}
+                "privileged_users": "removed", "logging_actions": "removed"}
 
 
 def list_entry(param, value):
@@ -245,6 +278,8 @@ def covers(param, entries, event):
     if param == "sanctioned_services":  # the service itself or any subdomain of an entry
         service = _service(event)
         return bool(service) and any(service == s or service.endswith("." + s) for s in entries)
+    if param == "logging_actions":
+        return (_action(event) or "").lower() in entries
     return (event.get("user") or "").lower() in entries
 
 
@@ -614,6 +649,12 @@ def _service(event):
     return name if "." in name else None
 
 
+def _action(event):
+    """The action named by an '<action> on <service>' message (the word before ' on '), or None."""
+    before, found, _ = (event.get("message") or "").partition(" on ")
+    return before.split()[-1] if found and before.split() else None
+
+
 def unsanctioned_cloud_service(events, params):
     sanctioned = [list_entry("sanctioned_services", s) for s in params["sanctioned_services"]]
     window = params["window_seconds"]
@@ -639,6 +680,63 @@ def unsanctioned_cloud_service(events, params):
     return findings
 
 
+def cloud_logging_disabled(events, params):
+    actions = {list_entry("logging_actions", a) for a in params["logging_actions"]}
+    window = params["window_seconds"]
+    groups = defaultdict(list)
+    for e in _filtered(events, params, CLOUD_TYPES):
+        key = (e.get("user") or "").lower() or e.get("src_ip")
+        if key and covers("logging_actions", actions, e):
+            groups[key].append(e)
+    findings = []
+    for principal, group in groups.items():
+        for cluster in _clusters(group, window, lambda w: True):
+            done = Counter(_action(e) for e in cluster)
+            ips = sorted({e.get("src_ip") or "unknown" for e in cluster})
+            findings.append(_finding(
+                principal, cluster,
+                f"Cloud audit logging disabled by {principal}: {', '.join(done)}",
+                f"{principal} called {', '.join(f'{a} ({n})' for a, n in done.items())} between {cluster[0]['ts']} "
+                f"and {cluster[-1]['ts']} from {', '.join(ips[:5])}. These actions stop or delete cloud audit "
+                f"logging, which hides what happens next. A denied attempt is recorded the same way, so check "
+                f"whether logging is actually off.",
+            ))
+    return findings
+
+
+PRIVILEGED_TYPES = ("privilege_use", "privilege_escalation", "cloud_iam_change")
+
+
+def admin_action_from_new_source(events, params):
+    history, needed, window = params["history_seconds"], params["min_prior_actions"], params["window_seconds"]
+    actions = [e for e in _filtered(events, params, PRIVILEGED_TYPES) if e.get("src_ip")]
+    findings = []
+    for user, group in _group_users(actions).items():
+        # Sources of this account's privileged actions inside the history span before each action.
+        known, start = Counter(), 0
+        for index, event in enumerate(group):
+            t = _epoch(event)
+            while _epoch(group[start]) < t - history:
+                known[group[start]["src_ip"]] -= 1
+                start += 1
+            prior, ip = index - start, event["src_ip"]
+            if prior >= needed and known[ip] <= 0:
+                cluster = [e for e in group[index:] if e["src_ip"] == ip and _epoch(e) - t <= window]
+                sources = sorted(s for s, n in known.items() if n > 0)
+                what = Counter(_action(e) or e["event_type"] for e in cluster)
+                findings.append(_finding(
+                    f"{user}|{ip}", cluster,
+                    f"Privileged action by {event['user']} from new source {ip}",
+                    f"{event['user']} made {len(cluster)} privileged action(s) "
+                    f"({', '.join(a for a, _ in what.most_common(5))}) from {ip} starting {event['ts']}. In the "
+                    f"preceding {history}s it made {prior} privileged actions, all from "
+                    f"{', '.join(sources[:5])}{'…' if len(sources) > 5 else ''}; never from {ip}. Accounts with "
+                    f"fewer than {needed} earlier privileged actions have no baseline and are not judged.",
+                ))
+            known[ip] += 1
+    return findings
+
+
 RULE_FUNCTIONS = {
     "brute_force_ip": brute_force_ip,
     "password_spray": password_spray,
@@ -652,6 +750,8 @@ RULE_FUNCTIONS = {
     "cloud_iam_change_by_new_principal": cloud_iam_change_by_new_principal,
     "data_exfil_volume": data_exfil_volume,
     "unsanctioned_cloud_service": unsanctioned_cloud_service,
+    "cloud_logging_disabled": cloud_logging_disabled,
+    "admin_action_from_new_source": admin_action_from_new_source,
 }
 
 

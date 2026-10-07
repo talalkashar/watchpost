@@ -201,6 +201,34 @@ def shadow_it(day, rng):
     return events
 
 
+def logging_disabled(day, rng):
+    """The rogue principal checks the audit trail, stops it, then deletes it before reading storage."""
+    ip, start = "203.0.113.150", _at(day, 17, 50)
+    return [_event(start + timedelta(seconds=i * 40), "logging_disabled", "cloud_api_call", "svc-deploy-tmp", ip,
+                   host=None, message=f"[SYNTHETIC] {action} on cloudtrail.amazonaws.com")
+            for i, action in enumerate(["DescribeTrails", "StopLogging", "DeleteTrail"])]
+
+
+def admin_new_source(day, rng):
+    """ops-admin changes IAM from the office every morning; tonight its keys are used from an outside address.
+
+    The two earlier mornings are history context (dated before the scenario day). Each morning starts with
+    a read so the IAM change is not also a 'new principal' change.
+    """
+    ip, events = "10.0.1.30", []
+    for back in (2, 1, 0):
+        morning = _at(day - timedelta(days=back), 9, 30)
+        events.append(_event(morning, "admin_new_source", "cloud_api_call", "ops-admin", ip, host=None,
+                             message="[SYNTHETIC] ListUsers on iam.amazonaws.com"))
+        events.append(_event(morning + timedelta(minutes=10), "admin_new_source", "cloud_iam_change", "ops-admin",
+                             ip, host=None, message="[SYNTHETIC] AttachUserPolicy on iam.amazonaws.com"))
+    for i, action in enumerate(["CreateAccessKey", "AttachUserPolicy"]):
+        events.append(_event(_at(day, 19, 10) + timedelta(seconds=i * 45), "admin_new_source", "cloud_iam_change",
+                             "ops-admin", "198.51.100.77", host=None,
+                             message=f"[SYNTHETIC] {action} on iam.amazonaws.com"))
+    return events
+
+
 # --- Benign look-alikes (noise lab) ------------------------------------------------------
 # Each one is ordinary activity that resembles what one rule looks for. Whether the rule
 # fires on it is measured, not assumed: several of these do trip their rule.
@@ -328,6 +356,24 @@ def sanctioned_saas(day, rng):
             for i in range(6)]
 
 
+def trail_maintenance(day, rng):
+    """ops-admin replaces the audit trail: a new trail, new event selectors, logging started. Logging stays on."""
+    return [_event(_at(day, 14, 0) + timedelta(seconds=i * 30), "trail_maintenance", "cloud_api_call", "ops-admin",
+                   "10.0.1.30", host=None, message=f"[SYNTHETIC] {action} on cloudtrail.amazonaws.com (change ticket)")
+            for i, action in enumerate(["DescribeTrails", "CreateTrail", "PutEventSelectors", "UpdateTrail",
+                                        "StartLogging", "GetTrailStatus"])]
+
+
+def admin_known_source(day, rng):
+    """ops-admin's routine IAM change from the office, and a read-only check from the remote site."""
+    events = admin_new_source(day, rng)[:-2]  # the same three office mornings, without the outside use
+    events.append(_event(_at(day, 15, 30), "admin_known_source", "cloud_iam_change", "ops-admin", "10.0.1.30",
+                         host=None, message="[SYNTHETIC] DetachUserPolicy on iam.amazonaws.com"))
+    events.append(_event(_at(day, 20, 0), "admin_known_source", "cloud_api_call", "ops-admin", "192.168.40.12",
+                         host=None, message="[SYNTHETIC] ListUsers on iam.amazonaws.com (from the remote site)"))
+    return [{**e, "source": "demo:admin_known_source"} for e in events]
+
+
 # expected: rule_id -> group_key the alert should be keyed on. Anything else firing is a false positive.
 SCENARIOS = {
     "baseline": {"build": baseline, "malicious": False, "expected": {},
@@ -369,6 +415,14 @@ SCENARIOS = {
                   "expected": {"unsanctioned_cloud_service": "judy|personal-drive.example"},
                   "description": "judy uploads customer exports to a file-sharing service that is not sanctioned; "
                                  "her uploads to the corporate drive do not alert."},
+    "logging_disabled": {"build": logging_disabled, "malicious": True,
+                         "expected": {"cloud_logging_disabled": "svc-deploy-tmp"},
+                         "description": "The rogue principal svc-deploy-tmp stops and then deletes the CloudTrail "
+                                        "trail."},
+    "admin_new_source": {"build": admin_new_source, "malicious": True,
+                         "expected": {"admin_action_from_new_source": "ops-admin|198.51.100.77"},
+                         "description": "ops-admin changes IAM from the office each morning; at 19:10 it creates an "
+                                        "access key from an outside address it has never used."},
 }
 
 # ATT&CK techniques each labeled attack's events actually exercise, for the coverage view. A rule that
@@ -387,6 +441,10 @@ SCENARIO_TECHNIQUES = {
     "cloud_new_principal": ["T1078.004", "T1098.001", "T1136.003"],
     "exfiltration": ["T1530"],
     "shadow_it": ["T1567"],
+    "logging_disabled": ["T1562.008"],
+    # A valid cloud account used from new infrastructure. Its CreateAccessKey is also T1098.001, but the rule
+    # that detects it does not map T1098.001, so the tag would prove nothing.
+    "admin_new_source": ["T1078.004"],
 }
 for _name, _techniques in SCENARIO_TECHNIQUES.items():
     SCENARIOS[_name]["techniques"] = _techniques
@@ -440,6 +498,15 @@ SCENARIOS.update({
     "sanctioned_saas": {
         "build": sanctioned_saas, "malicious": False, "expected": {}, "lookalike_of": "unsanctioned_cloud_service",
         "description": "A team uploads to the sanctioned corporate drive through its regional endpoint."},
+    "trail_maintenance": {
+        "build": trail_maintenance, "malicious": False, "expected": {}, "lookalike_of": "cloud_logging_disabled",
+        "description": "An administrator replaces the audit trail under a change ticket: creates a trail, sets event "
+                       "selectors, updates it, and starts logging. Logging stays on."},
+    "admin_known_source": {
+        "build": admin_known_source, "malicious": False, "expected": {},
+        "lookalike_of": "admin_action_from_new_source",
+        "description": "ops-admin makes a routine IAM change from its usual office address, and a read-only call "
+                       "from the remote site. A real IAM change from a new laptop address would alert."},
 })
 
 
