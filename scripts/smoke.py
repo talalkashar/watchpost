@@ -356,6 +356,19 @@ def main():
         check(statuses[-1] == 429, f"login attempts were not rate limited: {statuses}")
         print(f"      login answered 429 after {statuses.index(429)} attempts")
 
+        step("hunting: viewer runs a query, analyst saves and deletes it (audited), viewer cannot save")
+        hunt_q = 'ip:203.0.113.45 event_type:auth_failure NOT user:"x\' OR 1=1 --"'
+        status, res = viewer.call("GET", "/api/hunt?q=" + quote(hunt_q))
+        check(status == 200 and res["total"] >= 40 and len(res["terms"]) == 3, f"hunt: {status} {res.get('total')}")
+        check(viewer.call("GET", "/api/hunt?q=usr:x")[0] == 400, "unknown hunt field was not refused")
+        check(viewer.call("POST", "/api/hunt/saved", {"name": "v", "query": "user:a"})[0] == 403, "viewer saved a search")
+        status, saved = analyst.call("POST", "/api/hunt/saved", {"name": "Smoke brute force", "query": hunt_q})
+        check(status == 201 and viewer.call("GET", "/api/hunt/saved")[1][0]["id"] == saved["id"], f"save: {status} {saved}")
+        check(analyst.call("POST", f"/api/hunt/saved/{saved['id']}/delete")[0] == 200, "analyst could not delete")
+        actions = [a["action"] for a in admin.call("GET", "/api/audit")[1]]
+        check({"saved_search_created", "saved_search_deleted"} <= set(actions), "saved search changes not audited")
+        print(f"      {res['total']} events matched; saved search created and deleted")
+
         step("audit log hash chain verifies (keyed)")
         status, chain = admin.call("GET", "/api/audit/verify")
         check(status == 200 and chain["ok"] and chain["status"] == "verified" and chain["keyed"],

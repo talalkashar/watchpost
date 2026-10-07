@@ -81,14 +81,18 @@ def search_events(conn, params):
     if since_id is not None:
         where.append("id > ?")
         args.append(since_id)
+    return page_events(conn, where, args, params, newest_stored_first=since_id is not None)
 
+
+def page_events(conn, where, args, params, newest_stored_first=False):
+    """One page of events matching parameterized WHERE fragments (shared by event search and hunting)."""
     limit = _int(params.get("limit"), "limit", 100, 1, 1000)
     offset = _int(params.get("offset"), "offset", 0, 0, 10_000_000)
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     total = conn.execute(f"SELECT COUNT(*) FROM events{clause}", args).fetchone()[0]
     rows = conn.execute(
         f"SELECT {EVENT_FIELDS} FROM events{clause} ORDER BY "
-        f"{'id DESC' if since_id is not None else 'ts DESC, id DESC'} LIMIT ? OFFSET ?",
+        f"{'id DESC' if newest_stored_first else 'ts DESC, id DESC'} LIMIT ? OFFSET ?",
         args + [limit, offset],
     )
     return {"total": total, "limit": limit, "offset": offset, "events": [dict(r) for r in rows]}
