@@ -626,3 +626,22 @@ def noise_lab(conn):
         "summary": {"rules": len(rows), "noisy": sum(r["verdict"] == "noisy" for r in rows),
                     "lookalikes": sum("lookalike_of" in s for s in simulate.SCENARIOS.values())},
     }
+
+
+_NOISE_LAB_CACHE = {}  # {key: result}; one entry, replaced when rules, exceptions, or the demo day change
+
+
+def cached_noise_lab(conn):
+    """noise_lab(), reused while the inputs that decide it stay the same.
+
+    The evaluation is a pure function of the rule params and enabled flags, the active tuning
+    exceptions, and the scenario day, so those form the key. Callers must not modify the result.
+    """
+    key = (tuple((r["id"], r["version"], bool(r["enabled"]), json.dumps(r["params"], sort_keys=True))
+                 for r in load_rules(conn, enabled_only=False)),
+           tuple(sorted(active_suppressions(conn))), simulate.demo_day(utcnow()))
+    if key not in _NOISE_LAB_CACHE:
+        result = noise_lab(conn)
+        _NOISE_LAB_CACHE.clear()
+        _NOISE_LAB_CACHE[key] = result
+    return _NOISE_LAB_CACHE[key]

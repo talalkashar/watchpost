@@ -374,3 +374,20 @@ label.check { display: inline-flex; align-items: center; gap: 4px; margin: 0; fo
 fieldset { border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; margin: 8px 0; }
 legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
 .pill.stage { color: var(--high); border-color: rgb(255 138 48 / .45); background: rgb(255 138 48 / .07); text-transform: none; }
+
+/* ATT&CK coverage view: every level is spelled out in words; color only repeats it */
+.lv-validated { color: var(--ok); } .lv-mapped { color: var(--warn); } .lv-disabled { color: var(--muted); } .lv-gap { color: var(--bad); }
+.cov-scroll { overflow-x: auto; }
+.cov-grid { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(128px, 1fr); gap: 6px; }
+.cov-head { min-height: 32px; padding-bottom: 4px; margin-bottom: 6px; border-bottom: 1px solid var(--line); font-size: 11px; font-weight: 600; color: var(--ink-2); }
+.cov-cell { display: block; width: 100%; margin-bottom: 5px; padding: 5px 7px; text-align: left; font-weight: 400;
+  background: var(--panel-2); border: 1px solid currentColor; border-left-width: 4px; }
+.cov-cell b { display: block; font: 600 11px var(--mono); }
+.cov-cell span { display: block; color: var(--ink); font-size: 11.5px; line-height: 1.3; }
+.cov-cell small { display: block; font-size: 10.5px; }
+.cov-cell.lv-gap { border-style: dashed; }
+.cov-cell[aria-pressed="true"] { background: var(--raise); box-shadow: 0 0 0 2px var(--accent); }
+.cov-cell:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.cov-empty { font-size: 11px; margin: 4px 0; }
+.cov-gaps { margin: 0; padding-left: 18px; } .cov-gaps li { margin-bottom: 6px; }
+.cov-gaps button { white-space: normal; text-align: left; }

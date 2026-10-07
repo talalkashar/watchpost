@@ -179,12 +179,20 @@ def main():
         check(story["events_sent"] > 100 and story["alerts_created"] > 0, f"storyline output: {story}")
         print(f"      {story['events_sent']} synthetic events, {story['alerts_created']} alerts, last stage {story['stage']}")
 
-        step("ATT&CK coverage lists every catalog technique")
+        step("ATT&CK coverage grades every catalog technique; only validated counts as covered")
         status, coverage = analyst.call("GET", "/api/attack/coverage")
         hit = [t["id"] for t in coverage["techniques"] if t["hits"]]
-        check(status == 200 and coverage["summary"]["covered"] == coverage["summary"]["techniques"] and hit,
-              f"coverage: {coverage.get('summary')}")
-        print(f"      {coverage['summary']['techniques']} techniques covered, {len(hit)} with alerts")
+        levels = coverage["summary"]["levels"]
+        check(status == 200 and sum(levels.values()) == coverage["summary"]["techniques"] and hit
+              and coverage["summary"]["covered"] == levels["validated"]
+              and all(t["covered"] == (t["level"] == "validated") and (t["level"] != "validated" or t["scenarios"])
+                      for t in coverage["techniques"]), f"coverage: {coverage.get('summary')}")
+        status, layer = analyst.call("GET", "/api/attack/navigator.json")
+        by_level = {t["id"]: t["level"] for t in coverage["techniques"]}
+        check(status == 200 and all(t["comment"].lower().startswith(by_level[t["techniqueID"]])
+                                    for t in layer["techniques"]), "navigator layer does not match the levels")
+        print(f"      {coverage['summary']['techniques']} techniques: {levels['validated']} validated, "
+              f"{levels['mapped']} mapped only, {levels['disabled']} disabled, {levels['gap']} gaps; {len(hit)} with alerts")
 
         step("analyst investigates and resolves the compromise alert")
         target = next(a for a in alerts if a["rule_id"] == "success_after_failures" and "dave" in a["group_key"])
@@ -337,6 +345,7 @@ def main():
         viewer.login("viewer", VIEWER_PW)
         incident_id = viewer.call("GET", "/api/incidents")[1][0]["id"]
         check(viewer.call("GET", f"/api/incidents/{incident_id}")[0] == 200, "viewer cannot read an incident")
+        check(viewer.call("GET", "/api/attack/coverage")[0] == 200, "viewer cannot read ATT&CK coverage")
         check(viewer.download(f"/api/incidents/{incident_id}/report.pdf")[0] == 200, "viewer cannot download a report")
         for path, body in [("/api/ingest", []), (f"/api/incidents/{incident_id}/status", {"status": "resolved"}),
                            ("/api/demo/load", {}), ("/api/tokens", {"name": "x"})]:
