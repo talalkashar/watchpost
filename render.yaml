@@ -23,6 +23,8 @@ services:
         generateValue: true                     # shown once in the Render dashboard; never in git
       - key: SIEM_ANALYST_PASSWORD
         generateValue: true
+      - key: SIEM_AUDIT_KEY
+        generateValue: true                     # HMAC key for the audit chain; never in git
       - key: SIEM_VIEWER_PASSWORD
         value: watchpost-viewer-demo            # the public, read-only login for the LinkedIn post
       - key: SIEM_DEMO_LOOP
