@@ -19,9 +19,7 @@ class ChainTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.db_path = os.path.join(self.tmp.name, "chain.db")
-        db.set_audit_key(self.key)
-        self.addCleanup(db.set_audit_key, None)
-        self.conn = connect(self.db_path)
+        self.conn = connect(self.db_path, audit_key=self.key)
         self.addCleanup(self.conn.close)
         init_schema(self.conn)
 
@@ -42,6 +40,7 @@ class ChainTests(ChainTestCase):
             self.assertEqual(row["prev_hash"], prev["hash"])
         result = verify_chain(self.conn)
         self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "verified")
         self.assertEqual(result["entries"], 6)  # the chain start plus five
         self.assertFalse(result["keyed"])
         self.assertEqual(result["head"], {"id": rows[-1]["id"], "hash": rows[-1]["hash"]})
@@ -52,10 +51,26 @@ class ChainTests(ChainTestCase):
     def test_fresh_log_starts_with_a_chain_start_entry(self):
         rows = self.conn.execute("SELECT action, detail FROM audit_log").fetchall()
         self.assertEqual([r["action"] for r in rows], ["audit_chain_started"])
-        self.assertEqual(json.loads(rows[0]["detail"]), {"legacy_entries": 0, "legacy_last_id": None, "keyed": False})
+        self.assertEqual(json.loads(rows[0]["detail"]),
+                         {"legacy_entries": 0, "legacy_last_id": None, "keyed": False, "key_id": None})
         init_schema(self.conn)  # a restart does not start another chain
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0], 1)
         self.assertTrue(verify_chain(self.conn)["ok"])
+
+    def test_an_emptied_log_is_not_verified(self):
+        # Every log begins with a chain start, so no rows at all means they were removed.
+        self.conn.execute("DELETE FROM audit_log")
+        result = verify_chain(self.conn)
+        self.assertEqual((result["ok"], result["status"], result["first_break"]["reason"]), (False, "broken", "deleted"))
+
+    def test_an_emptied_log_restarted_is_not_verified(self):
+        # Delete everything and restart: the new chain start's id shows earlier entries existed.
+        self.write(3)
+        self.conn.execute("DELETE FROM audit_log")
+        init_schema(self.conn)
+        result = verify_chain(self.conn)
+        self.assertEqual((result["status"], result["first_break"]["reason"]), ("broken", "deleted"))
+        self.assertEqual(result["first_break"]["id"], result["chain_started"]["id"])
 
     def test_edited_detail_is_detected_at_that_row(self):
         self.write(5)
@@ -108,6 +123,11 @@ class ChainTests(ChainTestCase):
         audit(self.conn, "alice", "after_delete")
         self.assertEqual(verify_chain(self.conn)["first_break"]["reason"], "deleted")
 
+    def test_an_unkeyed_chain_verified_with_a_key_is_a_key_mismatch(self):
+        self.write(1)
+        result = verify_chain(self.conn, key="some-key")
+        self.assertEqual((result["status"], result["first_break"]["reason"]), ("broken", "key_mismatch"))
+
     def test_unkeyed_chain_can_be_recomputed_by_anyone_with_write_access(self):
         # Honest limitation of the fallback mode: a full rewrite of every hash verifies again.
         self.write(3)
@@ -157,8 +177,45 @@ class KeyedChainTests(ChainTestCase):
 
     def test_wrong_key_fails_verification(self):
         self.write(2)
-        self.assertFalse(verify_chain(self.conn, key="another-key")["ok"])
+        result = verify_chain(self.conn, key="another-key")
+        self.assertEqual((result["ok"], result["status"]), (False, "broken"))
+        self.assertEqual(result["first_break"]["reason"], "key_mismatch")
         self.assertTrue(verify_chain(self.conn, key=self.key)["ok"])
+
+    def test_verifying_a_keyed_chain_without_the_key_is_a_key_mismatch_not_a_pass(self):
+        self.write(2)
+        result = verify_chain(self.conn, key=None)
+        self.assertEqual((result["status"], result["keyed"]), ("broken", False))
+        self.assertEqual((result["first_break"]["id"], result["first_break"]["reason"]),
+                         (result["chain_started"]["id"], "key_mismatch"))
+
+    def test_server_refuses_to_start_with_a_different_key_or_none(self):
+        self.write(1)
+        for other in (None, "another-key"):
+            conn = connect(self.db_path, audit_key=other)
+            self.addCleanup(conn.close)
+            with self.assertRaises(db.AuditKeyError):
+                init_schema(conn)
+        self.assertTrue(verify_chain(self.conn)["ok"])
+
+    def test_audit_refuses_to_append_with_a_different_key(self):
+        # A connection opened without the key (the drift a module-global key allowed) cannot extend the chain.
+        before = len(self.ids())
+        for other in (None, "another-key"):
+            conn = connect(self.db_path, audit_key=other)
+            self.addCleanup(conn.close)
+            with self.assertRaises(db.AuditKeyError):
+                audit(conn, "alice", "unkeyed_append")
+        self.assertEqual(len(self.ids()), before)
+        self.assertTrue(verify_chain(self.conn)["ok"])
+
+    def test_connections_do_not_share_a_key(self):
+        other_path = os.path.join(self.tmp.name, "other.db")
+        unkeyed = connect(other_path)
+        self.addCleanup(unkeyed.close)
+        init_schema(unkeyed)
+        self.assertFalse(verify_chain(unkeyed)["keyed"])
+        self.assertTrue(verify_chain(self.conn)["keyed"])
 
 
 class ConcurrencyTests(ChainTestCase):
@@ -168,7 +225,7 @@ class ConcurrencyTests(ChainTestCase):
         threads, per_thread, errors = 8, 40, []
 
         def worker(n):
-            conn = connect(self.db_path)
+            conn = connect(self.db_path, audit_key=self.key)
             try:
                 for i in range(per_thread):
                     if i % 2:
@@ -215,11 +272,9 @@ class UpgradeTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.db_path = os.path.join(self.tmp.name, "old.db")
-        db.set_audit_key(self.key)
-        self.addCleanup(db.set_audit_key, None)
 
-    def restart(self):
-        conn = connect(self.db_path)
+    def restart(self, key=None):
+        conn = connect(self.db_path, audit_key=key or self.key)
         self.addCleanup(conn.close)
         init_schema(conn)
         return conn
@@ -236,18 +291,26 @@ class UpgradeTests(unittest.TestCase):
 
     def assert_legacy(self, conn, entries, last_id):
         result = verify_chain(conn)
-        self.assertTrue(result["ok"], result["first_break"])
+        # Intact from the chain start, but rows before it are unverified: never a plain "ok".
+        self.assertEqual((result["ok"], result["status"]), (False, "partial"), result["first_break"])
+        self.assertIsNone(result["first_break"])
         self.assertEqual(result["legacy"], {"entries": entries, "last_id": last_id})
         start = conn.execute("SELECT id, created_at, prev_hash, detail FROM audit_log"
                              " WHERE action = 'audit_chain_started' ORDER BY id DESC LIMIT 1").fetchone()
         self.assertEqual(result["chain_started"], {"id": start["id"], "created_at": start["created_at"]})
         self.assertEqual(start["prev_hash"], GENESIS_HASH)
         self.assertEqual(json.loads(start["detail"]),
-                         {"legacy_entries": entries, "legacy_last_id": last_id, "keyed": True})
+                         {"legacy_entries": entries, "legacy_last_id": last_id, "keyed": True,
+                          "key_id": db.audit_key_id(self.key)})
         # Nothing at or before the legacy boundary carries a hash: the server vouched for none of it.
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM audit_log WHERE id <= ? AND hash IS NOT NULL",
                                       (last_id,)).fetchone()[0], 0)
         return result
+
+    def test_attack_and_genuine_upgrade_both_read_partial_and_not_ok(self):
+        self.make_v3_database(2)
+        result = verify_chain(self.restart())
+        self.assertEqual((result["ok"], result["status"], result["legacy"]["entries"]), (False, "partial", 2))
 
     def chained_database(self, n=4):
         conn = self.restart()
@@ -327,22 +390,21 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual((result["first_break"]["id"], result["first_break"]["reason"]), (start, "legacy_mismatch"))
         self.assertEqual(result["legacy"], {"entries": 2, "last_id": 3})
         conn.execute("INSERT INTO audit_log(id, created_at, actor, action) VALUES (2, 'x', 'admin', 'old_action')")
-        self.assertTrue(verify_chain(conn)["ok"])  # legacy contents are not verified; only their count and range
+        # Legacy contents are not verified, only their count and range.
+        self.assertEqual(verify_chain(conn)["status"], "partial")
         conn.execute("INSERT INTO audit_log(id, created_at, actor, action) VALUES (0, 'x', 'mallory', 'forged')")
         self.assertEqual(verify_chain(conn)["first_break"]["reason"], "legacy_mismatch")
 
     def test_legacy_rows_before_an_ordinary_first_entry_are_detected(self):
         # A chain whose first entry is not a chain start (a 4.0 database from before this rule) declares no
         # legacy rows, so an unhashed row slipped in before it is a mismatch.
-        conn = self.chained_database()
-        conn.execute("DELETE FROM audit_log WHERE action = 'audit_chain_started'")
-        prev = GENESIS_HASH
-        for row in conn.execute("SELECT * FROM audit_log ORDER BY id").fetchall():
-            h = db.audit_hash(prev, dict(row), self.key)
-            conn.execute("UPDATE audit_log SET prev_hash = ?, hash = ? WHERE id = ?", (prev, h, row["id"]))
-            prev = h
+        conn = connect(self.db_path, audit_key=self.key)
+        self.addCleanup(conn.close)
+        conn.executescript(db.SCHEMA)  # no init_schema, so no chain start: entries chain from genesis
+        for i in range(3):
+            audit(conn, "alice", "real", str(i))
         first = conn.execute("SELECT MIN(id) FROM audit_log").fetchone()[0]
-        self.assertTrue(verify_chain(conn)["ok"])
+        self.assertEqual(verify_chain(conn)["status"], "verified")
         conn.execute("INSERT INTO audit_log(id, created_at, actor, action) VALUES (0, 'x', 'mallory', 'forged')")
         result = verify_chain(conn)
         self.assertEqual((result["first_break"]["id"], result["first_break"]["reason"]), (first, "legacy_mismatch"))
