@@ -26,8 +26,8 @@ every feature verifiable, every number reproducible, nothing overclaimed.
       the UI, tests that edit a row and detect it.
 - [x] 3. ATT&CK coverage view in the app: tactics x techniques, each cell showing the rules that cover it and their
       noise-lab verdict; no technique claimed without a rule and a labeled scenario. (PR #13: 15 validated, 3 mapped)
-- [ ] 4. Hunting: saved searches over events with a small documented query syntax (field:value, NOT, time range),
-      pivot from entity pages, viewer can run but not save.
+- [x] 4. Hunting: saved searches over events with a small documented query syntax (field:value, NOT, time range),
+      pivot from entity pages, viewer can run but not save. (PR #14)
 - [ ] 5. New detections from events the schema already carries, each with a malicious scenario and a benign
       look-alike in the noise lab (candidates: audit/logging disabled T1562, MFA push fatigue T1621, first-seen
       admin source for a user).

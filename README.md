@@ -162,6 +162,7 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | `watchpost/rules.py` | Eleven threshold rules as pure functions over event lists, each with a plain-English explanation. Also validates rule parameters. |
 | `watchpost/engine.py` | Stores each batch atomically, then runs detection over the batch's time range plus the longest rule window. Deduplicates and extends open alerts, and records every detection run. |
 | `watchpost/queries.py` | Event search (parameterized SQL), alert detail with evidence and a related-events timeline, notes, status changes, and SOC metrics. |
+| `watchpost/hunt.py` | Hunt query parser and compiler (whitelisted fields, bound values) and saved searches. |
 | `watchpost/auth.py` | PBKDF2-SHA256 password hashing, lockout, and server-side sessions (only token hashes are stored). Also ingest-only API tokens (hashed) and the viewer < analyst < admin roles. Viewers are read-only: the server refuses every non-GET request from them except logout. |
 | `watchpost/ratelimit.py` | In-memory per-IP token buckets. `server.py` answers 429 with `Retry-After` when a bucket is empty. |
 | `watchpost/health.py` | Component checks, each with a status (`ok`/`degraded`/`failing`), a message, and recovery guidance. |
@@ -261,6 +262,30 @@ Each audit entry stores `prev_hash` and `hash`, where `hash = HMAC-SHA256(key, p
 - Anyone who has the key. Set `SIEM_AUDIT_KEY` to a long random value kept outside the database (`python3 -c "import secrets; print(secrets.token_hex(32))"`). Set it before the first start and keep it (see above).
 
 For the first two, record the head and the chain start (`id`, `hash`, `created_at`) somewhere the database cannot reach, such as a ticket, a log shipped off the box, or a daily note, and compare them later.
+
+### Hunting
+
+**Hunt** takes a one-line query over stored events. Terms are ANDed (there is no OR). The server echoes how it read each term, and the UI shows that as chips under the query box. The query lives in the URL (`#hunt/<query>`), so a hunt is a link you can share. Entity pages and the event detail have **Hunt** links that open it prefilled, for example `user:alice last:7d`.
+
+| Form | Example | Meaning |
+|---|---|---|
+| `field:value` | `user:alice` | Exact match (user names ignore case, as in event search) |
+| `field:prefix*` | `host:web*` | Starts with; unquoted values only |
+| `field:"quoted"` | `user:"svc backup"` | Literal value; spaces and `*` are not special, `\"` escapes a quote |
+| word or `"phrase"` | `"invalid password"` | Message contains (`%` and `_` are literal) |
+| `NOT term` or `-term` | `NOT src_ip:10.0.0.5` | Excludes; events with no value in that field are kept |
+| `last:` | `last:15m`, `last:24h`, `last:7d` | Window up to now, at most 365 days |
+| `since:` / `until:` | `since:2026-10-01 until:2026-10-02T06:00Z` | ISO times, UTC unless an offset is given |
+
+Fields: `user`, `host`, `source`, `outcome`, `src_ip`, `dest_ip`, `ip` (source or destination), `batch_id`, `event_type`, `severity`, `dest_port`, `synthetic` (`0`/`1`), `message`. An unknown field is an error that lists these. Queries are capped at 500 characters and 20 terms, and results page and sort like event search (newest first, up to 1000 per page).
+
+```
+user:alice event_type:auth_failure NOT src_ip:10.0.0.5 host:web* "invalid password" last:24h
+ip:203.0.113.* event_type:fw_deny last:7d
+event_type:auth_success -source:demo:* since:2026-10-01
+```
+
+Each term compiles to a fixed SQL fragment chosen from a field whitelist, with the value as a bound parameter, so a value like `user:"x' OR 1=1 --"` matches that literal user name and nothing else. Any role can run a hunt and read saved searches. Analysts and admins can save a search (the query is checked on save) and delete their own; admins can delete any. Each save and delete is written to the audit log.
 
 ---
 
