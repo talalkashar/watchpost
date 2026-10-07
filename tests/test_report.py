@@ -106,7 +106,8 @@ class IncidentReportTests(unittest.TestCase):
 
     def setUp(self):
         self.conn = demo_conn()
-        # The cloud intrusion: IAM change then bulk data access by one new principal, four tactics.
+        # The cloud intrusion: IAM change, audit trail stopped, then bulk data access by one new principal,
+        # five tactics. The logging_disabled alert joins it because it shares the principal and source IP.
         self.exfil = alert_id(self.conn, "data_exfil_volume")
         self.id = incident_for(self.conn, self.exfil)
         self.incident = incidents.get_incident(self.conn, self.id)
@@ -123,13 +124,14 @@ class IncidentReportTests(unittest.TestCase):
         self.assertEqual([a["id"] for a in m["alerts"]], [a["id"] for a in i["alerts"]])
         self.assertIn(self.exfil, [a["id"] for a in m["alerts"]])
         self.assertTrue(m["synthetic"])
-        self.assertEqual(m["stages"], ["Initial Access", "Persistence", "Collection", "Exfiltration"])
+        self.assertEqual(m["stages"], ["Initial Access", "Persistence", "Defense Evasion", "Collection",
+                                       "Exfiltration"])
         self.assertTrue(m["escalated"])
         self.assertIn("svc-deploy-tmp", m["entities"]["users"])
         self.assertIn("203.0.113.150", m["entities"]["ips"])
         self.assertEqual(len({e["id"] for e in m["timeline"]}), len(m["timeline"]))
-        self.assertIn("2 alert(s) from 2 detection rule(s)", m["summary"])
-        self.assertIn("Escalated: the alerts span 4 ATT&CK tactics.", m["summary"])
+        self.assertIn("3 alert(s) from 3 detection rule(s)", m["summary"])
+        self.assertIn("Escalated: the alerts span 5 ATT&CK tactics.", m["summary"])
 
     def test_techniques_by_tactic_from_rule_metadata(self):
         m = report.build(self.conn, self.id)
@@ -142,13 +144,14 @@ class IncidentReportTests(unittest.TestCase):
         self.assertEqual(by_tactic["Exfiltration"][0]["alert_ids"], [self.exfil])
         self.assertEqual(by_tactic["Collection"][0]["name"], "Data from Cloud Storage")
         mapped = {a["technique"] for a in m["actions"] if a["technique"]}
-        self.assertTrue({"T1078.004", "T1098.001", "T1530", "T1048"} <= mapped)
+        self.assertTrue({"T1078.004", "T1098.001", "T1562.008", "T1530", "T1048"} <= mapped)
 
     def test_markdown(self):
         text = report.to_markdown(report.build(self.conn, self.id))
         self.assertTrue(text.startswith("# Incident report: Initial Access"))
         for expected in ("SYNTHETIC DATA", f"- **Incident:** #{self.id}",
-                         "**Kill-chain stages:** Initial Access -> Persistence -> Collection -> Exfiltration"
+                         "**Kill-chain stages:** Initial Access -> Persistence -> Defense Evasion -> Collection"
+                         " -> Exfiltration"
                          " (escalated: 3 or more tactics)",
                          f"- **Exfiltration:** T1048 Exfiltration Over Alternative Protocol (alert #{self.exfil})",
                          "- **Collection:** T1530 Data from Cloud Storage", "### Alert #", "**T1048:**"):
@@ -162,10 +165,10 @@ class IncidentReportTests(unittest.TestCase):
         pdf = ParsedPDF(report.to_pdf_bytes(m))
         text = pdf.text()
         # Non-Latin-1 characters in the title (arrows, ellipsis) become ASCII in the PDF.
-        self.assertIn("Initial Access -> ... -> Exfiltration (4 tactics)", text)
+        self.assertIn("Initial Access -> ... -> Exfiltration (5 tactics)", text)
         for expected in ("SYNTHETIC DATA", "MITRE ATT&CK techniques", "T1048", "Exfiltration Over Alternative",
                          f"#{self.exfil}", "escalated: 3 or more tactics", "Recommended actions"):
-            self.assertIn(expected, text)
+            self.assertIn(expected, " ".join(text.split()))  # five stages wrap the stage line
         self.assertIn(f"Page 1 of {len(pdf.pages())}", text)
 
     def test_status_change_and_alert_notes_flow_through(self):

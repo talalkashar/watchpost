@@ -190,6 +190,119 @@ class CloudRuleTests(unittest.TestCase):
         self.assertEqual(rules.data_exfil_volume(make([ev(0, "fw_allow", None, "10.0.3.15")] * 3), p), [])
 
 
+def trail(sec, action, user="svc-x", ip="203.0.113.9", event_type="cloud_api_call", suffix=""):
+    return ev(sec, event_type, user, ip, message=f"[SYNTHETIC] {action} on cloudtrail.amazonaws.com{suffix}")
+
+
+class CloudLoggingDisabledTests(unittest.TestCase):
+    def test_stop_and_delete_trail_fire_once_per_principal(self):
+        p = params("cloud_logging_disabled")
+        events = [trail(0, "DescribeTrails"), trail(30, "StopLogging"), trail(60, "DeleteTrail")]
+        found = rules.cloud_logging_disabled(make(events), p)
+        self.assertEqual([f["group_key"] for f in found], ["svc-x"])
+        self.assertEqual(found[0]["event_ids"], [2, 3])  # DescribeTrails is reading, not disabling
+        self.assertIn("StopLogging", found[0]["explanation"])
+        self.assertIn("DeleteTrail", found[0]["explanation"])
+
+    def test_changes_that_leave_logging_on_are_quiet(self):
+        p = params("cloud_logging_disabled")
+        events = [trail(i * 30, a, "ops-admin", "10.0.1.30") for i, a in enumerate(
+            ["CreateTrail", "UpdateTrail", "PutEventSelectors", "StartLogging", "GetTrailStatus"])]
+        self.assertEqual(rules.cloud_logging_disabled(make(events), p), [])
+        # Only cloud audit events count, and the action is the word before " on ", never a substring.
+        self.assertEqual(rules.cloud_logging_disabled(make([
+            trail(0, "StopLogging", event_type="syslog"),
+            ev(10, "cloud_api_call", "svc-x", message="[SYNTHETIC] ListBuckets on s3.amazonaws.com (StopLogging)"),
+            trail(20, "StopLoggingSoon"),
+            ev(30, "cloud_api_call", "svc-x", message="[SYNTHETIC] StopLogging"),
+        ]), p), [])
+
+    def test_cloudtrail_error_suffix_and_case_still_match(self):
+        # A denied attempt is still an attempt to blind the audit trail.
+        found = rules.cloud_logging_disabled(make([trail(0, "StopLogging", suffix=" (AccessDenied)")]),
+                                             params("cloud_logging_disabled", logging_actions=["stoplogging"]))
+        self.assertEqual(len(found), 1)
+
+    def test_actions_list_window_and_ignore_lists(self):
+        p = params("cloud_logging_disabled", logging_actions=["DeleteFlowLogs"])
+        self.assertEqual(rules.cloud_logging_disabled(make([trail(0, "StopLogging")]), p), [])
+        p = params("cloud_logging_disabled", window_seconds=60)
+        self.assertEqual(len(rules.cloud_logging_disabled(make([trail(0, "StopLogging"), trail(600, "DeleteTrail")]),
+                                                          p)), 2)
+        p = params("cloud_logging_disabled", ignore_users=["SVC-X"])
+        self.assertEqual(rules.cloud_logging_disabled(make([trail(0, "StopLogging")]), p), [])
+        # Without an account the source IP is the key.
+        found = rules.cloud_logging_disabled(make([trail(0, "StopLogging", user=None)]), params("cloud_logging_disabled"))
+        self.assertEqual(found[0]["group_key"], "203.0.113.9")
+
+    def test_removing_an_action_is_a_hiding_edit_matched_like_the_rule(self):
+        self.assertEqual(rules.HIDING_EDITS["logging_actions"], "removed")
+        entry = rules.list_entry("logging_actions", "StopLogging")
+        self.assertTrue(rules.covers("logging_actions", {entry}, trail(0, "StopLogging", suffix=" (AccessDenied)")))
+        self.assertFalse(rules.covers("logging_actions", {entry}, trail(0, "StartLogging")))
+
+
+def priv(sec, user="kim", ip="10.0.1.33", event_type="cloud_iam_change", action="AttachUserPolicy"):
+    return ev(sec, event_type, user, ip, message=f"[SYNTHETIC] {action} on iam.amazonaws.com")
+
+
+DAY = 86400
+
+
+class AdminNewSourceTests(unittest.TestCase):
+    def history(self, days=3, ip="10.0.1.33"):
+        return [priv(-DAY * back, ip=ip) for back in range(days, 0, -1)]
+
+    def test_privileged_action_from_a_new_source_fires(self):
+        p = params("admin_action_from_new_source")
+        attack = [priv(0, ip="198.51.100.77", action="CreateAccessKey"), priv(60, ip="198.51.100.77")]
+        found = rules.admin_action_from_new_source(make(self.history() + attack), p)
+        self.assertEqual([f["group_key"] for f in found], ["kim|198.51.100.77"])
+        self.assertEqual(found[0]["event_ids"], [4, 5])  # the second action joins the same alert
+        self.assertIn("10.0.1.33", found[0]["explanation"])
+        self.assertIn("CreateAccessKey", found[0]["explanation"])
+
+    def test_known_source_and_unprivileged_actions_are_quiet(self):
+        p = params("admin_action_from_new_source")
+        self.assertEqual(rules.admin_action_from_new_source(make(self.history() + [priv(0)]), p), [])
+        # A new address for a read-only call is not a privileged action.
+        browse = ev(0, "cloud_api_call", "kim", "192.168.40.12", message="[SYNTHETIC] ListUsers on iam.amazonaws.com")
+        login = ev(10, "auth_success", "kim", "192.168.40.12")
+        self.assertEqual(rules.admin_action_from_new_source(make(self.history() + [browse, login]), p), [])
+
+    def test_cold_start_needs_enough_history(self):
+        # Fewer than min_prior_actions earlier privileged actions: no baseline yet, so no alert.
+        p = params("admin_action_from_new_source")
+        new = priv(0, ip="198.51.100.77")
+        self.assertEqual(rules.admin_action_from_new_source(make(self.history(2) + [new]), p), [])
+        self.assertEqual(rules.admin_action_from_new_source(make([new]), p), [])
+        p = params("admin_action_from_new_source", min_prior_actions=2)
+        self.assertEqual(len(rules.admin_action_from_new_source(make(self.history(2) + [new]), p)), 1)
+
+    def test_history_outside_the_lookback_is_forgotten(self):
+        p = params("admin_action_from_new_source", history_seconds=2 * DAY)
+        # Only two of the three earlier actions are inside two days: under the default minimum of 3.
+        self.assertEqual(rules.admin_action_from_new_source(make(self.history() + [priv(0, ip="198.51.100.77")]), p), [])
+        # A source last used before the lookback counts as new again.
+        old = [priv(-10 * DAY, ip="10.0.9.9")] + self.history()
+        self.assertEqual([f["group_key"] for f in rules.admin_action_from_new_source(
+            make(old + [priv(0, ip="10.0.9.9")]), params("admin_action_from_new_source"))], ["kim|10.0.9.9"])
+
+    def test_host_privilege_events_count_and_missing_ips_are_skipped(self):
+        p = params("admin_action_from_new_source")
+        sudo = [ev(-DAY * b, "privilege_escalation", "grace", "10.0.1.26") for b in (3, 2, 1)]
+        found = rules.admin_action_from_new_source(make(sudo + [ev(0, "privilege_use", "Grace", "203.0.113.5")]), p)
+        self.assertEqual([f["group_key"] for f in found], ["grace|203.0.113.5"])
+        self.assertEqual(rules.admin_action_from_new_source(make(sudo + [ev(0, "privilege_use", "grace", None)]), p), [])
+
+    def test_ignore_lists(self):
+        events = make(self.history() + [priv(0, ip="198.51.100.77")])
+        for override in ({"ignore_ips": ["198.51.100.77"]}, {"ignore_users": ["KIM"]}):
+            with self.subTest(**override):
+                self.assertEqual(rules.admin_action_from_new_source(
+                    events, params("admin_action_from_new_source", **override)), [])
+
+
 class TechniqueMappingTests(unittest.TestCase):
     def test_every_rule_has_techniques_and_a_function(self):
         for rule in rules.DEFAULT_RULES:
@@ -221,6 +334,14 @@ class ValidationTests(unittest.TestCase):
             ("cloud_iam_change_by_new_principal", {"history_seconds": "1d"}),
             ("data_exfil_volume", {"bytes_threshold": 0}),
             ("web_scanner", {"distinct_ports": 5}),
+            ("cloud_logging_disabled", {"logging_actions": []}),
+            ("cloud_logging_disabled", {"logging_actions": "StopLogging"}),
+            ("cloud_logging_disabled", {"logging_actions": [""]}),
+            ("cloud_logging_disabled", {"window_seconds": 5}),
+            ("admin_action_from_new_source", {"min_prior_actions": 0}),
+            ("admin_action_from_new_source", {"min_prior_actions": "3"}),
+            ("admin_action_from_new_source", {"history_seconds": 30}),
+            ("admin_action_from_new_source", {"logging_actions": ["StopLogging"]}),
             ("missing_rule", {}),
         ]
         for rule_id, p in bad:

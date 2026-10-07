@@ -254,7 +254,7 @@ class IncidentApiTests(ServerTestCase):
     def test_attack_coverage_and_rule_techniques(self):
         analyst = self.client("analyst")
         rules = analyst.get("/api/rules")[1]
-        self.assertEqual(len(rules), 12)
+        self.assertEqual(len(rules), 14)
         for rule in rules:
             with self.subTest(rule=rule["id"]):
                 self.assertTrue(rule["techniques"])
