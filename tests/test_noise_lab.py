@@ -237,6 +237,17 @@ class EngineExfilExceptionTests(unittest.TestCase):
         self.conn.commit()
         self.assertEqual(self.ingest(self.night(0))["alerts_created"], 1)
 
+    def test_revoking_the_exception_reverts_to_flat_at_once(self):
+        self.allow(30)
+        self.assertEqual(self.ingest(self.night(4))["alerts_created"], 1)   # no history yet
+        self.assertEqual(self.ingest(self.night(3))["alerts_created"], 0)   # baseline keeps it quiet
+        sup = improve.list_suppressions(self.conn)[0]
+        revoked = improve.revoke_suppression(self.conn, sup["id"], "admin")
+        self.assertEqual((revoked["active"], revoked["revoked_by"]), (False, "admin"))
+        self.assertGreater(revoked["expires_at"], iso(utcnow() + timedelta(days=29)))  # expiry is left as history
+        self.assertEqual(engine.active_suppressions(self.conn), set())
+        self.assertEqual(self.ingest(self.night(2))["alerts_created"], 1)
+
     def test_storyline_replayed_into_one_database_alerts_on_exfil_every_time(self):
         timeline = storyline.build(7, 1.0)
         first = utcnow().replace(microsecond=0) - timedelta(hours=50)
@@ -344,7 +355,7 @@ class SuppressionApiTests(ServerTestCase):
         self.assertEqual(analyst.get("/api/suppressions")[1], [])
         self.assertEqual(analyst.post(f"/api/changes/{change['id']}/review", {"decision": "approve"})[0], 403)
         status, reviewed, _ = admin.post(f"/api/changes/{change['id']}/review",
-                                         {"decision": "approve", "note": "Confirmed with the scan owner."})
+                                         {"decision": "approve", "note": "Confirmed with the scan owner.", "evidence_digest": change["evidence_digest"]})
         self.assertEqual((status, reviewed["status"]), (200, "approved"))
 
         listed = self.client("viewer").get("/api/suppressions")[1]
@@ -386,6 +397,43 @@ class SuppressionApiTests(ServerTestCase):
         # The pass that was skipped while the exception was active surfaces again on the rescan.
         self.assertEqual(set(brute()), {"10.0.50.5"})
 
+    def test_admin_revokes_an_exception_early_and_the_row_stays_as_history(self):
+        analyst, admin, viewer = self.client("analyst"), self.client("admin"), self.client("viewer")
+        brute = lambda: [a["group_key"] for a in analyst.get("/api/alerts?rule_id=brute_force_ip&status=open")[1]]
+        change = self.propose(analyst)[1]
+        self.assertEqual(admin.post(f"/api/changes/{change['id']}/review",
+                                    {"decision": "approve", "evidence_digest": change["evidence_digest"]})[0], 200)
+        sup = analyst.get("/api/suppressions")[1][0]
+        self.assertEqual((sup["active"], sup["revoked_at"], sup["revoked_by"]), (True, None, None))
+        sim = analyst.post("/api/demo/simulate", {"scenario": "noisy_scanner"})[1]
+        self.assertGreaterEqual(sim["detection"]["alerts_suppressed"], 1)
+        self.assertEqual(brute(), [])
+
+        path = f"/api/suppressions/{sup['id']}/revoke"
+        self.assertEqual(self.client().post(path)[0], 401)
+        self.assertEqual(viewer.post(path)[0], 403)
+        self.assertEqual(analyst.post(path)[0], 403)
+        self.assertEqual(admin.post(path, csrf=False)[0], 403)
+        self.assertTrue(analyst.get("/api/suppressions")[1][0]["active"])
+        self.assertEqual(admin.post("/api/suppressions/9999/revoke")[0], 404)
+
+        status, revoked, _ = admin.post(path)
+        self.assertEqual(status, 200, revoked)
+        self.assertEqual((revoked["id"], revoked["active"], revoked["revoked_by"]), (sup["id"], False, "admin"))
+        self.assertLessEqual(revoked["revoked_at"], iso(utcnow()))
+        self.assertEqual(revoked["expires_at"], sup["expires_at"])  # the approved expiry is kept for history
+        self.assertEqual(viewer.get("/api/suppressions")[1], [revoked])
+        self.assertEqual(admin.post(path)[0], 409)  # already revoked
+
+        # It stops applying at once: the next run skips nothing and the scanner alerts again.
+        sim = analyst.post("/api/demo/simulate", {"scenario": "noisy_scanner", "seed": 3})[1]
+        self.assertEqual(sim["detection"]["alerts_suppressed"], 0)
+        self.assertEqual(set(brute()), {"10.0.50.5"})
+        row = {r["rule_id"]: r for r in analyst.get("/api/noise-lab")[1]["rules"]}["brute_force_ip"]
+        self.assertEqual((row["verdict"], row["suppressed"]), ("noisy", 0))
+        entry = [a for a in admin.get("/api/audit")[1] if a["action"] == "suppression_revoked"]
+        self.assertEqual([(a["actor"], a["target"]) for a in entry], [("admin", "brute_force_ip")])
+
     def test_validation_and_roles(self):
         analyst, admin, viewer = self.client("analyst"), self.client("admin"), self.client("viewer")
         self.assertEqual(self.propose(viewer)[0], 403)
@@ -417,6 +465,20 @@ class EngineSuppressionTests(unittest.TestCase):
         self.assertEqual(engine.run_detection(conn)["alerts_suppressed"], 0)
         self.assertEqual(improve.list_suppressions(conn), [])
 
+    def test_3_0_suppressions_table_gains_the_revoke_columns(self):
+        conn = connect(":memory:")
+        self.addCleanup(conn.close)
+        init_schema(conn)
+        for column in ("revoked_at", "revoked_by"):
+            conn.execute(f"ALTER TABLE suppressions DROP COLUMN {column}")
+        conn.execute(
+            "INSERT INTO suppressions(rule_id, group_key, reason, expires_at, proposed_by, approved_by, created_at)"
+            " VALUES ('brute_force_ip', '10.0.50.5', 'scanner', ?, 'analyst', 'admin', ?)",
+            (iso(utcnow() + timedelta(days=1)), iso(utcnow())))
+        init_schema(conn)
+        self.assertEqual(engine.active_suppressions(conn), {("brute_force_ip", "10.0.50.5")})
+        self.assertIsNone(improve.list_suppressions(conn)[0]["revoked_at"])
+
 
 class NoiseLabApiTests(ServerTestCase):
     def test_one_honest_row_per_rule(self):
@@ -447,7 +509,8 @@ class NoiseLabApiTests(ServerTestCase):
         analyst, admin = self.client("analyst"), self.client("admin")
         change = analyst.post("/api/rules/brute_force_ip/suppressions",
                               {"group_key": "10.0.50.5", "days": 7, "reason": "Authorized scanner."})[1]
-        admin.post(f"/api/changes/{change['id']}/review", {"decision": "approve"})
+        self.assertEqual(admin.post(f"/api/changes/{change['id']}/review",
+                                    {"decision": "approve", "evidence_digest": change["evidence_digest"]})[0], 200)
         row = {r["rule_id"]: r for r in analyst.get("/api/noise-lab")[1]["rules"]}["brute_force_ip"]
         self.assertEqual((row["verdict"], row["lookalikes_fired"], row["suppressed"]), ("quiet", [], 2))
         self.assertIn("exception", row["summary"])
@@ -460,7 +523,8 @@ class NoiseLabApiTests(ServerTestCase):
         self.assertEqual(change["evaluation"]["after"]["missed"], [])
         exfil = lambda: {r["rule_id"]: r for r in analyst.get("/api/noise-lab")[1]["rules"]}["data_exfil_volume"]
         self.assertEqual(exfil()["verdict"], "noisy")  # proposed is not approved
-        admin.post(f"/api/changes/{change['id']}/review", {"decision": "approve"})
+        self.assertEqual(admin.post(f"/api/changes/{change['id']}/review",
+                                    {"decision": "approve", "evidence_digest": change["evidence_digest"]})[0], 200)
         row = exfil()
         self.assertEqual((row["verdict"], row["lookalikes_fired"], row["detected"], row["suppressed"]),
                          ("quiet", [], ["exfiltration"], 0))
@@ -468,7 +532,9 @@ class NoiseLabApiTests(ServerTestCase):
     def test_a_disabled_rule_is_a_blind_spot_not_a_quiet_rule(self):
         analyst, admin = self.client("analyst"), self.client("admin")
         change = analyst.post("/api/rules/web_scanner/proposals", {"enabled": False, "reason": "testing the lab"})[1]
-        admin.post(f"/api/changes/{change['id']}/review", {"decision": "approve"})
+        self.assertEqual(admin.post(f"/api/changes/{change['id']}/review",
+                                    {"decision": "approve", "evidence_digest": change["evidence_digest"],
+                                     "acknowledge_detection_loss": True})[0], 200)
         row = {r["rule_id"]: r for r in analyst.get("/api/noise-lab")[1]["rules"]}["web_scanner"]
         self.assertEqual((row["enabled"], row["verdict"]), (False, "disabled"))
 

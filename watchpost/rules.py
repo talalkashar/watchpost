@@ -224,15 +224,39 @@ def _epoch(event):
     return event["_epoch"]
 
 
+# List parameters that decide which events a rule looks at, and the edit to each that hides activity.
+# `list_entry` and `covers` are the only definition of what an entry matches: the rules below use them,
+# and so does the review gate in improve.py, so the gate cannot read an entry differently from the rule.
+HIDING_EDITS = {"ignore_ips": "added", "ignore_users": "added", "sanctioned_services": "added",
+                "privileged_users": "removed"}
+
+
+def list_entry(param, value):
+    """One list entry in the form the rules compare it in."""
+    if param == "ignore_ips":
+        return value
+    return value.lower().lstrip(".") if param == "sanctioned_services" else value.lower()
+
+
+def covers(param, entries, event):
+    """Whether `event` matches any of `entries` (already passed through list_entry) of a list parameter."""
+    if param == "ignore_ips":
+        return event.get("src_ip") in entries
+    if param == "sanctioned_services":  # the service itself or any subdomain of an entry
+        service = _service(event)
+        return bool(service) and any(service == s or service.endswith("." + s) for s in entries)
+    return (event.get("user") or "").lower() in entries
+
+
 def _filtered(events, params, event_type):
     types = {event_type} if isinstance(event_type, str) else set(event_type)
-    ignore_ips = set(params.get("ignore_ips", []))
-    ignore_users = {u.lower() for u in params.get("ignore_users", [])}
+    ignore_ips = {list_entry("ignore_ips", v) for v in params.get("ignore_ips", [])}
+    ignore_users = {list_entry("ignore_users", u) for u in params.get("ignore_users", [])}
     out = [
         e for e in events
         if e["event_type"] in types
-        and e.get("src_ip") not in ignore_ips
-        and (e.get("user") or "").lower() not in ignore_users
+        and not covers("ignore_ips", ignore_ips, e)
+        and not covers("ignore_users", ignore_users, e)
     ]
     out.sort(key=lambda e: (_epoch(e), e["id"]))
     return out
@@ -360,7 +384,8 @@ def success_after_failures(events, params):
         cluster = prior + [success]
         findings.append(_finding(
             f"{user}|{success.get('src_ip') or 'unknown'}", cluster,
-            f"Possible compromise of {success.get('user')}: login after {len(prior)} failures",
+            f"Possible compromise of {success.get('user')}: login from "
+            f"{success.get('src_ip') or 'an unknown IP'} after {len(prior)} failures",
             f"{success.get('user')} logged in successfully from {success.get('src_ip') or 'an unknown IP'} "
             f"at {success['ts']} after {len(prior)} failed attempts in the preceding {window}s "
             f"(threshold {needed}). The failures came from {', '.join(ips[:5])}"
@@ -370,12 +395,12 @@ def success_after_failures(events, params):
 
 
 def off_hours_privileged_login(events, params):
-    privileged = {u.lower() for u in params["privileged_users"]}
+    privileged = {list_entry("privileged_users", u) for u in params["privileged_users"]}
     start, end = params["business_start_hour"], params["business_end_hour"]
     findings = []
     for event in _filtered(events, params, LOGIN_SUCCESS_TYPES):
         user = (event.get("user") or "").lower()
-        if user not in privileged:
+        if not covers("privileged_users", privileged, event):
             continue
         dt = parse_iso(event["ts"])
         if start <= dt.hour < end and dt.weekday() < 5:
@@ -590,12 +615,12 @@ def _service(event):
 
 
 def unsanctioned_cloud_service(events, params):
-    sanctioned = [s.lower().lstrip(".") for s in params["sanctioned_services"]]
+    sanctioned = [list_entry("sanctioned_services", s) for s in params["sanctioned_services"]]
     window = params["window_seconds"]
     groups = defaultdict(list)
     for e in _filtered(events, params, CLOUD_TYPES):
         service, user = _service(e), (e.get("user") or "").lower()
-        if not service or not user or any(service == s or service.endswith("." + s) for s in sanctioned):
+        if not service or not user or covers("sanctioned_services", sanctioned, e):
             continue
         groups[(user, service)].append(e)
     findings = []

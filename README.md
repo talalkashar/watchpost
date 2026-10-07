@@ -18,6 +18,17 @@ It uses only the Python standard library (3.10+). No packages to install, no pai
      incident-detail.png (kill-chain stages, techniques by tactic), incident-report-pdf.png (first page of the PDF),
      storyline-running.png (dashboard mid-storyline with the stage tile). -->
 
+## What's new in 3.1
+
+A small follow-up round. Nothing here changes how the rules detect.
+
+| Change | What it adds |
+|---|---|
+| **Revoke a tuning exception** | An admin can end an approved exception before it expires (`POST /api/suppressions/<id>/revoke`, admin only, audited as `suppression_revoked`). It stops applying from the next detection run, for both the skip behaviour and the exfil baseline mode. The row stays in the list as history with who revoked it and when. |
+| **Review evidence matches the action** | Every change request carries an `evidence_digest` (SHA-256 of its stored evidence). An approval must send the digest of the evidence the reviewer was shown; the server recomputes the evidence and applies the change only when the digests match, all in one transaction. On a mismatch nothing is applied: the request stays pending with the fresh evidence and the API answers 409, and a retry or a second reviewer has to send the new digest. Exception evidence gains a **live impact** section: existing alerts for that rule and group key by status and verdict, the newest few, whether any labeled scenario contains the key at all, how many were ever closed as a true positive, and the status changes the proposer made on them. For `data_exfil_volume` it states that the exception enables baseline mode instead of hiding findings. Two gates protect labeled detections, and they differ on purpose. An **exception** is refused outright, at propose and at approve, when it would make the rule miss a labeled attack it detects today, or when a matching alert has ever been closed as a true positive (read from the append-only alert history, so re-closing the alert as benign does not lift it). A value that a rule change adds to an ignore list (`ignore_ips`, `ignore_users`, `sanctioned_services`), or removes from `privileged_users`, is a permanent exception with no expiry, so each such edit gets the same live impact in the evidence and the same refusal on true-positive history. The gate decides which alerts an entry touches with the same function the rules use to apply it (`rules.covers`), so the two cannot read an entry differently. A **rule change** that loses a labeled detection (a looser threshold, or disabling the rule) can be a legitimate trade, so it is not refused: the reviewer must send `acknowledge_detection_loss: true`, the UI asks for it with a required checkbox, and the audit entry names the scenarios. |
+| **Inventory refresh** | In Admin, the asset inventory card redraws after "Load synthetic demo data", without a page reload. |
+| **ATT&CK Navigator export** | `GET /api/attack/navigator.json` (viewer) returns the rule coverage as a MITRE ATT&CK Navigator layer: one entry per covered technique, scored by alert count, with the mapped rules in the comment. The scores come from synthetic demo data and the layer says so. It names no ATT&CK release because the static technique table does not state one. The dashboard coverage panel links to it. |
+
 ## What's new in 3.0
 
 3.0 came out of the feedback on the 2.0 post. Each item answers something a reader asked for.

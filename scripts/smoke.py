@@ -226,7 +226,7 @@ def main():
         check(change is not None, f"no suggestion: {sug}")
         print(f"      proposal #{change['id']}: {change['payload']} "
               f"(scenario FP {change['evaluation']['before']['fp']} -> {change['evaluation']['after']['fp']})")
-        status, res = admin.call("POST", f"/api/changes/{change['id']}/review", {"decision": "approve", "note": "smoke"})
+        status, res = admin.call("POST", f"/api/changes/{change['id']}/review", {"decision": "approve", "note": "smoke", "evidence_digest": change["evidence_digest"]})
         check(status == 200 and res["status"] == "approved", f"approve: {status} {res}")
 
         step("noise lab scores every rule against benign look-alikes")
@@ -250,7 +250,7 @@ def main():
         check(status == 201 and change["status"] == "pending" and change["evaluation"]["after"]["fp"] == 0
               and not change["evaluation"]["after"]["missed"], f"exception proposal: {status} {change}")
         check(analyst.call("GET", "/api/suppressions")[1] == [], "exception applied before review")
-        status, res = admin.call("POST", f"/api/changes/{change['id']}/review", {"decision": "approve", "note": "smoke"})
+        status, res = admin.call("POST", f"/api/changes/{change['id']}/review", {"decision": "approve", "note": "smoke", "evidence_digest": change["evidence_digest"]})
         check(status == 200 and res["status"] == "approved", f"exception approve: {status} {res}")
         status, listed = analyst.call("GET", "/api/suppressions")
         check(status == 200 and [(s["rule_id"], s["group_key"], s["active"]) for s in listed]

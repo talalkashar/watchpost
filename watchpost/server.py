@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import (__version__, assets, auth, engine, entities, geo, improve, incidents, queries, report, simulate,
+from . import (__version__, assets, attack, auth, engine, entities, geo, improve, incidents, queries, report, simulate,
                storyline, stream)
 from .ratelimit import TokenBucketLimiter
 from .config import Config
@@ -323,6 +323,12 @@ def attack_coverage(req):
     return incidents.coverage(req.conn)
 
 
+@route("GET", r"/api/attack/navigator\.json")
+def attack_navigator(req):
+    """The same coverage as a MITRE ATT&CK Navigator layer (open it with 'Open Existing Layer')."""
+    return attack.navigator_layer(incidents.coverage(req.conn))
+
+
 # Reports ---------------------------------------------------------------------------------
 
 def _report(req, kind, ident, fmt):
@@ -446,6 +452,12 @@ def suppressions(req):
     return improve.list_suppressions(req.conn)
 
 
+@route("POST", r"/api/suppressions/(\d+)/revoke", role="admin")
+def suppression_revoke(req, suppression_id):
+    """End an approved exception before it expires; it stops applying from the next detection run."""
+    return improve.revoke_suppression(req.conn, int(suppression_id), req.user["username"])
+
+
 @route("GET", "/api/noise-lab")
 def noise_lab(req):
     return improve.noise_lab(req.conn)
@@ -481,7 +493,8 @@ def changes(req):
 def change_review(req, change_id):
     data = body_json(req)
     return improve.review_change(req.conn, int(change_id), data.get("decision"), req.user["username"],
-                                 data.get("note", ""))
+                                 data.get("note", ""), data.get("evidence_digest"),
+                                 data.get("acknowledge_detection_loss"))
 
 
 @route("GET", "/api/evaluations")
