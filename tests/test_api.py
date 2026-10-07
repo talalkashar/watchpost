@@ -313,8 +313,8 @@ class IncidentApiTests(ServerTestCase):
             self.assertGreater(old_entries, 0)
             self.assertEqual(actions[old_entries], "audit_chain_started")
         verified = self.client("admin").get("/api/audit/verify")[1]
-        self.assertTrue(verified["ok"], verified["first_break"])
-        # Pre-4.0 entries are counted but not vouched for; the chain starts at the upgrade.
+        # Pre-4.0 entries are counted but not vouched for, so an upgraded log is "partial", never "ok".
+        self.assertEqual((verified["ok"], verified["status"]), (False, "partial"), verified["first_break"])
         self.assertEqual(verified["legacy"]["entries"], old_entries)
         self.assertEqual(verified["chain_started"]["id"], verified["legacy"]["last_id"] + 1)
 

@@ -835,18 +835,20 @@ async function admin() {
 
 // Result of GET /api/audit/verify: each entry's hash covers its contents and the hash of the entry before it.
 function chainBadge(c) {
-  const from = c.chain_started ? ` from entry #${c.chain_started.id} (${fmtTime(c.chain_started.created_at)})` : "";
-  const badge = c.ok
-    ? pill(`Chain verified${from}: ${c.entries} entries${c.head ? `, head ${c.head.hash.slice(0, 12)}` : ""}`, "st-ok")
-    : pill(`Chain broken at entry #${c.first_break.id}: ${c.first_break.reason.replaceAll("_", " ")}`, "st-failing");
-  // Rows older than the chain start were never hashed; say so whenever there are any, verified or not.
-  const legacy = c.legacy?.entries
+  const start = c.chain_started ? `entry #${c.chain_started.id} (${fmtTime(c.chain_started.created_at)})` : "";
+  const badge = c.status === "verified"
+    ? pill(`Chain verified from ${start}: ${c.entries} entries, head ${c.head.hash.slice(0, 12)}`, "st-ok")
+    : c.status === "partial"
+      // Rows older than the chain start were never hashed: intact is not the same as verified.
+      ? pill(`Chain intact from ${start}, but ${c.legacy.entries} earlier entries are not verified`, "st-degraded")
+      : pill(`Chain broken at entry #${c.first_break.id ?? "?"}: ${c.first_break.reason.replaceAll("_", " ")}`, "st-failing");
+  const legacy = c.status === "broken" && c.legacy?.entries
     ? el("span", {}, " ", pill(`${c.legacy.entries} earlier entries predate the chain and are not verified`, "st-degraded"))
     : null;
   return el("p", {}, badge, legacy, " ",
-    el("span", { class: "muted" }, c.ok
-      ? `Edits and deletions after the chain start are detected. Record the head hash elsewhere to also catch removal of the newest entries, or a chain that restarts.${c.keyed ? "" : " Unkeyed (no SIEM_AUDIT_KEY): anyone who can write the database could recompute the chain."}`
-      : `${c.first_break.detail}. The log was changed outside the application.`));
+    el("span", { class: "muted" }, c.status === "broken"
+      ? `${c.first_break.detail}. The log was changed outside the application, or the server runs with another SIEM_AUDIT_KEY.`
+      : `Edits and deletions after the chain start are detected. Record the head hash and chain start elsewhere to also catch removal of the newest entries, or a chain that restarts.${c.keyed ? "" : " Unkeyed (no SIEM_AUDIT_KEY): anyone who can write the database could recompute the chain."}`));
 }
 
 // ---------- asset inventory ----------

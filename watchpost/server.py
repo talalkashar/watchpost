@@ -16,7 +16,7 @@ from . import (__version__, assets, attack, auth, engine, entities, geo, improve
                storyline, stream)
 from .ratelimit import TokenBucketLimiter
 from .config import Config
-from .db import audit, connect, init_schema, now_iso, row_to_dict, set_audit_key, verify_chain
+from .db import audit, connect, init_schema, now_iso, row_to_dict, verify_chain
 from .diagnostics import configure_logging, log, record_error
 from .health import STATIC_DIR, run_health_checks
 from .normalize import EventError, parse_payload, validate_source
@@ -40,8 +40,7 @@ class Download:
 class App:
     def __init__(self, config: Config):
         self.config = config
-        set_audit_key(config.audit_key)
-        conn = connect(config.db_path)
+        conn = connect(config.db_path, config.audit_key)
         try:
             init_schema(conn)
             engine.seed_rules(conn)
@@ -56,7 +55,7 @@ class App:
         self.storyline = storyline.Runner(self.conn)
 
     def conn(self):
-        return connect(self.config.db_path)
+        return connect(self.config.db_path, self.config.audit_key)
 
 
 # --- Routing ---------------------------------------------------------------------------
