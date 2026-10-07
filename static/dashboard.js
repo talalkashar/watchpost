@@ -90,7 +90,8 @@ function normCoverage(payload) {
     tactics: asList(t.tactics ?? t.tactic).map((x) => (typeof x === "string" ? x : x.name)).filter(Boolean),
     rules: asList(t.rules ?? t.rule_ids).map((r) => (typeof r === "string" ? r : r.id || r.rule_id)).filter(Boolean),
     hits: Number(t.hits ?? t.hit_count ?? t.alerts ?? t.alert_count ?? 0) || 0,
-    covered: t.covered,  // A: true only when an enabled rule covers the technique
+    covered: t.covered,  // true only when the technique is validated on a labeled scenario; "mapped" is not covered
+    level: t.level,
   }));
 }
 const tacticKey = (name) => String(name).toLowerCase().replace(/[^a-z]/g, "");
@@ -333,7 +334,7 @@ const Dash = {
         el("div", { class: "legend" }, ...["critical", "high", "medium", "low"].map((s) => el("span", {}, el("i", { class: `dot sev-${s}` }), s)),
           el("span", {}, el("i", { class: "dot volume" }), "event volume"))),
       panel("p-attackers", "Top attacker IPs", [el("span", { class: "muted" }, "by evidence events")], el("div", { class: "chartbox", id: "atk-chart" })),
-      panel("p-attack", "MITRE ATT&CK coverage", [el("span", { class: "muted", id: "attack-meta" }), el("a", { href: "/api/attack/navigator.json", download: "watchpost-navigator-layer.json", title: "MITRE ATT&CK Navigator layer (JSON) of rule coverage; scores come from synthetic demo data" }, "Export Navigator layer")], el("div", { class: "chartbox", id: "attack-chart" })),
+      panel("p-attack", "MITRE ATT&CK coverage", [el("span", { class: "muted", id: "attack-meta" }), el("a", { href: "/api/attack/navigator.json", download: "watchpost-navigator-layer.json", title: "MITRE ATT&CK Navigator layer (JSON) colored by evidence level; scores come from synthetic demo data" }, "Export Navigator layer")], el("div", { class: "chartbox", id: "attack-chart" })),
       panel("p-board", "Incident board", [el("span", { id: "board-meta" })], el("div", { class: "board", id: "board" })),
       panel("p-rules", "Top rules", [el("span", { class: "muted" }, "alerts all time")], el("div", { class: "chartbox", id: "rules-chart" })),
       panel("p-health", "Health", [el("a", { href: "#health", class: "muted" }, "details →")], el("div", { id: "health-body" })),
@@ -601,7 +602,7 @@ const Dash = {
         for (const tac of t.tactics.length ? t.tactics : ["Unmapped"]) {
           const key = tacticKey(tac);
           if (!byTactic.has(key)) byTactic.set(key, { name: tac, short: tac, cells: [] });
-          byTactic.get(key).cells.push({ id: t.id, name: t.name, value: t.hits, covered: t.covered ?? t.rules.length > 0, rules: t.rules });
+          byTactic.get(key).cells.push({ id: t.id, name: t.name, value: t.hits, covered: t.covered ?? t.rules.length > 0, level: t.level, rules: t.rules });
         }
       }
       for (const col of byTactic.values()) col.cells.sort((a, b) => b.value - a.value || a.id.localeCompare(b.id));
@@ -610,9 +611,10 @@ const Dash = {
     if (w < 900 && cov.state === "ok") columns = columns.filter((c) => c.cells.length);
     const meta = $("#attack-meta");
     if (cov.state === "ok") {
-      const covered = cov.list.filter((t) => t.covered ?? t.rules.length > 0).length;
+      const validated = cov.list.filter((t) => t.covered ?? t.rules.length > 0).length;
       const hot = cov.list.filter((t) => t.hits > 0).length;
-      meta.textContent = `${covered}/${cov.list.length} techniques covered · ${hot} observed`;
+      meta.textContent = `${validated}/${cov.list.length} techniques validated on synthetic scenarios · ${hot} observed · `;
+      meta.append(el("a", { href: "#coverage" }, "details"));
       mountSvg(box, WPCharts.heatMatrix(columns, { w, cellH: 21, maxRows: Math.max(3, Math.min(7, ...[Math.max(...columns.map((c) => c.cells.length))])), label: "ATT&CK coverage heat matrix" }));
       return;
     }

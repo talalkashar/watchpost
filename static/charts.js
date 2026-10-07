@@ -166,7 +166,7 @@ function heatMatrix(columns, { w = 700, cellH = 22, headH = 30, maxRows = 8, lab
         continue;
       }
       const lv = cell.covered === false ? "gap" : `h${level(cell.value || 0)}`;
-      const tip = `${cell.id} ${cell.name || ""}\n${c.name}\n${cell.value || 0} hits` +
+      const tip = `${cell.id} ${cell.name || ""}\n${c.name}\n${cell.value || 0} hits` + (cell.level ? `\nlevel: ${cell.level}` : "") +
         (cell.rules && cell.rules.length ? `\nrules: ${cell.rules.join(", ")}` : "\nno rule covers this");
       out += `<g class="cellg"><title>${esc(tip)}</title>` +
         `<rect class="cell ${lv}" x="${n2(x + 1.5)}" y="${n2(y)}" width="${n2(cw - 3)}" height="${cellH}"/>` +

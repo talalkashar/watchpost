@@ -135,7 +135,8 @@ function route() {
   document.querySelectorAll("#nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   if (view !== "dashboard") Dash.unmount();
   const views = { dashboard: socDashboard, incidents: () => (id ? incidentDetail(Number(id)) : incidentsView()),
-    alerts: () => (id ? alertDetail(Number(id)) : alerts()), events, overview, ingest, rules, noise: noiseLab, health, admin,
+    alerts: () => (id ? alertDetail(Number(id)) : alerts()), events, overview, ingest, rules: () => rules(id),
+    noise: noiseLab, coverage: coverageView, health, admin,
     entity: () => entityDetail(id, decodeURIComponent(rest.join("/"))) };
   guarded(views[view] || socDashboard);
 }
@@ -540,13 +541,13 @@ function ingestSummary(r) {
 }
 
 // ---------- rules ----------
-async function rules() {
+async function rules(focus) {
   const [list, changes, settings, evals, exceptions] = await Promise.all([api("/api/rules"), api("/api/changes"), api("/api/settings"), api("/api/evaluations"), api("/api/suppressions")]);
   const pending = changes.filter((c) => c.status === "pending");
   const ruleCards = list.map((r) => {
     const p = r.performance || {};
     const ev = r.evaluation;
-    return el("div", { class: "card" },
+    return el("div", { class: "card", id: `rule-${r.id}`, tabindex: "-1" },
       el("div", { class: "row", style: { justifyContent: "space-between" } },
         el("h2", {}, r.name), el("span", {}, sev(r.severity), " ", r.enabled ? pill("enabled", "st-ok") : pill("disabled", "st-rejected"))),
       el("p", { class: "muted" }, r.description),
@@ -619,6 +620,8 @@ async function rules() {
       table(["When", "Trigger", "By", "Summary"], evals.map((e) => ({ cells: [fmtTime(e.created_at), e.trigger, e.created_by,
         Object.entries(e.results.rules).map(([id, r]) => `${id}: TP ${r.tp} FN ${r.fn} FP ${r.fp}`).join(" · ")] })))),
   );
+  const card = focus && document.getElementById(`rule-${focus}`);  // linked from the Coverage view
+  if (card) { card.scrollIntoView({ block: "start" }); card.focus({ preventScroll: true }); }
 }
 
 // Labeled attacks a rule change stops detecting, from the evidence on the change request.
@@ -757,6 +760,73 @@ async function noiseLab() {
     el("div", { class: "card" }, el("h2", {}, "The benign look-alikes"),
       table(["Scenario", "Written for", "What happens"], lookalikes.map((s) => ({ cells: [
         el("span", {}, el("code", {}, s.name), " ", synth(true)), el("code", {}, s.lookalike_of), s.description] })))),
+  );
+}
+
+// ---------- ATT&CK coverage ----------
+const LEVEL_WORD = { validated: "Validated", mapped: "Mapped only", disabled: "Disabled", gap: "Gap" };
+const levelPill = (level) => pill(LEVEL_WORD[level] || level, `lv-${level}`);
+
+function coverageDetail(t, meaning) {
+  return el("div", {},
+    el("h2", {}, `${t.id} ${t.name}`),
+    el("p", {}, levelPill(t.level), " ", meaning[t.level]),
+    el("p", { class: "muted" }, `Tactic: ${t.tactic}. ${t.hits} live alert(s) from the rules mapped here.`),
+    el("h3", {}, "Proving scenarios"),
+    t.scenarios.length
+      ? el("div", { class: "row" }, t.scenarios.map((n) => el("span", {}, el("code", {}, n), " ", synth(true))))
+      : el("p", { class: "muted" }, "None: no labeled attack scenario proves that a running rule detects this technique."),
+    el("h3", {}, "Rules"),
+    t.rules.length ? table(["Rule", "State", "Noise-lab verdict", "Benign scenarios that fired", "Proves", "Alerts"], t.rules.map((r) => ({ cells: [
+      el("a", { href: `#rules/${encodeURIComponent(r.id)}`, title: "Open in Rules & review" }, r.name),
+      r.enabled ? pill("enabled", "st-ok") : pill("disabled", "st-rejected"),
+      r.verdict ? pill(r.verdict, VERDICT_CLASS[r.verdict] || "st-rejected") : "—",
+      r.lookalikes_fired.length ? r.lookalikes_fired.join(", ") : `none (${r.lookalikes_tested.length} look-alike(s) tested)`,
+      r.proves.length ? r.proves.join(", ") : "—", { num: r.hits }] })))
+      : el("p", { class: "muted" }, "No rule maps to this technique."));
+}
+
+async function coverageView() {
+  const cov = await api("/api/attack/coverage");
+  const lv = cov.summary.levels;
+  const detail = el("div", { class: "card", "aria-live": "polite" },
+    el("p", { class: "muted" }, "Select a technique to see its rules, their noise-lab verdicts, the scenarios that prove it, and its alerts."));
+  const cells = new Map();
+  const show = (t) => {
+    cells.forEach((b, id) => b.setAttribute("aria-pressed", String(id === t.id)));
+    detail.replaceChildren(coverageDetail(t, cov.level_meaning));
+  };
+  const columns = cov.tactics.map((tac) => {
+    const list = cov.techniques.filter((t) => t.tactic === tac.name);
+    return el("div", { class: "cov-col", role: "group", "aria-label": `${tac.name}: ${list.length} technique(s)` },
+      el("div", { class: "cov-head" }, tac.name),
+      list.length ? list.map((t) => {
+        const b = el("button", { type: "button", class: `cov-cell lv-${t.level}`, "aria-pressed": "false",
+          "aria-label": `${t.id} ${t.name}: ${LEVEL_WORD[t.level]}, ${t.hits} alert(s)`, onclick: () => show(t) },
+          el("b", {}, t.id), el("span", {}, t.name.split(": ").pop()),
+          el("small", {}, LEVEL_WORD[t.level], t.hits ? ` · ${t.hits} alerts` : ""));
+        cells.set(t.id, b);
+        return b;
+      }) : el("p", { class: "cov-empty muted" }, "No catalog technique"));
+  });
+  const order = { gap: 0, disabled: 1, mapped: 2 };
+  const gaps = cov.techniques.filter((t) => t.level !== "validated").sort((a, b) => order[a.level] - order[b.level] || a.id.localeCompare(b.id));
+  render(
+    el("div", { class: "page-head" }, el("h1", {}, "ATT&CK coverage"),
+      el("a", { href: "/api/attack/navigator.json", download: "watchpost-navigator-layer.json" }, "Export Navigator layer")),
+    el("div", { class: "card" },
+      el("p", {}, `${lv.validated} of ${cov.summary.techniques} catalog techniques are validated. ${lv.mapped} are mapped by a rule with no labeled scenario proving it, ${lv.disabled} only by disabled rules, and ${lv.gap} by none. Only validated counts as covered.`),
+      el("p", { class: "muted" }, "Honesty note: the scenarios are synthetic, so validated means a rule detected the project's own labeled data, not real-world coverage. The catalog holds only techniques a Watchpost rule maps to, not all of ATT&CK."),
+      el("div", { class: "legend", role: "list", "aria-label": "Levels" }, cov.levels.map((l) =>
+        el("span", { role: "listitem" }, levelPill(l), " ", cov.level_meaning[l])))),
+    el("div", { class: "card" }, el("h2", {}, "Tactics × techniques"),
+      el("div", { class: "cov-scroll" }, el("div", { class: "cov-grid" }, columns))),
+    detail,
+    el("div", { class: "card" }, el("h2", {}, `Gaps: not validated (${gaps.length})`),
+      gaps.length ? el("ul", { class: "cov-gaps" }, gaps.map((t) => el("li", {}, levelPill(t.level), " ",
+        el("button", { type: "button", class: "ghost mini", onclick: () => { show(t); detail.scrollIntoView({ block: "nearest" }); } }, `${t.id} ${t.name}`),
+        " ", el("span", { class: "muted" }, t.rules.length ? `Rules: ${t.rules.map((r) => r.id + (r.enabled ? "" : " (disabled)")).join(", ")}` : "No rule"))))
+        : el("p", { class: "muted" }, "Every catalog technique is validated on the labeled scenarios.")),
   );
 }
 
