@@ -229,14 +229,19 @@ This is **not machine learning**. It is transparent, deterministic tuning suppor
 
 ### Tamper-evident audit log
 
-Each audit entry stores `prev_hash` and `hash`, where `hash = HMAC-SHA256(key, prev_hash + JSON of id, created_at, actor, action, target, detail)`. The first entry links to a fixed genesis value (64 zeros). The previous hash is read and the new entry written in the same write transaction, so concurrent writers cannot fork the chain. `GET /api/audit/verify` (admin only) walks the log once and returns `{ok, entries, keyed, head: {id, hash}, first_break: {id, reason, detail} | null}`; **Admin → Audit log** shows the result as a badge. Upgrading a 3.x database chains the existing entries in id order and records an `audit_chain_started` entry.
+Each audit entry stores `prev_hash` and `hash`, where `hash = HMAC-SHA256(key, prev_hash + JSON of id, created_at, actor, action, target, detail)`. The previous hash is read and the new entry written in the same write transaction, so concurrent writers cannot fork the chain. `GET /api/audit/verify` (admin only) walks the log once and returns `{ok, entries, keyed, head: {id, hash}, chain_started: {id, created_at}, legacy: {entries, last_id}, first_break: {id, reason, detail} | null}`; **Admin → Audit log** shows the result as a badge.
 
-**What it detects:** an entry edited in place (`modified`), entries deleted from the middle or the start (`deleted`, from an id gap or a first entry that does not start at genesis), and an entry rewritten together with its own hash (`broken_link` at the entry after it).
+**Where the chain starts.** The server only hashes entries it is writing. When no entry carries a hash (a new database, an upgrade from 3.x, or a log whose hashes were removed), the next start writes an `audit_chain_started` entry that links to a fixed genesis value (64 zeros) and records how many older entries exist and the last id. Those older entries are **legacy**: they are counted and listed, but nothing vouches for them, and the badge says so ("N earlier entries predate the chain and are not verified") whenever there are any. Upgrading a 3.x database therefore leaves its existing entries unverified rather than signing whatever the file contains.
+
+**What it detects:** an entry edited in place, one with its hash cleared, or one changed by a database trigger as it was written (`modified`; the server hashes the values it inserted, never the row read back); entries deleted from the middle or the start of the chain (`deleted`); an entry rewritten together with its own hash, or a second chain start (`broken_link` at that entry or the one after it); legacy entries added or removed after the chain started (`legacy_mismatch`, checked against the signed count in the chain start).
 
 **What it does not detect:**
-- Deleting the newest entries. What remains is still a valid, shorter chain (the next append leaves an id gap, but nothing shows it before then). To catch this, record the head (`id` and `hash`) somewhere the database cannot reach, such as a ticket, a log shipped off the box, or a daily note, and compare later.
+- Deleting the newest entries. What remains is still a valid, shorter chain (the next append leaves an id gap, but nothing shows it before then).
+- A restarted chain. Someone who can write the database file can drop the hash column, or clear every hash, and restart the server. The result is a new chain start with the old entries shown as legacy and unverified, not a verified log, but the badge alone cannot tell you this was not a genuine upgrade. A chain start dated after your upgrade is the sign.
 - A full rewrite without a key. With `SIEM_AUDIT_KEY` unset the chain uses plain SHA-256 and `keyed` is `false`: anyone who can write the database file can recompute every hash, and verification passes. That mode only catches careless edits.
 - Anyone who has the key. Set `SIEM_AUDIT_KEY` to a long random value kept outside the database (`python3 -c "import secrets; print(secrets.token_hex(32))"`). Set it before the first start and keep it: entries hashed under one key fail verification under another.
+
+For the first two, record the head and the chain start (`id`, `hash`, `created_at`) somewhere the database cannot reach, such as a ticket, a log shipped off the box, or a daily note, and compare them later.
 
 ---
 
