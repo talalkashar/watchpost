@@ -12,8 +12,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import (__version__, assets, attack, auth, engine, entities, geo, improve, incidents, queries, report, simulate,
-               storyline, stream)
+from . import (__version__, assets, attack, auth, engine, entities, geo, hunt, improve, incidents, queries, report,
+               simulate, storyline, stream)
 from .ratelimit import TokenBucketLimiter
 from .config import Config
 from .db import audit, connect, init_schema, now_iso, row_to_dict, verify_chain
@@ -269,6 +269,27 @@ def storyline_status(req):
 @route("GET", "/api/events")
 def events(req):
     return queries.search_events(req.conn, req.query)
+
+
+@route("GET", "/api/hunt")
+def hunt_run(req):
+    return hunt.run(req.conn, req.query)
+
+
+@route("GET", "/api/hunt/saved")
+def hunt_saved(req):
+    return hunt.list_saved(req.conn)
+
+
+@route("POST", "/api/hunt/saved", role="analyst")
+def hunt_save(req):
+    req.status = 201
+    return hunt.save_search(req.conn, body_json(req), req.user["username"])
+
+
+@route("POST", r"/api/hunt/saved/(\d+)/delete", role="analyst")
+def hunt_delete(req, search_id):
+    return hunt.delete_saved(req.conn, int(search_id), req.user["username"], auth.has_role(req.user, "admin"))
 
 
 @route("GET", r"/api/events/(\d+)")

@@ -136,7 +136,7 @@ function route() {
   if (view !== "dashboard") Dash.unmount();
   const views = { dashboard: socDashboard, incidents: () => (id ? incidentDetail(Number(id)) : incidentsView()),
     alerts: () => (id ? alertDetail(Number(id)) : alerts()), events, overview, ingest, rules: () => rules(id),
-    noise: noiseLab, coverage: coverageView, health, admin,
+    noise: noiseLab, coverage: coverageView, health, admin, hunt: () => huntView(huntQueryFromHash([id, ...rest].join("/"))),
     entity: () => entityDetail(id, decodeURIComponent(rest.join("/"))) };
   guarded(views[view] || socDashboard);
 }
@@ -364,6 +364,7 @@ async function entityDetail(kind, value) {
     el("div", { class: "card" },
       el("div", { class: "row" }, pill(ENTITY_KINDS[e.kind], "stage"), synth(e.synthetic)),
       el("h1", { style: { marginTop: "8px" } }, e.value),
+      el("p", {}, huntLink(e.kind, e.value, `Hunt this ${ENTITY_KINDS[e.kind].toLowerCase()} (last 7 days)`)),
       el("div", { class: "kpis" },
         kpi(e.score, "Risk score"), kpi(counted.length, "Alerts counted"), kpi(e.incidents.length, "Incidents"),
         kpi(e.event_count.toLocaleString(), "Events"), kpi(fmtTime(e.first_seen), "First seen"), kpi(fmtTime(e.last_seen), "Last seen"))),
@@ -457,12 +458,108 @@ async function eventDialog(id) {
   $("#modal-body").replaceChildren(
     el("h2", {}, `Event #${e.id}`),
     el("dl", { class: "kv" }, ...["ts", "ingested_at", "source", "host", "event_type", "outcome", "severity", "user", "src_ip", "dest_ip", "batch_id"]
-      .flatMap((k) => [el("dt", {}, k), el("dd", {}, e[k] ?? "—")]), el("dt", {}, "synthetic"), el("dd", {}, e.synthetic ? "yes (demo data)" : "no")),
+      .flatMap((k) => [el("dt", {}, k), el("dd", {}, e[k] ?? "—",
+        HUNT_PIVOTS.includes(k) && e[k] !== null ? [" ", huntLink(k, e[k], "Hunt", () => $("#modal").close())] : null)]), el("dt", {}, "synthetic"), el("dd", {}, e.synthetic ? "yes (demo data)" : "no")),
     el("h3", {}, "Linked alerts"),
     e.alerts.length ? e.alerts.map((a) => el("div", {}, el("a", { href: `#alerts/${a.id}`, onclick: () => $("#modal").close() }, `#${a.id} ${a.title}`), " ", status(a.status)))
       : el("p", { class: "muted" }, "None."),
     el("h3", {}, "Original record (secrets redacted)"), el("pre", {}, e.raw ?? ""),
     el("p", {}, el("button", { onclick: () => $("#modal").close() }, "Close")));
+  $("#modal").showModal();
+}
+
+// ---------- hunt ----------
+// The query lives in the hash (#hunt/<percent-encoded query>), so a hunt is a shareable link.
+// The server parses it (watchpost/hunt.py) and echoes how each term was read; nothing is parsed here.
+const HUNT_PIVOTS = ["user", "src_ip", "dest_ip", "host", "event_type"];
+const HUNT_SYNTAX = [
+  ["field:value", "user:alice", "Exact match (user names ignore case)"],
+  ["field:prefix*", "host:web*", "Starts with (unquoted values only)"],
+  ['field:"quoted"', 'user:"svc backup"', "Literal value; * and spaces are not special"],
+  ["word or \"phrase\"", '"invalid password"', "Message contains"],
+  ["NOT term or -term", "NOT src_ip:10.0.0.5", "Excludes (events missing the field are kept)"],
+  ["last:15m|24h|7d", "last:24h", "Time window up to now (at most 365d)"],
+  ["since: / until:", "since:2026-10-01 until:2026-10-02T06:00Z", "ISO times, UTC unless stated"],
+];
+const HUNT_FIELDS = "user host source outcome src_ip dest_ip ip batch_id event_type severity dest_port synthetic message last since until";
+const huntHref = (q) => `#hunt/${encodeURIComponent(q)}`;
+const huntValue = (v) => (/^[^\s"\\]+$/.test(v) && !v.endsWith("*") ? v : `"${v.replace(/[\\"]/g, "\\$&")}"`);
+const huntLink = (field, value, label, onclick) => el("a", { href: huntHref(`${field}:${huntValue(String(value))} last:7d`),
+  title: `Hunt events where ${field} is ${value} in the last 7 days`, onclick }, label);
+
+function huntQueryFromHash(encoded) {
+  try { return decodeURIComponent(encoded || ""); } catch { return ""; }
+}
+
+function openHunt(q) {
+  if (location.hash === huntHref(q)) guarded(() => huntView(q));  // same hash: no hashchange fires
+  else location.hash = huntHref(q);
+}
+
+async function huntView(query = "", offset = 0) {
+  const input = el("input", { name: "q", value: query, maxlength: 500, autocomplete: "off", spellcheck: "false",
+    placeholder: 'user:alice NOT src_ip:10.0.0.5 "invalid password" last:24h', style: { width: "100%" } });
+  const form = el("form", { class: "card" },
+    el("div", { class: "row" },
+      el("label", { style: { flex: "1 1 220px", minWidth: "0" } }, "Query", input),
+      el("button", { type: "submit" }, "Hunt"),
+      can("analyst") ? el("button", { type: "button", class: "ghost", onclick: () => saveHuntDialog(input.value.trim()) }, "Save search") : null),
+    el("details", { style: { marginTop: "10px" } }, el("summary", { class: "muted" }, "Syntax"),
+      el("p", { class: "muted" }, "Terms are ANDed; there is no OR. Fields: ", el("code", {}, HUNT_FIELDS), ". ip matches source or destination."),
+      table(["Form", "Example", "Meaning"], HUNT_SYNTAX.map(([f, x, m]) => ({ cells: [el("code", {}, f), el("code", {}, x), m] })))));
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    openHunt(input.value.trim());
+  });
+  const params = new URLSearchParams({ q: query, limit: "100", offset: String(offset) });
+  const [saved, data] = await Promise.all([api("/api/hunt/saved"), api(`/api/hunt?${params}`).catch((e) => e)]);
+  const remove = (s) => confirm(`Delete saved search "${s.name}"?`) && guarded(async () => {
+    await api(`/api/hunt/saved/${s.id}/delete`, { method: "POST" });
+    toast("Saved search deleted");
+    huntView(query);
+  });
+  const mayDelete = (s) => can("analyst") && (s.owner === state.user.username || can("admin"));
+  const savedCard = el("div", { class: "card" }, el("h2", {}, `Saved searches (${saved.length})`),
+    table(["Name", "Query", "Owner", ""], saved.map((s) => ({ cells: [
+      el("span", {}, el("a", { href: huntHref(s.query) }, s.name), s.description ? el("div", { class: "muted" }, s.description) : null),
+      el("code", {}, s.query), `${s.owner} · ${fmtTime(s.created_at)}`,
+      mayDelete(s) ? el("button", { class: "danger", onclick: () => remove(s) }, "Delete") : null] }))));
+  if (data instanceof Error) {
+    render(el("h1", {}, "Hunt"), form, el("div", { class: "card" }, el("p", { class: "error" }, data.message)), savedCard);
+    return;
+  }
+  const parsed = el("div", { class: "row", style: { alignItems: "center" } }, el("span", { class: "muted" }, "Parsed as:"),
+    data.terms.length ? data.terms.map((t) => pill(t.text, "technique")) : el("span", { class: "muted" }, "no terms, so every event"));
+  const pager = el("div", { class: "row" },
+    el("span", { class: "muted" }, `${data.total.toLocaleString()} matching events · showing ${data.total ? offset + 1 : 0}–${offset + data.events.length}`),
+    el("button", { class: "ghost", disabled: offset === 0, onclick: () => guarded(() => huntView(query, Math.max(0, offset - 100))) }, "Newer"),
+    el("button", { class: "ghost", disabled: offset + 100 >= data.total, onclick: () => guarded(() => huntView(query, offset + 100)) }, "Older"));
+  render(el("h1", {}, "Hunt"), form, el("div", { class: "card" }, parsed, pager,
+    table(["Time", "Severity", "Type", "User", "Source IP", "Host", "Source", "Message"],
+      data.events.map((e) => ({ id: e.id, cells: [fmtTime(e.ts), sev(e.severity), e.event_type, e.user ?? "—", el("code", {}, e.src_ip ?? "—"), e.host ?? "—", el("span", {}, e.source, " ", synth(e.synthetic)), e.message ?? ""] })),
+      (r) => guarded(() => eventDialog(r.id)))), savedCard);
+}
+
+function saveHuntDialog(query) {
+  const form = el("form", {},
+    el("h2", {}, "Save search"),
+    el("label", {}, "Name", el("input", { name: "name", required: true, maxlength: 80 })),
+    el("label", {}, "Query (checked on save)", el("input", { name: "query", required: true, maxlength: 500, value: query })),
+    el("label", {}, "Description (optional)", el("input", { name: "description", maxlength: 300 })),
+    el("p", { class: "error", id: "hunt-error" }),
+    el("div", { class: "row" }, el("button", { type: "submit" }, "Save"),
+      el("button", { type: "button", class: "ghost", onclick: () => $("#modal").close() }, "Cancel")));
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const f = new FormData(form);
+    try {
+      const s = await api("/api/hunt/saved", { method: "POST", body: { name: f.get("name"), query: f.get("query"), description: f.get("description") } });
+      $("#modal").close();
+      toast(`Saved "${s.name}"`);
+      openHunt(s.query);
+    } catch (e) { $("#hunt-error").textContent = e.message; }
+  });
+  $("#modal-body").replaceChildren(form);
   $("#modal").showModal();
 }
 
