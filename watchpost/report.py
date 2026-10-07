@@ -35,6 +35,8 @@ ACTIONS = {
     "T1190": ["Check web server logs for successful exploitation and patch the exposed application."],
     "T1548": ["Review sudoers/admin group membership on the host; remove rights that are not needed."],
     "T1548.003": ["Audit /etc/sudoers and sudo logs on the host; require re-authentication for sudo."],
+    "T1562.008": ["Turn cloud audit logging back on (StartLogging, or recreate the trail) and restrict who may stop it.",
+                  "Treat the time logging was off as a blind spot and review it from other sources."],
     "T1068": ["Patch the host's kernel and local services; rebuild it if root was obtained."],
     "T1136": ["Disable accounts created during the incident window and confirm who requested them."],
     "T1136.001": ["Remove unauthorized local accounts and check for persistence (cron, SSH keys, services)."],

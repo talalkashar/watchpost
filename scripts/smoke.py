@@ -153,7 +153,8 @@ def main():
         expected = {"brute_force_ip", "password_spray", "account_repeated_failures",
                     "success_after_failures", "off_hours_privileged_login", "web_scanner", "firewall_port_sweep",
                     "impossible_geo_login", "privilege_escalation_after_login", "cloud_iam_change_by_new_principal",
-                    "data_exfil_volume", "unsanctioned_cloud_service"}
+                    "data_exfil_volume", "unsanctioned_cloud_service", "cloud_logging_disabled",
+                    "admin_action_from_new_source"}
         check(expected <= rules_fired, f"missing rules: {expected - rules_fired}")
         print(f"      {len(alerts)} alerts across {len(rules_fired)} rules")
 

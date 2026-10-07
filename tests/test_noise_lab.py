@@ -1,5 +1,6 @@
 """Watchpost 3.0 detection quality: benign look-alikes, baseline-aware exfil, exceptions, shadow IT."""
 
+import json
 import sqlite3
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -112,6 +113,58 @@ class EvaluateLookalikeTests(unittest.TestCase):
         r = improve.evaluate({"brute_force_ip": DEFAULTS["brute_force_ip"]},
                              suppressions={("brute_force_ip", "203.0.113.45")})["rules"]["brute_force_ip"]
         self.assertEqual(r["missed"], ["brute_force"])
+
+
+class NewDetectionLabTests(unittest.TestCase):
+    """Milestone 5: each new rule detects its labeled attack and stays quiet on its look-alike."""
+
+    NEW = {"cloud_logging_disabled": ("logging_disabled", "trail_maintenance", "svc-deploy-tmp"),
+           "admin_action_from_new_source": ("admin_new_source", "admin_known_source", "ops-admin|198.51.100.77")}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.result = improve.evaluate(DEFAULTS)["rules"]
+
+    def test_new_rules_detect_their_attack_and_no_lookalike(self):
+        for rule_id, (attack, lookalike, key) in self.NEW.items():
+            with self.subTest(rule=rule_id):
+                r = self.result[rule_id]
+                self.assertEqual((r["tp"], r["fn"], r["fp"]), (1, 0, 0))
+                self.assertEqual((r["detected"], r["lookalikes"], r["lookalikes_fired"]), ([attack], [lookalike], []))
+                self.assertEqual(r["group_keys"], [key])
+                self.assertEqual(simulate.SCENARIOS[lookalike]["lookalike_of"], rule_id)
+
+    def test_new_scenarios_trip_no_other_rule_and_old_scenarios_trip_no_new_rule(self):
+        new_scenarios = {s for attack, lookalike, _ in self.NEW.values() for s in (attack, lookalike)}
+        for rule_id, r in self.result.items():
+            with self.subTest(rule=rule_id):
+                fired = set(r["detected"]) | set(r["false_positives"])
+                if rule_id in self.NEW:
+                    self.assertEqual(fired, {self.NEW[rule_id][0]})
+                else:
+                    self.assertEqual(fired & new_scenarios, set())
+
+    def test_new_attacks_are_in_the_demo_and_their_lookalikes_are_not(self):
+        for attack, lookalike, _ in self.NEW.values():
+            self.assertIn(attack, simulate.DEMO_SCENARIOS)
+            self.assertNotIn(lookalike, simulate.DEMO_SCENARIOS)
+
+    def test_admin_history_predates_the_scenario_day_and_is_context_only(self):
+        events = simulate.build(["admin_new_source"])["admin_new_source"]
+        day = simulate.demo_day().isoformat()
+        self.assertTrue(any(e["ts"] < day for e in events))
+        found = rules.admin_action_from_new_source(make(events), DEFAULTS["admin_action_from_new_source"])
+        self.assertEqual([f["group_key"] for f in found], ["ops-admin|198.51.100.77"])
+        self.assertTrue(found[0]["first_seen"].startswith(day))
+
+    def test_cloudtrail_records_reach_the_logging_rule(self):
+        record = {"eventTime": "2026-09-15T17:50:00Z", "eventSource": "cloudtrail.amazonaws.com",
+                  "eventName": "StopLogging", "sourceIPAddress": "203.0.113.150",
+                  "userIdentity": {"type": "IAMUser", "userName": "svc-deploy-tmp"}}
+        events, rejected = parse_payload(json.dumps({"Records": [record]}), "json", "test")
+        self.assertEqual((rejected, events[0]["event_type"]), ([], "cloud_api_call"))
+        found = rules.cloud_logging_disabled(make(events), DEFAULTS["cloud_logging_disabled"])
+        self.assertEqual([f["group_key"] for f in found], ["svc-deploy-tmp"])
 
 
 def exfil_params(principals=(), **overrides):

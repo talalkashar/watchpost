@@ -36,7 +36,8 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(by_id["T1110.001"]["hits"], 3)
         self.assertEqual(by_id["T1110"]["hits"], 2)  # success_after_failures also maps to T1110
         self.assertEqual({r["id"] for r in by_id["T1078"]["rules"]},
-                         {"success_after_failures", "impossible_geo_login", "privilege_escalation_after_login"})
+                         {"success_after_failures", "impossible_geo_login", "privilege_escalation_after_login",
+                          "admin_action_from_new_source"})
         self.assertFalse(by_id["T1595.003"]["covered"])  # only the disabled web_scanner covers it
         self.assertEqual(result["summary"]["techniques"], len(attack.TECHNIQUES))
 
@@ -150,8 +151,19 @@ class ScenarioTechniqueTests(unittest.TestCase):
         levels = {t["id"]: t["level"] for t in result["techniques"]}
         # web_scan probes and injects but never exploits; exfiltration reads storage with no protocol shown.
         self.assertEqual({i for i, lvl in levels.items() if lvl != "validated"}, {"T1190", "T1048", "T1595.001"})
+        self.assertEqual(len(attack.TECHNIQUES), 19)  # milestone 5 added T1562.008
         self.assertEqual(result["summary"]["levels"],
                          {"validated": len(attack.TECHNIQUES) - 3, "mapped": 3, "disabled": 0, "gap": 0})
+        by_id = {t["id"]: t for t in result["techniques"]}
+        # Each milestone-5 rule proves its technique with its own scenario, not by borrowing another rule's.
+        self.assertEqual(by_id["T1562.008"]["scenarios"], ["logging_disabled"])
+        self.assertEqual({r["id"]: r["proves"] for r in by_id["T1562.008"]["rules"]},
+                         {"cloud_logging_disabled": ["logging_disabled"]})
+        proves = {r["id"]: r["proves"] for r in by_id["T1078.004"]["rules"]}
+        self.assertEqual(proves["admin_action_from_new_source"], ["admin_new_source"])
+        self.assertEqual(proves["cloud_iam_change_by_new_principal"], ["cloud_new_principal"])
+        # The new-source rule also maps T1078, but its scenario is tagged only with what it shows.
+        self.assertNotIn("admin_new_source", by_id["T1078"]["scenarios"])
 
 
 class NoiseLabCacheTests(unittest.TestCase):

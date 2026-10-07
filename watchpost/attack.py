@@ -34,6 +34,7 @@ TECHNIQUES = {
     "T1098.001": ("Account Manipulation: Additional Cloud Credentials", "Persistence"),
     "T1136.003": ("Create Account: Cloud Account", "Persistence"),
     "T1548.003": ("Abuse Elevation Control Mechanism: Sudo and Sudo Caching", "Privilege Escalation"),
+    "T1562.008": ("Impair Defenses: Disable or Modify Cloud Logs", "Defense Evasion"),
     "T1110": ("Brute Force", "Credential Access"),
     "T1110.001": ("Brute Force: Password Guessing", "Credential Access"),
     "T1110.003": ("Brute Force: Password Spraying", "Credential Access"),
