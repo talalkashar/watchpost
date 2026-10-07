@@ -337,15 +337,14 @@ def init_schema(conn):
         existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
         if column not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
-    # 4.0: hash-chained audit log. Add the columns and chain the existing rows in one transaction, so a
-    # failed upgrade leaves the old schema rather than a half-chained log.
-    audit_columns = {r["name"] for r in conn.execute("PRAGMA table_info(audit_log)")}
-    if "hash" not in audit_columns:
-        with transaction(conn):
-            for column in ("prev_hash", "hash"):
-                if column not in audit_columns:
-                    conn.execute(f"ALTER TABLE audit_log ADD COLUMN {column} TEXT")
-            _chain_existing_audit_rows(conn)
+    # 4.0: hash-chained audit log. Rows written before the chain existed are never hashed here: the server
+    # would be signing whatever the database file says, including rows someone rewrote before a restart.
+    with transaction(conn):
+        audit_columns = {r["name"] for r in conn.execute("PRAGMA table_info(audit_log)")}
+        for column in ("prev_hash", "hash"):
+            if column not in audit_columns:
+                conn.execute(f"ALTER TABLE audit_log ADD COLUMN {column} TEXT")
+        _start_audit_chain(conn)
     conn.execute(
         "INSERT INTO meta(key, value) VALUES ('schema_version', ?)"
         " ON CONFLICT(key) DO UPDATE SET value = excluded.value", (str(SCHEMA_VERSION),)
@@ -381,26 +380,18 @@ def audit_hash(prev_hash, row, key):
     return hashlib.sha256(payload).hexdigest()
 
 
-def _link_audit_row(conn, row_id, prev_hash):
-    # Hash the row as stored (column affinity may have changed a value's type), then write prev_hash and hash.
-    row = conn.execute(f"SELECT {', '.join(AUDIT_FIELDS)} FROM audit_log WHERE id = ?", (row_id,)).fetchone()
-    digest = audit_hash(prev_hash, dict(zip(AUDIT_FIELDS, row)), _audit_key)
-    conn.execute("UPDATE audit_log SET prev_hash = ?, hash = ? WHERE id = ?", (prev_hash, digest, row_id))
-    return digest
+def _start_audit_chain(conn):
+    """Begin the chain with an `audit_chain_started` entry when no entry carries a hash yet.
 
-
-def _chain_existing_audit_rows(conn):
-    """Schema 4 upgrade: chain the rows written before 4.0 in id order, then record that it happened.
-
-    Runs only when the hash column is first added, so a row inserted later without a hash is reported by
-    verify_chain instead of being adopted on the next start.
+    That is a new database, a 3.x upgrade, or a log whose hashes were dropped or cleared. Earlier rows stay
+    unhashed; verify_chain reports them as legacy and unverified, and this entry records how many there were
+    (signed, so the legacy range cannot grow or shrink afterwards without a break).
     """
-    ids = [r[0] for r in conn.execute("SELECT id FROM audit_log ORDER BY id")]
-    prev_hash = GENESIS_HASH
-    for row_id in ids:
-        prev_hash = _link_audit_row(conn, row_id, prev_hash)
-    if ids:
-        audit(conn, "system", "audit_chain_started", None, {"backfilled": len(ids), "keyed": bool(_audit_key)})
+    if conn.execute("SELECT 1 FROM audit_log WHERE hash IS NOT NULL LIMIT 1").fetchone():
+        return
+    count, last_id = conn.execute("SELECT COUNT(*), MAX(id) FROM audit_log").fetchone()
+    audit(conn, "system", "audit_chain_started", None,
+          {"legacy_entries": count, "legacy_last_id": last_id, "keyed": bool(_audit_key)})
 
 
 def audit(conn, actor, action, target=None, detail=None):
@@ -410,12 +401,17 @@ def audit(conn, actor, action, target=None, detail=None):
     if own:
         conn.execute("BEGIN IMMEDIATE")
     try:
-        last = conn.execute("SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1").fetchone()
-        cur = conn.execute(
-            "INSERT INTO audit_log(created_at, actor, action, target, detail) VALUES (?,?,?,?,?)",
-            (now_iso(), actor, action, target, json.dumps(detail) if detail is not None else None),
-        )
-        _link_audit_row(conn, cur.lastrowid, last[0] if last else GENESIS_HASH)
+        # Link to the newest hashed entry; an unhashed row after it is reported by verify_chain, not adopted.
+        last = conn.execute("SELECT hash FROM audit_log WHERE hash IS NOT NULL ORDER BY id DESC LIMIT 1").fetchone()
+        # Every column is TEXT: store strings so the values hashed below are exactly the values stored.
+        values = (now_iso(), str(actor), str(action), None if target is None else str(target),
+                  json.dumps(detail) if detail is not None else None)
+        cur = conn.execute("INSERT INTO audit_log(created_at, actor, action, target, detail) VALUES (?,?,?,?,?)", values)
+        # Hash what this call wrote, never the row read back: a trigger in the database file could have changed
+        # it, and the server would then sign content it did not write.
+        prev_hash = last[0] if last else GENESIS_HASH
+        digest = audit_hash(prev_hash, dict(zip(AUDIT_FIELDS, (cur.lastrowid, *values))), _audit_key)
+        conn.execute("UPDATE audit_log SET prev_hash = ?, hash = ? WHERE id = ?", (prev_hash, digest, cur.lastrowid))
     except BaseException:
         if own:
             conn.execute("ROLLBACK")
@@ -431,31 +427,60 @@ _CONFIGURED_KEY = object()
 def verify_chain(conn, key=_CONFIGURED_KEY):
     """Walk the audit log once, oldest first, and report the first entry that breaks the chain.
 
-    Reasons: `deleted` (an id gap, or the first entry does not start from the genesis hash), `modified` (the
-    entry's own hash does not match its contents), `broken_link` (the entry is intact but does not point at the
-    entry before it, e.g. that one was rewritten together with its hash). Deleting the newest entries leaves a
+    The chain starts at the first hashed entry, which must link to the genesis hash. Unhashed rows before it
+    are legacy: counted, never verified, and they must match the range its `audit_chain_started` detail
+    records (an ordinary first entry declares none). Reasons: `deleted` (an id gap, or the first hashed entry
+    does not start from genesis), `modified` (an entry does not match its hash, or has none), `broken_link`
+    (an intact entry that does not point at the one before it, including a second chain start), and
+    `legacy_mismatch` (rows before the chain start were added or removed). Deleting the newest entries leaves a
     valid shorter chain; only a head recorded elsewhere shows that.
     """
     key = _audit_key if key is _CONFIGURED_KEY else key
-    entries, prev_id, prev_hash, head, first_break = 0, None, GENESIS_HASH, None, None
+    entries, prev_id, prev_hash, head, first_break, started = 0, None, GENESIS_HASH, None, None, None
+    legacy = {"entries": 0, "last_id": None}
     # One SELECT reads one consistent snapshot, even while other connections append.
     cur = conn.execute(f"SELECT {', '.join(AUDIT_FIELDS)}, prev_hash, hash FROM audit_log ORDER BY id")
     for row in cur:
-        entries += 1
         row_id, stored_prev, stored_hash = row[0], row[6], row[7]
+        if started is None and stored_hash is None:
+            legacy = {"entries": legacy["entries"] + 1, "last_id": row_id}
+            continue
+        entries += 1
         head = {"id": row_id, "hash": stored_hash}
-        if first_break is None:
-            if prev_id is not None and row_id != prev_id + 1:
+        if started is None:
+            started = {"id": row_id, "created_at": row[1]}
+            if stored_hash != audit_hash(stored_prev, dict(zip(AUDIT_FIELDS, row)), key):
+                first_break = {"id": row_id, "reason": "modified", "detail": "the entry no longer matches its hash"}
+            elif stored_prev != GENESIS_HASH:
+                first_break = {"id": row_id, "reason": "deleted", "detail": "entries before this one are missing"}
+            elif _declared_legacy(row) != legacy:
+                first_break = {"id": row_id, "reason": "legacy_mismatch",
+                               "detail": f"{legacy['entries']} entries precede the chain start, which recorded "
+                                         f"{_declared_legacy(row)['entries']}"}
+        elif first_break is None:
+            if row_id != prev_id + 1:
                 first_break = {"id": row_id, "reason": "deleted",
                                "detail": f"entries #{prev_id + 1} to #{row_id - 1} are missing"}
             elif stored_hash != audit_hash(stored_prev, dict(zip(AUDIT_FIELDS, row)), key):
                 first_break = {"id": row_id, "reason": "modified",
-                               "detail": "the entry no longer matches its hash"}
+                               "detail": "the entry no longer matches its hash" if stored_hash else "the entry has no hash"}
             elif stored_prev != prev_hash:
-                first_break = ({"id": row_id, "reason": "deleted",
-                                "detail": "entries before this one are missing"} if prev_id is None else
-                               {"id": row_id, "reason": "broken_link",
-                                "detail": f"the entry does not link to entry #{prev_id}"})
+                first_break = {"id": row_id, "reason": "broken_link",
+                               "detail": f"the entry does not link to entry #{prev_id}"}
         prev_id, prev_hash = row_id, stored_hash
+    if started is None and legacy["entries"]:
+        # Rows but no chain: every hash was cleared. The server only starts a new chain on restart.
+        first_break = {"id": legacy["last_id"], "reason": "modified", "detail": "no entry in the log carries a hash"}
     return {"ok": first_break is None, "entries": entries, "keyed": bool(key), "head": head,
-            "first_break": first_break}
+            "first_break": first_break, "legacy": legacy, "chain_started": started}
+
+
+def _declared_legacy(row):
+    """The legacy range a chain start recorded about itself; any other first entry declares none."""
+    if row[3] == "audit_chain_started" and row[5]:
+        try:
+            detail = json.loads(row[5])
+            return {"entries": detail["legacy_entries"], "last_id": detail["legacy_last_id"]}
+        except (ValueError, KeyError, TypeError):
+            pass
+    return {"entries": 0, "last_id": None}

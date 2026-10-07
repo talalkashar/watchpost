@@ -314,6 +314,9 @@ class IncidentApiTests(ServerTestCase):
             self.assertEqual(actions[old_entries], "audit_chain_started")
         verified = self.client("admin").get("/api/audit/verify")[1]
         self.assertTrue(verified["ok"], verified["first_break"])
+        # Pre-4.0 entries are counted but not vouched for; the chain starts at the upgrade.
+        self.assertEqual(verified["legacy"]["entries"], old_entries)
+        self.assertEqual(verified["chain_started"]["id"], verified["legacy"]["last_id"] + 1)
 
 
 class SearchTests(ServerTestCase):

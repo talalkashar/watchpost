@@ -350,7 +350,8 @@ def main():
         step("audit log hash chain verifies (keyed)")
         status, chain = admin.call("GET", "/api/audit/verify")
         check(status == 200 and chain["ok"] and chain["keyed"], f"audit chain: {status} {chain}")
-        check(chain["entries"] > 0 and len(chain["head"]["hash"]) == 64, f"audit chain head: {chain}")
+        check(chain["entries"] > 0 and len(chain["head"]["hash"]) == 64 and chain["legacy"]["entries"] == 0,
+              f"audit chain head: {chain}")
         check(viewer.call("GET", "/api/audit/verify")[0] == 403, "viewer can verify the audit chain")
         print(f"      {chain['entries']} entries, head #{chain['head']['id']} {chain['head']['hash'][:12]}")
 
