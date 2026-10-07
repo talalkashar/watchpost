@@ -23,6 +23,7 @@ from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parent.parent
 ADMIN_PW, ANALYST_PW, VIEWER_PW = "smoke-admin-password", "smoke-analyst-password", "smoke-viewer-password"
+AUDIT_KEY = "smoke-audit-chain-key"
 STEP = 0
 
 
@@ -85,7 +86,7 @@ def main():
     base = f"http://127.0.0.1:{port}"
     env = {**os.environ, "SIEM_DB": os.path.join(tmp.name, "smoke.db"), "SIEM_HOST": "127.0.0.1",
            "SIEM_PORT": str(port), "SIEM_ADMIN_PASSWORD": ADMIN_PW, "SIEM_ANALYST_PASSWORD": ANALYST_PW,
-           "SIEM_VIEWER_PASSWORD": VIEWER_PW,
+           "SIEM_VIEWER_PASSWORD": VIEWER_PW, "SIEM_AUDIT_KEY": AUDIT_KEY,
            "SIEM_SYSLOG": "1", "SIEM_SYSLOG_PORT": str(syslog_port)}
     log_path = os.path.join(tmp.name, "server.log")
     log_file = open(log_path, "w")
@@ -346,9 +347,18 @@ def main():
         check(statuses[-1] == 429, f"login attempts were not rate limited: {statuses}")
         print(f"      login answered 429 after {statuses.index(429)} attempts")
 
+        step("audit log hash chain verifies (keyed)")
+        status, chain = admin.call("GET", "/api/audit/verify")
+        check(status == 200 and chain["ok"] and chain["status"] == "verified" and chain["keyed"],
+              f"audit chain: {status} {chain}")
+        check(chain["entries"] > 0 and len(chain["head"]["hash"]) == 64 and chain["legacy"]["entries"] == 0,
+              f"audit chain head: {chain}")
+        check(viewer.call("GET", "/api/audit/verify")[0] == 403, "viewer can verify the audit chain")
+        print(f"      {chain['entries']} entries, head #{chain['head']['id']} {chain['head']['hash'][:12]}")
+
         step("server log contains no secrets")
         log_text = Path(log_path).read_text()
-        for secret in (ADMIN_PW, ANALYST_PW, VIEWER_PW, tok["token"]):
+        for secret in (ADMIN_PW, ANALYST_PW, VIEWER_PW, tok["token"], AUDIT_KEY):
             check(secret not in log_text, "a secret appeared in the server log")
         print("\nSMOKE OK")
     finally:

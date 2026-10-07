@@ -293,6 +293,10 @@ class IncidentApiTests(ServerTestCase):
             # A 2.0 database: no asset inventory and no asset weighting on alerts.
             db.execute("DROP TABLE assets")
             db.execute("ALTER TABLE alerts DROP COLUMN base_severity")
+            # A 3.x database: an audit log with no hash chain.
+            db.execute("ALTER TABLE audit_log DROP COLUMN prev_hash")
+            db.execute("ALTER TABLE audit_log DROP COLUMN hash")
+            old_entries = db.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
         from watchpost.server import App
         App(self.config)
         with sqlite3.connect(self.db_path) as db:
@@ -304,7 +308,15 @@ class IncidentApiTests(ServerTestCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM incidents").fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM assets").fetchone()[0], 0)
             self.assertIn("base_severity", {r[1] for r in db.execute("PRAGMA table_info(alerts)")})
-            self.assertEqual(db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0], "3")
+            self.assertEqual(db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0], "4")
+            actions = [r[0] for r in db.execute("SELECT action FROM audit_log ORDER BY id")]
+            self.assertGreater(old_entries, 0)
+            self.assertEqual(actions[old_entries], "audit_chain_started")
+        verified = self.client("admin").get("/api/audit/verify")[1]
+        # Pre-4.0 entries are counted but not vouched for, so an upgraded log is "partial", never "ok".
+        self.assertEqual((verified["ok"], verified["status"]), (False, "partial"), verified["first_break"])
+        self.assertEqual(verified["legacy"]["entries"], old_entries)
+        self.assertEqual(verified["chain_started"]["id"], verified["legacy"]["last_id"] + 1)
 
 
 class SearchTests(ServerTestCase):
