@@ -49,12 +49,14 @@ class App:
             self.credentials_file = auth.bootstrap_users(conn, config, Path(config.db_path).parent)
         finally:
             conn.close()
-        self.login_limiter = self.request_limiter = self.backtest_limiter = None
+        self.login_limiter = self.request_limiter = self.backtest_limiter = self.change_backtest_limiter = None
         if config.rate_limit_enabled:
             self.login_limiter = TokenBucketLimiter(config.login_rate_burst, config.login_rate_per_minute)
             self.request_limiter = TokenBucketLimiter(config.rate_burst, config.rate_per_minute)
-            # Per account: each preview replays up to backtest.MAX_EVENTS stored events twice.
+            # Per account: each backtest replays up to backtest.MAX_EVENTS stored events twice. Previews are the
+            # cheap thing to repeat and get the tight bucket; rule proposals and approvals get their own.
             self.backtest_limiter = TokenBucketLimiter(BACKTEST_BURST, BACKTEST_PER_MINUTE)
+            self.change_backtest_limiter = TokenBucketLimiter(CHANGE_BACKTEST_BURST, BACKTEST_PER_MINUTE)
         self.storyline = storyline.Runner(self.conn)
 
     def conn(self):
@@ -452,9 +454,8 @@ def rule_history(req, rule_id):
     return [row_to_dict(r, ["params"]) for r in rows]
 
 
-def _backtest_quota(req):
-    """Spend one backtest from the account's quota: previews, rule proposals and approvals all replay events."""
-    limiter = req.app.backtest_limiter
+def _backtest_quota(req, limiter):
+    """Spend one backtest from the account's quota in `limiter` (None when rate limiting is off)."""
     if limiter is not None:
         allowed, retry_after = limiter.allow(req.user["username"])
         if not allowed:
@@ -464,14 +465,15 @@ def _backtest_quota(req):
 @route("POST", r"/api/rules/([a-z_]+)/proposals", role="analyst")
 def rule_propose(req, rule_id):
     data = body_json(req)
-    _backtest_quota(req)  # the proposal's evidence carries a backtest
+    _backtest_quota(req, req.app.change_backtest_limiter)  # the proposal's evidence carries a backtest
     payload = {k: data[k] for k in ("params", "enabled") if k in data}
     req.status = 201
     return improve.propose_change(req.conn, "rule_update", rule_id, payload, data.get("reason"),
                                   req.user["username"])
 
 
-BACKTEST_BURST, BACKTEST_PER_MINUTE = 20, 12
+BACKTEST_BURST, BACKTEST_PER_MINUTE = 6, 12
+CHANGE_BACKTEST_BURST = 20  # rule proposals and approvals: room for a review session
 
 
 @route("GET", r"/api/rules/([a-z_]+)/backtest", role="analyst")
@@ -488,7 +490,7 @@ def rule_backtest(req, rule_id):
     days = req.query.get("days", str(backtest_mod.DEFAULT_WINDOW_DAYS))
     if not days.isdigit() or not 1 <= int(days) <= backtest_mod.MAX_WINDOW_DAYS:
         raise ApiError(400, f"days must be an integer between 1 and {backtest_mod.MAX_WINDOW_DAYS}")
-    _backtest_quota(req)
+    _backtest_quota(req, req.app.backtest_limiter)
     return improve.preview_backtest(req.conn, rule_id, params, int(days))
 
 
@@ -550,7 +552,7 @@ def change_review(req, change_id):
     if data.get("decision") == "approve":
         row = req.conn.execute("SELECT kind FROM change_requests WHERE id = ?", (int(change_id),)).fetchone()
         if row is not None and row["kind"] == "rule_update":
-            _backtest_quota(req)  # approval recomputes the evidence, backtest included
+            _backtest_quota(req, req.app.change_backtest_limiter)  # approval recomputes the evidence, backtest included
     return improve.review_change(req.conn, int(change_id), data.get("decision"), req.user["username"],
                                  data.get("note", ""), data.get("evidence_digest"),
                                  data.get("acknowledge_detection_loss"))
