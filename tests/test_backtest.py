@@ -197,8 +197,8 @@ class BacktestApiTests(ServerTestCase):
 
     def test_previews_are_rate_limited_per_account(self):
         admin = self.client("admin")
-        codes = [admin.get(self.url({}))[0] for _ in range(8)]
-        self.assertEqual(codes[:6], [200] * 6)
+        codes = [admin.get(self.url({}))[0] for _ in range(22)]
+        self.assertEqual(codes[:20], [200] * 20)
         self.assertEqual(codes[-1], 429)
         self.assertEqual(self.client("analyst").get(self.url({}))[0], 200)  # another account has its own bucket
 
@@ -206,10 +206,10 @@ class BacktestApiTests(ServerTestCase):
         # Proposing a rule change and approving one both run a backtest, so they draw on the same bucket.
         analyst, admin = self.client("analyst"), self.client("admin")
         codes = [analyst.post(f"/api/rules/{RULE}/proposals", {"params": {"threshold": 13 + i}, "reason": "tune it down"})[0]
-                 for i in range(8)]
-        self.assertEqual(codes[:6], [201] * 6)
+                 for i in range(22)]
+        self.assertEqual(codes[:20], [201] * 20)
         self.assertEqual(codes[-1], 429)
-        for _ in range(6):
+        for _ in range(20):
             admin.get(self.url({}))
         status, data, _ = admin.post("/api/changes/1/review", {"decision": "approve", "evidence_digest": "x"})
         self.assertEqual(status, 429, data)

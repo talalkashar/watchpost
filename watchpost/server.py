@@ -471,7 +471,7 @@ def rule_propose(req, rule_id):
                                   req.user["username"])
 
 
-BACKTEST_BURST, BACKTEST_PER_MINUTE = 6, 12
+BACKTEST_BURST, BACKTEST_PER_MINUTE = 20, 12
 
 
 @route("GET", r"/api/rules/([a-z_]+)/backtest", role="analyst")
