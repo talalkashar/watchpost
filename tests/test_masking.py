@@ -233,6 +233,8 @@ class MaskingServerTests(ServerTestCase):
                 values = ids[kind]
             elif group == "(md|pdf)":
                 values = ["md", "pdf"]
+            elif group == "(json|md)":
+                values = ["json", "md"]
             elif group == "([a-z_]+)":
                 values = ids["rules"]
             elif group == "([^/]+)":

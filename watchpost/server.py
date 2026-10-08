@@ -13,8 +13,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import (__version__, assets, attack, auth, ecs, engine, entities, geo, hunt, improve, incidents, masking,
-               portability, queries, report, search_rules, sigma, simulate, sources, storyline, stream, triage)
+from . import (__version__, assets, attack, auth, case_record, ecs, engine, entities, geo, hunt, improve, incidents,
+               masking, portability, queries, report, search_rules, sigma, simulate, sources, storyline, stream,
+               triage)
 from . import backtest as backtest_mod
 from .ratelimit import TokenBucketLimiter
 from .config import Config
@@ -522,6 +523,16 @@ def alert_report(req, alert_id, fmt):
 @route("GET", r"/api/incidents/(\d+)/report\.(md|pdf)")
 def incident_report(req, incident_id, fmt):
     return _report(req, "incident", int(incident_id), fmt)
+
+
+@route("GET", r"/api/incidents/(\d+)/case\.(json|md)")
+def incident_case(req, incident_id, fmt):
+    ident = int(incident_id)
+    model = case_record.build(req.conn, ident)
+    audit(req.conn, req.user["username"], "case_exported", f"incident:{ident}", {"format": fmt})
+    render = case_record.to_json_bytes if fmt == "json" else case_record.to_markdown_bytes
+    content_type = "application/json" if fmt == "json" else "text/markdown; charset=utf-8"
+    return Download(None, content_type, f"watchpost-incident-{ident}-case.{fmt}", model, render)
 
 
 @route("GET", "/api/metrics")
