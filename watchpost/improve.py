@@ -12,6 +12,7 @@ from collections import Counter
 from datetime import datetime, time, timedelta, timezone
 
 from . import assets as assets_mod
+from . import backtest as backtest_mod
 from . import rules as rules_mod
 from . import simulate
 from .db import audit, iso, now_iso, row_to_dict, transaction, utcnow
@@ -281,6 +282,7 @@ def _validate_change(conn, kind, target, payload):
 
 
 LIVE_IMPACT_RECENT = 5  # newest matching alerts listed in an exception's evidence
+BACKTEST_EVIDENCE_LIMIT = 10  # kept/new/lost findings listed in a rule change's evidence; counts are complete
 
 
 # Every verdict is in alert_activity as "<from> -> resolved (<disposition>)" (queries.update_status), and
@@ -398,7 +400,12 @@ def _evidence(conn, kind, target, payload, proposer):
         if not payload.get("enabled", enabled):
             new = _not_running(new)
         evaluation = {"rule": target, "before": base, "after": new,
-                      "ignore_additions": _ignore_additions(conn, target, before[target], after[target], proposer)}
+                      "ignore_additions": _ignore_additions(conn, target, before[target], after[target], proposer),
+                      # Replayed over stored events. Events are only appended, so one arriving between viewing
+                      # and approving changes this (and the digest): the reviewer re-confirms, as for assets.
+                      "backtest": backtest_mod.backtest(conn, target, after[target],
+                                                        running=(enabled, payload.get("enabled", enabled)),
+                                                        limit=BACKTEST_EVIDENCE_LIMIT)}
     elif kind == "suppression_add":
         params = {target: current_params(conn, include_disabled=True)[target]}
         active = active_suppressions(conn)
@@ -413,10 +420,18 @@ def _evidence(conn, kind, target, payload, proposer):
     return json.loads(json.dumps(evaluation))  # as it reads back from storage, so the two compare equal
 
 
+BACKTEST_CONTEXT = ("window", "max_event_id", "events_scanned", "synthetic_events")
+
+
 def evidence_digest(evaluation):
     """A stable hash of a change's evidence. An approval names the evidence it was given by this digest."""
     if evaluation is None:
         return None
+    if isinstance(evaluation.get("backtest"), dict):
+        # The backtest's scan context moves with every ingested event (the window ends at the newest one);
+        # the digest covers what the reviewer decides on: the kept / new / lost findings and open alerts lost.
+        evaluation = {**evaluation, "backtest": {k: v for k, v in evaluation["backtest"].items()
+                                                 if k not in BACKTEST_CONTEXT}}
     canonical = json.dumps(evaluation, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -434,6 +449,25 @@ def evidence_digest(evaluation):
 def _detection_loss(evaluation):
     """Labeled attacks the rule detects before the change and misses after it."""
     return sorted(set(evaluation["before"]["detected"]) & set(evaluation["after"]["missed"]))
+
+
+def _open_alerts_lost(evaluation):
+    """Open alerts the backtest reproduces with today's params and not with the proposed ones.
+
+    The same trade as a lost labeled attack, from real stored events: approval needs the same explicit
+    acknowledgement. Change requests from before backtesting carry no backtest until refreshed.
+    """
+    bt = (evaluation or {}).get("backtest")
+    return [a["id"] for a in bt["open_alerts_lost"]] if bt else []
+
+
+def preview_backtest(conn, rule_id, params, window_days=backtest_mod.DEFAULT_WINDOW_DAYS):
+    """Backtest a draft rule change before it is proposed. Validated exactly as a rule_update proposal."""
+    if not isinstance(params, dict):
+        raise ChangeError("params must be a JSON object")
+    merged = _validate_change(conn, "rule_update", rule_id, {"params": params})
+    enabled = bool(conn.execute("SELECT enabled FROM rules WHERE id = ?", (rule_id,)).fetchone()["enabled"])
+    return backtest_mod.backtest(conn, rule_id, merged, window_days=window_days, running=(enabled, enabled))
 
 
 def _refusal(kind, evaluation):
@@ -507,7 +541,7 @@ def review_change(conn, change_id, decision, reviewer, note="", digest=None, ack
         if change["proposed_by"] == reviewer:
             raise ChangeError("you cannot review your own change request; a second person must approve it", 403)
         note = (note or "").strip()[:2000]
-        problem, lost = None, []
+        problem, lost, lost_alerts = None, [], []
         if decision == "approve":
             # Recomputed, compared and applied in this one transaction: approval acts on the evidence the
             # reviewer was shown (named by its digest), or not at all.
@@ -522,16 +556,19 @@ def review_change(conn, change_id, decision, reviewer, note="", digest=None, ack
                       {"id": change_id})
             refusal = _refusal(change["kind"], fresh)
             if change["kind"] == "rule_update":
-                lost = _detection_loss(fresh)
+                lost, lost_alerts = _detection_loss(fresh), _open_alerts_lost(fresh)
             if refusal:
                 problem = ChangeError(refusal)
             elif fresh is not None and digest != evidence_digest(fresh):
                 problem = ChangeError("the evidence changed since this request was last shown; nothing was "
                                       "applied. Review the updated evidence and approve again", 409)
-            elif lost and acknowledge_detection_loss is not True:
-                problem = ChangeError("this change makes the rule miss labeled attacks it detects today "
-                                      f"({', '.join(lost)}); approve with acknowledge_detection_loss: true to "
-                                      "accept that")
+            elif (lost or lost_alerts) and acknowledge_detection_loss is not True:
+                what = [f"labeled attacks it detects today ({', '.join(lost)})"] if lost else []
+                if lost_alerts:
+                    what.append(f"{fresh['backtest']['counts']['open_alerts_lost']} open alert(s) on stored "
+                                f"events (#{', #'.join(map(str, lost_alerts))})")
+                problem = ChangeError(f"this change makes the rule miss {' and '.join(what)}; approve with "
+                                      "acknowledge_detection_loss: true to accept that")
         if problem is not None:
             pass  # left pending; raised once the refreshed evidence is committed
         elif decision == "approve":
@@ -564,7 +601,8 @@ def review_change(conn, change_id, decision, reviewer, note="", digest=None, ack
                 (status, reviewer, now_iso(), note, change_id),
             )
             audit(conn, reviewer, f"change_{status}", f"{change['kind']}:{change['target']}",
-                  {"id": change_id, **({"acknowledged_detection_loss": lost} if lost else {})})
+                  {"id": change_id, **({"acknowledged_detection_loss": lost} if lost else {}),
+                   **({"acknowledged_open_alerts_lost": lost_alerts} if lost_alerts else {})})
             if decision == "approve" and change["kind"] == "rule_update":
                 record_evaluation(conn, evaluate(current_params(conn)), "post_change", reviewer, change_id)
     if problem is not None:
