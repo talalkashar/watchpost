@@ -134,6 +134,7 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 | Endpoint | Role | Notes |
 |---|---|---|
 | `GET /api/events/{id}` | viewer | Includes the redacted `raw` record and linked alerts |
+| `GET /api/events/{id}/ecs` | viewer | The event as an ECS-shaped document (field mapping for export; see the README, "ECS field mapping") |
 | `GET /api/hunt?q=&limit=&offset=` | viewer | Runs a hunt query (syntax in the README, "Hunting"). Returns the event-search page plus `query` and `terms` (`[{field, value, negate, text}]`, how each term was read). Bad syntax or an unknown field is 400 with the reason |
 | `GET /api/hunt/saved` | viewer | Saved searches: `[{id, name, query, description, owner, created_at}]` by name |
 | `POST /api/hunt/saved` | analyst | `{name (≤ 80), query, description? (≤ 300)}`; the query must parse. 409 on a duplicate name (case-insensitive). Audited as `saved_search_created` |
@@ -222,6 +223,8 @@ Asset fields: `id`, `name`, `kind` (`server`, `workstation`, `network`, `cloud`,
 |---|---|---|
 | `GET /api/rules` | viewer | Params, version, `techniques` (`[{id, name, tactic}]`), `performance` (from verdicts), latest `evaluation` |
 | `GET /api/rules/{id}/history` | viewer | Every version, with who proposed and who approved it |
+| `GET /api/rules/export` | viewer | Download `watchpost-rules.json`: `{format: "watchpost-rules", format_version: 1, watchpost_version, exported_at, note, rules: [{id, name, version, enabled, severity, params, techniques, description}]}`, sorted. Tuning only; detection logic is code and is not exported |
+| `POST /api/rules/import` | analyst | Body: an exported document (max 256 KB). `?dry_run=1` proposes nothing; `?label=` names the file in each reason. Applies nothing: each changed rule becomes a `rule_update` change request. Returns `{dry_run, label, summary, rules: [{id, outcome: proposed\|would_propose\|unchanged\|refused, change_id?, changes?, reason?}]}`. 400 on a bad format, 413 when too large, 429 when the backtest quota cannot cover every changed rule |
 | `POST /api/rules/{id}/proposals` | analyst | `{params?: {...partial}, enabled?: bool, reason}`; validated, then scored against scenarios |
 | `POST /api/rules/suggestions` | analyst | Generates proposals from false-positive feedback (deduplicated) |
 | `POST /api/rules/{id}/suppressions` | analyst | `{group_key, days (1–90), reason}`: proposes a tuning exception; nothing is suppressed until an admin approves it |

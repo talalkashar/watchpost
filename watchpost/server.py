@@ -12,8 +12,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import (__version__, assets, attack, auth, engine, entities, geo, hunt, improve, incidents, queries, report,
-               simulate, storyline, stream, triage)
+from . import (__version__, assets, attack, auth, ecs, engine, entities, geo, hunt, improve, incidents, portability,
+               queries, report, simulate, storyline, stream, triage)
 from . import backtest as backtest_mod
 from .ratelimit import TokenBucketLimiter
 from .config import Config
@@ -348,6 +348,14 @@ def event_detail(req, event_id):
     return queries.get_event(req.conn, int(event_id))
 
 
+@route("GET", r"/api/events/(\d+)/ecs")
+def event_ecs(req, event_id):
+    """The event as an ECS-shaped document (ecs.py). A field mapping for export, not how events are stored."""
+    event = queries.get_event(req.conn, int(event_id))
+    event.pop("alerts")
+    return ecs.to_ecs(event)
+
+
 @route("GET", "/api/alerts")
 def alerts(req):
     now = utcnow()
@@ -511,12 +519,15 @@ def rule_history(req, rule_id):
     return [row_to_dict(r, ["params"]) for r in rows]
 
 
-def _backtest_quota(req, limiter):
-    """Spend one backtest from the account's quota in `limiter` (None when rate limiting is off)."""
+def _backtest_quota(req, limiter, cost=1):
+    """Spend `cost` backtests, all or none, from the account's quota in `limiter` (None when rate limiting is off)."""
     if limiter is not None:
-        allowed, retry_after = limiter.allow(req.user["username"])
+        needed = f" ({cost} needed)" if cost > 1 else ""
+        if cost > limiter.burst:
+            raise ApiError(429, f"too many backtests{needed}: the quota holds at most {int(limiter.burst)}")
+        allowed, retry_after = limiter.allow(req.user["username"], cost)
         if not allowed:
-            raise ApiError(429, f"too many backtests; retry in {retry_after} s")
+            raise ApiError(429, f"too many backtests{needed}; retry in {retry_after} s")
 
 
 @route("POST", r"/api/rules/([a-z_]+)/proposals", role="analyst")
@@ -527,6 +538,36 @@ def rule_propose(req, rule_id):
     req.status = 201
     return improve.propose_change(req.conn, "rule_update", rule_id, payload, data.get("reason"),
                                   req.user["username"])
+
+
+@route("GET", "/api/rules/export")
+def rules_export(req):
+    """Every rule's tuning as a versioned JSON document. Detection logic is code and is not exported."""
+    body = json.dumps(portability.export_rules(req.conn), sort_keys=True, indent=2).encode()
+    return Download(body, "application/json", "watchpost-rules.json")
+
+
+IMPORT_LABEL_RE = re.compile(r"[^A-Za-z0-9 ._()\-]")
+
+
+@route("POST", "/api/rules/import", role="analyst")
+def rules_import(req):
+    """Turn an exported rules document into reviewed rule_update proposals. Applies nothing by itself.
+
+    ?dry_run=1 returns the per-rule outcomes and proposes nothing. ?label= names the file in each reason.
+    """
+    if len(req.body) > portability.MAX_IMPORT_BYTES:
+        raise ApiError(413, f"a rules import is at most {portability.MAX_IMPORT_BYTES} bytes")
+    dry_run = req.query.get("dry_run") == "1"
+    label = IMPORT_LABEL_RE.sub("", req.query.get("label", ""))[:100].strip() or "upload"
+    plan = portability.plan_import(req.conn, body_json(req))
+    if not dry_run:
+        # Each proposal runs a backtest: spend one per changed rule from the same bucket as hand-made
+        # proposals, all up front, so an import is refused whole rather than half proposed.
+        if portability.to_propose(plan):
+            _backtest_quota(req, req.app.change_backtest_limiter, portability.to_propose(plan))
+        portability.propose_import(req.conn, plan, label, req.user["username"])
+    return {"dry_run": dry_run, "label": label, "summary": portability.summary(plan), "rules": plan}
 
 
 BACKTEST_BURST, BACKTEST_PER_MINUTE = 6, 12

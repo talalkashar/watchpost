@@ -51,7 +51,7 @@ When this list runs low, add more real-SIEM gaps here and keep going. Same groun
       audit entries, session list with revoke. (PR #25; lockout already existed)
 - [x] 14. Explainable entity risk: per-user/host score from alert severities, asset weight, and recency with a
       visible breakdown; no ML, every point traceable to an alert. (PR #26: scoring existed since 3.0; the breakdown now shows asset raises)
-- [ ] 15. Detection content portability: export/import rules as versioned JSON, plus a documented field mapping
-      from Watchpost's event schema to ECS names.
+- [x] 15. Detection content portability: export/import rules as versioned JSON, plus a documented field mapping
+      from Watchpost's event schema to ECS names.  (PR #28: tuning only, imports become reviewed proposals)
 - [ ] 16. Sigma subset: import a documented subset of Sigma rules (stdlib parser for the YAML subset Sigma uses),
       refuse anything outside it with a clear reason, scenario required before enable.

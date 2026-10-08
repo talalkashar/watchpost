@@ -176,6 +176,7 @@ async function main() {
         ["resolve dialog", `alerts/${alertId}`, "button:has-text('Resolve…')"],
         ["event dialog", "events", "#view tr.clickable"],
         ["propose-change dialog", "rules", `#rule-${ruleId} button:has-text('Propose change…')`],
+        ["rules import dialog", "rules", "button:has-text('Import rules…')"],
         ["asset dialog", "admin", "button:has-text('Add asset')"],
         ["shortcut help", "alerts", "#kbd-help"],
       ];
@@ -313,6 +314,8 @@ async function main() {
       check(!/(^|\n)r\b/.test(await page.textContent("#modal")) && !(await page.textContent("#modal")).includes("resolve dialog"), "viewer: help lists no action keys");
       await page.keyboard.press("Escape");
       for (const v of ["dashboard", "alerts", "hunt", "coverage", "rules"]) { await show(page, v); await auditView(page, `viewer #${v}`, 390); }
+      check(await page.locator("a[href='/api/rules/export']").count() === 1 && await page.locator("button:has-text('Import rules…')").count() === 0,
+        "viewer: rules export link shown, no import button");
       check(!errors.length, `viewer: no JS errors${errors.length ? `: ${errors.join(" | ")}` : ""}`);
       await ctx.close();
     }

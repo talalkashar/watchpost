@@ -22,8 +22,10 @@ class TokenBucketLimiter:
         self._buckets = {}  # key -> [tokens, last_refill]
         self._lock = threading.Lock()
 
-    def allow(self, key):
-        """Spend one token for `key`. Returns (allowed, retry_after_seconds)."""
+    def allow(self, key, cost=1):
+        """Spend `cost` tokens for `key`, all or none. Returns (allowed, retry_after_seconds)."""
+        if not 1 <= cost <= self.burst:
+            raise ValueError("cost must be between 1 and the burst size")
         now = self.clock()
         with self._lock:
             bucket = self._buckets.get(key)
@@ -33,11 +35,11 @@ class TokenBucketLimiter:
                 bucket = self._buckets[key] = [self.burst, now]
             tokens = min(self.burst, bucket[0] + (now - bucket[1]) * self.rate)
             bucket[1] = now
-            if tokens >= 1:
-                bucket[0] = tokens - 1
+            if tokens >= cost:
+                bucket[0] = tokens - cost
                 return True, 0
             bucket[0] = tokens
-            return False, max(1, math.ceil(round((1 - tokens) / self.rate, 6)))
+            return False, max(1, math.ceil(round((cost - tokens) / self.rate, 6)))
 
     def _prune(self, now):
         """Drop buckets that have refilled completely; if none have, drop the oldest half."""
