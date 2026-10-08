@@ -452,16 +452,26 @@ def rule_history(req, rule_id):
     return [row_to_dict(r, ["params"]) for r in rows]
 
 
+def _backtest_quota(req):
+    """Spend one backtest from the account's quota: previews, rule proposals and approvals all replay events."""
+    limiter = req.app.backtest_limiter
+    if limiter is not None:
+        allowed, retry_after = limiter.allow(req.user["username"])
+        if not allowed:
+            raise ApiError(429, f"too many backtests; retry in {retry_after} s")
+
+
 @route("POST", r"/api/rules/([a-z_]+)/proposals", role="analyst")
 def rule_propose(req, rule_id):
     data = body_json(req)
+    _backtest_quota(req)  # the proposal's evidence carries a backtest
     payload = {k: data[k] for k in ("params", "enabled") if k in data}
     req.status = 201
     return improve.propose_change(req.conn, "rule_update", rule_id, payload, data.get("reason"),
                                   req.user["username"])
 
 
-BACKTEST_BURST, BACKTEST_PER_MINUTE = 6, 12
+BACKTEST_BURST, BACKTEST_PER_MINUTE = 20, 12
 
 
 @route("GET", r"/api/rules/([a-z_]+)/backtest", role="analyst")
@@ -478,11 +488,7 @@ def rule_backtest(req, rule_id):
     days = req.query.get("days", str(backtest_mod.DEFAULT_WINDOW_DAYS))
     if not days.isdigit() or not 1 <= int(days) <= backtest_mod.MAX_WINDOW_DAYS:
         raise ApiError(400, f"days must be an integer between 1 and {backtest_mod.MAX_WINDOW_DAYS}")
-    limiter = req.app.backtest_limiter
-    if limiter is not None:
-        allowed, retry_after = limiter.allow(req.user["username"])
-        if not allowed:
-            raise ApiError(429, f"too many backtests; retry in {retry_after} s")
+    _backtest_quota(req)
     return improve.preview_backtest(req.conn, rule_id, params, int(days))
 
 
@@ -541,6 +547,10 @@ def changes(req):
 @route("POST", r"/api/changes/(\d+)/review", role="admin")
 def change_review(req, change_id):
     data = body_json(req)
+    if data.get("decision") == "approve":
+        row = req.conn.execute("SELECT kind FROM change_requests WHERE id = ?", (int(change_id),)).fetchone()
+        if row is not None and row["kind"] == "rule_update":
+            _backtest_quota(req)  # approval recomputes the evidence, backtest included
     return improve.review_change(req.conn, int(change_id), data.get("decision"), req.user["username"],
                                  data.get("note", ""), data.get("evidence_digest"),
                                  data.get("acknowledge_detection_loss"))
