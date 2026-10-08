@@ -71,8 +71,9 @@ When this list runs low, add more real-SIEM gaps here and keep going. Same groun
 
 ## Wave 4 (added 2026-10-08, same ground rules; none of these are Juan's reserved items)
 
-- [ ] 22. Per-rule alert suppression windows: time-bounded windows with a reason and expiry, created through
+- [x] 22. Per-rule alert suppression windows: time-bounded windows with a reason and expiry, created through
       two-person review, visible with active/upcoming/expired state, and applied without hiding audit history.
+      (PR #37)
 - [ ] 23. Detection-as-code checks: a stdlib CLI that validates exported Watchpost rules and runs their labeled
       malicious and benign samples, with machine-readable output and a failing exit status for CI or pre-merge use.
 - [ ] 24. Case notes and timeline export: one chronological incident case record combining alert transitions,
