@@ -115,7 +115,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 ### Tests
 
 ```bash
-./run_tests.sh      # 405 unit/integration tests + a 25-step end-to-end smoke check
+./run_tests.sh      # 418 unit/integration tests + a 26-step end-to-end smoke check
 ```
 
 ### Replit
@@ -181,6 +181,7 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | `watchpost/ratelimit.py` | In-memory per-IP token buckets. `server.py` answers 429 with `Retry-After` when a bucket is empty. |
 | `watchpost/health.py` | Component checks, each with a status (`ok`/`degraded`/`failing`), a message, and recovery guidance. |
 | `watchpost/improve.py` | Scenario evaluation (TP/FN/FP, recall, precision), rule performance from analyst verdicts, heuristic suggestions, and two-person change review. |
+| `watchpost/backtest.py` | Replays a proposed rule change over stored events (kept / new / lost findings, open alerts it would lose) for the review evidence and the preview route. |
 | `watchpost/syslog_listener.py` | Optional UDP/TCP syslog receiver (RFC 3164, RFC 5424, RFC 6587 framing). Runs each line through the auth.log parser, falls back to a generic `syslog` event with severity from PRI, and batches into the engine every 2 seconds. Reports itself as the `syslog` health component. |
 | `scripts/shipper.py` | Stdlib-only file tailer for Linux boxes: batches new lines to `/api/ingest/upload` with an ingest token, with backoff, rotation handling, and a position file. |
 | `watchpost/simulate.py` | Labeled synthetic scenarios and a CLI that sends only to loopback unless you explicitly allow otherwise. |
@@ -266,6 +267,17 @@ If detection fails, the events stay stored, the ingest response says `"detection
 5. Nothing changes until an admin approves, and that admin can't be the one who proposed it. Approval bumps the rule version, writes `rule_history`, re-runs the evaluation, and records everything in the audit log. Security settings (lockout threshold and duration) follow the same process.
 
 This is **not machine learning**. It is transparent, deterministic tuning support.
+
+### Backtesting rule changes
+
+Before a rule change is approved, `watchpost/backtest.py` replays the rule over stored events twice, once with today's params and once with the proposed ones, and compares the findings by group key: **kept**, **new** (fires only with the change) and **lost** (fires only today). Each finding lists its entities (linked to their entity pages), first and last time, event count, and a few evidence event ids. It loads events and applies active tuning exceptions and history context through the same engine functions detection uses (`engine.scan_events`, `engine.rule_findings`), so it reports what detection would really do with those params.
+
+- **Window.** The last 7 days of stored event time, ending at the newest stored event. A preview can ask for 1 to 30 days. If the window holds more than 100,000 events, it starts later until it doesn't, and the result says `capped`. At least one rule window is always scanned. The result also gives the window, the number of events scanned, and how many of them are synthetic (`all`, `some` or `none`).
+- **Open alerts.** A lost finding is marked when it reproduces an alert that is still open or under investigation. Reproducing means it shares evidence events with that alert under the same group key. The proposal would never have raised that alert. Approving such a change needs the same explicit `acknowledge_detection_loss: true` as losing a labeled attack, and the audit entry names the alerts (`acknowledged_open_alerts_lost`).
+- **Review evidence.** Every `rule_update` proposal carries the backtest counts and up to 10 kept, new and lost findings in its evidence. The evidence is hashed into the `evidence_digest`, and approval must present the same digest. The digest covers the findings (kept, new, lost, and open alerts lost) but not the scan context (window, events scanned), so an unrelated event arriving between viewing and approving does not void the review; a change in what the proposal would keep, add, or lose does, and the reviewer has to look again.
+- **Preview.** `GET /api/rules/<id>/backtest?params=<JSON>&days=<1-30>` backtests a draft without proposing it. The params are validated exactly as a `rule_update` proposal is (a bad value is a 400). The route needs the analyst role, like proposing. The viewer gets 403 but can read the backtest in a change request's evidence. Previews are rate-limited per account (a burst of 6, then 12 a minute) on top of the general request limit. In the UI, **Propose change…** has a **Preview backtest** button, and **Rules & review** shows a "Backtest on stored events" block on each rule change.
+
+What it is not: it replays stored events only, so it can't predict traffic you haven't stored or behavior that hasn't happened yet. A finding that is "kept" can still change size within its group key, and an open alert raised under older params, or from events outside the window, isn't counted. On the demo, the stored events are synthetic, and the block says so.
 
 ### Tamper-evident audit log
 

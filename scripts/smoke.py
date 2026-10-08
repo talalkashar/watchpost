@@ -239,6 +239,23 @@ def main():
         status, res = admin.call("POST", f"/api/changes/{change['id']}/review", {"decision": "approve", "note": "smoke", "evidence_digest": change["evidence_digest"]})
         check(status == 200 and res["status"] == "approved", f"approve: {status} {res}")
 
+        step("rule backtest: the review evidence and an analyst preview replay stored events")
+        bt = change["evaluation"]["backtest"]
+        check("10.0.50.5" in [x["group_key"] for x in bt["lost"]] and bt["synthetic"] in ("all", "some"),
+              f"suggestion evidence lacks the backtest of the scanner exclusion: {bt['counts']}")
+        status, preview = analyst.call("GET", "/api/rules/web_scanner/backtest?params="
+                                       + quote(json.dumps({"threshold": 10000})))
+        check(status == 200 and preview["counts"]["lost"] >= 1 and not preview["new"],
+              f"preview: {status} {preview.get('counts') if isinstance(preview, dict) else preview}")
+        check(analyst.call("GET", "/api/rules/web_scanner/backtest?params=" + quote('{"threshold": "x"}'))[0] == 400,
+              "bad backtest params were not refused")
+        bt_viewer = Session(base)
+        bt_viewer.login("viewer", VIEWER_PW)
+        check(bt_viewer.call("GET", "/api/rules/web_scanner/backtest")[0] == 403, "viewer could run a backtest preview")
+        print(f"      raising web_scanner threshold to 10000: kept {preview['counts']['kept']}, lost"
+              f" {preview['counts']['lost']} ({preview['counts']['open_alerts_lost']} open alert(s)) over"
+              f" {preview['events_scanned']} stored events")
+
         step("noise lab scores every rule against benign look-alikes")
         status, lab = analyst.call("GET", "/api/noise-lab")
         rows = {r["rule_id"]: r for r in lab["rules"]}

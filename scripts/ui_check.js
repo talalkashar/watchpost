@@ -187,6 +187,32 @@ async function main() {
         await page.keyboard.press("Escape");
         check(await page.isHidden("#modal"), `${width}px Esc closes the ${label}`);
       }
+
+      // Backtest: preview a draft in the propose dialog, submit it, then find the same block in the review evidence.
+      await show(page, "rules");
+      await page.locator("#rule-brute_force_ip button:has-text('Propose change…')").click();
+      await page.waitForSelector("#modal[open]");
+      await page.fill("#modal textarea[name=params]", JSON.stringify({ threshold: 1000 }));
+      await page.click("#backtest-run");
+      await page.waitForFunction(() => /Backtest done/.test(document.querySelector("#backtest-status")?.textContent || ""), null, { timeout: 30000 });
+      const preview = await page.evaluate(() => ({ text: document.querySelector("#backtest-preview")?.textContent || "",
+        live: document.querySelector("#backtest-status")?.getAttribute("role") }));
+      check(preview.text.includes("Backtest on stored events") && /Lost [1-9]/.test(preview.text) && preview.text.includes("Warning: loses"),
+        `${width}px backtest preview shows lost findings and the open-alert warning`);
+      check(preview.live === "status", `${width}px backtest result is announced in a status live region`);
+      await page.locator("#backtest-preview summary").first().click();
+      const fits = await page.evaluate(() => { const r = document.querySelector("#modal").getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth; });
+      check(fits, `${width}px propose dialog with the backtest still fits the screen`);
+      await auditView(page, "backtest preview", width);
+      await page.fill("#modal textarea[name=reason]", `ui check backtest at ${width}px`);
+      await page.click("#modal button[type=submit]");
+      await page.waitForSelector("#modal", { state: "hidden" });
+      await show(page, "rules");
+      const block = page.locator("#view .backtest").first();
+      check(await block.count() === 1 && (await block.textContent()).includes("Warning: loses"), `${width}px review evidence shows the backtest block`);
+      await block.locator("summary").first().click();
+      check(await block.locator("details[open] a[href^='#entity/']").count() > 0, `${width}px expanded backtest list links to entity pages`);
+      await auditView(page, "rules with an expanded backtest", width);
       check(!errors.length, `${width}px no JS errors${errors.length ? `: ${errors.join(" | ")}` : ""}`);
       await ctx.close();
     }

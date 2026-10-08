@@ -427,3 +427,10 @@ legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
 .cov-empty { font-size: 11px; margin: 4px 0; }
 .cov-gaps { margin: 0; padding-left: 18px; } .cov-gaps li { margin-bottom: 6px; }
 .cov-gaps button { white-space: normal; text-align: left; }
+
+/* Rule backtest (review evidence and the proposal preview) */
+.backtest { min-width: 16em; }
+.backtest p { margin: 4px 0; }
+.backtest summary { cursor: pointer; padding: 10px 0; }
+.bt-list { margin: 0 0 8px; padding-left: 18px; } .bt-list li { margin-bottom: 6px; overflow-wrap: anywhere; }
+.bt-warn { color: var(--bad); }
