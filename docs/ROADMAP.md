@@ -35,7 +35,7 @@ every feature verifiable, every number reproducible, nothing overclaimed.
       README from a reproducible script. (PR #16: ingest 2.1k → 5.3k events/s at 100k)
 - [x] 7. Owner-level review gaps: asset inventory edits through two-person review (Juan's PR #9 left this to the
       owner; coordinate on the PR, credit him). (PR #17)
-- [ ] 8. UI pass: keyboard triage, mobile width, accessibility labels.
+- [x] 8. UI pass: keyboard triage, mobile width, accessibility labels. (PR #19)
 - [ ] 9. Refresh `LINKEDIN_3.md` draft and README numbers from the latest test run.
 
 ## Next wave (added 2026-10-07: owner: "the siem can be endlessly better and closer to a real siem")

@@ -13,10 +13,12 @@
   <script src="/app.js" defer></script>
 </head>
 <body>
+  <a class="skip-link" href="#main">Skip to content</a>
   <aside class="rail" id="rail" hidden>
     <div class="brand">
       <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="5.5"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/></svg>
       <div><b>WATCHPOST</b><small>SOC console</small></div>
+      <button type="button" id="nav-toggle" class="ghost nav-toggle" aria-expanded="false" aria-controls="nav">Menu</button>
     </div>
     <nav id="nav" aria-label="Views">
       <button data-view="dashboard"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 2h5v6H2zM9 2h5v3H9zM9 7h5v7H9zM2 10h5v4H2z"/></svg>Dashboard</button>
@@ -35,13 +37,14 @@
     <div class="rail-foot">
       <div class="who" id="who" hidden>
         <span id="who-name"></span>
+        <button type="button" id="kbd-help" class="ghost" aria-keyshortcuts="?">Keyboard shortcuts <kbd>?</kbd></button>
         <button id="logout" class="ghost">Sign out</button>
       </div>
       <p class="honesty">Portfolio lab. Demo data and geo positions are synthetic and labeled.</p>
     </div>
   </aside>
 
-  <header class="strip" id="strip" hidden>
+  <header class="strip" id="strip" aria-label="Status" hidden>
     <div class="tile t-epm"><span class="tl">Events / min</span><span class="tv" id="k-epm">0</span><span class="spark" id="k-epm-spark"></span></div>
     <div class="tile"><span class="tl">Open alerts</span><span class="tv" id="k-open">—</span></div>
     <div class="tile t-crit"><span class="tl">Critical</span><span class="tv" id="k-crit">—</span></div>
@@ -58,9 +61,9 @@
     </div>
   </header>
 
-  <div id="banner" class="banner" hidden></div>
+  <div id="banner" class="banner" role="status" hidden></div>
 
-  <main id="main">
+  <main id="main" tabindex="-1">
     <section id="login-view" class="login" hidden>
       <div class="login-brand">
         <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="5.5"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/></svg>
@@ -70,7 +73,7 @@
         <label>Username <input name="username" autocomplete="username" required maxlength="64"></label>
         <label>Password <input name="password" type="password" autocomplete="current-password" required maxlength="256"></label>
         <button type="submit">Sign in</button>
-        <p class="error" id="login-error"></p>
+        <p class="error" id="login-error" role="alert"></p>
       </form>
       <p class="muted">Initial passwords come from <code>SIEM_ADMIN_PASSWORD</code> / <code>SIEM_ANALYST_PASSWORD</code>,
         or were generated into <code>data/initial_credentials.txt</code> on first start.</p>
@@ -79,5 +82,9 @@
   </main>
 
   <dialog id="modal"><div id="modal-body"></div></dialog>
+  <div class="toasts" id="toasts">
+    <div id="toast-status" role="status"></div>
+    <div id="toast-alert" role="alert"></div>
+  </div>
 </body>
 </html>
