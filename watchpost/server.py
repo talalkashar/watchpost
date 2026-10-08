@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (__version__, assets, attack, auth, ecs, engine, entities, geo, hunt, improve, incidents, portability,
-               queries, report, sigma, simulate, sources, storyline, stream, triage)
+               queries, report, search_rules, sigma, simulate, sources, storyline, stream, triage)
 from . import backtest as backtest_mod
 from .ratelimit import TokenBucketLimiter
 from .config import Config
@@ -368,6 +368,55 @@ def hunt_delete(req, search_id):
     return hunt.delete_saved(req.conn, int(search_id), req.user["username"], auth.has_role(req.user, "admin"))
 
 
+PROMOTE_MAX_BODY = 64 * 1024  # the definition plus its labeled sample
+
+
+@route("POST", r"/api/hunt/saved/(\d+)/promote", role="analyst")
+def hunt_promote(req, search_id):
+    """Promote a saved search to a threshold detection rule. Applies nothing by itself.
+
+    Body: {group_by, threshold, window_minutes, severity, techniques (optional), name (optional, defaults to the
+    saved search's name), sample (optional), reason (optional)}. The saved search's query is copied into the
+    request, so later edits or deletion of the saved search do not change it. ?dry_run=1 compiles it and
+    previews its findings on stored events; otherwise it becomes a `search_add` change request, and approval
+    adds the rule disabled. Either way it spends one backtest from the rule-proposal bucket.
+    """
+    if len(req.body) > PROMOTE_MAX_BODY:
+        raise ApiError(413, f"a promotion is at most {PROMOTE_MAX_BODY} bytes")
+    data = body_json(req)
+    if not set(data) <= search_rules.DEFINITION_KEYS | {"sample", "reason"}:
+        raise ApiError(400, "a promotion is {group_by, threshold, window_minutes, severity, techniques (optional), "
+                            "name (optional), sample (optional), reason (optional)}")
+    saved = req.conn.execute("SELECT id, name, query FROM saved_searches WHERE id = ?", (int(search_id),)).fetchone()
+    if saved is None:
+        raise ApiError(404, "saved search not found")
+    dry_run = req.query.get("dry_run") == "1"
+    _backtest_quota(req, req.app.change_backtest_limiter)  # the preview, and the proposal's evidence, backtest
+    definition = {k: data[k] for k in search_rules.DEFINITION_KEYS if k in data}
+    try:
+        compiled = search_rules.compile_rule(saved["name"], saved["query"], definition)
+        sample = search_rules.validate_sample(data["sample"]) if data.get("sample") is not None else None
+    except search_rules.SearchRuleError as exc:
+        if not dry_run:
+            raise ApiError(400, f"refused: {exc}")
+        return {"dry_run": True, "ok": False, "refused": str(exc)}
+    if dry_run:
+        exists = req.conn.execute("SELECT 1 FROM rules WHERE id = ?", (compiled["rule_id"],)).fetchone()
+        return {"dry_run": True, "ok": not exists,
+                "refused": f"rule {compiled['rule_id']!r} already exists" if exists else None,
+                "compiled": {k: compiled[k] for k in ("rule_id", "title", "severity", "techniques", "conditions",
+                                                      "query", "params")},
+                "sample": search_rules.sample_result(compiled["params"], sample),
+                "backtest": search_rules.preview(req.conn, compiled["params"])}
+    payload = {"saved_search_id": saved["id"], "query": compiled["query"],
+               "definition": {**definition, "name": compiled["title"]},
+               **({"sample": sample} if sample is not None else {})}
+    req.status = 201
+    return improve.propose_change(req.conn, "search_add", compiled["rule_id"], payload,
+                                  data.get("reason") or f"promote saved search {saved['name']}"[:2000],
+                                  req.user["username"])
+
+
 @route("GET", r"/api/events/(\d+)")
 def event_detail(req, event_id):
     return queries.get_event(req.conn, int(event_id))
@@ -535,8 +584,20 @@ def rules(req):
     latest = improve.list_evaluations(req.conn, limit=1)
     evaluation = latest[0]["results"]["rules"] if latest else {}
     return [{**r, "performance": perf.get(r["id"]), "evaluation": evaluation.get(r["id"]),
-             **({"sigma": _sigma_detail(req.conn, r)} if sigma.is_sigma(r["id"]) else {})}
+             **({"sigma": _sigma_detail(req.conn, r)} if sigma.is_sigma(r["id"]) else {}),
+             **({"search": _search_detail(req.conn, r)} if search_rules.is_search(r["id"]) else {})}
             for r in engine.load_rules(req.conn, enabled_only=False)]
+
+
+def _search_detail(conn, rule):
+    """A promoted saved search's query (read-only), where it came from, and its sample."""
+    rec = search_rules.stored(conn, rule["id"])
+    if rec is None:
+        return None
+    return {**{k: rec[k] for k in ("query", "saved_search_id", "proposed_by", "approved_by", "change_request_id",
+                                   "created_at", "sample")},
+            "conditions": search_rules.describe(rule["params"]),
+            "sample_result": search_rules.sample_result(rule["params"], rec["sample"])}
 
 
 def _sigma_detail(conn, rule):
@@ -656,6 +717,15 @@ def sigma_sample_propose(req, rule_id):
                                   data.get("reason"), req.user["username"])
 
 
+@route("POST", r"/api/rules/([a-z_]+)/search-sample", role="analyst")
+def search_sample_propose(req, rule_id):
+    """Attach or replace a promoted search rule's labeled sample; a change request like any other."""
+    data = body_json(req)
+    req.status = 201
+    return improve.propose_change(req.conn, "search_sample", rule_id, {"sample": data.get("sample")},
+                                  data.get("reason"), req.user["username"])
+
+
 BACKTEST_BURST, BACKTEST_PER_MINUTE = 6, 12
 CHANGE_BACKTEST_BURST = 20  # rule proposals and approvals: room for a review session
 
@@ -735,7 +805,7 @@ def change_review(req, change_id):
     data = body_json(req)
     if data.get("decision") == "approve":
         row = req.conn.execute("SELECT kind FROM change_requests WHERE id = ?", (int(change_id),)).fetchone()
-        if row is not None and row["kind"] in ("rule_update", "sigma_add"):
+        if row is not None and row["kind"] in ("rule_update", "sigma_add", "search_add"):
             _backtest_quota(req, req.app.change_backtest_limiter)  # approval recomputes the evidence, backtest included
     return improve.review_change(req.conn, int(change_id), data.get("decision"), req.user["username"],
                                  data.get("note", ""), data.get("evidence_digest"),

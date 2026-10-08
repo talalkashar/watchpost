@@ -141,6 +141,11 @@ async function main() {
     const alertId = await admin.page.evaluate(async () => (await (await fetch("/api/alerts?status=open")).json())[0].id);
     const incidentId = await admin.page.evaluate(async () => (await (await fetch("/api/incidents")).json())[0]?.id);
     const ruleId = await admin.page.evaluate(async () => (await (await fetch("/api/rules")).json())[0].id);
+    // A saved search, so the hunt page shows "Promote to detection…" (state.csrf is the app's own token).
+    const savedStatus = await admin.page.evaluate(async () => (await fetch("/api/hunt/saved", { method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": state.csrf },
+      body: JSON.stringify({ name: "UI check failed logins", query: "event_type:auth_failure" }) })).status);
+    check(savedStatus === 201, `saved a search for the promote dialog (${savedStatus})`);
     await admin.ctx.close();
 
     const views = ["dashboard", "incidents", "alerts", `alerts/${alertId}`, incidentId ? `incidents/${incidentId}` : null, "events",
@@ -187,6 +192,7 @@ async function main() {
         ["propose-change dialog", "rules", `#rule-${ruleId} button:has-text('Propose change…')`],
         ["rules import dialog", "rules", "button:has-text('Import rules…')"],
         ["sigma import dialog", "rules", "button:has-text('Import Sigma rule…')"],
+        ["promote dialog", "hunt", "button:has-text('Promote to detection…')"],
         ["asset dialog", "admin", "button:has-text('Add asset')"],
         ["shortcut help", "alerts", "#kbd-help"],
       ];
@@ -327,6 +333,8 @@ async function main() {
       check(await page.locator("a[href='/api/rules/export']").count() === 1 && await page.locator("button:has-text('Import rules…')").count() === 0
         && await page.locator("button:has-text('Import Sigma rule…')").count() === 0,
         "viewer: rules export link shown, no import buttons");
+      await show(page, "hunt");
+      check(await page.locator("button:has-text('Promote to detection…')").count() === 0, "viewer: no promote button on saved searches");
       check(!errors.length, `viewer: no JS errors${errors.length ? `: ${errors.join(" | ")}` : ""}`);
       await ctx.close();
     }
