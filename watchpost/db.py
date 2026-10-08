@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # prev_hash of the first audit entry. Every later entry links to the hash of the one before it.
 GENESIS_HASH = "0" * 64
@@ -302,6 +302,20 @@ CREATE TABLE IF NOT EXISTS sigma_rules (
     sigma_id TEXT,
     sample TEXT,
     imported_by TEXT NOT NULL,
+    approved_by TEXT NOT NULL,
+    change_request_id INTEGER,
+    created_at TEXT NOT NULL
+);
+
+-- 11.0: saved searches promoted to detections. The rule is a row in `rules` (id search_<slug>, params the compiled
+-- query, group-by, threshold and window); this keeps the query it was promoted with, the saved search it came
+-- from (which may since be deleted), and the labeled sample that must pass before the rule can be enabled.
+CREATE TABLE IF NOT EXISTS search_rules (
+    rule_id TEXT PRIMARY KEY,
+    query TEXT NOT NULL,
+    saved_search_id INTEGER,
+    sample TEXT,
+    proposed_by TEXT NOT NULL,
     approved_by TEXT NOT NULL,
     change_request_id INTEGER,
     created_at TEXT NOT NULL
