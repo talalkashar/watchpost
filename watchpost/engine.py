@@ -7,6 +7,7 @@ from datetime import timedelta
 
 from . import assets as assets_mod
 from . import correlate as correlate_mod
+from . import grouping
 from . import rules as rules_mod
 from . import sources as sources_mod
 from . import stream
@@ -48,7 +49,7 @@ def seed_rules(conn, actor="system"):
 
 def load_rules(conn, enabled_only=True):
     sql = "SELECT * FROM rules" + (" WHERE enabled = 1" if enabled_only else "") + " ORDER BY id"
-    rules = [row_to_dict(r, ["params", "techniques"]) for r in conn.execute(sql)]
+    rules = [row_to_dict(r, ["params", "techniques", "grouping"]) for r in conn.execute(sql)]
     for rule in rules:
         rule["techniques"] = rule.get("techniques") or []
     return rules
@@ -245,7 +246,8 @@ def rule_findings(rule, events, history_events, scan_start, suppressed, suppress
         rule_events = [e for e in history_events
                        if e["event_type"] in wanted and e["ts"] >= since] + events
     findings, skipped = [], 0
-    for finding in rules_mod.rule_function(rule["id"])(rule_events, params):
+    raw_findings = rules_mod.rule_function(rule["id"])(rule_events, params)
+    for finding in grouping.apply(raw_findings, rule_events, rule.get("grouping") or []):
         if scan_start and finding["last_seen"] < scan_start:
             continue  # built only from history context; outside this scan
         if skips and (rule["id"], finding["group_key"]) in suppressed:
@@ -465,17 +467,22 @@ def apply_rule_change(conn, rule_id, payload, changed_by, approved_by, change_re
     params = json.loads(rule["params"])
     if "params" in payload:
         params = rules_mod.validate_params(rule_id, {**params, **payload["params"]})
+    grouping_fields = json.loads(rule["grouping"] or "[]")
+    if "grouping" in payload:
+        grouping_fields = grouping.validate(payload["grouping"])
     enabled = int(payload.get("enabled", rule["enabled"]))
     version = rule["version"] + 1
     now = now_iso()
     conn.execute(
-        "UPDATE rules SET params = ?, enabled = ?, version = ?, updated_at = ?, updated_by = ? WHERE id = ?",
-        (json.dumps(params), enabled, version, now, approved_by, rule_id),
+        "UPDATE rules SET params = ?, grouping = ?, enabled = ?, version = ?, updated_at = ?, updated_by = ?"
+        " WHERE id = ?",
+        (json.dumps(params), json.dumps(grouping_fields), enabled, version, now, approved_by, rule_id),
     )
     conn.execute(
-        "INSERT INTO rule_history(rule_id, version, enabled, params, changed_at, changed_by, approved_by,"
-        " change_request_id, note) VALUES (?,?,?,?,?,?,?,?,?)",
-        (rule_id, version, enabled, json.dumps(params), now, changed_by, approved_by, change_request_id, note),
+        "INSERT INTO rule_history(rule_id, version, enabled, params, grouping, changed_at, changed_by, approved_by,"
+        " change_request_id, note) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (rule_id, version, enabled, json.dumps(params), json.dumps(grouping_fields), now, changed_by, approved_by,
+         change_request_id, note),
     )
     audit(conn, approved_by, "rule_changed", rule_id, {"version": version, "change_request": change_request_id})
     return version

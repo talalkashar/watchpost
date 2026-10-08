@@ -707,6 +707,11 @@ What these numbers do and do not say:
 
 **Real, working, and tested:** everything in the architecture section. That includes the ingestion API and file upload, normalization, persistence, search, the fifteen built-in rules, the noise lab, tuning exceptions, entity risk scores, ATT&CK mapping and coverage, incident correlation, Markdown and PDF reports, the SSE dashboard with saved filter/layout views, the syslog listener and shipper, alerts with evidence and timelines, notes, status and verdicts, metrics, health checks and recovery, authentication, roles (including the read-only viewer), per-IP rate limiting, CSRF protection, API tokens, redaction, feedback-driven suggestions, two-person review (including asset inventory edits), evaluation history, hunting and saved searches, keyboard triage, and the hash-chained audit log.
 
+Alert grouping and incident correlation are deliberately separate. A reviewed per-rule grouping override changes
+the stable key used to deduplicate that rule's alerts (up to three allowlisted event fields) while retaining the
+finding's evidence event IDs. Correlation still combines distinct alerts into incidents using its own entities and
+time window; changing an alert grouping key does not change that incident logic.
+
 **Synthetic:** all bundled data. The demo dataset and simulator scenarios (`watchpost/simulate.py`) and the files in `samples/` are invented. External IPs come from the RFC 5737 documentation ranges. Synthetic events are stored with `synthetic=1`, sourced `demo:*`, and tagged in the UI. The evaluation scores (recall and precision) measure the rules against these hand-labeled scenarios only. They say nothing about real-world accuracy.
 
 **Limitations:**

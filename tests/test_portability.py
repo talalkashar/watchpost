@@ -40,7 +40,7 @@ class ExportImportTests(ServerTestCase):
         self.assertEqual(ids, sorted(ids))
         self.assertIn(RULE, ids)
         rule = doc["rules"][ids.index(RULE)]
-        self.assertEqual(set(rule), {"id", "name", "version", "enabled", "severity", "params", "techniques",
+        self.assertEqual(set(rule), {"id", "name", "version", "enabled", "severity", "params", "grouping", "techniques",
                                      "description"})
         self.assertEqual(rule["techniques"], ["T1110.001"])
         self.assertEqual(rule["params"]["threshold"], 10)

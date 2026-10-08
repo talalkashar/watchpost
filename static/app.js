@@ -830,6 +830,8 @@ async function rules(focus) {
         el("h2", {}, r.name), el("span", {}, sev(r.severity), " ", r.enabled ? pill("enabled", "st-ok") : pill("disabled", "st-rejected"))),
       el("p", { class: "muted" }, r.description),
       el("p", {}, el("strong", {}, "MITRE ATT&CK: "), techniques(r.techniques)),
+      el("p", {}, el("strong", {}, "Alert grouping: "), r.grouping.length ? r.grouping.join(" + ") : "rule default",
+        el("span", { class: "muted" }, " · alert deduplication only; incident correlation is separate")),
       el("div", { class: "grid" },
         r.sigma ? sigmaDetail(r) : r.search ? searchDetail(r) : el("div", {}, el("h3", {}, `Parameters (v${r.version})`), el("pre", {}, JSON.stringify(r.params, null, 2))),
         el("div", {},
@@ -1029,6 +1031,7 @@ function proposeDialog(rule) {
   const form = el("form", {},
     el("h2", {}, `Propose change: ${rule.id}`),
     el("label", {}, "Parameter changes (JSON; only the keys you want to change)", el("textarea", { name: "params", class: "mono" }, JSON.stringify(rule.params, null, 2))),
+    el("label", {}, "Alert grouping fields (comma-separated; blank uses the rule default)", el("input", { name: "grouping", value: rule.grouping.join(", "), maxlength: 100 })),
     el("label", {}, "Enabled", el("select", { name: "enabled" }, el("option", { value: "true", selected: !!rule.enabled }, "enabled"), el("option", { value: "false", selected: !rule.enabled }, "disabled"))),
     el("label", {}, "Reason (required)", el("textarea", { name: "reason", required: true, minlength: 5, maxlength: 2000 })),
     el("p", { class: "error", role: "alert", id: "propose-error" }),
@@ -1045,6 +1048,8 @@ function proposeDialog(rule) {
       const changed = changedParams(f, rule);
       if (Object.keys(changed).length) body.params = changed;
       if ((f.get("enabled") === "true") !== !!rule.enabled) body.enabled = f.get("enabled") === "true";
+      const grouping = f.get("grouping").split(",").map((x) => x.trim()).filter(Boolean);
+      if (JSON.stringify(grouping) !== JSON.stringify(rule.grouping)) body.grouping = grouping;
       await api(`/api/rules/${rule.id}/proposals`, { method: "POST", body });
       $("#modal").close();
       toast("Proposal submitted for review");

@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # prev_hash of the first audit entry. Every later entry links to the hash of the one before it.
 GENESIS_HASH = "0" * 64
@@ -411,6 +411,9 @@ ADDED_COLUMNS = [
     ("api_tokens", "role", "TEXT NOT NULL DEFAULT 'analyst'"),
     ("api_tokens", "capabilities", "TEXT NOT NULL DEFAULT '[\"ingest\"]'"),
     ("api_tokens", "expires_at", "TEXT"),
+    # 15.0: reviewed fields that replace a rule's built-in alert deduplication key.
+    ("rules", "grouping", "TEXT NOT NULL DEFAULT '[]'"),
+    ("rule_history", "grouping", "TEXT NOT NULL DEFAULT '[]'"),
 ]
 
 

@@ -70,7 +70,7 @@ class DashboardViewApiTests(ServerTestCase):
         from watchpost.server import App
         App(self.config)
         with sqlite3.connect(self.db_path) as db:
-            self.assertEqual(db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0], "14")
+            self.assertEqual(db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0], "15")
             self.assertEqual(db.execute("SELECT COUNT(*) FROM dashboard_views").fetchone()[0], 0)
 
 
