@@ -80,8 +80,8 @@ When this list runs low, add more real-SIEM gaps here and keep going. Same groun
 - [x] 24. Case notes and timeline export: one chronological incident case record combining alert transitions,
       assignments, analyst notes, and evidence, downloadable as JSON and Markdown with viewer masking preserved.
       (PR #41)
-- [ ] 25. Role-scoped API tokens with expiry: hashed bearer tokens limited to explicit API capabilities, optional
-      expiry, revocation and last-used metadata; viewer-equivalent tokens remain read-only.
+- [x] 25. Role-scoped API tokens with expiry: hashed bearer tokens limited to explicit API capabilities, optional
+      expiry, revocation and last-used metadata; viewer-equivalent tokens remain read-only. (PR #43)
 - [ ] 26. Saved dashboard views: analysts can save and share dashboard filter/layout presets, viewers can apply
       them read-only, and changes are audited with ownership and visibility enforced server-side.
 - [ ] 27. Per-rule alert grouping keys: reviewed grouping configuration with a preview of deduplication effects,
