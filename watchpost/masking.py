@@ -4,7 +4,8 @@ Applied in one place, the server's response path (server.Handler), and only when
 setting `viewer_masking` is 1 and the signed-in account is a viewer. Analyst and admin responses never pass
 through here.
 
-- Usernames are matched by exact known value (every distinct events.user plus every account name, bounded),
+- Usernames are matched by exact known value (every distinct events.user plus every account name), up to
+  CANDIDATE_LIMIT distinct names; past that a viewer is refused (Unavailable) rather than shown raw names. Matched
   case-insensitively, in structured fields and inside free text alike. Not by guessing what a name looks like.
   An account named after a role ("analyst") is masked in identity fields (USER_FIELDS) but not as a word in
   text, where it is the product's own vocabulary ("Analyst notes"). An event username is masked everywhere.
@@ -35,13 +36,18 @@ DIGEST_CHARS = 8
 INTERNAL_NETS = [ipaddress.ip_network(n) for n in (
     "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16",
     "::1/128", "fe80::/10", "fc00::/7")]
-# Fields that always hold an account or event username, masked even past CANDIDATE_LIMIT.
+# Fields that always hold an account or event username, masked whatever their value.
 USER_FIELDS = frozenset(("user", "username", "assignee", "author", "actor", "proposed_by", "reviewed_by",
                          "approved_by", "updated_by", "changed_by", "submitted_by", "created_by"))
 IP_RE = re.compile(
     r"(?<![\w:.])(?:[0-9A-Fa-f]{0,4}:){2,7}(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9A-Fa-f]{1,4})?(?![\w:])"
     r"|(?<![\w.])\d{1,3}(?:\.\d{1,3}){3}(?!\w|\.\d)")
 PSEUDONYM_RE = re.compile(r"\b(?:user|internal)-[0-9a-f]{%d}\b" % DIGEST_CHARS)
+
+
+class Unavailable(Exception):
+    """More distinct usernames than masking can match: refuse the viewer rather than leave names in text."""
+    status = 503
 
 
 def is_internal(ip):
@@ -69,7 +75,9 @@ def for_user(conn, user):
     if not user or user.get("role") != "viewer" or not enabled(conn):
         return None
     names = {r[0] for r in conn.execute("SELECT DISTINCT lower(user) FROM events WHERE user IS NOT NULL"
-                                        " AND user != '' LIMIT ?", (CANDIDATE_LIMIT,))}
+                                        " AND user != '' LIMIT ?", (CANDIDATE_LIMIT + 1,))}
+    if len(names) > CANDIDATE_LIMIT:  # fail closed: names past the bound would go out unmasked in free text
+        raise Unavailable(f"the masked view is unavailable: more than {CANDIDATE_LIMIT:,} distinct usernames")
     names |= {r[0].lower() for r in conn.execute("SELECT username FROM users")} - set(ROLES)
     return Masker(key(conn), names, self_name=user["username"])
 
