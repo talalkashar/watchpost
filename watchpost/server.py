@@ -533,8 +533,9 @@ def evaluation_run(req):
 
 @route("GET", "/api/assets")
 def asset_list(req):
+    pending = [c for c in improve.list_changes(req.conn, "pending") if c["kind"] in improve.ASSET_KINDS]
     return {"assets": assets.list_assets(req.conn), "criticalities": list(assets.CRITICALITIES),
-            "kinds": list(assets.KINDS), "data_tags": assets.DATA_TAGS}
+            "kinds": list(assets.KINDS), "data_tags": assets.DATA_TAGS, "pending": pending}
 
 
 def _asset_saved(req, asset):
@@ -545,24 +546,63 @@ def _asset_saved(req, asset):
     return {"asset": asset, "alerts_rescored": changed}
 
 
+def _review_required(req, exc, proposal_route):
+    """409 for a direct edit that could lower alert severity, pointing at the route that proposes it."""
+    req.status = 409
+    return {"error": f"{exc}; propose it with POST {proposal_route}", "review_required": True,
+            "reasons": exc.reasons, "proposal_route": proposal_route}
+
+
+# Edits that can only keep or raise alert severity apply here at once; the rest are refused with 409 and go
+# through /proposals and a second admin's review (assets.review_reasons decides which is which).
 @route("POST", "/api/assets", role="admin")
 def asset_create(req):
+    try:
+        asset = assets.save_asset(req.conn, body_json(req), req.user["username"], gated=True)
+    except assets.ReviewRequired as exc:
+        return _review_required(req, exc, "/api/assets/proposals")
     req.status = 201
-    return _asset_saved(req, assets.save_asset(req.conn, body_json(req), req.user["username"]))
+    return _asset_saved(req, asset)
 
 
 @route("POST", r"/api/assets/(\d+)", role="admin")
 def asset_update(req, asset_id):
-    return _asset_saved(req, assets.save_asset(req.conn, body_json(req), req.user["username"], int(asset_id)))
+    try:
+        asset = assets.save_asset(req.conn, body_json(req), req.user["username"], int(asset_id), gated=True)
+    except assets.ReviewRequired as exc:
+        return _review_required(req, exc, f"/api/assets/{asset_id}/proposals")
+    return _asset_saved(req, asset)
 
 
 @route("POST", r"/api/assets/(\d+)/delete", role="admin")
 def asset_delete(req, asset_id):
-    assets.delete_asset(req.conn, int(asset_id), req.user["username"])
-    changed = assets.rescore_open_alerts(req.conn)
-    if changed:
-        engine.correlate_alerts(req.conn)
-    return {"ok": True, "alerts_rescored": changed}
+    """A delete always needs a second admin. Kept as a route so older clients get a pointer, not a 404."""
+    assets.get_asset(req.conn, int(asset_id))  # an unknown asset is still a 404
+    return _review_required(req, assets.ReviewRequired(assets.review_reasons(None, None)),
+                            f"/api/assets/{asset_id}/proposals")
+
+
+@route("POST", "/api/assets/proposals", role="admin")
+def asset_propose_add(req):
+    data = body_json(req)
+    asset = assets.validate({k: v for k, v in data.items() if k != "reason"})  # stored as validated, nothing else
+    req.status = 201
+    return improve.propose_change(req.conn, "asset_add", asset["name"], asset, data.get("reason"),
+                                  req.user["username"])
+
+
+@route("POST", r"/api/assets/(\d+)/proposals", role="admin")
+def asset_propose(req, asset_id):
+    """Propose an edit (the full asset, as for a direct edit) or, with {"delete": true}, a delete."""
+    data = body_json(req)
+    if data.get("delete") is True:
+        assets.get_asset(req.conn, int(asset_id))
+        kind, payload = "asset_delete", {}
+    else:
+        kind, payload = "asset_update", assets.edit_payload(req.conn, int(asset_id),
+                                                            {k: v for k, v in data.items() if k != "reason"})
+    req.status = 201
+    return improve.propose_change(req.conn, kind, asset_id, payload, data.get("reason"), req.user["username"])
 
 
 # Administration ------------------------------------------------------------------------

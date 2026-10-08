@@ -677,9 +677,9 @@ async function rules(focus) {
     ? el("div", {}, el("strong", {}, `Loses detection of labeled attack(s): ${detectionLoss(c).join(", ")}. `), "Approving requires an explicit acknowledgement.") : null);
 
   const changeRows = changes.slice(0, 30).map((c) => ({ cells: [
-    `#${c.id}`, status(c.status), el("code", {}, `${{ rule_update: "rule", suppression_add: "exception" }[c.kind] || "setting"}:${c.target}`),
-    el("pre", {}, JSON.stringify(c.payload)), c.reason,
-    c.evaluation ? el("span", {}, `FP ${c.evaluation.before.fp}→${c.evaluation.after.fp}, TP ${c.evaluation.before.tp}→${c.evaluation.after.tp}, missed ${c.evaluation.after.missed.join(", ") || "none"}`, lostNote(c), liveImpact(c.evaluation.live_impact),
+    `#${c.id}`, status(c.status), el("code", {}, isAssetChange(c) ? `asset:${c.evaluation?.asset ?? c.target}` : `${{ rule_update: "rule", suppression_add: "exception" }[c.kind] || "setting"}:${c.target}`),
+    isAssetChange(c) ? assetDiff(c) : el("pre", {}, JSON.stringify(c.payload)), c.reason,
+    isAssetChange(c) ? assetImpact(c) : c.evaluation ? el("span", {}, `FP ${c.evaluation.before.fp}→${c.evaluation.after.fp}, TP ${c.evaluation.before.tp}→${c.evaluation.after.tp}, missed ${c.evaluation.after.missed.join(", ") || "none"}`, lostNote(c), liveImpact(c.evaluation.live_impact),
       (c.evaluation.ignore_additions || []).map((x) => el("div", {}, el("strong", {}, `${x.change === "removed" ? "Removes" : "Adds"} ${x.value} ${x.change === "removed" ? "from" : "to"} ${x.param} (permanent, no expiry).`), liveImpact(x.live_impact)))) : "—",
     c.proposed_by, c.reviewed_by ? `${c.reviewed_by}${c.review_note ? `: ${c.review_note}` : ""}` : "—",
     c.status === "pending" && can("admin") ? el("span", { class: "row" },
@@ -691,7 +691,7 @@ async function rules(focus) {
     el("h1", {}, "Detection rules"),
     el("div", { class: "card" },
       el("h2", {}, "How rules change"),
-      el("p", {}, "Rules are fixed thresholds you can read and test. No machine learning. Changes to rules or security settings are proposals until a ",
+      el("p", {}, "Rules are fixed thresholds you can read and test. No machine learning. Changes to rules or security settings, and asset inventory edits that could lower alert severity, are proposals until a ",
         el("strong", {}, "different"), " admin approves them. Each proposal is scored against the labeled synthetic scenarios before review. Suggestions come from analyst verdicts: when at least two false positives share a cause, such as one IP or one account, Watchpost proposes an exclusion or a new threshold. It never applies the change itself."),
       el("div", { class: "row" },
         can("analyst") ? el("button", { onclick: () => guarded(async () => { const r = await api("/api/rules/suggestions", { method: "POST" }); toast(r.message); rules(); }) }, "Suggest improvements from feedback") : null,
@@ -719,6 +719,45 @@ async function rules(focus) {
   );
   const card = focus && document.getElementById(`rule-${focus}`);  // linked from the Coverage view
   if (card) { card.scrollIntoView({ block: "start" }); card.focus({ preventScroll: true }); }
+}
+
+// Asset inventory change requests (asset_add / asset_update / asset_delete). Evidence: assets.change_evidence.
+const isAssetChange = (c) => c.kind.startsWith("asset_");
+const fmtField = (v) => (Array.isArray(v) ? v.join(", ") || "none" : v ?? "—");
+
+// One line for the inventory card, e.g. "lower db01 to low".
+function assetChangeText(c) {
+  const ev = c.evaluation || {};
+  if (c.kind === "asset_delete") return `delete ${ev.asset}`;
+  if (c.kind === "asset_add") return `add ${ev.asset} (${ev.after?.criticality})`;
+  const crit = ["low", "medium", "high", "critical"];
+  return (ev.changes || []).map((x) => {
+    if (x.field === "criticality") return `${crit.indexOf(x.after) < crit.indexOf(x.before) ? "lower" : "raise"} ${ev.before.name} to ${x.after}`;
+    if (x.field === "name") return `rename ${x.before} to ${x.after}`;
+    if (Array.isArray(x.before)) {
+      const gone = x.before.filter((v) => !x.after.includes(v)), added = x.after.filter((v) => !x.before.includes(v));
+      return [gone.length ? `remove ${gone.join(", ")}` : "", added.length ? `add ${added.join(", ")}` : ""].filter(Boolean).join(", ") + ` (${x.field === "data_tags" ? "tags" : "addresses"})`;
+    }
+    return `${x.field}: ${fmtField(x.after)}`;
+  }).join("; ");
+}
+
+// Before → after for each field the change touches; delete and add show the whole asset on one side.
+function assetDiff(c) {
+  const ev = c.evaluation || {};
+  return el("div", { class: "diff" },
+    c.kind === "asset_delete" ? el("div", {}, el("strong", {}, `Delete ${ev.asset}`)) : null,
+    (ev.changes || []).map((x) => el("div", {}, el("code", {}, x.field), ": ",
+      el("span", { class: "before" }, fmtField(x.before)), " → ", el("span", { class: "after" }, fmtField(x.after)))));
+}
+
+function assetImpact(c) {
+  const ev = c.evaluation || {}, sc = ev.severity_changes || { alerts: 0, recent: [] };
+  return el("div", {},
+    ev.needs_review?.length ? el("div", {}, el("strong", {}, "Could lower severity: "), ev.needs_review.join("; "), ".")
+      : el("div", { class: "muted" }, "Cannot lower severity (sent for review by choice)."),
+    el("div", { class: "muted" }, `${sc.alerts} open alert(s) would change severity`, sc.alerts ? ":" : "."),
+    sc.recent.map((a) => el("div", { class: "muted" }, `#${a.id} ${a.title}: ${a.from} → ${a.to}`)));
 }
 
 // Labeled attacks a rule change stops detecting, from the evidence on the change request.
@@ -1020,17 +1059,28 @@ function chainBadge(c) {
 
 // ---------- asset inventory ----------
 function assetsCard(inv) {
-  const remove = (a) => confirm(`Delete asset "${a.name}"? Open alerts will be re-weighed without it.`) && guarded(async () => {
-    const r = await api(`/api/assets/${a.id}/delete`, { method: "POST" });
-    toast(`Asset deleted; ${r.alerts_rescored} open alert(s) changed severity`);
-    admin();
-  });
+  const pending = inv.pending || [];
+  const proposed = (c) => el("div", { class: "pending-note st-pending" }, `Proposed: ${assetChangeText(c)} (pending review, `, el("a", { href: "#rules" }, `change #${c.id}`), ")");
+  // A delete always needs a second admin: it is proposed with a reason, never applied from here.
+  const remove = (a) => {
+    const reason = prompt(`Deleting "${a.name}" needs a second admin's approval. Reason for the change request:`);
+    if (reason === null) return;
+    guarded(async () => {
+      const r = await api(`/api/assets/${a.id}/proposals`, { method: "POST", body: { delete: true, reason } });
+      toast(`Delete proposed as change #${r.id}; a different admin must approve it`);
+      admin();
+    });
+  };
   return el("div", { class: "card" }, el("h2", {}, "Asset inventory"),
     el("p", { class: "muted" }, "Give systems a weight of importance and tag the ones that process sensitive data. Alerts whose evidence touches a ",
       el("strong", {}, "high"), " asset gain one severity level, a ", el("strong", {}, "critical"), " asset two, and any sensitive-data tag one more (capped at two, never past critical). The rule's own severity stays visible on the alert. Changing the inventory re-weighs open alerts at once."),
+    el("p", { class: "muted" }, "Edits that could lower alert severity (lower criticality, remove a tag or address, rename, delete, or claim another asset's address) are proposals until a ",
+      el("strong", {}, "different"), " admin approves them under Rules & review. Everything else applies at once. Both are audited."),
     el("div", { class: "row" }, el("button", { onclick: () => assetDialog(inv) }, "Add asset")),
+    pending.filter((c) => c.kind === "asset_add").map(proposed),
     table(["Asset", "Kind", "Criticality", "Sensitive data", "Addresses", "Owner", "Updated", ""], inv.assets.map((a) => ({ cells: [
-      el("span", {}, el("strong", {}, a.name), a.synthetic ? el("span", {}, " ", synth(true)) : null, a.description ? el("div", { class: "muted" }, a.description) : null),
+      el("span", {}, el("strong", {}, a.name), a.synthetic ? el("span", {}, " ", synth(true)) : null, a.description ? el("div", { class: "muted" }, a.description) : null,
+        pending.filter((c) => c.kind !== "asset_add" && c.target === String(a.id)).map(proposed)),
       a.kind, pill(a.criticality, `crit-${a.criticality}`),
       a.data_tags.length ? el("span", { class: "row" }, a.data_tags.map((t) => el("span", { class: "pill tag", title: inv.data_tags[t] || t }, t))) : el("span", { class: "muted" }, "—"),
       a.addresses.length ? el("code", {}, a.addresses.join(", ")) : "—", a.owner ?? "—", `${fmtTime(a.updated_at)} by ${a.updated_by}`,
@@ -1052,7 +1102,25 @@ function assetDialog(inv, asset = null) {
     el("label", {}, "Owner (optional)", el("input", { name: "owner", maxlength: 128, value: asset?.owner ?? "" })),
     el("label", {}, "Description (optional)", el("input", { name: "description", maxlength: 500, value: asset?.description ?? "" })),
     el("p", { class: "error", id: "asset-error" }),
+    el("div", { id: "asset-review" }),
     el("div", { class: "row" }, el("button", { type: "submit" }, asset ? "Save" : "Add"), el("button", { type: "button", class: "ghost", onclick: () => $("#modal").close() }, "Cancel")));
+  // The server refuses an edit that could lower alert severity (409, review_required) and names the
+  // proposal route; the same body plus a reason becomes a change request for a different admin.
+  const offerReview = (data, body) => {
+    const reason = el("textarea", { name: "reason", maxlength: 2000 });
+    $("#asset-error").textContent = "";
+    $("#asset-review").replaceChildren(el("div", { class: "explain" },
+      el("p", {}, el("strong", {}, "A different admin must approve this edit: "), `it ${data.reasons.join("; ")}.`),
+      el("label", {}, "Reason for the change request", reason),
+      el("button", { type: "button", onclick: async () => {
+        try {
+          const r = await api(data.proposal_route, { method: "POST", body: { ...body, reason: reason.value } });
+          $("#modal").close();
+          toast(`Proposed as change #${r.id}; pending review`);
+          admin();
+        } catch (e) { $("#asset-error").textContent = e.message; }
+      } }, "Propose for review")));
+  };
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const f = new FormData(form);
@@ -1063,7 +1131,10 @@ function assetDialog(inv, asset = null) {
       $("#modal").close();
       toast(`Asset saved; ${r.alerts_rescored} open alert(s) changed severity`);
       admin();
-    } catch (e) { $("#asset-error").textContent = e.message; }
+    } catch (e) {
+      if (e.status === 409 && e.data?.review_required) offerReview(e.data, body);
+      else $("#asset-error").textContent = e.message;
+    }
   });
   $("#modal-body").replaceChildren(form);
   $("#modal").showModal();

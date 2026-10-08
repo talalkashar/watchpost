@@ -53,7 +53,7 @@ Left for a contributor's pull requests ([issue #8](https://github.com/talalkasha
 | **D · Incident reports** | One-click **Markdown and PDF** reports for incidents and alerts, with a timeline, entities, techniques by tactic, evidence, notes, and recommended actions per technique. The PDF writer is hand-written PDF 1.4. |
 | **E · Live ingestion** | A UDP/TCP **syslog listener** (RFC 3164/5424) and `scripts/shipper.py`, a file tailer that posts to the ingest API with a token. See [docs/LIVE_INGEST.md](docs/LIVE_INGEST.md). |
 | **F · Demo kit** | A read-only **viewer** role that the server enforces on every route, with a public demo account from `SIEM_VIEWER_PASSWORD`. **Per-IP rate limiting** (strict on login). A **`deploy/`** kit for Debian 12: a hardened systemd unit, an idempotent installer, and Caddy or nginx HTTPS. A LinkedIn kit and demo script. |
-| **G · Asset modeling** | An **asset inventory** (Admin → Asset inventory) gives hosts a weight of importance (`low` to `critical`) and tags the systems that process **sensitive data** (`pii`, `pci`, `phi`, `credentials`, `financial`, `confidential`). Alerts whose evidence touches a high or critical asset, or a sensitive-data system, are raised one or two severity levels, with the rule's own severity and the reason kept on the alert; incidents and reports inherit the weighting. Changing the inventory re-weighs open alerts at once. Adds `GET/POST /api/assets`. |
+| **G · Asset modeling** | An **asset inventory** (Admin → Asset inventory) gives hosts a weight of importance (`low` to `critical`) and tags the systems that process **sensitive data** (`pii`, `pci`, `phi`, `credentials`, `financial`, `confidential`). Alerts whose evidence touches a high or critical asset, or a sensitive-data system, are raised one or two severity levels, with the rule's own severity and the reason kept on the alert; incidents and reports inherit the weighting. Changing the inventory re-weighs open alerts at once. Adds `GET/POST /api/assets`. Built by Juan Carlos Munera (PR #9); edits that could lower severity now go through two-person review (see [Asset inventory review](#asset-inventory-review)). |
 | **C · Attack storyline** | **Admin → Start storyline** replays a six-stage synthetic intrusion in real time (recon → credential attack → foothold → escalation → lateral and cloud → exfiltration) over baseline noise; the dashboard shows the current stage. `SIEM_DEMO_LOOP=<minutes>` replays it on a timer for unattended public demos. |
 
 ### 2.0 architecture
@@ -296,6 +296,23 @@ event_type:auth_success -source:demo:* since:2026-10-01
 ```
 
 Each term compiles to a fixed SQL fragment chosen from a field whitelist, with the value as a bound parameter, so a value like `user:"x' OR 1=1 --"` matches that literal user name and nothing else. Any role can run a hunt and read saved searches. Analysts and admins can save a search (the query is checked on save) and delete their own; admins can delete any. Each save and delete is written to the audit log.
+
+### Asset inventory review
+
+The asset inventory was contributed by Juan Carlos Munera (PR #9): criticality and sensitive-data tags per host, severity raised on alerts that touch them, and open alerts re-weighed whenever the inventory changes. Because the inventory raises severity, editing it can also lower severity, so one admin alone may not make an edit that could do that. Such an edit goes through the same two-person review as rule and setting changes.
+
+| Needs a second admin | Applies at once (still audited) |
+|---|---|
+| Lowering criticality | Adding an asset |
+| Removing a sensitive-data tag | Raising criticality |
+| Removing an IP address (alerts on it stop matching) | Adding tags or addresses |
+| Renaming the host (alerts on the old name stop matching; a change of case is not a rename) | Editing owner, kind, or description |
+| Deleting the asset | |
+| Claiming an address another asset already has (an address matches one asset only, so it could take over that asset's alerts) | |
+
+`assets.review_reasons` is the only definition of this list. The direct routes (`POST /api/assets`, `POST /api/assets/<id>`) apply an edit only when it has no review reasons, checked and written in one transaction. Otherwise they change nothing and answer 409 with `review_required`, the reasons, and `proposal_route`. `POST /api/assets/<id>/delete` always answers 409 that way. Proposals go to `POST /api/assets/<id>/proposals` (the full asset as for a direct edit, or `{"delete": true}`) or `POST /api/assets/proposals` (an add, if you want one reviewed), each with a `reason`. Proposing is admin only, like editing the inventory. Analysts and the viewer get 403, and the viewer can still read the inventory and its pending proposals.
+
+An update stores only the fields it changes. The evidence a reviewer sees has the asset before and after, a before/after line for each changed field, the review reasons, and the open alerts whose severity the change would move, with from and to. Approval works like other change requests: a different admin (`POST /api/changes/<id>/review`), sending the `evidence_digest` they were shown. The server re-checks the change against the inventory as it is at that moment. If the asset was deleted, its new name is taken, or it already matches, the approval is refused with 409 and nothing is applied. If the asset was edited in between, the evidence is refreshed and the old digest is refused. An approved change is applied through the same asset functions as a direct edit, then open alerts are re-weighed and incident severities refreshed. Proposals, approvals, rejections, and the asset change itself are all written to the hash-chained audit log, and the asset entry names the change request. **Admin → Asset inventory** shows pending proposals on each asset (for example "Proposed: lower db01 to low (pending review, change #12)"), and the edit dialog offers **Propose for review** when the server answers 409. **Rules & review** lists them with the other change requests.
 
 ---
 
