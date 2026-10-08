@@ -1,7 +1,7 @@
 # LinkedIn kit: Watchpost 5.0 follow-up
 
 Draft only. Check every number against the README and `./run_tests.sh` before posting, and confirm Juan Carlos
-Munera is happy to be named. The last run had 565 unit tests passing plus the 26-step smoke check.
+Munera is happy to be named. The last run had 569 unit tests passing plus the 26-step smoke check.
 
 ---
 
@@ -30,7 +30,7 @@ ATT&CK coverage is still graded by evidence: 17 of the 20 techniques in its smal
 project's own labeled scenarios, and 3 are only mapped. That is not a claim about real-world coverage.
 
 Still true: all the data is synthetic, there is no ML, and this is a single-node portfolio project, not a
-production tool. It has 565 automated tests plus an end-to-end smoke check.
+production tool. It has 569 automated tests plus an end-to-end smoke check.
 
 Thanks again to Juan Carlos Munera for the asset inventory work it builds on.
 

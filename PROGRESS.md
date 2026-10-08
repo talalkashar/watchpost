@@ -301,5 +301,5 @@ Entries after 2.1 were tracked in `docs/ROADMAP.md` and the PR descriptions inst
 #21 to #34; see `CHANGELOG.md`.
 
 - `__version__` bumped from 4.0.0 to 5.0.0 (`/api/health` reports it).
-- `./run_tests.sh` on 2026-10-08: 565 tests OK, SMOKE OK (26 steps).
+- `./run_tests.sh` on 2026-10-08: 569 tests OK, SMOKE OK (26 steps).
 - 15 built-in rules; ATT&CK coverage with the default rules: 17 of 20 catalog techniques validated, 3 mapped.
