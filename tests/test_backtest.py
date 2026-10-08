@@ -201,3 +201,17 @@ class BacktestApiTests(ServerTestCase):
         self.assertEqual(codes[:6], [200] * 6)
         self.assertEqual(codes[-1], 429)
         self.assertEqual(self.client("analyst").get(self.url({}))[0], 200)  # another account has its own bucket
+
+    def test_rule_proposals_and_approvals_spend_the_backtest_quota(self):
+        # Proposing a rule change and approving one both run a backtest; they share a bucket apart from previews.
+        analyst, admin = self.client("analyst"), self.client("admin")
+        codes = [analyst.post(f"/api/rules/{RULE}/proposals", {"params": {"threshold": 13 + i}, "reason": "tune it down"})[0]
+                 for i in range(22)]
+        self.assertEqual(codes[:20], [201] * 20)
+        self.assertEqual(codes[-1], 429)
+        for i in range(20):
+            admin.post(f"/api/rules/{RULE}/proposals", {"params": {"threshold": 40 + i}, "reason": "tune it up"})
+        status, data, _ = admin.post("/api/changes/1/review", {"decision": "approve", "evidence_digest": "x"})
+        self.assertEqual(status, 429, data)
+        # Rejecting runs no backtest and is not limited.
+        self.assertEqual(admin.post("/api/changes/1/review", {"decision": "reject", "note": "no"})[0], 200)
