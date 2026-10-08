@@ -58,8 +58,8 @@ When this list runs low, add more real-SIEM gaps here and keep going. Same groun
 
 ## Wave 3 (added 2026-10-08, same ground rules; none of these are Juan's reserved items)
 
-- [ ] 17. Log source health: per-source last-seen and expected cadence, a "source went silent" detection with a
-      labeled scenario and look-alike (maintenance window), and a source-health panel. Not a new parser.
+- [x] 17. Log source health: per-source last-seen and expected cadence, a "source went silent" detection with a
+      labeled scenario and look-alike (maintenance window), and a source-health panel. Not a new parser. (PR #31)
 - [ ] 18. Hunt aggregations: `| stats count by <field>`, `| top <field>`, `| timechart span=1h` over the existing
       query language, with whitelisted fields, bound parameters, and row caps.
 - [ ] 19. Scheduled searches as detections: promote a saved hunt to a threshold rule through the change-request
