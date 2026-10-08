@@ -33,7 +33,25 @@ every feature verifiable, every number reproducible, nothing overclaimed.
       admin source for a user). (PR #15: logging disabled + admin from new source; MFA skipped, no MFA signal)
 - [x] 6. Scale honesty: load test (100k+ events), indexes and pagination where it hurts, published numbers in the
       README from a reproducible script. (PR #16: ingest 2.1k → 5.3k events/s at 100k)
-- [ ] 7. Owner-level review gaps: asset inventory edits through two-person review (Juan's PR #9 left this to the
-      owner; coordinate on the PR, credit him).
+- [x] 7. Owner-level review gaps: asset inventory edits through two-person review (Juan's PR #9 left this to the
+      owner; coordinate on the PR, credit him). (PR #17)
 - [ ] 8. UI pass: keyboard triage, mobile width, accessibility labels.
 - [ ] 9. Refresh `LINKEDIN_3.md` draft and README numbers from the latest test run.
+
+## Next wave (added 2026-10-07: owner: "the siem can be endlessly better and closer to a real siem")
+
+When this list runs low, add more real-SIEM gaps here and keep going. Same ground rules.
+
+- [ ] 10. CI: GitHub Actions running `./run_tests.sh` on every PR (Python 3.11 to 3.14), badge in README.
+- [ ] 11. Rule backtesting: run a proposed rule change against stored history before approval and show the
+      alert diff (new / lost alerts) in the review panel, so reviewers approve evidence, not params.
+- [ ] 12. Case workflow metrics: alert assignment, acknowledge/resolve timestamps, MTTA/MTTR per severity on the
+      dashboard, SLA breach badges. Numbers labeled synthetic when the data is.
+- [ ] 13. Login hardening: TOTP second factor (stdlib HMAC, RFC 6238) for admin/analyst, per-account lockout with
+      audit entries, session list with revoke.
+- [ ] 14. Explainable entity risk: per-user/host score from alert severities, asset weight, and recency with a
+      visible breakdown; no ML, every point traceable to an alert.
+- [ ] 15. Detection content portability: export/import rules as versioned JSON, plus a documented field mapping
+      from Watchpost's event schema to ECS names.
+- [ ] 16. Sigma subset: import a documented subset of Sigma rules (stdlib parser for the YAML subset Sigma uses),
+      refuse anything outside it with a clear reason, scenario required before enable.
