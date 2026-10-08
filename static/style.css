@@ -373,6 +373,10 @@ dialog::backdrop { background: rgb(0 0 0 / .6); }
 label.check { display: inline-flex; align-items: center; gap: 4px; margin: 0; font-weight: normal; }
 fieldset { border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; margin: 8px 0; }
 legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
+/* Asset change requests: pending note on the inventory card, before/after diff under Rules & review */
+.pending-note { font-size: 12px; white-space: normal; overflow-wrap: anywhere; }
+.diff .before { text-decoration: line-through; color: var(--muted); } .diff .after { font-weight: 600; }
+.diff { min-width: 12em; }
 .pill.stage { color: var(--high); border-color: rgb(255 138 48 / .45); background: rgb(255 138 48 / .07); text-transform: none; }
 
 /* ATT&CK coverage view: every level is spelled out in words; color only repeats it */

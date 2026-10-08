@@ -1,7 +1,8 @@
 """Continuous improvement: evaluation, rule performance, suggestions, and reviewed changes.
 
 Nothing here learns on its own. Suggestions are deterministic heuristics over analyst
-feedback, and no rule or security setting changes until a second person approves it.
+feedback, and no rule, security setting, or severity-lowering asset edit changes until a second
+person approves it.
 """
 
 import copy
@@ -10,10 +11,11 @@ import json
 from collections import Counter
 from datetime import datetime, time, timedelta, timezone
 
+from . import assets as assets_mod
 from . import rules as rules_mod
 from . import simulate
 from .db import audit, iso, now_iso, row_to_dict, transaction, utcnow
-from .engine import active_suppressions, apply_rule_change, load_rules
+from .engine import active_suppressions, apply_rule_change, correlate_alerts, load_rules
 
 SECURITY_SETTINGS = {
     "login_lockout_threshold": (3, 20, 5, "Failed logins before an account is temporarily locked"),
@@ -21,6 +23,7 @@ SECURITY_SETTINGS = {
 }
 MIN_FEEDBACK_FOR_SUGGESTION = 2
 MAX_SUPPRESSION_DAYS = 90  # tuning exceptions always expire
+ASSET_KINDS = ("asset_add", "asset_update", "asset_delete")  # inventory edits; see assets.review_reasons
 
 
 class ChangeError(ValueError):
@@ -269,7 +272,12 @@ def _validate_change(conn, kind, target, payload):
         if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= MAX_SUPPRESSION_DAYS:
             raise ChangeError(f"days must be an integer between 1 and {MAX_SUPPRESSION_DAYS}")
         return None
-    raise ChangeError("kind must be rule_update, setting_update or suppression_add")
+    if kind in ASSET_KINDS:
+        try:
+            return assets_mod.plan_change(conn, kind, target, payload)  # (before, after)
+        except assets_mod.AssetError as exc:
+            raise ChangeError(str(exc), exc.status)
+    raise ChangeError(f"kind must be rule_update, setting_update, suppression_add or one of {', '.join(ASSET_KINDS)}")
 
 
 LIVE_IMPACT_RECENT = 5  # newest matching alerts listed in an exception's evidence
@@ -400,6 +408,8 @@ def _evidence(conn, kind, target, payload, proposer):
                       ["rules"][target],
                       "live_impact": _live_impact(conn, target, payload["group_key"], base["group_keys"],
                                                   proposer)}
+    elif kind in ASSET_KINDS:
+        evaluation = assets_mod.change_evidence(conn, *merged)
     return json.loads(json.dumps(evaluation))  # as it reads back from storage, so the two compare equal
 
 
@@ -538,6 +548,10 @@ def review_change(conn, change_id, decision, reviewer, note="", digest=None, ack
                 audit(conn, reviewer, "suppression_added", change["target"],
                       {"group_key": change["payload"]["group_key"], "expires_at": expires,
                        "change_request": change_id})
+            elif change["kind"] in ASSET_KINDS:
+                # Checked again by _evidence above in this transaction, so a conflict has already refused it.
+                assets_mod.apply_change(conn, change["kind"], change["target"], change["payload"], reviewer,
+                                        {"change_request": change_id, "proposed_by": change["proposed_by"]})
             else:
                 conn.execute("UPDATE settings SET value = ?, updated_at = ?, updated_by = ? WHERE key = ?",
                              (str(change["payload"]["value"]), now_iso(), reviewer, change["target"]))
@@ -555,7 +569,13 @@ def review_change(conn, change_id, decision, reviewer, note="", digest=None, ack
                 record_evaluation(conn, evaluate(current_params(conn)), "post_change", reviewer, change_id)
     if problem is not None:
         raise problem
-    return get_change(conn, change_id)
+    result = get_change(conn, change_id)
+    if decision == "approve" and change["kind"] in ASSET_KINDS:
+        # Same follow-up as a direct inventory edit: re-weigh open alerts, then refresh incident severities.
+        result["alerts_rescored"] = assets_mod.rescore_open_alerts(conn)
+        if result["alerts_rescored"]:
+            correlate_alerts(conn)
+    return result
 
 
 # --- Tuning exceptions and the noise lab ------------------------------------------------

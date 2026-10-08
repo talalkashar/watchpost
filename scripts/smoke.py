@@ -275,6 +275,35 @@ def main():
         print(f"      exception #{listed[0]['id']} until {listed[0]['expires_at']}: "
               f"{sim['detection']['alerts_suppressed']} finding(s) suppressed")
 
+        step("asset inventory: an edit that lowers severity needs a second admin")
+        status, made = admin.call("POST", "/api/assets", {"name": "smoke-db01", "criticality": "critical",
+                                                          "data_tags": ["pii"]})
+        check(status == 201, f"asset create: {status} {made}")
+        asset = made["asset"]
+        status, res = admin.call("POST", f"/api/assets/{asset['id']}", {**asset, "criticality": "low"})
+        check(status == 409 and res["review_required"], f"lowering applied without review: {status} {res}")
+        status, change = admin.call("POST", f"/api/assets/{asset['id']}/proposals",
+                                    {**asset, "criticality": "low", "reason": "Smoke test: retire the asset."})
+        check(status == 201 and change["kind"] == "asset_update" and change["status"] == "pending",
+              f"asset proposal: {status} {change}")
+        review = {"decision": "approve", "evidence_digest": change["evidence_digest"]}
+        check(admin.call("POST", f"/api/changes/{change['id']}/review", review)[0] == 403, "proposer approved own edit")
+        # Users are only created from the server side (auth.create_user); the smoke test writes the second
+        # admin straight into its throwaway database, with the same audit key so the chain stays verifiable.
+        sys.path.insert(0, str(ROOT))
+        from watchpost.auth import create_user
+        from watchpost.db import connect
+        conn = connect(env["SIEM_DB"], audit_key=AUDIT_KEY)
+        create_user(conn, "admin2", "smoke-second-admin-password", "admin", actor="smoke")
+        conn.close()
+        admin2 = Session(base)
+        admin2.login("admin2", "smoke-second-admin-password")
+        status, res = admin2.call("POST", f"/api/changes/{change['id']}/review", review)
+        check(status == 200 and res["status"] == "approved" and "alerts_rescored" in res, f"asset approve: {status} {res}")
+        listed = {a["id"]: a for a in admin.call("GET", "/api/assets")[1]["assets"]}
+        check(listed[asset["id"]]["criticality"] == "low", f"approved edit not applied: {listed[asset['id']]}")
+        print(f"      change #{change['id']} approved by admin2; {res['alerts_rescored']} open alert(s) re-weighed")
+
         step("live ingestion: syslog listener and file shipper")
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
             udp.sendto(b"<11>1 2026-09-28T10:00:00Z smoke-host smokeapp 1 - - live syslog frame",
