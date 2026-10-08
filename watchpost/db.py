@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 # prev_hash of the first audit entry. Every later entry links to the hash of the one before it.
 GENESIS_HASH = "0" * 64
@@ -366,6 +366,20 @@ CREATE TABLE IF NOT EXISTS saved_searches (
     description TEXT,
     owner TEXT NOT NULL,
     created_at TEXT NOT NULL
+);
+
+-- 14.0: named dashboard severity filters and ordered panel subsets. Shared views are readable by every role;
+-- private views and all mutations are restricted to their owner by the server.
+CREATE TABLE IF NOT EXISTS dashboard_views (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    filters TEXT NOT NULL,
+    layout TEXT NOT NULL,
+    visibility TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(owner, name COLLATE NOCASE)
 );
 """
 
