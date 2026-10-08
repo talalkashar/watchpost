@@ -2,7 +2,9 @@
 
 Risk score = sum over the entity's alerts of SEVERITY_WEIGHTS[severity] * 0.5 ** (age_hours / HALF_LIFE_HOURS),
 leaving out alerts an analyst closed as false positive or benign. Every score comes back with the
-alerts behind it and each one's weight, so it can be checked by hand.
+alerts behind it and each one's weight, so it can be checked by hand. Asset criticality counts through
+the alert's severity (assets.weigh raises it before the alert is stored); each contribution names the rule's
+base severity and the asset note, so the raise is visible in the breakdown.
 
 An alert belongs to an entity when one of its evidence events (alert_events -> events) carries that
 user, src_ip, or host. This is the same mapping the correlation engine uses. `group_key` is not used:
@@ -21,7 +23,7 @@ SEVERITY_WEIGHTS = {"critical": 40, "high": 20, "medium": 10, "low": 5, "info": 
 HALF_LIFE_HOURS = 24
 EXCLUDED_DISPOSITIONS = ("false_positive", "benign")
 _SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
-_ALERT_FIELDS = "id, rule_id, severity, title, status, disposition, first_seen, last_seen, event_count, synthetic"
+_ALERT_FIELDS = "id, rule_id, severity, base_severity, severity_note, title, status, disposition, first_seen, last_seen, event_count, synthetic"
 
 
 def _anchor(conn):
@@ -36,7 +38,10 @@ def _contribution(alert, anchor):
     decay = 0.5 ** (age_hours / HALF_LIFE_HOURS)
     counted = alert["disposition"] not in EXCLUDED_DISPOSITIONS
     return {"alert_id": alert["id"], "rule_id": alert["rule_id"], "title": alert["title"],
-            "severity": alert["severity"], "status": alert["status"], "disposition": alert["disposition"],
+            "severity": alert["severity"],
+            # Asset weight enters through severity: an alert on a critical or sensitive asset was raised before scoring.
+            "base_severity": alert["base_severity"] or alert["severity"], "asset_note": alert["severity_note"],
+            "status": alert["status"], "disposition": alert["disposition"],
             "last_seen": alert["last_seen"], "base_weight": base, "age_hours": round(age_hours, 1),
             "decay": round(decay, 3), "weight": round(base * decay, 2) if counted else 0.0, "counted": counted}
 

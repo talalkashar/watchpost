@@ -65,6 +65,18 @@ class RiskScoreTests(unittest.TestCase):
         self.assertEqual(entities.get_entity(self.conn, "user", "ALICE")["score"], 40.0)
         self.assertEqual(entities.get_entity(self.conn, "host", "web01")["score"], 20.0)
 
+    def test_asset_weight_shows_in_the_breakdown(self):
+        ev = add_event(self.conn, ANCHOR, host="db01")
+        raised = add_alert(self.conn, "high", ANCHOR, [ev])
+        self.conn.execute("UPDATE alerts SET base_severity = 'medium', severity_note = ? WHERE id = ?",
+                          ("raised 1 level(s): db01 is a high-criticality asset", raised))
+        plain = add_alert(self.conn, "low", ANCHOR, [ev])
+        by_alert = {c["alert_id"]: c for c in entities.get_entity(self.conn, "host", "db01")["contributions"]}
+        self.assertEqual((by_alert[raised]["base_severity"], by_alert[raised]["severity"], by_alert[raised]["weight"]),
+                         ("medium", "high", 20.0))
+        self.assertIn("high-criticality", by_alert[raised]["asset_note"])
+        self.assertEqual((by_alert[plain]["base_severity"], by_alert[plain]["asset_note"]), ("low", None))
+
     def test_false_positive_and_benign_alerts_do_not_count_but_are_listed(self):
         e = add_event(self.conn, ANCHOR, src_ip="10.0.50.5")
         fp = add_alert(self.conn, "critical", ANCHOR, [e], "resolved", "false_positive")
