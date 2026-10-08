@@ -14,6 +14,7 @@ from datetime import datetime, time, timedelta, timezone
 from . import assets as assets_mod
 from . import backtest as backtest_mod
 from . import rules as rules_mod
+from . import search_rules
 from . import sigma
 from . import simulate
 from . import sources as sources_mod
@@ -28,6 +29,13 @@ MIN_FEEDBACK_FOR_SUGGESTION = 2
 MAX_SUPPRESSION_DAYS = 90  # tuning exceptions always expire
 ASSET_KINDS = ("asset_add", "asset_update", "asset_delete")  # inventory edits; see assets.review_reasons
 SIGMA_KINDS = ("sigma_add", "sigma_sample")  # import a Sigma rule (added disabled); attach its labeled sample
+SEARCH_KINDS = ("search_add", "search_sample")  # promote a saved search to a rule (added disabled); its sample
+
+
+def sampled_family(rule_id):
+    """The module of a rule family proved by its own labeled sample (sigma, search_rules), or None for a
+    built-in rule. Each has RULE_PREFIX, SAMPLE_PREFIX, stored_result and sample_scenarios."""
+    return next((m for m in (sigma, search_rules) if rule_id.startswith(m.RULE_PREFIX)), None)
 
 
 class ChangeError(ValueError):
@@ -105,8 +113,8 @@ def evaluate(rule_params, seed=7, suppressions=()):
                     r["fn"] += 1
                     r["missed"].append(name)
                 extra = len(findings) - len(hit)
-            elif sigma.is_sigma(rule_id) and simulate.SCENARIOS[name]["malicious"]:
-                extra = 0  # the built-in labels say nothing about an imported rule firing on an attack
+            elif sampled_family(rule_id) and simulate.SCENARIOS[name]["malicious"]:
+                extra = 0  # the built-in labels say nothing about an imported or promoted rule firing on an attack
             else:
                 extra = len(findings)
             if extra:
@@ -229,8 +237,8 @@ def suggest_for_rule(conn, rule):
 def generate_suggestions(conn, actor="system:feedback"):
     created = []
     for rule in load_rules(conn, enabled_only=False):
-        if sigma.is_sigma(rule["id"]):
-            continue  # no tunable params: a Sigma rule changes by importing a new version of its YAML
+        if sampled_family(rule["id"]):
+            continue  # a Sigma rule has no tunable params; a search rule has no ignore lists to suggest
         rule["params"] = rules_mod.validate_params(rule["id"], rule["params"])
         suggestion = suggest_for_rule(conn, rule)
         if not suggestion:
@@ -265,11 +273,22 @@ def _validate_change(conn, kind, target, payload):
                     {**json.loads(rule["params"]), **payload["params"]} != json.loads(rule["params"]):
                 raise ChangeError("a Sigma rule has no tunable params: change its YAML and import it again")
             if payload.get("enabled") is True:
-                result = sigma.stored_result(conn, target)
-                if result is None or not result["passes"]:
-                    raise ChangeError("this Sigma rule cannot be enabled until it has a labeled sample that passes ("
-                                      + ("no sample attached" if result is None else result["summary"]) + ")")
+                _require_passing_sample(conn, sigma, target, "Sigma rule")
             return json.loads(rule["params"]) if "params" in payload else None
+        if search_rules.is_search(target):
+            # The threshold and window tune like any rule; the query, group-by and title are the rule itself.
+            if "params" in payload:
+                if not isinstance(payload["params"], dict):
+                    raise ChangeError("params must be an object")
+                current = json.loads(rule["params"])
+                fixed = sorted(k for k, v in payload["params"].items()
+                               if k not in search_rules.TUNABLE and current.get(k, v) != v or k not in current)
+                if fixed:
+                    raise ChangeError(f"only threshold and window_seconds of a search rule are tunable "
+                                      f"({', '.join(fixed)} cannot change): promote a saved search again for a "
+                                      "different query")
+            if payload.get("enabled") is True:
+                _require_passing_sample(conn, search_rules, target, "search rule")
         if "params" in payload:
             try:
                 merged = rules_mod.validate_params(target, {**json.loads(rule["params"]), **payload["params"]})
@@ -308,8 +327,18 @@ def _validate_change(conn, kind, target, payload):
             raise ChangeError(str(exc), exc.status)
     if kind in SIGMA_KINDS:
         return _validate_sigma(conn, kind, target, payload)
+    if kind in SEARCH_KINDS:
+        return _validate_search(conn, kind, target, payload)
     raise ChangeError(f"kind must be rule_update, setting_update, suppression_add, maintenance_add or one of "
-                      f"{', '.join(ASSET_KINDS + SIGMA_KINDS)}")
+                      f"{', '.join(ASSET_KINDS + SIGMA_KINDS + SEARCH_KINDS)}")
+
+
+def _require_passing_sample(conn, family, target, label):
+    """Refuse enabling a sampled rule (Sigma, search) until its labeled sample passes."""
+    result = family.stored_result(conn, target)
+    if result is None or not result["passes"]:
+        raise ChangeError(f"this {label} cannot be enabled until it has a labeled sample that passes ("
+                          + ("no sample attached" if result is None else result["summary"]) + ")")
 
 
 def _validate_sigma(conn, kind, target, payload):
@@ -334,6 +363,36 @@ def _validate_sigma(conn, kind, target, payload):
             raise ChangeError("a sample change is {sample}")
         return None, sigma.validate_sample(payload["sample"])
     except sigma.SigmaError as exc:
+        raise ChangeError(str(exc))
+
+
+def _validate_search(conn, kind, target, payload):
+    """search_add: {saved_search_id, query, definition, sample?} compiles to a new rule `target` (the query is
+    the one copied from the saved search when it was promoted); search_sample: {sample} for a search rule.
+
+    Returns (compiled rule or None, validated sample or None).
+    """
+    try:
+        if kind == "search_add":
+            if not set(payload) <= {"saved_search_id", "query", "definition", "sample"} or \
+                    not {"query", "definition"} <= set(payload):
+                raise ChangeError("a promoted search is {saved_search_id, query, definition, sample (optional)}")
+            sid = payload.get("saved_search_id")
+            if sid is not None and (not isinstance(sid, int) or isinstance(sid, bool)):
+                raise ChangeError("saved_search_id must be an integer")
+            compiled = search_rules.compile_rule(None, payload["query"], payload["definition"])
+            if compiled["rule_id"] != target:
+                raise ChangeError(f"the rule id for this name is {compiled['rule_id']!r}, not {target!r}")
+            if conn.execute("SELECT 1 FROM rules WHERE id = ?", (target,)).fetchone():
+                raise ChangeError(f"rule {target!r} already exists; give the search rule a different name", 409)
+            sample = payload.get("sample")
+            return compiled, search_rules.validate_sample(sample) if sample is not None else None
+        if not search_rules.is_search(target) or search_rules.stored(conn, target) is None:
+            raise ChangeError(f"unknown search rule {target!r}", 404)
+        if set(payload) != {"sample"}:
+            raise ChangeError("a sample change is {sample}")
+        return None, search_rules.validate_sample(payload["sample"])
+    except search_rules.SearchRuleError as exc:
         raise ChangeError(str(exc))
 
 
@@ -481,11 +540,22 @@ def _evidence(conn, kind, target, payload, proposer):
                       "sample": sigma.sample_result(compiled["params"], sample),
                       # What it would match among stored events. Added disabled either way.
                       "backtest": sigma.preview(conn, compiled["params"])}
-    elif kind == "sigma_sample":
+    elif kind == "search_add":
+        compiled, sample = merged
+        params = compiled["params"]
+        evaluation = {"rule": target, "title": compiled["title"], "query": compiled["query"],
+                      "severity": compiled["severity"], "techniques": [t["id"] for t in compiled["techniques"]],
+                      "conditions": compiled["conditions"],
+                      **{k: params[k] for k in ("group_by", "threshold", "window_seconds")},
+                      "sample": search_rules.sample_result(params, sample),
+                      # Its findings among stored events. Added disabled either way.
+                      "backtest": search_rules.preview(conn, params)}
+    elif kind in ("sigma_sample", "search_sample"):
+        family = sigma if kind == "sigma_sample" else search_rules
         row = conn.execute("SELECT params, enabled FROM rules WHERE id = ?", (target,)).fetchone()
         evaluation = {"rule": target, "enabled": bool(row["enabled"]),
-                      "before": sigma.stored_result(conn, target),
-                      "sample": sigma.sample_result(json.loads(row["params"]), merged[1])}
+                      "before": family.stored_result(conn, target),
+                      "sample": family.sample_result(json.loads(row["params"]), merged[1])}
     return json.loads(json.dumps(evaluation))  # as it reads back from storage, so the two compare equal
 
 
@@ -675,6 +745,19 @@ def review_change(conn, change_id, decision, reviewer, note="", digest=None, ack
                                            now_iso())
                 audit(conn, reviewer, "sigma_sample_set", change["target"],
                       {"version": version, "passes": fresh["sample"]["passes"], "change_request": change_id})
+            elif change["kind"] == "search_add":
+                compiled, sample = _validate_search(conn, "search_add", change["target"], change["payload"])
+                search_rules.add_rule(conn, compiled, change["payload"].get("saved_search_id"), sample,
+                                      change["proposed_by"], reviewer, change_id, now_iso())
+                audit(conn, reviewer, "search_rule_added", change["target"],
+                      {"query": compiled["query"], "enabled": False, "sample": sample is not None,
+                       "change_request": change_id})
+            elif change["kind"] == "search_sample":
+                _, sample = _validate_search(conn, "search_sample", change["target"], change["payload"])
+                version = search_rules.set_sample(conn, change["target"], sample, change["proposed_by"], reviewer,
+                                                  change_id, now_iso())
+                audit(conn, reviewer, "search_sample_set", change["target"],
+                      {"version": version, "passes": fresh["sample"]["passes"], "change_request": change_id})
             elif change["kind"] in ASSET_KINDS:
                 # Checked again by _evidence above in this transaction, so a conflict has already refused it.
                 assets_mod.apply_change(conn, change["kind"], change["target"], change["payload"], reviewer,
@@ -758,25 +841,27 @@ def noise_lab(conn):
         r = results["rules"][rule["id"]]
         other = [n for n in r["false_positives"] if n in benign and n not in r["lookalikes_fired"]]
         sample = None
-        if sigma.is_sigma(rule["id"]):
+        family = sampled_family(rule["id"])
+        if family:
             # The rule's own labeled sample stands in for a scenario: detected when it passes.
-            sample = sigma.stored_result(conn, rule["id"])
-            name = sigma.SAMPLE_PREFIX + rule["id"]
+            sample = family.stored_result(conn, rule["id"])
+            name = family.SAMPLE_PREFIX + rule["id"]
             if sample:
                 r = {**r, "detected": r["detected"] + [name] * sample["passes"],
                      "missed": r["missed"] + [name] * bool(sample["missed"]),
                      "lookalikes": r["lookalikes"] + [name],
                      "lookalikes_fired": r["lookalikes_fired"] + [name] * bool(sample["fired"])}
         verdict, summary = _verdict(rule, r, other)
-        if sigma.is_sigma(rule["id"]) and sample is None and rule["enabled"]:
-            verdict, summary = "untested", "Imported Sigma rule without a labeled sample: nothing proves it detects."
+        if family and sample is None and rule["enabled"]:
+            verdict, summary = "untested", (f"{'Imported Sigma rule' if family is sigma else 'Promoted saved search'}"
+                                            " without a labeled sample: nothing proves it detects.")
         rows.append({
             "rule_id": rule["id"], "name": rule["name"], "severity": rule["severity"],
             "enabled": bool(rule["enabled"]), "recall": r["recall"], "precision": r["precision"],
             "tp": r["tp"], "fn": r["fn"], "fp": r["fp"], "detected": r["detected"], "missed": r["missed"],
             "lookalikes_tested": r["lookalikes"], "lookalikes_fired": r["lookalikes_fired"],
             "other_benign_fired": other, "suppressed": r["suppressed"], "verdict": verdict, "summary": summary,
-            **({"sample": sample} if sigma.is_sigma(rule["id"]) else {}),
+            **({"sample": sample} if family else {}),
         })
     return {
         "seed": results["seed"],

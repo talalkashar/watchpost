@@ -810,8 +810,9 @@ def _finding(key, cluster, title):
 SAMPLE_FIELDS = set(EVENT_FIELDS) | {"ts"}
 
 
-def validate_sample(sample):
-    """{"malicious": [events], "benign": [events]}: at least one of each, Watchpost field names only."""
+def validate_sample(sample, fields=SAMPLE_FIELDS):
+    """{"malicious": [events], "benign": [events]}: at least one of each, Watchpost field names only
+    (`fields`: the names a sample event may use; promoted saved searches pass their own)."""
     if not isinstance(sample, dict) or set(sample) != {"malicious", "benign"}:
         raise SigmaError("sample must be an object with 'malicious' and 'benign' event lists")
     out = {}
@@ -823,10 +824,10 @@ def validate_sample(sample):
         for n, e in enumerate(events):
             if not isinstance(e, dict) or not e:
                 raise SigmaError(f"sample.{side}[{n}] must be a non-empty object")
-            unknown = set(e) - SAMPLE_FIELDS
+            unknown = set(e) - set(fields)
             if unknown:
                 raise SigmaError(f"sample.{side}[{n}]: unknown field(s) {', '.join(sorted(unknown))} "
-                                 f"(use Watchpost names: {', '.join(sorted(SAMPLE_FIELDS))})")
+                                 f"(use Watchpost names: {', '.join(sorted(fields))})")
             for k, v in e.items():
                 ok = v is None or (isinstance(v, int) and not isinstance(v, bool) if k in ("dest_port", "bytes")
                                    else isinstance(v, str) and len(v) <= SAMPLE_VALUE_LIMIT)
@@ -928,35 +929,9 @@ def set_sample(conn, rule_id, sample, proposed_by, approved_by, change_request_i
 
 
 def preview(conn, params, window_days=7, max_events=100_000):
-    """What the compiled rule would match among stored events: a backtest of a rule that does not exist yet.
+    """What the compiled rule would match among stored events: a backtest of a rule that does not exist yet
+    (backtest.preview_new_rule, shared with promoted saved searches)."""
+    from . import backtest
 
-    Uses the engine's own event loading and finding filter (engine.scan_events / rule_findings), so it reads
-    what detection would read. Window: the last `window_days` of stored event time, newest event last.
-    """
-    from datetime import timedelta
-
-    from . import engine
-    from .db import iso
-
-    rule = {"id": "sigma_preview", "params": params}
-    max_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
-    end = conn.execute("SELECT MAX(ts) FROM events WHERE id <= ?", (max_id,)).fetchone()[0]
-    out = {"window": None, "max_event_id": max_id, "events_scanned": 0, "synthetic_events": 0,
-           "matched_events": 0, "findings": 0, "group_keys": [], "capped": False}
-    if end is None:
-        return out
-    start = iso(parse_iso(end) - timedelta(days=window_days))
-    over = conn.execute("SELECT ts FROM events WHERE id <= ? AND ts >= ? AND ts <= ? ORDER BY ts DESC LIMIT 1"
-                        " OFFSET ?", (max_id, start, end, max_events)).fetchone()
-    if over:
-        start = over["ts"]
-    events, history, scan_start = engine.scan_events(conn, [rule], max_id, start, end)
-    events = [e for e in events if e["ts"] >= start]
-    findings, _ = engine.rule_findings(rule, events, [], None, set())
     compiled = _Compiled(params["detection"])
-    keys = sorted({f["group_key"] for f in findings})
-    out.update(window={"start": start, "end": end}, events_scanned=len(events),
-               synthetic_events=sum(1 for e in events if e["synthetic"]), capped=bool(over),
-               matched_events=sum(1 for e in events if compiled.matches(e)), findings=len(findings),
-               group_keys=keys[:10])
-    return out
+    return backtest.preview_new_rule(conn, "sigma_preview", params, compiled.matches, window_days, max_events)

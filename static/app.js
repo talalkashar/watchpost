@@ -639,7 +639,9 @@ async function huntView(query = "", offset = 0) {
     table(["Name", "Query", "Owner", ""], saved.map((s) => ({ cells: [
       el("span", {}, el("a", { href: huntHref(s.query) }, s.name), s.description ? el("div", { class: "muted" }, s.description) : null),
       el("code", {}, s.query), `${s.owner} · ${fmtTime(s.created_at)}`,
-      mayDelete(s) ? el("button", { class: "danger", onclick: () => remove(s) }, "Delete") : null] }))));
+      el("span", { class: "row" },
+        can("analyst") ? el("button", { class: "ghost", onclick: () => promoteDialog(s) }, "Promote to detection…") : null,
+        mayDelete(s) ? el("button", { class: "danger", onclick: () => remove(s) }, "Delete") : null)] }))));
   if (data instanceof Error) {
     render(el("h1", {}, "Hunt"), form, el("div", { class: "card" }, el("p", { class: "error", role: "alert" }, data.message)), savedCard);
     return;
@@ -825,7 +827,7 @@ async function rules(focus) {
       el("p", { class: "muted" }, r.description),
       el("p", {}, el("strong", {}, "MITRE ATT&CK: "), techniques(r.techniques)),
       el("div", { class: "grid" },
-        r.sigma ? sigmaDetail(r) : el("div", {}, el("h3", {}, `Parameters (v${r.version})`), el("pre", {}, JSON.stringify(r.params, null, 2))),
+        r.sigma ? sigmaDetail(r) : r.search ? searchDetail(r) : el("div", {}, el("h3", {}, `Parameters (v${r.version})`), el("pre", {}, JSON.stringify(r.params, null, 2))),
         el("div", {},
           el("h3", {}, "Analyst feedback"),
           el("dl", { class: "kv" }, ...[["Alerts", p.total], ["Open / investigating", `${p.open} / ${p.investigating}`], ["True positives", p.tp], ["False positives", p.fp], ["Benign", p.benign], ["Precision (TP / (TP+FP))", pct(p.precision)]]
@@ -836,7 +838,7 @@ async function rules(focus) {
       el("div", { class: "row" },
         can("analyst") ? el("button", { class: "ghost", onclick: () => proposeDialog(r) }, "Propose change…") : null,
         can("analyst") ? el("button", { class: "ghost", onclick: () => exceptionDialog(r) }, "Propose exception…") : null,
-        can("analyst") && r.sigma ? el("button", { class: "ghost", onclick: () => sigmaSampleDialog(r) }, "Labeled sample…") : null,
+        can("analyst") && (r.sigma || r.search) ? el("button", { class: "ghost", onclick: () => sigmaSampleDialog(r) }, "Labeled sample…") : null,
         el("button", { class: "ghost", onclick: () => guarded(() => historyDialog(r)) }, "History")));
   });
 
@@ -853,8 +855,8 @@ async function rules(focus) {
     ? el("div", {}, el("strong", {}, `Loses detection of labeled attack(s): ${detectionLoss(c).join(", ")}. `), "Approving requires an explicit acknowledgement.") : null);
 
   const changeRows = changes.slice(0, 30).map((c) => ({ cells: [
-    `#${c.id}`, status(c.status), el("code", {}, isAssetChange(c) ? `asset:${c.evaluation?.asset ?? c.target}` : `${{ rule_update: "rule", suppression_add: "exception", sigma_add: "sigma", sigma_sample: "sample", maintenance_add: "maintenance" }[c.kind] || "setting"}:${c.target}`),
-    isAssetChange(c) ? assetDiff(c) : isSigmaChange(c) ? (c.kind === "sigma_add" ? el("code", {}, c.evaluation?.conditions ?? "—") : "labeled sample") : el("pre", {}, JSON.stringify(c.payload)), c.reason,
+    `#${c.id}`, status(c.status), el("code", {}, isAssetChange(c) ? `asset:${c.evaluation?.asset ?? c.target}` : `${{ rule_update: "rule", suppression_add: "exception", sigma_add: "sigma", sigma_sample: "sample", search_add: "search", search_sample: "sample", maintenance_add: "maintenance" }[c.kind] || "setting"}:${c.target}`),
+    isAssetChange(c) ? assetDiff(c) : isSigmaChange(c) ? (c.kind.endsWith("_add") ? el("code", {}, c.evaluation?.conditions ?? "—") : "labeled sample") : el("pre", {}, JSON.stringify(c.payload)), c.reason,
     isAssetChange(c) ? assetImpact(c) : isSigmaChange(c) ? sigmaEvidence(c) : c.evaluation ? el("span", {}, `FP ${c.evaluation.before.fp}→${c.evaluation.after.fp}, TP ${c.evaluation.before.tp}→${c.evaluation.after.tp}, missed ${c.evaluation.after.missed.join(", ") || "none"}`, lostNote(c), liveImpact(c.evaluation.live_impact),
       (c.evaluation.ignore_additions || []).map((x) => el("div", {}, el("strong", {}, `${x.change === "removed" ? "Removes" : "Adds"} ${x.value} ${x.change === "removed" ? "from" : "to"} ${x.param} (permanent, no expiry).`), liveImpact(x.live_impact))),
       backtestBlock(c.evaluation.backtest)) : "—",
@@ -1110,8 +1112,9 @@ function importDialog() {
   openModal();
 }
 
-// Imported Sigma rules: sigma_add / sigma_sample change requests (evidence: improve._evidence) and the rule card.
-const isSigmaChange = (c) => c.kind.startsWith("sigma_");
+// Imported Sigma rules and promoted saved searches: sigma_add / search_add and their *_sample change requests
+// (evidence: improve._evidence) and the rule card. Both are added disabled and enabled only on a passing sample.
+const isSigmaChange = (c) => c.kind.startsWith("sigma_") || c.kind.startsWith("search_");
 const sampleLine = (s) => (s ? el("div", {}, pill(s.passes ? "sample passes" : "sample fails", s.passes ? "st-ok" : "st-rejected"), ` ${s.summary} (${s.malicious} malicious, ${s.benign} benign)`)
   : el("div", { class: "muted" }, "No labeled sample: the rule cannot be enabled and its ATT&CK mapping is not validated."));
 const sigmaPreview = (bt) => (bt && bt.window
@@ -1120,9 +1123,13 @@ const sigmaPreview = (bt) => (bt && bt.window
 
 function sigmaEvidence(c) {
   const ev = c.evaluation || {};
-  if (c.kind === "sigma_sample") {
+  if (c.kind.endsWith("_sample")) {
     return el("span", {}, ev.before ? el("div", { class: "muted" }, `Before: ${ev.before.summary}`) : null, sampleLine(ev.sample),
       ev.enabled && ev.sample && !ev.sample.passes ? el("div", {}, el("strong", {}, "The rule is enabled: a failing sample drops its ATT&CK coverage to mapped.")) : null);
+  }
+  if (c.kind === "search_add") {
+    return el("span", {}, el("div", {}, `Added disabled. Severity ${ev.severity}; ATT&CK ${(ev.techniques || []).join(", ") || "none"}; query `, el("code", {}, ev.query ?? "—")),
+      sampleLine(ev.sample), sigmaPreview(ev.backtest));
   }
   return el("span", {}, el("div", {}, `Added disabled. Severity ${ev.severity}; ATT&CK ${(ev.techniques || []).join(", ") || "none"}; sha256 ${(ev.sha256 || "").slice(0, 12)}…`),
     sampleLine(ev.sample), sigmaPreview(ev.backtest), (ev.warnings || []).map((w) => el("div", { class: "muted" }, w)));
@@ -1196,12 +1203,15 @@ function sigmaDialog() {
   openModal();
 }
 
-// The rule's labeled sample: malicious events that must match, benign look-alikes that must not.
+// The rule's labeled sample: malicious events that must match, benign look-alikes that must not. A promoted
+// search counts: its malicious events together must raise a finding, its benign ones none.
 function sigmaSampleDialog(rule) {
-  const current = rule.sigma?.sample ?? { malicious: [{ event_type: "" }], benign: [{ event_type: "" }] };
+  const current = (rule.sigma || rule.search)?.sample ?? { malicious: [{ event_type: "" }], benign: [{ event_type: "" }] };
   const form = el("form", {},
     el("h2", {}, `Labeled sample: ${rule.id}`),
-    el("p", { class: "muted" }, "Every malicious event must match and no benign look-alike may. Until the sample passes, the rule cannot be enabled and its ATT&CK techniques count as mapped, not validated. A different admin approves the change."),
+    el("p", { class: "muted" }, rule.search
+      ? "The malicious events must raise a finding (reach the threshold within the window) and the benign look-alikes must raise none. Events without a ts are one second apart. Until the sample passes, the rule cannot be enabled and its ATT&CK techniques count as mapped, not validated. A different admin approves the change."
+      : "Every malicious event must match and no benign look-alike may. Until the sample passes, the rule cannot be enabled and its ATT&CK techniques count as mapped, not validated. A different admin approves the change."),
     el("label", {}, "Sample (JSON)", el("textarea", { name: "sample", class: "mono", rows: 10 }, JSON.stringify(current, null, 2))),
     el("label", {}, "Reason (required)", el("textarea", { name: "reason", required: true, minlength: 5, maxlength: 2000 })),
     el("p", { class: "error", role: "alert", id: "sample-error" }),
@@ -1213,11 +1223,92 @@ function sigmaSampleDialog(rule) {
     let sample;
     try { sample = JSON.parse(f.get("sample")); } catch { $("#sample-error").textContent = "The sample must be valid JSON"; return; }
     try {
-      await api(`/api/rules/${encodeURIComponent(rule.id)}/sigma-sample`, { method: "POST", body: { sample, reason: f.get("reason") } });
+      await api(`/api/rules/${encodeURIComponent(rule.id)}/${rule.search ? "search" : "sigma"}-sample`, { method: "POST", body: { sample, reason: f.get("reason") } });
       $("#modal").close();
       toast("Sample submitted for review");
       rules();
     } catch (e) { $("#sample-error").textContent = e.message; }
+  });
+  $("#modal-body").replaceChildren(form);
+  openModal();
+}
+
+// A promoted saved search on its rule card: the query is read-only; threshold and window tune via "Propose change…".
+function searchDetail(r) {
+  const s = r.search;
+  return el("div", {}, el("h3", {}, `Promoted saved search (v${r.version})`),
+    el("p", {}, el("strong", {}, "Query (read-only): "), el("code", {}, s.query)),
+    el("p", {}, el("strong", {}, "Fires on: "), s.conditions),
+    sampleLine(s.sample_result),
+    el("p", { class: "muted" }, `Proposed by ${s.proposed_by}, approved by ${s.approved_by}${s.change_request_id ? ` (change #${s.change_request_id})` : ""}. Tunable: threshold and window_seconds. A different query means promoting a new saved search.`),
+    el("details", {}, el("summary", {}, "Parameters"), el("pre", {}, JSON.stringify({ group_by: r.params.group_by, threshold: r.params.threshold, window_seconds: r.params.window_seconds }, null, 2))));
+}
+
+// POST /api/hunt/saved/{id}/promote: a dry run previews the rule's findings on stored events, then a confirm sends
+// the same body as a search_add change request. Both spend one backtest from the rule-proposal quota.
+const PROMOTE_GROUP_BY = ["src_ip", "user", "host", "dest_ip", "source", "event_type", "dest_port"];
+function promoteDialog(saved) {
+  let checked = null;
+  const confirmBtn = el("button", { type: "button", disabled: true }, "Submit for review");
+  const reset = () => { checked = null; confirmBtn.disabled = true; $("#promote-preview")?.replaceChildren(); };
+  const form = el("form", { oninput: reset },
+    el("h2", {}, "Promote to detection"),
+    el("p", { class: "muted" }, "The saved search's filter becomes a threshold rule: it fires when at least N matching events share one group-by value within a sliding window of W minutes. Time terms and | stages are refused; the window replaces them. The query is copied now and cannot be tuned later. The dry run previews findings on stored events; submitting creates a change request that a different admin approves. The rule is added disabled and can be enabled only once its labeled sample passes."),
+    el("p", {}, el("strong", {}, "Query: "), el("code", {}, saved.query)),
+    el("label", {}, "Rule name", el("input", { name: "name", required: true, maxlength: 80, value: saved.name })),
+    el("div", { class: "row" },
+      el("label", {}, "Group by", el("select", { name: "group_by" }, PROMOTE_GROUP_BY.map((f) => el("option", { value: f }, f)))),
+      el("label", {}, "Threshold (events)", el("input", { name: "threshold", type: "number", min: 1, max: 100000, value: 5, required: true })),
+      el("label", {}, "Window (minutes)", el("input", { name: "window_minutes", type: "number", min: 1, max: 1440, value: 10, required: true })),
+      el("label", {}, "Severity", el("select", { name: "severity" }, ["low", "medium", "high", "critical"].map((v) => el("option", { value: v, selected: v === "medium" }, v))))),
+    el("label", {}, "ATT&CK technique ids (optional, comma separated)", el("input", { name: "techniques", placeholder: "T1110, T1190" })),
+    el("label", {}, "Labeled sample (JSON, optional): {\"malicious\": [events], \"benign\": [events]}", el("textarea", { name: "sample", class: "mono", rows: 4 })),
+    el("label", {}, "Reason (optional)", el("input", { name: "reason", maxlength: 2000 })),
+    el("p", { class: "error", role: "alert", id: "promote-error" }),
+    el("p", { class: "muted", role: "status", id: "promote-status" }),
+    el("div", { id: "promote-preview" }),
+    el("div", { class: "row" }, el("button", { type: "submit" }, "Dry run"), confirmBtn,
+      el("button", { type: "button", class: "ghost", onclick: () => $("#modal").close() }, "Cancel")));
+  const body = () => {
+    const f = new FormData(form);
+    const b = { name: f.get("name"), group_by: f.get("group_by"), threshold: Number(f.get("threshold")),
+      window_minutes: Number(f.get("window_minutes")), severity: f.get("severity"),
+      techniques: (f.get("techniques") || "").split(",").map((t) => t.trim()).filter(Boolean) };
+    const sample = (f.get("sample") || "").trim(), reason = (f.get("reason") || "").trim();
+    if (sample) b.sample = JSON.parse(sample);
+    if (reason) b.reason = reason;
+    return b;
+  };
+  const url = `/api/hunt/saved/${saved.id}/promote`;
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    $("#promote-error").textContent = "";
+    reset();
+    let b;
+    try { b = body(); } catch { $("#promote-error").textContent = "The sample must be valid JSON"; return; }
+    $("#promote-status").textContent = "Compiling and previewing on stored events…";
+    try {
+      const r = await api(`${url}?dry_run=1`, { method: "POST", body: b });
+      const c = r.compiled, bt = r.backtest;
+      $("#promote-status").textContent = r.ok ? "Dry run done. Nothing has been created." : "Refused. Nothing has been created.";
+      $("#promote-preview").replaceChildren(
+        r.refused ? el("p", { class: "error" }, `Refused: ${r.refused}`) : null,
+        c ? el("div", {},
+          el("p", {}, el("strong", {}, "Rule id: "), el("code", {}, c.rule_id), ` · severity ${c.severity} · ATT&CK ${c.techniques.map((t) => t.id).join(", ") || "none"}`),
+          el("p", {}, el("strong", {}, "Fires on: "), c.conditions),
+          sampleLine(r.sample), sigmaPreview(bt),
+          bt && bt.sample_findings.length ? table(["Group", "Events", "First seen", "Last seen"], bt.sample_findings.map((x) => ({ cells: [
+            el("code", {}, x.group_key), { num: x.event_count }, fmtTime(x.first_seen), fmtTime(x.last_seen)] }))) : null) : null);
+      if (r.ok) { checked = b; confirmBtn.disabled = false; }
+    } catch (e) { $("#promote-status").textContent = ""; $("#promote-error").textContent = e.message; }
+  });
+  confirmBtn.addEventListener("click", async () => {
+    confirmBtn.disabled = true;
+    try {
+      const change = await api(url, { method: "POST", body: checked });
+      $("#modal").close();
+      toast(`Change request #${change.id} submitted for review`);
+    } catch (e) { $("#promote-error").textContent = e.message; }
   });
   $("#modal-body").replaceChildren(form);
   openModal();
