@@ -9,7 +9,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from . import totp
-from .db import audit, iso, now_iso, parse_iso, utcnow
+from .db import audit, iso, now_iso, parse_iso, transaction, utcnow
 
 ROLES = {"viewer": 1, "analyst": 2, "admin": 3}
 PBKDF2_ITERATIONS = int(os.environ.get("SIEM_PBKDF2_ITERATIONS", "310000"))
@@ -125,18 +125,49 @@ def _check_not_locked(conn, user):
         raise AuthError("account temporarily locked after repeated failures; try again later", 429)
 
 
-def _record_failure(conn, user, detail=None):
-    """Count a failed password or TOTP code toward the per-account lockout. Returns True when it locks."""
+def _count_failure(conn, user_id):
+    """Add one failure to the account inside the caller's transaction, locking it at the threshold.
+
+    The count is re-read under BEGIN IMMEDIATE, so concurrent attempts cannot overwrite each other's increment.
+    Returns True when this failure locks the account.
+    """
     threshold, lock_minutes = _lockout_settings(conn)
-    failures = user["failed_logins"] + 1
+    failures = conn.execute("SELECT failed_logins FROM users WHERE id = ?", (user_id,)).fetchone()[0] + 1
     locked_until = None
     if failures >= threshold:
         locked_until = iso(utcnow() + timedelta(minutes=lock_minutes))
         failures = 0
-    conn.execute("UPDATE users SET failed_logins = ?, locked_until = ? WHERE id = ?",
-                 (failures, locked_until, user["id"]))
-    audit(conn, user["username"], "login_failed", None, {**(detail or {}), "locked": bool(locked_until)})
+    conn.execute("UPDATE users SET failed_logins = ?, locked_until = ? WHERE id = ?", (failures, locked_until, user_id))
     return bool(locked_until)
+
+
+def _record_failure(conn, user, detail=None):
+    """Count a failed password toward the per-account lockout. Returns True when it locks."""
+    with transaction(conn):
+        locked = _count_failure(conn, user["id"])
+        audit(conn, user["username"], "login_failed", None, {**(detail or {}), "locked": locked})
+    return locked
+
+
+def _reserve_code_attempt(conn, user_id):
+    """Spend one attempt before a TOTP code is checked: refuse when locked, else count it as a failure now.
+
+    Checking the lock and counting happen in one transaction, so parallel guesses cannot all slip in before
+    the lock lands: at most `threshold` codes are ever checked per lockout window. A correct code then
+    clears the count and the lock (_start_session), and a TOTP step can only be used once, so counting first
+    loses nothing. Returns True when this attempt set the lock.
+    """
+    with transaction(conn):
+        row = conn.execute("SELECT username, locked_until FROM users WHERE id = ?", (user_id,)).fetchone()
+        if row["locked_until"] and parse_iso(row["locked_until"]) > utcnow():
+            audit(conn, row["username"], "login_blocked", None, {"reason": "locked"})
+            locked_out = True
+        else:
+            locked_out = False
+            locked = _count_failure(conn, user_id)
+    if locked_out:
+        raise AuthError("account temporarily locked after repeated failures; try again later", 429)
+    return locked
 
 
 def _start_session(conn, user, ttl_seconds, detail=None):
@@ -201,17 +232,20 @@ def complete_mfa(conn, mfa_token, code, ttl_seconds):
     if pending is None or parse_iso(pending["expires_at"]) < utcnow() or pending["disabled"] \
             or not pending["totp_secret"]:
         raise AuthError("sign-in step expired; sign in again")
-    _check_not_locked(conn, pending)
+    locked = _reserve_code_attempt(conn, pending["id"])
     step = totp.verify(pending["totp_secret"], code, pending["totp_last_step"])
     if step is None:
-        if _record_failure(conn, pending, {"reason": "mfa"}):
+        if locked:
             conn.execute("DELETE FROM mfa_pending WHERE user_id = ?", (pending["id"],))
+        audit(conn, pending["username"], "login_failed", None, {"reason": "mfa", "locked": locked})
         raise AuthError("invalid authentication code")
     # Both checks are single statements, so two requests racing with the same token or code cannot both win.
     if not conn.execute("DELETE FROM mfa_pending WHERE token_hash = ?", (sha256(mfa_token),)).rowcount:
         raise AuthError("sign-in step expired; sign in again")
     if not _claim_step(conn, pending["id"], step):
-        _record_failure(conn, pending, {"reason": "mfa"})
+        if locked:
+            conn.execute("DELETE FROM mfa_pending WHERE user_id = ?", (pending["id"],))
+        audit(conn, pending["username"], "login_failed", None, {"reason": "mfa", "locked": locked})
         raise AuthError("invalid authentication code")
     return _start_session(conn, pending, ttl_seconds, {"mfa": True})
 
@@ -302,10 +336,13 @@ def mfa_disable(conn, username, code):
             audit(conn, username, "mfa_enroll_cancelled", username)
             return {"enabled": False}
         raise AuthError("two-factor authentication is not on", 409)
+    # Same budget as signing in, so a stolen session cannot guess codes to turn the second factor off.
+    _reserve_code_attempt(conn, user["id"])
     step = totp.verify(user["totp_secret"], code, user["totp_last_step"])
     if step is None or not _claim_step(conn, user["id"], step):
         audit(conn, username, "mfa_disable_failed", username)
         raise AuthError("invalid authentication code", 400)
+    conn.execute("UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = ?", (user["id"],))
     _clear_mfa(conn, user["id"])
     audit(conn, username, "mfa_disabled", username)
     return {"enabled": False}
