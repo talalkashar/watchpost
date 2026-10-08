@@ -3,7 +3,7 @@
 // (via el()), never innerHTML. The SOC dashboard and live stream live in dashboard.js; its
 // charts are SVG strings from charts.js/map.js with every text value escaped.
 
-const state = { user: null, csrf: null, view: "dashboard", alertId: null };
+const state = { user: null, csrf: null, view: "dashboard", alertId: null, keys: null, restore: null, focusSearch: false };
 const ROLE_RANK = { viewer: 1, analyst: 2, admin: 3 };
 const can = (role) => state.user && ROLE_RANK[state.user.role] >= ROLE_RANK[role];
 
@@ -43,10 +43,12 @@ const assetChip = (a) => el("span", { class: `pill asset crit-${a.criticality}`,
   `${a.name} · ${a.criticality}${a.data_tags?.length ? ` · ${a.data_tags.join(" ")}` : ""}`);
 const assetChips = (list) => (list && list.length ? el("span", { class: "row" }, list.map(assetChip)) : el("span", { class: "muted" }, "none inventoried"));
 
-function toast(msg) {
-  const t = el("div", { class: "toast", role: "status" }, msg);
-  document.body.append(t);
-  setTimeout(() => t.remove(), 4000);
+// Toasts go into two live regions that exist from page load (index.html), so screen readers announce them:
+// #toast-status (polite) for confirmations, #toast-alert (assertive) for errors.
+function toast(msg, isError = false) {
+  const t = el("div", { class: `toast${isError ? " toast-error" : ""}` }, msg);
+  $(isError ? "#toast-alert" : "#toast-status").append(t);
+  setTimeout(() => t.remove(), isError ? 7000 : 4000);
 }
 
 async function api(path, { method = "GET", body, raw, contentType, allow = [] } = {}) {
@@ -67,12 +69,19 @@ async function api(path, { method = "GET", body, raw, contentType, allow = [] } 
   return data;
 }
 
+// Clickable rows are focusable and open with Enter or Space, so the mouse is never required.
 function table(headers, rows, onClick) {
+  const onKey = (r) => (ev) => {
+    if (ev.target !== ev.currentTarget || (ev.key !== "Enter" && ev.key !== " ")) return;
+    ev.preventDefault();
+    onClick(r);
+  };
   return el("div", { class: "table-wrap" },
     el("table", {},
-      el("thead", {}, el("tr", {}, headers.map((h) => el("th", {}, h)))),
+      el("thead", {}, el("tr", {}, headers.map((h) => el("th", { scope: "col" }, h)))),
       el("tbody", {}, rows.length ? rows.map((r) =>
-        el("tr", { class: [onClick ? "clickable" : "", r.cls || ""].join(" "), onclick: onClick ? () => onClick(r) : null },
+        el("tr", { class: [onClick ? "clickable" : "", r.cls || ""].join(" "), onclick: onClick ? () => onClick(r) : null,
+          tabindex: onClick ? "0" : null, onkeydown: onClick ? onKey(r) : null, "data-id": onClick && r.id !== undefined ? r.id : null },
           r.cells.map((c) => (c && c.num !== undefined ? el("td", { class: "num" }, c.num) : el("td", {}, c)))))
         : el("tr", {}, el("td", { colspan: headers.length, class: "muted" }, "Nothing to show.")))));
 }
@@ -83,7 +92,18 @@ function render(...nodes) {
 }
 
 async function guarded(fn) {
-  try { await fn(); } catch (e) { if (e.message !== "Session expired") toast(e.message); }
+  try { await fn(); } catch (e) { if (e.message !== "Session expired") toast(e.message, true); }
+}
+
+// One <dialog> serves every modal: showModal() makes the page behind it inert (the browser traps focus)
+// and Esc closes it. This names it after its heading and hands focus back to the trigger on close.
+let modalReturn = null;
+function openModal() {
+  const m = $("#modal");
+  const h = $("#modal-body").querySelector("h2");
+  if (h) { h.id = "modal-title"; m.setAttribute("aria-labelledby", "modal-title"); } else m.removeAttribute("aria-labelledby");
+  if (!m.open) modalReturn = document.activeElement;
+  m.showModal();
 }
 
 // ---------- auth ----------
@@ -108,7 +128,20 @@ async function boot() {
     } catch (e) { $("#login-error").textContent = e.message; }
   });
   $("#logout").addEventListener("click", async () => { await api("/api/auth/logout", { method: "POST" }).catch(() => {}); showLogin(); });
-  document.querySelectorAll("#nav button").forEach((b) => b.addEventListener("click", () => go(b.dataset.view)));
+  document.querySelectorAll("#nav button").forEach((b) => b.addEventListener("click", () => {
+    const menuOpen = $("#rail").classList.contains("menu-open");
+    go(b.dataset.view);
+    if (menuOpen) { setMenu(false); $("#nav-toggle").focus(); }  // the button just clicked is about to be hidden
+  }));
+  $("#nav-toggle").addEventListener("click", () => setMenu($("#nav-toggle").getAttribute("aria-expanded") !== "true"));
+  $("#kbd-help").addEventListener("click", shortcutHelp);
+  $("#modal").addEventListener("close", () => {
+    // Back to the trigger; if a re-render removed it, to <main>, so focus never stays in the closed dialog.
+    const back = modalReturn && modalReturn.isConnected && modalReturn !== document.body ? modalReturn : $("#main");
+    modalReturn = null;
+    back.focus({ preventScroll: true });
+  });
+  document.addEventListener("keydown", onShortcut);
   window.addEventListener("hashchange", () => route());
   try { onLogin(await api("/api/auth/me")); } catch { showLogin(); }
 }
@@ -127,12 +160,23 @@ function onLogin(data) {
 
 function go(view, id) { location.hash = id ? `${view}/${id}` : view; }
 
+// Narrow screens fold the nav behind a Menu button (CSS shows the button below 760px only).
+function setMenu(open) {
+  $("#rail").classList.toggle("menu-open", open);
+  $("#nav-toggle").setAttribute("aria-expanded", String(open));
+}
+
 function route() {
   if (!state.user) return;
   const [view, id, ...rest] = (location.hash.slice(1) || "dashboard").split("/");
   state.view = view;
   document.body.dataset.view = view;
-  document.querySelectorAll("#nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
+  state.keys = null;  // per-view shortcut keys; the view that owns them sets them again
+  setMenu(false);
+  document.querySelectorAll("#nav button").forEach((b) => {
+    b.classList.toggle("active", b.dataset.view === view);
+    if (b.dataset.view === view) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
+  });
   if (view !== "dashboard") Dash.unmount();
   const views = { dashboard: socDashboard, incidents: () => (id ? incidentDetail(Number(id)) : incidentsView()),
     alerts: () => (id ? alertDetail(Number(id)) : alerts()), events, overview, ingest, rules: () => rules(id),
@@ -146,15 +190,17 @@ async function refreshBanner() {
     const h = await api("/api/health", { allow: [503] });  // 503 = failing, still a valid report
     const b = $("#banner");
     const bad = Object.entries(h.checks).filter(([, s]) => s !== "ok");
+    const text = `System ${h.status}: ${bad.map(([n, s]) => `${n} ${s}`).join(", ")}. `;
     b.hidden = h.status === "ok";
     b.className = `banner ${h.status === "failing" ? "bad" : ""}`;
-    b.replaceChildren(`System ${h.status}: ${bad.map(([n, s]) => `${n} ${s}`).join(", ")}. `,
-      el("a", { href: "#health" }, "Open Health for details and recovery steps."));
+    // The banner is a live region and health pushes arrive often: rewrite it only when it says something new.
+    if (b.firstChild?.textContent !== text) b.replaceChildren(text, el("a", { href: "#health" }, "Open Health for details and recovery steps."));
   } catch {
     const b = $("#banner");
+    const text = "Cannot reach the Watchpost health endpoint. The server may be down.";
     b.hidden = false;
     b.className = "banner bad";
-    b.textContent = "Cannot reach the Watchpost health endpoint. The server may be down.";
+    if (b.textContent !== text) b.textContent = text;
   }
 }
 
@@ -164,7 +210,7 @@ async function overview() {
   const kpi = (v, l) => el("div", { class: "kpi" }, el("div", { class: "v" }, v ?? "—"), el("div", { class: "l" }, l));
   const hist = m.activity_last_24h_of_data;
   const max = Math.max(1, ...hist.map((h) => h.events));
-  const bars = el("div", { class: "bars", "aria-label": "Events per hour" }, hist.map((h) =>
+  const bars = el("div", { class: "bars", role: "img", "aria-label": `Events per hour over 24 hours: ${hist.reduce((n, h) => n + h.events, 0)} events, ${hist.reduce((n, h) => n + h.failures, 0)} failed logins, busiest hour ${Math.max(0, ...hist.map((h) => h.events))} events` }, hist.map((h) =>
     el("div", { class: "b", title: `${fmtTime(h.hour)} — ${h.events} events, ${h.failures} failed logins` },
       el("span", { class: "fail", style: { height: `${(h.failures / max) * 110}px` } }),
       el("span", { class: "all", style: { height: `${((h.events - h.failures) / max) * 110}px` } }))));
@@ -242,16 +288,23 @@ async function alerts() {
         incidents.map((i) => ({ id: i.id, cells: [sev(i.severity), i.title, i.stages.join(" → ") || "—", { num: i.alert_count },
           status(i.status), fmtTime(i.last_seen), synth(i.synthetic)] })),
         (r) => go("incidents", r.id))),
-    form, el("div", { class: "card" }, table(
+    form, el("div", { class: "card", "data-kbd-list": "alerts" }, table(
     ["Severity", "Alert", "Rule", "Status", "Events", "Last seen", ""],
     list.map((a) => ({ id: a.id, cells: [sev(a.severity), a.title, el("code", {}, a.rule_id),
       el("span", {}, status(a.status), a.disposition ? ` ${a.disposition.replace("_", " ")}` : ""),
       { num: a.event_count }, fmtTime(a.last_seen), synth(a.synthetic)] })),
     (r) => go("alerts", r.id))));
+  restoreSelection(`[data-kbd-list] tr[data-id="${state.restore}"]`);
 }
 
 async function alertDetail(id) {
   const a = await api(`/api/alerts/${id}`);
+  // Triage keys (see keyboard section): Esc for everyone; a and r only for roles that may act.
+  state.keys = state.view === "alerts" ? { Escape: () => { state.restore = id; go("alerts"); } } : null;
+  if (state.keys && can("analyst") && a.status !== "resolved") {
+    state.keys.a = () => (a.status === "open" ? setStatus(id, { status: "investigating" }) : toast("Already investigating"));
+    state.keys.r = () => resolveDialog(id);
+  }
   const actions = el("div", { class: "row" });
   if (can("analyst")) {
     if (a.status === "open") actions.append(el("button", { onclick: () => setStatus(id, { status: "investigating" }) }, "Start investigating"));
@@ -260,7 +313,7 @@ async function alertDetail(id) {
   }
   actions.append(reportLinks("alerts", id));
   const noteForm = can("analyst") ? el("form", {},
-    el("textarea", { name: "body", maxlength: 5000, required: true, placeholder: "Add an investigation note…" }),
+    el("textarea", { name: "body", maxlength: 5000, required: true, placeholder: "Add an investigation note…", "aria-label": "Investigation note" }),
     el("button", { type: "submit" }, "Add note")) : null;
   noteForm?.addEventListener("submit", (ev) => {
     ev.preventDefault();
@@ -315,6 +368,8 @@ function reportLinks(kind, id) {
 async function incidentDetail(id) {
   const i = await api(`/api/incidents/${id}`);
   const setIncident = (body) => guarded(async () => { await api(`/api/incidents/${id}/status`, { method: "POST", body }); incidentDetail(id); });
+  state.keys = state.view === "incidents" ? { Escape: () => { state.restore = id; go("incidents"); } } : null;
+  if (state.keys && can("analyst") && i.status === "open") state.keys.a = () => setIncident({ status: "investigating" });
   const actions = el("div", { class: "row" });
   if (can("analyst")) {
     if (i.status === "open") actions.append(el("button", { onclick: () => setIncident({ status: "investigating" }) }, "Start investigating"));
@@ -406,7 +461,7 @@ function resolveDialog(id) {
     setStatus(id, { status: "resolved", disposition: f.get("disposition"), note: f.get("note") || null });
   });
   $("#modal-body").replaceChildren(form);
-  $("#modal").showModal();
+  openModal();
 }
 
 // ---------- events ----------
@@ -425,7 +480,7 @@ async function events(offset = 0) {
           .map((v) => el("option", { value: v, selected: saved.get("event_type") === v }, v || "Any")))),
       el("label", {}, "Min severity", el("select", { name: "severity" },
         ["", "low", "medium", "high", "critical"].map((v) => el("option", { value: v, selected: saved.get("severity") === v }, v || "Any")))),
-      field("q", "Message contains", { size: 14 }),
+      field("q", "Message contains", { size: 14, "data-search": "" }),
       el("label", {}, "Data", el("select", { name: "synthetic" },
         [["", "All"], ["0", "Real only"], ["1", "Synthetic only"]].map(([v, t]) => el("option", { value: v, selected: saved.get("synthetic") === v }, t)))),
       el("button", { type: "submit" }, "Search"),
@@ -442,7 +497,7 @@ async function events(offset = 0) {
   query.set("limit", "100"); query.set("offset", String(offset));
   let data;
   try { data = await api(`/api/events?${query}`); }
-  catch (e) { render(el("h1", {}, "Event search"), form, el("p", { class: "error" }, e.message)); return; }
+  catch (e) { render(el("h1", {}, "Event search"), form, el("p", { class: "error", role: "alert" }, e.message)); return; }
   const pager = el("div", { class: "row" },
     el("span", { class: "muted" }, `${data.total.toLocaleString()} matching events · showing ${data.total ? offset + 1 : 0}–${offset + data.events.length}`),
     el("button", { class: "ghost", disabled: offset === 0, onclick: () => guarded(() => events(Math.max(0, offset - 100))) }, "Newer"),
@@ -465,7 +520,7 @@ async function eventDialog(id) {
       : el("p", { class: "muted" }, "None."),
     el("h3", {}, "Original record (secrets redacted)"), el("pre", {}, e.raw ?? ""),
     el("p", {}, el("button", { onclick: () => $("#modal").close() }, "Close")));
-  $("#modal").showModal();
+  openModal();
 }
 
 // ---------- hunt ----------
@@ -498,7 +553,7 @@ function openHunt(q) {
 
 async function huntView(query = "", offset = 0) {
   const input = el("input", { name: "q", value: query, maxlength: 500, autocomplete: "off", spellcheck: "false",
-    placeholder: 'user:alice NOT src_ip:10.0.0.5 "invalid password" last:24h', style: { width: "100%" } });
+    placeholder: 'user:alice NOT src_ip:10.0.0.5 "invalid password" last:24h', style: { width: "100%" }, "data-search": "" });
   const form = el("form", { class: "card" },
     el("div", { class: "row" },
       el("label", { style: { flex: "1 1 220px", minWidth: "0" } }, "Query", input),
@@ -525,7 +580,7 @@ async function huntView(query = "", offset = 0) {
       el("code", {}, s.query), `${s.owner} · ${fmtTime(s.created_at)}`,
       mayDelete(s) ? el("button", { class: "danger", onclick: () => remove(s) }, "Delete") : null] }))));
   if (data instanceof Error) {
-    render(el("h1", {}, "Hunt"), form, el("div", { class: "card" }, el("p", { class: "error" }, data.message)), savedCard);
+    render(el("h1", {}, "Hunt"), form, el("div", { class: "card" }, el("p", { class: "error", role: "alert" }, data.message)), savedCard);
     return;
   }
   const parsed = el("div", { class: "row", style: { alignItems: "center" } }, el("span", { class: "muted" }, "Parsed as:"),
@@ -534,6 +589,7 @@ async function huntView(query = "", offset = 0) {
     el("span", { class: "muted" }, `${data.total.toLocaleString()} matching events · showing ${data.total ? offset + 1 : 0}–${offset + data.events.length}`),
     el("button", { class: "ghost", disabled: offset === 0, onclick: () => guarded(() => huntView(query, Math.max(0, offset - 100))) }, "Newer"),
     el("button", { class: "ghost", disabled: offset + 100 >= data.total, onclick: () => guarded(() => huntView(query, offset + 100)) }, "Older"));
+  if (state.focusSearch) { state.focusSearch = false; queueMicrotask(() => input.focus()); }
   render(el("h1", {}, "Hunt"), form, el("div", { class: "card" }, parsed, pager,
     table(["Time", "Severity", "Type", "User", "Source IP", "Host", "Source", "Message"],
       data.events.map((e) => ({ id: e.id, cells: [fmtTime(e.ts), sev(e.severity), e.event_type, e.user ?? "—", el("code", {}, e.src_ip ?? "—"), e.host ?? "—", el("span", {}, e.source, " ", synth(e.synthetic)), e.message ?? ""] })),
@@ -546,7 +602,7 @@ function saveHuntDialog(query) {
     el("label", {}, "Name", el("input", { name: "name", required: true, maxlength: 80 })),
     el("label", {}, "Query (checked on save)", el("input", { name: "query", required: true, maxlength: 500, value: query })),
     el("label", {}, "Description (optional)", el("input", { name: "description", maxlength: 300 })),
-    el("p", { class: "error", id: "hunt-error" }),
+    el("p", { class: "error", role: "alert", id: "hunt-error" }),
     el("div", { class: "row" }, el("button", { type: "submit" }, "Save"),
       el("button", { type: "button", class: "ghost", onclick: () => $("#modal").close() }, "Cancel")));
   form.addEventListener("submit", async (ev) => {
@@ -560,7 +616,7 @@ function saveHuntDialog(query) {
     } catch (e) { $("#hunt-error").textContent = e.message; }
   });
   $("#modal-body").replaceChildren(form);
-  $("#modal").showModal();
+  openModal();
 }
 
 // ---------- ingest ----------
@@ -785,7 +841,7 @@ function lossDialog(c) {
     el("p", {}, "After this change the rule no longer detects these labeled attacks, which it detects today: ", el("strong", {}, detectionLoss(c).join(", ")), "."),
     el("label", { class: "check" }, el("input", { type: "checkbox", name: "ack", required: true }), " I accept that these attacks will go undetected by this rule"),
     el("label", {}, "Review note", el("textarea", { name: "note", maxlength: 2000 })),
-    el("p", { class: "error", id: "loss-error" }),
+    el("p", { class: "error", role: "alert", id: "loss-error" }),
     el("div", { class: "row" }, el("button", { type: "submit" }, "Approve"), el("button", { type: "button", class: "ghost", onclick: () => $("#modal").close() }, "Cancel")));
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
@@ -794,7 +850,7 @@ function lossDialog(c) {
     catch (e) { if (e.status === 409) { $("#modal").close(); toast(e.message); } else $("#loss-error").textContent = e.message; }
   });
   $("#modal-body").replaceChildren(form);
-  $("#modal").showModal();
+  openModal();
 }
 
 function proposeDialog(rule) {
@@ -803,7 +859,7 @@ function proposeDialog(rule) {
     el("label", {}, "Parameter changes (JSON; only the keys you want to change)", el("textarea", { name: "params", class: "mono" }, JSON.stringify(rule.params, null, 2))),
     el("label", {}, "Enabled", el("select", { name: "enabled" }, el("option", { value: "true", selected: !!rule.enabled }, "enabled"), el("option", { value: "false", selected: !rule.enabled }, "disabled"))),
     el("label", {}, "Reason (required)", el("textarea", { name: "reason", required: true, minlength: 5, maxlength: 2000 })),
-    el("p", { class: "error", id: "propose-error" }),
+    el("p", { class: "error", role: "alert", id: "propose-error" }),
     el("div", { class: "row" }, el("button", { type: "submit" }, "Submit for review"), el("button", { type: "button", class: "ghost", onclick: () => $("#modal").close() }, "Cancel")));
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
@@ -821,7 +877,7 @@ function proposeDialog(rule) {
     } catch (e) { $("#propose-error").textContent = e instanceof SyntaxError ? "Parameters must be valid JSON" : e.message; }
   });
   $("#modal-body").replaceChildren(form);
-  $("#modal").showModal();
+  openModal();
 }
 
 function exceptionDialog(rule) {
@@ -831,7 +887,7 @@ function exceptionDialog(rule) {
     el("label", {}, "Group key", el("input", { name: "group_key", class: "mono", required: true, maxlength: 256 })),
     el("label", {}, "Expires after (days, 1–90)", el("input", { name: "days", type: "number", min: 1, max: 90, value: 30, required: true })),
     el("label", {}, "Reason (required)", el("textarea", { name: "reason", required: true, minlength: 5, maxlength: 2000 })),
-    el("p", { class: "error", id: "exception-error" }),
+    el("p", { class: "error", role: "alert", id: "exception-error" }),
     el("div", { class: "row" }, el("button", { type: "submit" }, "Submit for review"), el("button", { type: "button", class: "ghost", onclick: () => $("#modal").close() }, "Cancel")));
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
@@ -842,7 +898,7 @@ function exceptionDialog(rule) {
     } catch (e) { $("#exception-error").textContent = e.message; }
   });
   $("#modal-body").replaceChildren(form);
-  $("#modal").showModal();
+  openModal();
 }
 
 function settingDialog(s) {
@@ -850,7 +906,7 @@ function settingDialog(s) {
     el("h2", {}, `Propose: ${s.key}`), el("p", { class: "muted" }, s.description),
     el("label", {}, `New value (${s.min}–${s.max})`, el("input", { name: "value", type: "number", min: s.min, max: s.max, value: s.value, required: true })),
     el("label", {}, "Reason", el("textarea", { name: "reason", required: true, minlength: 5 })),
-    el("p", { class: "error", id: "setting-error" }),
+    el("p", { class: "error", role: "alert", id: "setting-error" }),
     el("div", { class: "row" }, el("button", { type: "submit" }, "Submit for review"), el("button", { type: "button", class: "ghost", onclick: () => $("#modal").close() }, "Cancel")));
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
@@ -861,7 +917,7 @@ function settingDialog(s) {
     } catch (e) { $("#setting-error").textContent = e.message; }
   });
   $("#modal-body").replaceChildren(form);
-  $("#modal").showModal();
+  openModal();
 }
 
 async function historyDialog(rule) {
@@ -870,7 +926,7 @@ async function historyDialog(rule) {
     table(["Version", "When", "Proposed by", "Approved by", "Enabled", "Params", "Note"], h.map((x) => ({ cells: [
       `v${x.version}`, fmtTime(x.changed_at), x.changed_by, x.approved_by ?? "—", x.enabled ? "yes" : "no", el("pre", {}, JSON.stringify(x.params)), x.note ?? ""] }))),
     el("p", {}, el("button", { onclick: () => $("#modal").close() }, "Close")));
-  $("#modal").showModal();
+  openModal();
 }
 
 // ---------- noise lab ----------
@@ -1101,7 +1157,7 @@ function assetDialog(inv, asset = null) {
     el("label", {}, "IP addresses (optional, comma-separated; match src/dest IP)", el("input", { name: "addresses", value: asset?.addresses.join(", ") ?? "", placeholder: "10.0.0.10, 10.0.0.11" })),
     el("label", {}, "Owner (optional)", el("input", { name: "owner", maxlength: 128, value: asset?.owner ?? "" })),
     el("label", {}, "Description (optional)", el("input", { name: "description", maxlength: 500, value: asset?.description ?? "" })),
-    el("p", { class: "error", id: "asset-error" }),
+    el("p", { class: "error", role: "alert", id: "asset-error" }),
     el("div", { id: "asset-review" }),
     el("div", { class: "row" }, el("button", { type: "submit" }, asset ? "Save" : "Add"), el("button", { type: "button", class: "ghost", onclick: () => $("#modal").close() }, "Cancel")));
   // The server refuses an edit that could lower alert severity (409, review_required) and names the
@@ -1137,12 +1193,12 @@ function assetDialog(inv, asset = null) {
     }
   });
   $("#modal-body").replaceChildren(form);
-  $("#modal").showModal();
+  openModal();
 }
 
 function storyCard() {
   const out = el("div", { class: "story-status muted" }, "Loading…");
-  const speed = el("select", {}, ...[["1", "Real time (2 min)"], ["2", "2x (1 min)"], ["10", "10x (12 s)"], ["100", "Instant"]].map(([v, t]) => el("option", { value: v }, t)));
+  const speed = el("select", { "aria-label": "Storyline speed" }, ...[["1", "Real time (2 min)"], ["2", "2x (1 min)"], ["10", "10x (12 s)"], ["100", "Instant"]].map(([v, t]) => el("option", { value: v }, t)));
   let timer = null;
   const render = (s) => {
     const stage = s.running ? `stage: ${s.stage} · ${Math.round((s.progress || 0) * 100)}%` : s.finished_at ? `last run finished ${fmtTime(s.finished_at)}` : "idle";
@@ -1159,6 +1215,72 @@ function storyCard() {
       el("button", { onclick: () => guarded(async () => { render(await api("/api/storyline/start", { method: "POST", body: { speed: Number(speed.value) } })); }) }, "Start storyline"),
       el("button", { class: "danger", onclick: () => guarded(async () => { render(await api("/api/storyline/stop", { method: "POST" })); }) }, "Stop")),
     out);
+}
+
+// ---------- keyboard triage ----------
+// j/k move the selection through the list marked data-kbd-list (Alerts, Incidents); Enter opens it
+// (rows handle Enter themselves, board cards are links). / focuses the view's search box or opens Hunt,
+// ? shows the help. Views add their own keys in state.keys (alert detail: a, r, Esc). Nothing fires
+// while typing in a field, while a dialog is open, or with Ctrl/Alt/Cmd held.
+const KBD_ITEMS = "[data-kbd-list] tr.clickable, [data-kbd-list] a.bcard";
+const isTyping = (t) => !!t && (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName));
+
+function shortcutsAllowed(ev) {
+  const m = $("#modal");
+  // A field inside the just-closed dialog can hold focus until its close event runs: that is not typing.
+  return !!state.user && !ev.ctrlKey && !ev.metaKey && !ev.altKey && !m.open && (!isTyping(ev.target) || m.contains(ev.target));
+}
+
+function selectItem(node) {
+  document.querySelectorAll(".kbd-selected").forEach((n) => n.classList.remove("kbd-selected"));
+  node.classList.add("kbd-selected");
+  node.focus({ preventScroll: true });
+  node.scrollIntoView({ block: "nearest" });
+}
+
+function moveSelection(step) {
+  const items = [...document.querySelectorAll(KBD_ITEMS)];
+  if (!items.length) return;
+  let cur = items.indexOf(document.activeElement);
+  if (cur === -1) cur = items.findIndex((n) => n.classList.contains("kbd-selected"));
+  selectItem(items[cur === -1 ? (step > 0 ? 0 : items.length - 1) : Math.min(items.length - 1, Math.max(0, cur + step))]);
+}
+
+// After Esc from a detail page, put the selection back on the item it came from.
+function restoreSelection(selector) {
+  if (state.restore === null) return;
+  state.restore = null;
+  const node = document.querySelector(selector);
+  if (node) selectItem(node);
+}
+
+function focusSearch() {
+  const box = document.querySelector("#view [data-search]");
+  if (box) { box.focus(); box.select(); return; }
+  state.focusSearch = true;
+  go("hunt");
+}
+
+function shortcutHelp() {
+  const rows = [["j / k", "Next / previous alert or incident in the list"], ["Enter", "Open the selected alert or incident"],
+    ["Esc", "Alert or incident page: back to the list. In a dialog: close it"]];
+  if (can("analyst")) rows.push(["a", "Alert or incident page: start investigating"], ["r", "Alert page: open the resolve dialog"]);
+  rows.push(["/", "Focus the search box (opens Hunt when the view has none)"], ["?", "Show this help"]);
+  $("#modal-body").replaceChildren(el("h2", {}, "Keyboard shortcuts"),
+    table(["Key", "Action"], rows.map(([k, a]) => ({ cells: [el("kbd", {}, k), a] }))),
+    el("p", { class: "muted" }, "Shortcuts do nothing while you type in a field or while a dialog is open.",
+      can("analyst") ? "" : " This account is read-only, so it can move and open but has no action keys."),
+    el("p", {}, el("button", { onclick: () => $("#modal").close() }, "Close")));
+  openModal();
+}
+
+function onShortcut(ev) {
+  if (!shortcutsAllowed(ev)) return;
+  const keys = { j: () => moveSelection(1), k: () => moveSelection(-1), "/": focusSearch, "?": shortcutHelp, ...(state.keys || {}) };
+  const action = Object.hasOwn(keys, ev.key) ? keys[ev.key] : null;
+  if (!action) return;
+  ev.preventDefault();
+  action();
 }
 
 boot();
