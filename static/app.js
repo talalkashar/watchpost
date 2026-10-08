@@ -818,7 +818,7 @@ function ingestSummary(r) {
 
 // ---------- rules ----------
 async function rules(focus) {
-  const [list, changes, settings, evals, exceptions] = await Promise.all([api("/api/rules"), api("/api/changes"), api("/api/settings"), api("/api/evaluations"), api("/api/suppressions")]);
+  const [list, changes, settings, evals, exceptions, suppressionWindows] = await Promise.all([api("/api/rules"), api("/api/changes"), api("/api/settings"), api("/api/evaluations"), api("/api/suppressions"), api("/api/rule-suppression-windows")]);
   const pending = changes.filter((c) => c.status === "pending");
   const ruleCards = list.map((r) => {
     const p = r.performance || {};
@@ -840,6 +840,7 @@ async function rules(focus) {
       el("div", { class: "row" },
         can("analyst") ? el("button", { class: "ghost", onclick: () => proposeDialog(r) }, "Propose change…") : null,
         can("analyst") ? el("button", { class: "ghost", onclick: () => exceptionDialog(r) }, "Propose exception…") : null,
+        can("analyst") ? el("button", { class: "ghost", onclick: () => suppressionWindowDialog(r) }, "Schedule suppression…") : null,
         can("analyst") && (r.sigma || r.search) ? el("button", { class: "ghost", onclick: () => sigmaSampleDialog(r) }, "Labeled sample…") : null,
         el("button", { class: "ghost", onclick: () => guarded(() => historyDialog(r)) }, "History")));
   });
@@ -853,11 +854,11 @@ async function rules(focus) {
     li.ever_true_positive ? el("div", {}, el("strong", {}, `${li.ever_true_positive} matching alert(s) have been closed as a true positive at some point.`)) : null,
     li.proposer_verdict_changes?.count ? el("div", {}, el("strong", {}, `The proposer changed the status or verdict of these alerts ${li.proposer_verdict_changes.count} time(s): `),
       li.proposer_verdict_changes.recent.map((x) => `#${x.alert_id} ${x.detail} at ${fmtTime(x.created_at)}`).join("; ")) : null) : null);
-  const lostNote = (c) => (c.kind === "rule_update" && detectionLoss(c).length
+  const lostNote = (c) => (["rule_update", "rule_suppression_add"].includes(c.kind) && detectionLoss(c).length
     ? el("div", {}, el("strong", {}, `Loses detection of labeled attack(s): ${detectionLoss(c).join(", ")}. `), "Approving requires an explicit acknowledgement.") : null);
 
   const changeRows = changes.slice(0, 30).map((c) => ({ cells: [
-    `#${c.id}`, status(c.status), el("code", {}, isAssetChange(c) ? `asset:${c.evaluation?.asset ?? c.target}` : `${{ rule_update: "rule", suppression_add: "exception", sigma_add: "sigma", sigma_sample: "sample", search_add: "search", search_sample: "sample", maintenance_add: "maintenance" }[c.kind] || "setting"}:${c.target}`),
+    `#${c.id}`, status(c.status), el("code", {}, isAssetChange(c) ? `asset:${c.evaluation?.asset ?? c.target}` : `${{ rule_update: "rule", suppression_add: "exception", rule_suppression_add: "suppression window", sigma_add: "sigma", sigma_sample: "sample", search_add: "search", search_sample: "sample", maintenance_add: "maintenance" }[c.kind] || "setting"}:${c.target}`),
     isAssetChange(c) ? assetDiff(c) : isSigmaChange(c) ? (c.kind.endsWith("_add") ? el("code", {}, c.evaluation?.conditions ?? "—") : "labeled sample") : el("pre", {}, JSON.stringify(c.payload)), c.reason,
     isAssetChange(c) ? assetImpact(c) : isSigmaChange(c) ? sigmaEvidence(c) : c.evaluation ? el("span", {}, `FP ${c.evaluation.before.fp}→${c.evaluation.after.fp}, TP ${c.evaluation.before.tp}→${c.evaluation.after.tp}, missed ${c.evaluation.after.missed.join(", ") || "none"}`, lostNote(c), liveImpact(c.evaluation.live_impact),
       (c.evaluation.ignore_additions || []).map((x) => el("div", {}, el("strong", {}, `${x.change === "removed" ? "Removes" : "Adds"} ${x.value} ${x.change === "removed" ? "from" : "to"} ${x.param} (permanent, no expiry).`), liveImpact(x.live_impact))),
@@ -895,6 +896,14 @@ async function rules(focus) {
         x.revoked_at ? el("span", { title: `Revoked by ${x.revoked_by} at ${fmtTime(x.revoked_at)}` }, pill("revoked", "st-rejected"), ` by ${x.revoked_by} ${fmtTime(x.revoked_at)}`)
           : x.active ? pill("active", "st-ok") : pill("expired", "st-rejected"),
         x.active && can("admin") ? el("button", { class: "danger", onclick: () => confirm(`Revoke the exception for ${x.rule_id} / ${x.group_key}? It stops applying at once.`) && guarded(async () => { await api(`/api/suppressions/${x.id}/revoke`, { method: "POST" }); toast("Exception revoked"); rules(); }) }, "Revoke") : ""] })))),
+    el("div", { class: "card" }, el("h2", {}, `Rule suppression windows (${suppressionWindows.filter((x) => x.active).length} active)`),
+      el("p", { class: "muted" }, "A reviewed window pauses every finding from one rule for a bounded operational period. Review evidence names the labeled detections that will be missed, and approval requires explicit acknowledgement. Detection runs still count suppressed findings; expired and ended windows remain here as history."),
+      table(["Rule", "Starts", "Expires", "Reason", "Proposed by", "Approved by", "Change", "State", ""], suppressionWindows.map((x) => ({ cells: [
+        el("code", {}, x.rule_id), fmtTime(x.starts_at), fmtTime(x.expires_at), x.reason, x.proposed_by, x.approved_by,
+        x.change_request_id ? `#${x.change_request_id}` : "—",
+        x.ended_at ? el("span", { title: `Ended by ${x.ended_by} at ${fmtTime(x.ended_at)}` }, pill("ended", "st-rejected"))
+          : pill(x.state, x.state === "active" ? "st-ok" : x.state === "upcoming" ? "st-degraded" : "st-rejected"),
+        ["active", "upcoming"].includes(x.state) && can("admin") ? el("button", { class: "danger", onclick: () => confirm(`End the suppression window for ${x.rule_id}?`) && guarded(async () => { await api(`/api/rule-suppression-windows/${x.id}/end`, { method: "POST" }); toast("Suppression window ended"); rules(); }) }, "End") : ""] })))),
     ...ruleCards,
     el("div", { class: "card" }, el("h2", {}, "Security settings"),
       table(["Setting", "Value", "Allowed", "Last changed", ""], settings.map((s) => ({ cells: [
@@ -989,7 +998,7 @@ async function sendReview(c, decision, note, acknowledged) {
 }
 
 async function review(c, decision) {
-  if (decision === "approve" && c.kind === "rule_update" && (detectionLoss(c).length || openAlertsLost(c))) return lossDialog(c);
+  if (decision === "approve" && ["rule_update", "rule_suppression_add"].includes(c.kind) && (detectionLoss(c).length || openAlertsLost(c))) return lossDialog(c);
   const note = prompt(`${decision === "approve" ? "Approve" : "Reject"} change #${c.id}. Review note:`) ?? null;
   if (note === null) return;
   await guarded(() => sendReview(c, decision, note));
@@ -1332,6 +1341,32 @@ function exceptionDialog(rule) {
       await api(`/api/rules/${rule.id}/suppressions`, { method: "POST", body: { group_key: f.get("group_key").trim(), days: Number(f.get("days")), reason: f.get("reason") } });
       $("#modal").close(); toast("Exception submitted; an admin must approve it"); rules();
     } catch (e) { $("#exception-error").textContent = e.message; }
+  });
+  $("#modal-body").replaceChildren(form);
+  openModal();
+}
+
+function suppressionWindowDialog(rule) {
+  const local = (d) => new Date(d).toISOString().slice(0, 16);
+  const form = el("form", {},
+    el("h2", {}, `Schedule rule suppression: ${rule.id}`),
+    el("p", { class: "muted" }, "Every finding from this rule is suppressed during the approved interval (maximum 30 days). The reviewer must explicitly acknowledge the labeled detections the window will miss."),
+    el("label", {}, "Starts", el("input", { name: "starts_at", type: "datetime-local", value: local(Date.now()), required: true })),
+    el("label", {}, "Expires", el("input", { name: "expires_at", type: "datetime-local", value: local(Date.now() + 2 * 60 * 60 * 1000), required: true })),
+    el("label", {}, "Reason (required)", el("textarea", { name: "reason", required: true, minlength: 5, maxlength: 2000 })),
+    el("p", { class: "error", role: "alert", id: "suppression-window-error" }),
+    el("div", { class: "row" }, el("button", { type: "submit" }, "Submit for review"), el("button", { type: "button", class: "ghost", onclick: () => $("#modal").close() }, "Cancel")));
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const f = new FormData(form);
+    try {
+      await api(`/api/rules/${rule.id}/suppression-windows`, { method: "POST", body: {
+        starts_at: new Date(f.get("starts_at")).toISOString(),
+        expires_at: new Date(f.get("expires_at")).toISOString(),
+        reason: f.get("reason"),
+      } });
+      $("#modal").close(); toast("Suppression window submitted; a different admin must approve it"); rules();
+    } catch (e) { $("#suppression-window-error").textContent = e.message; }
   });
   $("#modal-body").replaceChildren(form);
   openModal();

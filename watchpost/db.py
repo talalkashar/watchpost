@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # prev_hash of the first audit entry. Every later entry links to the hash of the one before it.
 GENESIS_HASH = "0" * 64
@@ -291,6 +291,24 @@ CREATE TABLE IF NOT EXISTS suppressions (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_suppressions_rule ON suppressions(rule_id, group_key);
+
+-- 12.0: reviewed, time-bounded suppression of every finding from one rule. The row remains as history after
+-- expiry or an admin ends it early.
+CREATE TABLE IF NOT EXISTS rule_suppression_windows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id TEXT NOT NULL,
+    starts_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    proposed_by TEXT NOT NULL,
+    approved_by TEXT NOT NULL,
+    change_request_id INTEGER,
+    created_at TEXT NOT NULL,
+    ended_at TEXT,
+    ended_by TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_rule_suppression_windows_active
+    ON rule_suppression_windows(rule_id, starts_at, expires_at);
 
 -- 5.0: hunting. A saved search stores the query text; time terms like last:24h resolve when it runs.
 -- 9.0: imported Sigma rules. The rule itself is a row in `rules` (id sigma_<slug>); this keeps the original

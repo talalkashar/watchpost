@@ -68,3 +68,18 @@ When this list runs low, add more real-SIEM gaps here and keep going. Same groun
       consistent across endpoints, with tests that walk every viewer GET route. (PR #34; off by default)
 - [x] 21. Release 5.0 (PR titles already used 4.1-4.9): version bump, CHANGELOG from merged PRs, README numbers refreshed from a test run,
       `LINKEDIN_3.md` draft refreshed (draft only, never posted). (PR #36)
+
+## Wave 4 (added 2026-10-08, same ground rules; none of these are Juan's reserved items)
+
+- [ ] 22. Per-rule alert suppression windows: time-bounded windows with a reason and expiry, created through
+      two-person review, visible with active/upcoming/expired state, and applied without hiding audit history.
+- [ ] 23. Detection-as-code checks: a stdlib CLI that validates exported Watchpost rules and runs their labeled
+      malicious and benign samples, with machine-readable output and a failing exit status for CI or pre-merge use.
+- [ ] 24. Case notes and timeline export: one chronological incident case record combining alert transitions,
+      assignments, analyst notes, and evidence, downloadable as JSON and Markdown with viewer masking preserved.
+- [ ] 25. Role-scoped API tokens with expiry: hashed bearer tokens limited to explicit API capabilities, optional
+      expiry, revocation and last-used metadata; viewer-equivalent tokens remain read-only.
+- [ ] 26. Saved dashboard views: analysts can save and share dashboard filter/layout presets, viewers can apply
+      them read-only, and changes are audited with ownership and visibility enforced server-side.
+- [ ] 27. Per-rule alert grouping keys: reviewed grouping configuration with a preview of deduplication effects,
+      stable evidence attachment, and clear documentation of how grouping differs from incident correlation.

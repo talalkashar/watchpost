@@ -234,6 +234,9 @@ Asset fields: `id`, `name`, `kind` (`server`, `workstation`, `network`, `cloud`,
 | `POST /api/rules/{id}/suppressions` | analyst | `{group_key, days (1–90), reason}`: proposes a tuning exception; nothing is suppressed until an admin approves it |
 | `GET /api/suppressions` | viewer | Approved tuning exceptions, newest first, with `active` false once expired or revoked |
 | `POST /api/suppressions/{id}/revoke` | admin | Ends an exception early; audited as `suppression_revoked` |
+| `POST /api/rules/{id}/suppression-windows` | analyst | `{starts_at, expires_at, reason}` proposes a reviewed, rule-wide pause of at most 30 days; approval must acknowledge labeled detection loss |
+| `GET /api/rule-suppression-windows` | viewer | Approved rule-wide windows, including `upcoming`, `active`, `expired`, and `ended` history |
+| `POST /api/rule-suppression-windows/{id}/end` | admin | Ends an active or upcoming rule-wide window early; the approved interval remains in history |
 | `GET /api/noise-lab` | viewer | Each rule against the labeled scenarios and its benign look-alikes: recall, precision, tp/fn/fp, look-alikes tested and fired, and a `verdict` (`quiet`, `noisy`, `blind`, `untested`, `disabled`) |
 | `GET /api/settings` | viewer | Security settings with allowed ranges |
 | `POST /api/settings/{key}/proposals` | admin | `{value, reason}` |
