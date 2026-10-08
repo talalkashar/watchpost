@@ -38,6 +38,9 @@ def _validated_rules(document):
             params = rules.validate_params(rule_id, entry["params"])
         except rules.RuleConfigError as exc:
             raise ValidationError(f"rule {rule_id!r}: {exc}") from exc
+        missing = set(params) - set(entry["params"])
+        if missing:
+            raise ValidationError(f"rule {rule_id!r} params missing key(s): {', '.join(sorted(missing))}")
         checked.append({"id": rule_id, "enabled": enabled, "params": params})
         seen.add(rule_id)
     return checked
