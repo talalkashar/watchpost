@@ -29,6 +29,10 @@ MAX_SELECTIONS = 50
 MAX_VALUES = 100
 MAX_CONDITION = 1000
 MAX_SAMPLE_EVENTS = 50
+# A condition can name the same selection many times ("1 of them or 1 of them ..."), and each mention copies it,
+# so the source cap alone does not bound the compiled rule. These bound what runs against every event.
+MAX_COMPILED_VALUES = 2000
+MAX_COMPILED_CHARS = 128 * 1024
 SAMPLE_VALUE_LIMIT = 2048
 GROUP_GAP_SECONDS = 3600  # matching events of one group key further apart than this become separate findings
 RULE_PREFIX = "sigma_"
@@ -561,6 +565,7 @@ def compile_rule(source):
             raise SigmaError(f"selection name {name!r} is not usable in a condition")
     selections = {name: _selection(name, body) for name, body in named.items()}
     tree = _Condition(detection["condition"], selections).parse()
+    _check_budget(tree)
 
     techniques, ignored_tags = [], []
     for tag in tags:
@@ -633,7 +638,27 @@ def validate_params(params):
             raise SigmaError("compiled detection is malformed")
 
     check(params["detection"], 0)
+    _check_budget(params["detection"])
     return params
+
+
+def _check_budget(tree):
+    """Refuse a compiled detection that would compare too many values per event (see MAX_COMPILED_VALUES)."""
+    values = chars = 0
+    stack = [tree]
+    while stack:
+        node = stack.pop()
+        if node["op"] in ("and", "or"):
+            stack.extend(node["args"])
+        elif node["op"] == "not":
+            stack.append(node["arg"])
+        else:
+            values += len(node["values"])
+            chars += sum(len(str(v)) for v in node["values"])
+        if values > MAX_COMPILED_VALUES or chars > MAX_COMPILED_CHARS:
+            raise SigmaError(f"the compiled detection is too large (at most {MAX_COMPILED_VALUES} values and "
+                             f"{MAX_COMPILED_CHARS // 1024} KB once the condition is expanded); a condition that "
+                             "names the same selections many times multiplies them")
 
 
 # --- Evaluation ---------------------------------------------------------------------------------

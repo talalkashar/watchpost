@@ -92,6 +92,23 @@ class YamlSubsetTests(unittest.TestCase):
         self.assertIn("at most", str(ctx.exception))
 
 
+    def test_condition_expansion_is_capped(self):
+        # 15 selections of 100 values fit the source cap; naming them 75 times would compile to ~8 MB.
+        values = "".join(f"      - v{i:05d}{'x' * 26}\n" for i in range(100))
+        selections = "".join(f"  s{j}:\n    message|contains:\n{values}" for j in range(15))
+        text = ("title: t\nlevel: low\ndetection:\n" + selections
+                + "  condition: " + " or ".join(["1 of them"] * 75) + "\n")
+        self.assertLess(len(text), sigma.MAX_SOURCE_BYTES)
+        with self.assertRaises(sigma.SigmaError) as ctx:
+            sigma.compile_rule(text)
+        self.assertIn("too large", str(ctx.exception))
+        # The stored-params path (a rule_update) is held to the same budget.
+        big = {"op": "match", "field": "message", "mod": "contains", "all": False,
+               "values": ["x"] * (sigma.MAX_COMPILED_VALUES + 1)}
+        with self.assertRaises(sigma.SigmaError):
+            sigma.validate_params({"title": "t", "detection": big})
+
+
 class CompileTests(unittest.TestCase):
     def test_modifiers(self):
         p = compiled("  sel:\n    message|contains: Union Select\n  condition: sel\n")
