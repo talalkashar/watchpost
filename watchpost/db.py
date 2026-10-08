@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # prev_hash of the first audit entry. Every later entry links to the hash of the one before it.
 GENESIS_HASH = "0" * 64
@@ -307,6 +307,8 @@ ADDED_COLUMNS = [
     # 3.1: an admin can end a tuning exception before it expires; the row stays as history.
     ("suppressions", "revoked_at", "TEXT"),
     ("suppressions", "revoked_by", "TEXT"),
+    # 7.0: when an alert first left `open` (triage metrics). Rows from before stay NULL: never backfilled.
+    ("alerts", "acknowledged_at", "TEXT"),
 ]
 
 
