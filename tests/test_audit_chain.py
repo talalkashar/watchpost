@@ -326,7 +326,7 @@ class UpgradeTests(unittest.TestCase):
         result = self.assert_legacy(conn, 4, 4)
         self.assertEqual(result["entries"], 1)
         self.assertTrue(result["keyed"])
-        self.assertEqual(conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0], "8")
+        self.assertEqual(conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0], "9")
         audit(conn, "alice", "after_upgrade")
         init_schema(conn)  # another start writes no second chain start
         self.assertEqual(self.assert_legacy(conn, 4, 4)["entries"], 2)

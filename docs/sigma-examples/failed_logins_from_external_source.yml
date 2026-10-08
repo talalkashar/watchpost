@@ -1,0 +1,36 @@
+# A simple Sigma rule in the shape of the public "failed logon from an external address" detections,
+# written for Watchpost's supported subset (see README, "Sigma rule import"). The field names are a mix of
+# ECS (event.action, user.name) and common Sigma names (SourceIp); all map to Watchpost event fields.
+title: Failed Admin Login From External Source
+id: 5d2c1a6e-8f3b-4c1e-9a77-0e4b2f6d9c10
+status: experimental
+description: |
+  A failed login for a privileged account name from an address outside the private ranges.
+  Each matching event is evidence; Watchpost groups them per source IP.
+author: Watchpost example
+date: 2026-10-07
+references:
+  - https://attack.mitre.org/techniques/T1110/001/
+tags:
+  - attack.credential_access
+  - attack.t1110.001
+logsource:
+  category: authentication
+  product: linux
+detection:
+  selection:
+    event.action: auth_failure
+    user.name:
+      - root
+      - admin
+      - administrator
+  internal:
+    SourceIp|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+  condition: selection and not internal
+falsepositives:
+  - An administrator mistyping a password from a home or hotel network
+level: high

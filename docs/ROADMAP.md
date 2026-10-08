@@ -53,5 +53,18 @@ When this list runs low, add more real-SIEM gaps here and keep going. Same groun
       visible breakdown; no ML, every point traceable to an alert. (PR #26: scoring existed since 3.0; the breakdown now shows asset raises)
 - [x] 15. Detection content portability: export/import rules as versioned JSON, plus a documented field mapping
       from Watchpost's event schema to ECS names.  (PR #28: tuning only, imports become reviewed proposals)
-- [ ] 16. Sigma subset: import a documented subset of Sigma rules (stdlib parser for the YAML subset Sigma uses),
-      refuse anything outside it with a clear reason, scenario required before enable.
+- [x] 16. Sigma subset: import a documented subset of Sigma rules (stdlib parser for the YAML subset Sigma uses),
+      refuse anything outside it with a clear reason, scenario required before enable. (PR #29)
+
+## Wave 3 (added 2026-10-08, same ground rules; none of these are Juan's reserved items)
+
+- [ ] 17. Log source health: per-source last-seen and expected cadence, a "source went silent" detection with a
+      labeled scenario and look-alike (maintenance window), and a source-health panel. Not a new parser.
+- [ ] 18. Hunt aggregations: `| stats count by <field>`, `| top <field>`, `| timechart span=1h` over the existing
+      query language, with whitelisted fields, bound parameters, and row caps.
+- [ ] 19. Scheduled searches as detections: promote a saved hunt to a threshold rule through the change-request
+      workflow (backtest, two-person review, scenario before enable, like Sigma rules).
+- [ ] 20. Viewer data masking: usernames and internal IPs masked for the viewer role in API responses and exports,
+      consistent across endpoints, with tests that walk every viewer GET route.
+- [ ] 21. Release 4.5: version bump, CHANGELOG from merged PRs, README numbers refreshed from a test run,
+      `LINKEDIN_3.md` draft refreshed (draft only, never posted).

@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (__version__, assets, attack, auth, ecs, engine, entities, geo, hunt, improve, incidents, portability,
-               queries, report, simulate, storyline, stream, triage)
+               queries, report, sigma, simulate, storyline, stream, triage)
 from . import backtest as backtest_mod
 from .ratelimit import TokenBucketLimiter
 from .config import Config
@@ -509,8 +509,20 @@ def rules(req):
     perf = improve.rule_performance(req.conn)
     latest = improve.list_evaluations(req.conn, limit=1)
     evaluation = latest[0]["results"]["rules"] if latest else {}
-    return [{**r, "performance": perf.get(r["id"]), "evaluation": evaluation.get(r["id"])}
+    return [{**r, "performance": perf.get(r["id"]), "evaluation": evaluation.get(r["id"]),
+             **({"sigma": _sigma_detail(req.conn, r)} if sigma.is_sigma(r["id"]) else {})}
             for r in engine.load_rules(req.conn, enabled_only=False)]
+
+
+def _sigma_detail(conn, rule):
+    """An imported rule's original YAML (read-only), its sha256, its compiled conditions and its sample."""
+    rec = sigma.stored(conn, rule["id"])
+    if rec is None:
+        return None
+    return {**{k: rec[k] for k in ("source", "sha256", "sigma_id", "imported_by", "approved_by", "change_request_id",
+                                   "created_at", "sample")},
+            "conditions": sigma.describe(rule["params"]["detection"]),
+            "sample_result": sigma.sample_result(rule["params"], rec["sample"])}
 
 
 @route("GET", r"/api/rules/([a-z_]+)/history")
@@ -568,6 +580,55 @@ def rules_import(req):
             _backtest_quota(req, req.app.change_backtest_limiter, portability.to_propose(plan))
         portability.propose_import(req.conn, plan, label, req.user["username"])
     return {"dry_run": dry_run, "label": label, "summary": portability.summary(plan), "rules": plan}
+
+
+SIGMA_MAX_BODY = 256 * 1024  # the YAML (at most sigma.MAX_SOURCE_BYTES) plus its labeled sample
+
+
+@route("POST", "/api/rules/sigma", role="analyst")
+def sigma_import(req):
+    """Import a Sigma rule: {source, sample (optional), reason (optional)}. Applies nothing by itself.
+
+    ?dry_run=1 compiles it and previews it on stored events (spends one preview backtest) and returns the
+    compiled conditions or the refusal reason. Otherwise it becomes a `sigma_add` change request (spends one
+    from the rule-proposal bucket, as its evidence carries the same preview); approval adds the rule disabled.
+    """
+    if len(req.body) > SIGMA_MAX_BODY:
+        raise ApiError(413, f"a Sigma import is at most {SIGMA_MAX_BODY} bytes")
+    data = body_json(req)
+    if not set(data) <= {"source", "sample", "reason"}:
+        raise ApiError(400, "a Sigma import is {source, sample (optional), reason (optional)}")
+    dry_run = req.query.get("dry_run") == "1"
+    _backtest_quota(req, req.app.backtest_limiter if dry_run else req.app.change_backtest_limiter)
+    try:
+        compiled = sigma.compile_rule(data.get("source"))
+        sample = sigma.validate_sample(data["sample"]) if data.get("sample") is not None else None
+    except sigma.SigmaError as exc:
+        if not dry_run:
+            raise ApiError(400, f"refused: {exc}")
+        return {"dry_run": True, "ok": False, "refused": str(exc)}
+    if dry_run:
+        exists = req.conn.execute("SELECT 1 FROM rules WHERE id = ?", (compiled["rule_id"],)).fetchone()
+        return {"dry_run": True, "ok": not exists,
+                "refused": f"rule {compiled['rule_id']!r} already exists" if exists else None,
+                "compiled": {k: compiled[k] for k in ("rule_id", "title", "severity", "techniques", "conditions",
+                                                      "warnings", "sha256", "params", "logsource")},
+                "sample": sigma.sample_result(compiled["params"], sample),
+                "backtest": sigma.preview(req.conn, compiled["params"])}
+    payload = {"source": data["source"], **({"sample": sample} if sample is not None else {})}
+    req.status = 201
+    return improve.propose_change(req.conn, "sigma_add", compiled["rule_id"], payload,
+                                  data.get("reason") or f"import Sigma rule {compiled['title']}"[:2000],
+                                  req.user["username"])
+
+
+@route("POST", r"/api/rules/([a-z_]+)/sigma-sample", role="analyst")
+def sigma_sample_propose(req, rule_id):
+    """Attach or replace an imported rule's labeled sample; a change request like any other."""
+    data = body_json(req)
+    req.status = 201
+    return improve.propose_change(req.conn, "sigma_sample", rule_id, {"sample": data.get("sample")},
+                                  data.get("reason"), req.user["username"])
 
 
 BACKTEST_BURST, BACKTEST_PER_MINUTE = 6, 12
@@ -649,7 +710,7 @@ def change_review(req, change_id):
     data = body_json(req)
     if data.get("decision") == "approve":
         row = req.conn.execute("SELECT kind FROM change_requests WHERE id = ?", (int(change_id),)).fetchone()
-        if row is not None and row["kind"] == "rule_update":
+        if row is not None and row["kind"] in ("rule_update", "sigma_add"):
             _backtest_quota(req, req.app.change_backtest_limiter)  # approval recomputes the evidence, backtest included
     return improve.review_change(req.conn, int(change_id), data.get("decision"), req.user["username"],
                                  data.get("note", ""), data.get("evidence_digest"),

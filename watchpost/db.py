@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # prev_hash of the first audit entry. Every later entry links to the hash of the one before it.
 GENESIS_HASH = "0" * 64
@@ -291,6 +291,20 @@ CREATE TABLE IF NOT EXISTS suppressions (
 CREATE INDEX IF NOT EXISTS idx_suppressions_rule ON suppressions(rule_id, group_key);
 
 -- 5.0: hunting. A saved search stores the query text; time terms like last:24h resolve when it runs.
+-- 9.0: imported Sigma rules. The rule itself is a row in `rules` (id sigma_<slug>); this keeps the original
+-- YAML, its sha256, and the labeled sample that must pass before the rule can be enabled.
+CREATE TABLE IF NOT EXISTS sigma_rules (
+    rule_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    sigma_id TEXT,
+    sample TEXT,
+    imported_by TEXT NOT NULL,
+    approved_by TEXT NOT NULL,
+    change_request_id INTEGER,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS saved_searches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE COLLATE NOCASE,

@@ -14,6 +14,7 @@ from datetime import datetime, time, timedelta, timezone
 from . import assets as assets_mod
 from . import backtest as backtest_mod
 from . import rules as rules_mod
+from . import sigma
 from . import simulate
 from .db import audit, iso, now_iso, row_to_dict, transaction, utcnow
 from .engine import active_suppressions, apply_rule_change, correlate_alerts, load_rules
@@ -25,6 +26,7 @@ SECURITY_SETTINGS = {
 MIN_FEEDBACK_FOR_SUGGESTION = 2
 MAX_SUPPRESSION_DAYS = 90  # tuning exceptions always expire
 ASSET_KINDS = ("asset_add", "asset_update", "asset_delete")  # inventory edits; see assets.review_reasons
+SIGMA_KINDS = ("sigma_add", "sigma_sample")  # import a Sigma rule (added disabled); attach its labeled sample
 
 
 class ChangeError(ValueError):
@@ -76,7 +78,7 @@ def evaluate(rule_params, seed=7, suppressions=()):
         lookalike_of = simulate.SCENARIOS[name].get("lookalike_of")
         for rule_id, params in rule_params.items():
             run_params = rules_mod.exception_params(rule_id, params, suppressions)
-            findings = [f for f in rules_mod.RULE_FUNCTIONS[rule_id](copy.deepcopy(events), run_params)
+            findings = [f for f in rules_mod.rule_function(rule_id)(copy.deepcopy(events), run_params)
                         if f["last_seen"] >= day_start]
             r = results[rule_id]
             r["group_keys"].update(f["group_key"] for f in findings)  # every key the scenarios exercise
@@ -98,6 +100,8 @@ def evaluate(rule_params, seed=7, suppressions=()):
                     r["fn"] += 1
                     r["missed"].append(name)
                 extra = len(findings) - len(hit)
+            elif sigma.is_sigma(rule_id) and simulate.SCENARIOS[name]["malicious"]:
+                extra = 0  # the built-in labels say nothing about an imported rule firing on an attack
             else:
                 extra = len(findings)
             if extra:
@@ -220,6 +224,8 @@ def suggest_for_rule(conn, rule):
 def generate_suggestions(conn, actor="system:feedback"):
     created = []
     for rule in load_rules(conn, enabled_only=False):
+        if sigma.is_sigma(rule["id"]):
+            continue  # no tunable params: a Sigma rule changes by importing a new version of its YAML
         rule["params"] = rules_mod.validate_params(rule["id"], rule["params"])
         suggestion = suggest_for_rule(conn, rule)
         if not suggestion:
@@ -248,6 +254,17 @@ def _validate_change(conn, kind, target, payload):
             raise ChangeError("rule changes may only contain 'params' and/or 'enabled'")
         if "enabled" in payload and not isinstance(payload["enabled"], bool):
             raise ChangeError("enabled must be true or false")
+        if sigma.is_sigma(target):
+            # Imported logic is not tuned in place, and it runs only once its labeled sample passes.
+            if "params" in payload and payload["params"] != {} and \
+                    {**json.loads(rule["params"]), **payload["params"]} != json.loads(rule["params"]):
+                raise ChangeError("a Sigma rule has no tunable params: change its YAML and import it again")
+            if payload.get("enabled") is True:
+                result = sigma.stored_result(conn, target)
+                if result is None or not result["passes"]:
+                    raise ChangeError("this Sigma rule cannot be enabled until it has a labeled sample that passes ("
+                                      + ("no sample attached" if result is None else result["summary"]) + ")")
+            return json.loads(rule["params"]) if "params" in payload else None
         if "params" in payload:
             try:
                 merged = rules_mod.validate_params(target, {**json.loads(rule["params"]), **payload["params"]})
@@ -278,7 +295,35 @@ def _validate_change(conn, kind, target, payload):
             return assets_mod.plan_change(conn, kind, target, payload)  # (before, after)
         except assets_mod.AssetError as exc:
             raise ChangeError(str(exc), exc.status)
-    raise ChangeError(f"kind must be rule_update, setting_update, suppression_add or one of {', '.join(ASSET_KINDS)}")
+    if kind in SIGMA_KINDS:
+        return _validate_sigma(conn, kind, target, payload)
+    raise ChangeError(f"kind must be rule_update, setting_update, suppression_add or one of "
+                      f"{', '.join(ASSET_KINDS + SIGMA_KINDS)}")
+
+
+def _validate_sigma(conn, kind, target, payload):
+    """sigma_add: {source, sample?} compiles to a new rule `target`; sigma_sample: {sample} for a Sigma rule.
+
+    Returns (compiled rule or None, validated sample or None).
+    """
+    try:
+        if kind == "sigma_add":
+            if not set(payload) <= {"source", "sample"} or "source" not in payload:
+                raise ChangeError("a Sigma import is {source, sample (optional)}")
+            compiled = sigma.compile_rule(payload["source"])
+            if compiled["rule_id"] != target:
+                raise ChangeError(f"the rule id for this title is {compiled['rule_id']!r}, not {target!r}")
+            if conn.execute("SELECT 1 FROM rules WHERE id = ?", (target,)).fetchone():
+                raise ChangeError(f"rule {target!r} already exists; give the Sigma rule a different title", 409)
+            sample = payload.get("sample")
+            return compiled, sigma.validate_sample(sample) if sample is not None else None
+        if not sigma.is_sigma(target) or sigma.stored(conn, target) is None:
+            raise ChangeError(f"unknown Sigma rule {target!r}", 404)
+        if set(payload) != {"sample"}:
+            raise ChangeError("a sample change is {sample}")
+        return None, sigma.validate_sample(payload["sample"])
+    except sigma.SigmaError as exc:
+        raise ChangeError(str(exc))
 
 
 LIVE_IMPACT_RECENT = 5  # newest matching alerts listed in an exception's evidence
@@ -417,6 +462,19 @@ def _evidence(conn, kind, target, payload, proposer):
                                                   proposer)}
     elif kind in ASSET_KINDS:
         evaluation = assets_mod.change_evidence(conn, *merged)
+    elif kind == "sigma_add":
+        compiled, sample = merged
+        evaluation = {"rule": target, "title": compiled["title"], "sha256": compiled["sha256"],
+                      "severity": compiled["severity"], "techniques": [t["id"] for t in compiled["techniques"]],
+                      "conditions": compiled["conditions"], "warnings": compiled["warnings"],
+                      "sample": sigma.sample_result(compiled["params"], sample),
+                      # What it would match among stored events. Added disabled either way.
+                      "backtest": sigma.preview(conn, compiled["params"])}
+    elif kind == "sigma_sample":
+        row = conn.execute("SELECT params, enabled FROM rules WHERE id = ?", (target,)).fetchone()
+        evaluation = {"rule": target, "enabled": bool(row["enabled"]),
+                      "before": sigma.stored_result(conn, target),
+                      "sample": sigma.sample_result(json.loads(row["params"]), merged[1])}
     return json.loads(json.dumps(evaluation))  # as it reads back from storage, so the two compare equal
 
 
@@ -590,6 +648,19 @@ def review_change(conn, change_id, decision, reviewer, note="", digest=None, ack
                 audit(conn, reviewer, "suppression_added", change["target"],
                       {"group_key": change["payload"]["group_key"], "expires_at": expires,
                        "change_request": change_id})
+            elif change["kind"] == "sigma_add":
+                compiled, sample = _validate_sigma(conn, "sigma_add", change["target"], change["payload"])
+                sigma.add_rule(conn, compiled, change["payload"]["source"], sample, change["proposed_by"],
+                               reviewer, change_id, now_iso())
+                audit(conn, reviewer, "sigma_rule_added", change["target"],
+                      {"sha256": compiled["sha256"], "enabled": False, "sample": sample is not None,
+                       "change_request": change_id})
+            elif change["kind"] == "sigma_sample":
+                _, sample = _validate_sigma(conn, "sigma_sample", change["target"], change["payload"])
+                version = sigma.set_sample(conn, change["target"], sample, change["proposed_by"], reviewer, change_id,
+                                           now_iso())
+                audit(conn, reviewer, "sigma_sample_set", change["target"],
+                      {"version": version, "passes": fresh["sample"]["passes"], "change_request": change_id})
             elif change["kind"] in ASSET_KINDS:
                 # Checked again by _evidence above in this transaction, so a conflict has already refused it.
                 assets_mod.apply_change(conn, change["kind"], change["target"], change["payload"], reviewer,
@@ -672,13 +743,26 @@ def noise_lab(conn):
     for rule in load_rules(conn, enabled_only=False):
         r = results["rules"][rule["id"]]
         other = [n for n in r["false_positives"] if n in benign and n not in r["lookalikes_fired"]]
+        sample = None
+        if sigma.is_sigma(rule["id"]):
+            # The rule's own labeled sample stands in for a scenario: detected when it passes.
+            sample = sigma.stored_result(conn, rule["id"])
+            name = sigma.SAMPLE_PREFIX + rule["id"]
+            if sample:
+                r = {**r, "detected": r["detected"] + [name] * sample["passes"],
+                     "missed": r["missed"] + [name] * bool(sample["missed"]),
+                     "lookalikes": r["lookalikes"] + [name],
+                     "lookalikes_fired": r["lookalikes_fired"] + [name] * bool(sample["fired"])}
         verdict, summary = _verdict(rule, r, other)
+        if sigma.is_sigma(rule["id"]) and sample is None and rule["enabled"]:
+            verdict, summary = "untested", "Imported Sigma rule without a labeled sample: nothing proves it detects."
         rows.append({
             "rule_id": rule["id"], "name": rule["name"], "severity": rule["severity"],
             "enabled": bool(rule["enabled"]), "recall": r["recall"], "precision": r["precision"],
             "tp": r["tp"], "fn": r["fn"], "fp": r["fp"], "detected": r["detected"], "missed": r["missed"],
             "lookalikes_tested": r["lookalikes"], "lookalikes_fired": r["lookalikes_fired"],
             "other_benign_fired": other, "suppressed": r["suppressed"], "verdict": verdict, "summary": summary,
+            **({"sample": sample} if sigma.is_sigma(rule["id"]) else {}),
         })
     return {
         "seed": results["seed"],
