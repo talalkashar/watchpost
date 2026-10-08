@@ -12,11 +12,12 @@ Base URL: `http://127.0.0.1:8080`. All request and response bodies are JSON unle
 Roles: `viewer` (read) < `analyst` (read, ingest, triage, propose rule changes) < `admin` (everything, plus approvals, tokens, demo data, and audit log).
 
 **Viewer is read-only.** A viewer can call every `GET` route whose role below is `viewer` or `public`: dashboard,
-stream, events, alerts, incidents, reports, ATT&CK coverage, metrics, rules, settings, change requests, evaluations,
-batches, and health details. Any other method is refused with 403 `viewer accounts are read-only`, except
+stream, events, hunting and saved searches, alerts, incidents, reports, ATT&CK coverage and the Navigator layer,
+entities, metrics, rules, the noise lab, tuning exceptions, settings, change requests, evaluations, the asset
+inventory, batches, and health details. Any other method is refused with 403 `viewer accounts are read-only`, except
 `POST /api/auth/logout`. The server enforces this in `_authorize`, on top of each route's minimum role, so a new
 write route is closed to viewers even if its role is left at the default. Admin-only reads (`/api/tokens`,
-`/api/audit`) are 403 for viewers. The `viewer` account is created on start from `SIEM_VIEWER_PASSWORD` when set and
+`/api/audit`, `/api/audit/verify`) are 403 for viewers. The `viewer` account is created on start from `SIEM_VIEWER_PASSWORD` when set and
 no user named `viewer` exists.
 
 Five failed logins lock an account for 15 minutes. Both values are security settings, changed only through reviewed proposals.
@@ -144,7 +145,10 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 | `GET /api/incidents?status=open,investigating&severity=&limit=` | viewer | Correlated incidents: `title`, `severity`, `status`, `first_seen`, `last_seen`, `entities` (`{src_ip, user, host}` lists), `stages` (ATT&CK tactics in kill-chain order), `alert_count`, `synthetic`. Active first, then severity, then recency |
 | `GET /api/incidents/{id}` | viewer | Adds `alerts` (each with `techniques`), `events` (evidence, each with `alert_ids`), `timeline` (one entry per alert with tactics and technique ids), `techniques`, `techniques_by_tactic`, `escalated`, `assets` (inventory entries behind the incident's hosts and addresses). 404 if missing |
 | `POST /api/incidents/{id}/status` | analyst | `{status: open\|investigating\|resolved, note?}`; audited as `incident_status_changed` |
-| `GET /api/attack/coverage` | viewer | `{tactics, techniques: [{id, name, tactic, rules: [{id, name, enabled}], hits, covered}], summary}` over the built-in ATT&CK subset; `hits` counts alerts from the covering rules |
+| `GET /api/attack/coverage` | viewer | `{tactics, techniques: [{id, name, tactic, level, scenarios, rules: [{id, name, enabled, hits, verdict, lookalikes_fired, proves}], hits, covered}], summary, levels, level_meaning}` over the built-in ATT&CK subset. `level` is `validated`, `mapped`, `disabled`, or `gap` (see the README, "ATT&CK coverage"); `covered` is true only for `validated`. `hits` counts alerts from the mapped rules; `summary.levels` counts techniques per level |
+| `GET /api/attack/navigator.json` | viewer | The same coverage as a MITRE ATT&CK Navigator layer, colored by level and scored by alert count |
+| `GET /api/entities?kind=&limit=` | viewer | Riskiest entities (`kind` is `user`, `src_ip`, or `host`; `limit` 1–100, default 10), each with its score and the alerts that contribute to it |
+| `GET /api/entities/{kind}/{value}` | viewer | One entity (value percent-encoded): score breakdown, alerts, incidents, and recent events |
 | `GET /api/metrics?hours=24` | viewer | Counts, severity/rule breakdowns, MTTR, top failing IPs/users, and a 24-hour histogram ending at the newest event |
 
 ## Reports
@@ -199,7 +203,14 @@ seeds a fictional inventory (marked `synthetic`) for the demo hosts; existing na
 | `GET /api/assets` | viewer | `{assets: [...], criticalities, kinds, data_tags: {tag: description}}`, most critical first |
 | `POST /api/assets` | admin | `{name, kind?, criticality?, data_tags?, addresses?, owner?, description?}` → 201 `{asset, alerts_rescored}`. `name` is unique ignoring case (409 on a clash); `data_tags` and `addresses` accept a list or a comma-separated string. Audited as `asset_created` |
 | `POST /api/assets/{id}` | admin | Same body; replaces the asset. Audited as `asset_updated` |
-| `POST /api/assets/{id}/delete` | admin | → `{ok, alerts_rescored}`. Audited as `asset_deleted` |
+| `POST /api/assets/{id}/delete` | admin | Always 409 `review_required`: a delete needs a second admin, through the proposal route below |
+| `POST /api/assets/{id}/proposals` | admin | `{...asset, reason}` for an edit, or `{"delete": true, reason}` → 201 change request, approved through `POST /api/changes/{id}/review` |
+| `POST /api/assets/proposals` | admin | `{...asset, reason}`: propose an add for review instead of applying it at once |
+
+`POST /api/assets` and `POST /api/assets/{id}` apply an edit only when it cannot lower alert severity. An edit that
+lowers criticality, removes a sensitive-data tag or an address, renames the host, or claims an address another asset
+has changes nothing and answers 409 with `{error, review_required: true, reasons, proposal_route}`. The full rules
+are in the README, "Asset inventory review".
 
 Asset fields: `id`, `name`, `kind` (`server`, `workstation`, `network`, `cloud`, `database`, `other`), `criticality`
 (`low`, `medium`, `high`, `critical`), `data_tags`, `addresses`, `owner`, `description`, `synthetic`, `created_at`,
@@ -213,10 +224,14 @@ Asset fields: `id`, `name`, `kind` (`server`, `workstation`, `network`, `cloud`,
 | `GET /api/rules/{id}/history` | viewer | Every version, with who proposed and who approved it |
 | `POST /api/rules/{id}/proposals` | analyst | `{params?: {...partial}, enabled?: bool, reason}`; validated, then scored against scenarios |
 | `POST /api/rules/suggestions` | analyst | Generates proposals from false-positive feedback (deduplicated) |
+| `POST /api/rules/{id}/suppressions` | analyst | `{group_key, days (1–90), reason}`: proposes a tuning exception; nothing is suppressed until an admin approves it |
+| `GET /api/suppressions` | viewer | Approved tuning exceptions, newest first, with `active` false once expired or revoked |
+| `POST /api/suppressions/{id}/revoke` | admin | Ends an exception early; audited as `suppression_revoked` |
+| `GET /api/noise-lab` | viewer | Each rule against the labeled scenarios and its benign look-alikes: recall, precision, tp/fn/fp, look-alikes tested and fired, and a `verdict` (`quiet`, `noisy`, `blind`, `untested`, `disabled`) |
 | `GET /api/settings` | viewer | Security settings with allowed ranges |
 | `POST /api/settings/{key}/proposals` | admin | `{value, reason}` |
 | `GET /api/changes?status=pending` | viewer | Change requests |
-| `POST /api/changes/{id}/review` | admin | `{decision: approve\|reject, note}`. Self-review → 403; already reviewed → 409 |
+| `POST /api/changes/{id}/review` | admin | `{decision: approve\|reject, note, evidence_digest?, acknowledge_detection_loss?}`. Approval must send the `evidence_digest` of the evidence the reviewer was shown; if the evidence changed, nothing is applied and the answer is 409. A rule change that loses a labeled detection also needs `acknowledge_detection_loss: true`. Self-review → 403; already reviewed → 409 |
 | `GET /api/evaluations` / `POST /api/evaluations` | viewer / analyst | Evaluation history / run one now |
 
 ## SOC dashboard and live stream
@@ -254,6 +269,7 @@ The dashboard also reads `GET /api/incidents`, `GET /api/attack/coverage`, and `
 | `GET /api/tokens` / `POST /api/tokens` | admin | `{name}` → `{token}` (shown once; only a SHA-256 hash is stored) |
 | `POST /api/tokens/{id}/revoke` | admin | |
 | `GET /api/audit` | admin | Last 200 audit entries |
+| `GET /api/audit/verify` | admin | Walks the audit hash chain: `{ok, status (verified\|partial\|broken), entries, keyed, head, chain_started, legacy, first_break}` (README, "Tamper-evident audit log") |
 
 ## Attack storyline (synthetic demo)
 

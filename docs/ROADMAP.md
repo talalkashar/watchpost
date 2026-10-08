@@ -36,7 +36,7 @@ every feature verifiable, every number reproducible, nothing overclaimed.
 - [x] 7. Owner-level review gaps: asset inventory edits through two-person review (Juan's PR #9 left this to the
       owner; coordinate on the PR, credit him). (PR #17)
 - [x] 8. UI pass: keyboard triage, mobile width, accessibility labels. (PR #19)
-- [ ] 9. Refresh `LINKEDIN_3.md` draft and README numbers from the latest test run.
+- [x] 9. Refresh `LINKEDIN_3.md` draft and README numbers from the latest test run. (PR #20, version 4.0.0)
 
 ## Next wave (added 2026-10-07: owner: "the siem can be endlessly better and closer to a real siem")
 

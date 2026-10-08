@@ -1,44 +1,40 @@
-# LinkedIn kit: Watchpost 3.0 follow-up
+# LinkedIn kit: Watchpost 4.0 follow-up
 
-Draft only. Check every number against the Noise lab view and `./run_tests.sh` before posting, and confirm each
-person is happy to be tagged. The last run had 241 unit tests passing plus the smoke check.
+Draft only. Check every number against the README and `./run_tests.sh` before posting, and confirm Juan Carlos
+Munera is happy to be named. The last run had 405 unit tests passing plus the 25-step smoke check.
 
 ---
 
 ## Post
 
-Last week I posted a SIEM I built from scratch and asked what you would add. You answered, so I built it.
+Watchpost 4.0: this round was about making every claim in my SIEM project checkable.
 
-The most useful comment came from Charles Vosburgh: test the rules against benign activity that looks like an
-attack, and see where they get noisy. I did. The result was humbling.
+Watchpost is a learning project I build and test in a lab, in plain Python with no packages. After the last
+update I kept asking one question: how would a reviewer verify that? So this round added fewer new screens and more
+evidence.
 
-Every rule still catches its attack. But 8 of my 12 rules also fire on at least one harmless look-alike: an
-authorized scanner, an on-call admin logging in at 3 AM, a whole office failing logins the morning after a
-password-expiry day.
+What changed:
 
-Watchpost 3.0 shows that instead of hiding it.
+• Tamper-evident audit log: entries are hash-chained, and an admin can verify the chain and see where it breaks
+• ATT&CK coverage graded by evidence: 16 of the 19 techniques in its small catalog are validated on the project's
+  own labeled scenarios, and 3 are only mapped. That is not a claim about real-world coverage.
+• Hunting with a small query language and saved searches
+• Two new rules (14 in total): cloud logging disabled, and an admin action from a new source, each tested against
+  a benign look-alike
+• A reproducible load test: one laptop run ingested 100,000 synthetic events at 5,314 events/s
+• Two-person review for asset inventory edits, building on the asset inventory Juan Carlos Munera contributed,
+  including a fix so an address shared by several assets matches all of them
+• Keyboard triage and an accessibility pass (automated checks, not a screen-reader audit)
 
-What changed, and who asked:
+Still true: all the data is synthetic, there is no ML, and this is a single-node portfolio project, not a
+production tool. It has 405 automated tests plus an end-to-end smoke check.
 
-• Noise lab: every rule is scored against benign look-alikes, with recall and precision side by side
-  (Charles Vosburgh)
-• Baseline-aware exfiltration: once a second person approves an exception for it, the nightly backup is compared
-  with its own history and stays quiet, while everything else keeps the flat threshold (Abderrazak Benarous)
-• Tuning exceptions: a reviewed, expiring allowlist for known-benign sources, approved by a second person
-  (Issouf D. Dayo)
-• A shadow IT rule for cloud services that are not on the sanctioned list (Issouf D. Dayo)
-• Entity risk scores for users, IPs, and hosts, where every point traces back to an alert
-
-Still true: the data is synthetic, there is no ML, and this is a single-node learning project. The scores measure
-my rules against scenarios I wrote, not real-world accuracy.
-
-Next up from the thread: encrypted syslog, more log sources, and threat intel, which Juan Carlos Munera offered
-to contribute.
+Thanks again to Juan Carlos Munera for the inventory work it builds on.
 
 Demo: https://watchpost-nxxu.onrender.com (read-only: viewer / watchpost-viewer-demo, first load takes ~30 seconds)
 Code: https://github.com/talalkashar/watchpost
 
-What would you test it against next?
+What should I try to verify next?
 
 #cybersecurity #SIEM #detectionengineering #MITREATTACK #blueteam
 
@@ -46,6 +42,6 @@ What would you test it against next?
 
 ## Notes
 
-- The demo link only shows 3.0 after the branch is merged to `main` and Render redeploys.
-- A screenshot of the Noise lab view is the natural image for this post.
-- Stdlib-only Python, 241 tests plus the smoke check, if you want a closing technical line.
+- The demo link only shows 4.0 after the branch is merged to `main` and Render redeploys.
+- A screenshot of the Coverage view (validated / mapped levels) or the audit log badge is the natural image.
+- Keep the wording about the lab and synthetic data: this is a portfolio project, not work experience.

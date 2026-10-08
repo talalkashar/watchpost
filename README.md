@@ -18,6 +18,20 @@ It uses only the Python standard library (3.10+). No packages to install, no pai
      incident-detail.png (kill-chain stages, techniques by tactic), incident-report-pdf.png (first page of the PDF),
      storyline-running.png (dashboard mid-storyline with the stage tile). -->
 
+## What's new in 4.0
+
+4.0 is about making each claim checkable: every feature has a test, every number comes from a script you can rerun, and the limits are written down next to the feature.
+
+| Change | What it adds |
+|---|---|
+| **Tamper-evident audit log** | Audit entries form a hash chain (HMAC-SHA256 with `SIEM_AUDIT_KEY`, plain SHA-256 without). `GET /api/audit/verify` (admin) walks it and reports `verified`, `partial`, or `broken` with the first break; **Admin → Audit log** shows a badge. What it does and does not detect is listed under [Tamper-evident audit log](#tamper-evident-audit-log). |
+| **ATT&CK coverage graded by evidence** | Each technique is **validated** (an enabled rule detects a labeled scenario that shows it), **mapped**, **disabled**, or a **gap**. With the default rules, 16 of 19 catalog techniques are validated and 3 are only mapped. Validated means detected on the project's own synthetic scenarios, not in real traffic. See [ATT&CK coverage](#attck-coverage). |
+| **Hunting** | A one-line query language over events (`field:value`, prefixes, `NOT`, `last:7d`, `since:`/`until:`), compiled from a field whitelist with bound values. Saved searches for analysts and admins; the viewer can run them. See [Hunting](#hunting). |
+| **Two new detections** | `cloud_logging_disabled` (T1562.008) and `admin_action_from_new_source` (T1078), fourteen rules in total. Each has a labeled attack and a benign look-alike in the noise lab, and the cold-start limits are documented. |
+| **Load test and indexes** | `scripts/loadtest.py` (seeded, stdlib only) ingests 100,000 synthetic events and times the read routes. New indexes and narrower per-batch history reads; one laptop run ingested 5,314 events/s. See [Performance](#performance). |
+| **Reviewed asset edits** | Builds on Juan Carlos Munera's asset inventory (PR #9): an edit that could lower alert severity (lower criticality, drop a tag or address, rename, delete, claim another asset's address) needs a second admin, with before/after evidence and the alerts it would move. An address listed on several assets now matches all of them, so inventory order never decides the weighting. See [Asset inventory review](#asset-inventory-review). |
+| **Keyboard triage and accessibility** | `j`/`k`/`Enter`/`a`/`r`/`Esc`/`/`/`?` shortcuts, landmarks and labels, native dialogs, AA contrast, and a 390px layout, checked by static tests and a headless browser script (automated checks only, not a screen-reader audit). See [Keyboard shortcuts](#keyboard-shortcuts). |
+
 ## What's new in 3.1
 
 A small follow-up round. Nothing here changes how the rules detect.
@@ -35,9 +49,9 @@ A small follow-up round. Nothing here changes how the rules detect.
 
 | Feature | Asked by | What it adds |
 |---|---|---|
-| **Noise lab** | Charles Vosburgh, Issouf D. Dayo | Benign look-alike scenarios for the rules (an authorized scanner, an on-call admin at 03:00, an office NAT after a password-expiry day, a nightly backup, and more). `GET /api/noise-lab` and the **Noise lab** view show, per rule, recall, precision, the look-alikes it was tested against, and the ones that fired. Rules that are noisy are shown as noisy: with default settings, 8 of the 12 rules fire on at least one benign look-alike. |
+| **Noise lab** | Charles Vosburgh, Issouf D. Dayo | Benign look-alike scenarios for the rules (an authorized scanner, an on-call admin at 03:00, an office NAT after a password-expiry day, a nightly backup, and more). `GET /api/noise-lab` and the **Noise lab** view show, per rule, recall, precision, the look-alikes it was tested against, and the ones that fired. Rules that are noisy are shown as noisy: with default settings in 3.0, 8 of the 12 rules fired on at least one benign scenario (in 4.0 it is 8 of 14; the two new rules stay quiet on their look-alikes). |
 | **Baseline-aware exfiltration** | Abderrazak Benarous | `data_exfil_volume` keeps its flat thresholds by default: history and analyst verdicts never quiet it. A principal with an approved, unexpired tuning exception (analyst proposes, admin approves) is not skipped but compared with its own history (`baseline_multiplier`, 7-day window), so an excepted nightly backup that always moves several GB stays quiet and still alerts at 3x its own normal. The alert states which mode applied and, in baseline mode, the baseline and the ratio. |
-| **Tuning exceptions** | Issouf D. Dayo | A reviewed, expiring allowlist (rule + group key + reason, 1 to 90 days). An analyst proposes one, an admin approves it through the existing two-person review, and the engine skips matching findings and counts them as suppressed. There is no revoke route yet; exceptions end by expiring. |
+| **Tuning exceptions** | Issouf D. Dayo | A reviewed, expiring allowlist (rule + group key + reason, 1 to 90 days). An analyst proposes one, an admin approves it through the existing two-person review, and the engine skips matching findings and counts them as suppressed. In 3.0 exceptions ended only by expiring; 3.1 added a revoke route. |
 | **Shadow IT rule** | Issouf D. Dayo | A twelfth rule, `unsanctioned_cloud_service`, flags use of a cloud service that is not on the rule's sanctioned list (mapped to T1567). It is not part of the attack storyline. |
 | **Entity risk** | (added) | Every user, source IP, and host gets a risk score: each alert adds a severity weight (critical 40, high 20, medium 10, low 5, info 1) that halves every 24 hours, and alerts closed as false positive or benign add nothing. `GET /api/entities` and an entity page list the contributing alerts and their weights, so the score can be checked by hand. The dashboard has a **Riskiest entities** panel. |
 | **SOC metrics** | (added) | Time to resolve by severity, false-positive rate by rule, and open-alert aging. Time to detect and dwell time are deliberately left out: the demo replays synthetic events with old timestamps, which would make both numbers meaningless. |
@@ -101,7 +115,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 ### Tests
 
 ```bash
-./run_tests.sh      # ~200 unit/integration tests + a 19-step end-to-end smoke check
+./run_tests.sh      # 405 unit/integration tests + a 25-step end-to-end smoke check
 ```
 
 ### Replit
@@ -425,7 +439,7 @@ What these numbers do and do not say:
 
 ## What is real vs. synthetic vs. future
 
-**Real, working, and tested:** everything in the architecture section. That includes the ingestion API and file upload, normalization, persistence, search, the fourteen rules, the noise lab, tuning exceptions, entity risk scores, ATT&CK mapping and coverage, incident correlation, Markdown and PDF reports, the SSE dashboard, the syslog listener and shipper, alerts with evidence and timelines, notes, status and verdicts, metrics, health checks and recovery, authentication, roles (including the read-only viewer), per-IP rate limiting, CSRF protection, API tokens, redaction, feedback-driven suggestions, two-person review, evaluation history, and the hash-chained audit log.
+**Real, working, and tested:** everything in the architecture section. That includes the ingestion API and file upload, normalization, persistence, search, the fourteen rules, the noise lab, tuning exceptions, entity risk scores, ATT&CK mapping and coverage, incident correlation, Markdown and PDF reports, the SSE dashboard, the syslog listener and shipper, alerts with evidence and timelines, notes, status and verdicts, metrics, health checks and recovery, authentication, roles (including the read-only viewer), per-IP rate limiting, CSRF protection, API tokens, redaction, feedback-driven suggestions, two-person review (including asset inventory edits), evaluation history, hunting and saved searches, keyboard triage, and the hash-chained audit log.
 
 **Synthetic:** all bundled data. The demo dataset and simulator scenarios (`watchpost/simulate.py`) and the files in `samples/` are invented. External IPs come from the RFC 5737 documentation ranges. Synthetic events are stored with `synthetic=1`, sourced `demo:*`, and tagged in the UI. The evaluation scores (recall and precision) measure the rules against these hand-labeled scenarios only. They say nothing about real-world accuracy.
 
