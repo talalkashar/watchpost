@@ -6,14 +6,15 @@ import json
 import queue
 import mimetypes
 import re
+import sqlite3
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import (__version__, assets, attack, auth, ecs, engine, entities, geo, hunt, improve, incidents, portability,
-               queries, report, search_rules, sigma, simulate, sources, storyline, stream, triage)
+from . import (__version__, assets, attack, auth, ecs, engine, entities, geo, hunt, improve, incidents, masking,
+               portability, queries, report, search_rules, sigma, simulate, sources, storyline, stream, triage)
 from . import backtest as backtest_mod
 from .ratelimit import TokenBucketLimiter
 from .config import Config
@@ -32,10 +33,15 @@ class ApiError(Exception):
 
 
 class Download:
-    """A non-JSON response body sent as a file attachment."""
+    """A non-JSON response body sent as a file attachment.
 
-    def __init__(self, body, content_type, filename):
+    With `render`, the body is render(data) and is built in the response path, which masks `data` first for
+    a masked viewer (a PDF cannot be masked as text). See Handler._download_body.
+    """
+
+    def __init__(self, body, content_type, filename, data=None, render=None):
         self.body, self.content_type, self.filename = body, content_type, filename
+        self.data, self.render = data, render
 
 
 class App:
@@ -47,6 +53,7 @@ class App:
             engine.seed_rules(conn)
             improve.seed_settings(conn)
             self.credentials_file = auth.bootstrap_users(conn, config, Path(config.db_path).parent)
+            masking.key(conn)  # create the per-database pseudonym key now, not on a viewer's GET
         finally:
             conn.close()
         self.login_limiter = self.request_limiter = self.backtest_limiter = self.change_backtest_limiter = None
@@ -101,7 +108,7 @@ def login(req):
                 "expires_in": auth.MFA_TOKEN_TTL_SECONDS}
     token, csrf, user = result
     req.set_cookie = token
-    return {"user": user, "csrf_token": csrf}
+    return _masked_flag(req.conn, user, {"user": user, "csrf_token": csrf})
 
 
 @route("POST", "/api/auth/mfa", role="public", csrf=False)
@@ -110,7 +117,14 @@ def login_mfa(req):
     token, csrf, user = auth.complete_mfa(req.conn, data.get("mfa_token"), data.get("code"),
                                           req.app.config.session_ttl_seconds)
     req.set_cookie = token
-    return {"user": user, "csrf_token": csrf}
+    return _masked_flag(req.conn, user, {"user": user, "csrf_token": csrf})
+
+
+def _masked_flag(conn, user, payload):
+    """Tell a viewer that masking is on (the UI shows a "Masked view" pill). Other responses are unchanged."""
+    if user.get("role") == "viewer" and masking.enabled(conn):
+        payload["masked"] = True
+    return payload
 
 
 @route("POST", "/api/auth/logout")
@@ -122,8 +136,8 @@ def logout(req):
 
 @route("GET", "/api/auth/me")
 def me(req):
-    return {"user": {"username": req.user["username"], "role": req.user["role"]},
-            "csrf_token": req.user["csrf"]}
+    return _masked_flag(req.conn, req.user, {"user": {"username": req.user["username"], "role": req.user["role"]},
+                                             "csrf_token": req.user["csrf"]})
 
 
 # Account security: TOTP enrollment and sessions. The viewer can read its own status and sessions only.
@@ -496,8 +510,8 @@ def _report(req, kind, ident, fmt):
     audit(req.conn, req.user["username"], "report_downloaded", f"{kind}:{ident}", {"format": fmt})
     name = f"watchpost-{kind}-{ident}-report.{fmt}"
     if fmt == "pdf":
-        return Download(report.to_pdf_bytes(model), "application/pdf", name)
-    return Download(report.to_markdown(model).encode("utf-8"), "text/markdown; charset=utf-8", name)
+        return Download(None, "application/pdf", name, model, report.to_pdf_bytes)
+    return Download(None, "text/markdown; charset=utf-8", name, model, lambda m: report.to_markdown(m).encode("utf-8"))
 
 
 @route("GET", r"/api/alerts/(\d+)/report\.(md|pdf)")
@@ -1049,6 +1063,7 @@ class Handler(BaseHTTPRequestHandler):
         self.status = 200
         self.set_cookie = None
         self.conn = None
+        self.masker = None
         try:
             for method, pattern, fn, role, csrf in ROUTES:
                 match = pattern.match(parsed.path)
@@ -1064,7 +1079,14 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(415, "Content-Type must be application/json")
             self.conn = self.app.conn()
             self._authorize(role, csrf, fn)
-            result = fn(self, *match.groups())
+            groups = match.groups()
+            # The one masking choke point: a viewer's pseudonyms resolve on the way in (pivots), and every
+            # response below (JSON, downloads, and the stream in _frame) is masked on the way out.
+            self.masker = masking.for_user(self.conn, self.user)
+            if self.masker is not None:
+                self.query = {k: self.masker.unmask(self.conn, v) for k, v in self.query.items()}
+                groups = tuple(g if g is None else self.masker.unmask(self.conn, g, path=True) for g in groups)
+            result = fn(self, *groups)
             if result is STREAM_RESPONSE:
                 return self._stream()
             headers = {"Cache-Control": "no-store"}
@@ -1072,7 +1094,9 @@ class Handler(BaseHTTPRequestHandler):
                 headers["Set-Cookie"] = self._cookie_header(self.set_cookie)
             if isinstance(result, Download):
                 headers["Content-Disposition"] = f'attachment; filename="{result.filename}"'
-                return self._send(self.status, result.body, result.content_type, headers)
+                return self._send(self.status, self._download_body(result), result.content_type, headers)
+            if self.masker is not None:
+                result = self.masker.mask(result)
             self._send(self.status, result, extra_headers=headers)
         except ApiError as exc:
             self._send(exc.status, {"error": str(exc)})
@@ -1085,6 +1109,15 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             if self.conn is not None:
                 self.conn.close()
+
+    def _download_body(self, download):
+        if download.render is not None:
+            return download.render(self.masker.mask(download.data) if self.masker else download.data)
+        if self.masker is None:
+            return download.body
+        if not download.content_type.startswith(("text/", "application/json")):
+            raise ApiError(403, "this download is not available in the masked view")  # fail closed
+        return self.masker.text(download.body.decode("utf-8")).encode("utf-8")
 
     def _authorize(self, role, csrf, fn=None):
         self.session_token = self._session_token()
@@ -1149,6 +1182,15 @@ class Handler(BaseHTTPRequestHandler):
             stream.BROKER.unsubscribe(sub)
 
     def _frame(self, kind, data, retry=None):
+        if self.masker is not None:  # rebuilt per frame: the setting or the known usernames may have changed
+            conn = self.app.conn()
+            try:
+                masker = masking.for_user(conn, self.user)
+            except sqlite3.Error:
+                raise ConnectionAbortedError("masking unavailable; end the stream rather than send it unmasked")
+            finally:
+                conn.close()
+            data = masker.mask(data) if masker else data
         payload = (f"retry: {retry}\n".encode() if retry else b"") + \
             stream.frame(kind, data, stream.BROKER.next_id())
         self.wfile.write(payload)

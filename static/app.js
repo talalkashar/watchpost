@@ -185,6 +185,8 @@ function onLogin(data) {
   document.body.classList.add("authed");
   $("#rail").hidden = false; $("#strip").hidden = false; $("#who").hidden = false;
   $("#who-name").textContent = `${data.user.username} · ${data.user.role}${data.user.role === "viewer" ? " (read-only)" : ""}`;
+  $("#masked-pill")?.remove();
+  if (data.masked) $("#who-name").after(el("span", { class: "pill tag", id: "masked-pill", title: "Masked view: usernames and internal IP addresses are shown as consistent pseudonyms (user-…, internal-…). Public IPs are not masked. Filters and pivots on a pseudonym still work." }, "Masked view"));
   document.querySelectorAll("#nav [data-role]").forEach((b) => { b.hidden = !can(b.dataset.role); });
   route();
   refreshBanner();

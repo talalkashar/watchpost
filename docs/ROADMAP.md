@@ -64,7 +64,7 @@ When this list runs low, add more real-SIEM gaps here and keep going. Same groun
       query language, with whitelisted fields, bound parameters, and row caps. (PR #32)
 - [x] 19. Scheduled searches as detections: promote a saved hunt to a threshold rule through the change-request
       workflow (backtest, two-person review, scenario before enable, like Sigma rules). (PR #33)
-- [ ] 20. Viewer data masking: usernames and internal IPs masked for the viewer role in API responses and exports,
-      consistent across endpoints, with tests that walk every viewer GET route.
+- [x] 20. Viewer data masking: usernames and internal IPs masked for the viewer role in API responses and exports,
+      consistent across endpoints, with tests that walk every viewer GET route. (PR #34; off by default)
 - [ ] 21. Release 4.5: version bump, CHANGELOG from merged PRs, README numbers refreshed from a test run,
       `LINKEDIN_3.md` draft refreshed (draft only, never posted).
