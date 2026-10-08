@@ -31,8 +31,8 @@ every feature verifiable, every number reproducible, nothing overclaimed.
 - [x] 5. New detections from events the schema already carries, each with a malicious scenario and a benign
       look-alike in the noise lab (candidates: audit/logging disabled T1562, MFA push fatigue T1621, first-seen
       admin source for a user). (PR #15: logging disabled + admin from new source; MFA skipped, no MFA signal)
-- [ ] 6. Scale honesty: load test (100k+ events), indexes and pagination where it hurts, published numbers in the
-      README from a reproducible script.
+- [x] 6. Scale honesty: load test (100k+ events), indexes and pagination where it hurts, published numbers in the
+      README from a reproducible script. (PR #16: ingest 2.1k → 5.3k events/s at 100k)
 - [ ] 7. Owner-level review gaps: asset inventory edits through two-person review (Juan's PR #9 left this to the
       owner; coordinate on the PR, credit him).
 - [ ] 8. UI pass: keyboard triage, mobile width, accessibility labels.

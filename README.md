@@ -160,7 +160,7 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | `watchpost/correlate.py`, `watchpost/incidents.py` | Pure alert-to-incident grouping; incident queries, status changes, and ATT&CK coverage. |
 | `watchpost/attack.py`, `watchpost/geo.py` | Static ATT&CK subset; synthetic geo table for demo IP ranges (never a real lookup). |
 | `watchpost/rules.py` | Fourteen explainable rules as pure functions over event lists, each with a plain-English explanation. Also validates rule parameters. |
-| `watchpost/engine.py` | Stores each batch atomically, then runs detection over the batch's time range plus the longest rule window. Deduplicates and extends open alerts, and records every detection run. |
+| `watchpost/engine.py` | Stores each batch atomically, then runs detection over the batch's time range plus the longest rule window. Rules that compare with earlier activity (`history_seconds`) also get their own history span before that, of only the event types they read. Deduplicates and extends open alerts, and records every detection run. |
 | `watchpost/queries.py` | Event search (parameterized SQL), alert detail with evidence and a related-events timeline, notes, status changes, and SOC metrics. |
 | `watchpost/hunt.py` | Hunt query parser and compiler (whitelisted fields, bound values) and saved searches. |
 | `watchpost/auth.py` | PBKDF2-SHA256 password hashing, lockout, and server-side sessions (only token hashes are stored). Also ingest-only API tokens (hashed) and the viewer < analyst < admin roles. Viewers are read-only: the server refuses every non-GET request from them except logout. |
@@ -309,6 +309,79 @@ The landing view is a dark SOC console built for a 1280×800 screen: a status st
 
 Admin → "Attack storyline (synthetic)" replays a scripted six-stage intrusion over about two minutes (or faster): web scanning and a port sweep from `203.0.113.80`, a password spray then brute force against `dave`, a VPN login with the cracked password, sudo to root and a new `svc-deploy-tmp` account, a hop to `db01` and cloud IAM changes by that new principal, then bulk storage reads and large outbound transfers. Ten detection rules fire in order and correlation folds them into one Reconnaissance → Exfiltration incident while the dashboard updates live. Every record is labeled synthetic and uses RFC 5737 documentation addresses; the same replay runs in the test suite (`tests/test_storyline.py`) and the smoke check.
 
+## Performance
+
+One run on a dev laptop with synthetic data, not a benchmark. Your numbers will differ; the script is there so
+you can produce your own.
+
+```bash
+python3 scripts/loadtest.py                    # 100,000 events into a throwaway DB under /tmp
+python3 scripts/loadtest.py --events 250000 --json
+```
+
+`scripts/loadtest.py` (stdlib only, seed 7) generates a week of background activity (2,000 users, 200 hosts,
+about 3,000 internal and 762 documentation-range IPs, 18 event types, a few very busy accounts) plus the labeled
+demo scenarios, all stored as synthetic. It ingests them in time-ordered batches of 1,000 through the
+`POST /api/ingest` handler (JSON parse, normalization, storage, and detection on each batch), runs one full
+detection, then calls each read route's handler 20 times in-process and reports p50/p95. Read times include
+the handler and JSON encoding, not HTTP. `--url http://127.0.0.1:8090 --token wp_... --db <that server's DB>`
+ingests over HTTP instead.
+
+Run on 2026-10-08 (UTC) with `python3 scripts/loadtest.py --json` (the same run as the command above, printed
+as JSON). Machine: Python 3.14.2, macOS 26.6.2 arm64, 10 CPUs. Database on disk afterwards: 97.3 MB.
+
+| Step | Result |
+|---|---|
+| Ingest (parse, normalize, store, detect per batch) | 18.8 s, 5,314 events/s |
+| of which per-batch detection | 9.2 s |
+| Full detection run (100,000 events) | 0.69 s |
+| Alerts / incidents after the run | 26 / 7 |
+
+| Read path (route handler + JSON, 20 runs) | p50 ms | p95 ms |
+|---|---:|---:|
+| events: no filter | 1.3 | 1.4 |
+| events: user | 2.0 | 2.1 |
+| events: user prefix | 2.3 | 2.4 |
+| events: ip (src or dest) | 1.3 | 1.4 |
+| events: host | 1.1 | 1.2 |
+| events: type + last day | 1.3 | 1.3 |
+| events: severity >= high | 0.5 | 0.6 |
+| events: message text | 22.1 | 22.6 |
+| events: page 50 | 1.4 | 1.5 |
+| hunt: user + type | 25.2 | 28.4 |
+| hunt: ip | 1.4 | 1.5 |
+| hunt: host prefix + NOT | 17.0 | 17.8 |
+| hunt: message | 22.1 | 24.1 |
+| alerts: list | 0.8 | 0.9 |
+| alerts: open | 0.7 | 0.8 |
+| alert detail | 0.7 | 0.7 |
+| dashboard | 34.6 | 35.3 |
+| metrics | 29.4 | 31.0 |
+| entities: list | 1.2 | 1.3 |
+| entity: user | 18.1 | 20.0 |
+| entity: src_ip | 1.1 | 1.4 |
+| entity: host | 1.6 | 1.7 |
+| attack coverage | 0.9 | 1.0 |
+| noise lab | 15.9 | 16.0 |
+
+At 250,000 events over the same week (same machine and day) ingest ran at 2,825 events/s, a full detection
+took 2.3 s, and the slowest reads were the dashboard and metrics (about 80 ms p50) and hunting the busiest
+account by event type (about 68 ms). The database was 243 MB.
+
+What these numbers do and do not say:
+- **Ingest slows as the stored week fills up.** Each batch's detection rereads the history the baseline rules
+  need: a week of the transfer and cloud events of the accounts involved. That is most of the per-batch
+  detection time, and it grows with event density.
+- **Text search scans.** `q=` and hunt message terms are `LIKE '%text%'`, which no index serves, so they cost
+  one pass over the table (about 22 ms per 100,000 events here). Prefix searches on `host` scan too.
+- **Very busy accounts cost more.** The user filters and entity page use an index, but the generator's busiest
+  account has about a quarter of all events, so its entity page and a hunt that pairs it with a rare event type
+  read tens of thousands of rows.
+- **The dashboard's events-per-minute chart** reads every event ingested in the last hour, which here is all of
+  them because the whole load arrived in under a minute.
+- **Paging totals are exact.** `total` is a `COUNT(*)` with the same filters; with these indexes it stayed in the
+  low milliseconds except for text search, so it is not capped.
+
 ## What is real vs. synthetic vs. future
 
 **Real, working, and tested:** everything in the architecture section. That includes the ingestion API and file upload, normalization, persistence, search, the fourteen rules, the noise lab, tuning exceptions, entity risk scores, ATT&CK mapping and coverage, incident correlation, Markdown and PDF reports, the SSE dashboard, the syslog listener and shipper, alerts with evidence and timelines, notes, status and verdicts, metrics, health checks and recovery, authentication, roles (including the read-only viewer), per-IP rate limiting, CSRF protection, API tokens, redaction, feedback-driven suggestions, two-person review, evaluation history, and the hash-chained audit log.
@@ -316,7 +389,7 @@ Admin → "Attack storyline (synthetic)" replays a scripted six-stage intrusion 
 **Synthetic:** all bundled data. The demo dataset and simulator scenarios (`watchpost/simulate.py`) and the files in `samples/` are invented. External IPs come from the RFC 5737 documentation ranges. Synthetic events are stored with `synthetic=1`, sourced `demo:*`, and tagged in the UI. The evaluation scores (recall and precision) measure the rules against these hand-labeled scenarios only. They say nothing about real-world accuracy.
 
 **Limitations:**
-- Single process with SQLite, sized for thousands to low millions of events, not enterprise volume. No retention or rollup.
+- Single process with SQLite. Measured up to 250,000 events on one laptop (see [Performance](#performance)); larger volumes are untested, and this is not enterprise volume. No retention or rollup.
 - Live ingestion is basic: an optional syslog listener (unauthenticated, no TLS; loopback by default) and a single-file-per-flag shipper script. See [docs/LIVE_INGEST.md](docs/LIVE_INGEST.md) for its limits.
 - Timestamps without a zone are treated as UTC. BSD syslog lines carry no year, so you pass one or the current year is assumed.
 - Seeded accounts only (admin, analyst, and an optional viewer); there is no user-management UI or API. Accounts can be added with `watchpost.auth.create_user`.
@@ -337,6 +410,7 @@ labs/siem/
 ├── static/             UI: SOC dashboard (dashboard.js, charts.js, map.js) and views (app.js); no inline scripts
 ├── samples/            synthetic log files for upload
 ├── scripts/smoke.py    end-to-end smoke check against a real server process
+├── scripts/loadtest.py seeded load test: ingest, detection, and read-path latency (stdlib only)
 ├── scripts/shipper.py  log file shipper for Linux boxes (stdlib only)
 ├── tests/              unittest suite
 ├── docs/API.md         API reference
