@@ -177,6 +177,7 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | `watchpost/engine.py` | Stores each batch atomically, then runs detection over the batch's time range plus the longest rule window. Rules that compare with earlier activity (`history_seconds`) also get their own history span before that, of only the event types they read. Deduplicates and extends open alerts, and records every detection run. |
 | `watchpost/queries.py` | Event search (parameterized SQL), alert detail with evidence and a related-events timeline, notes, status changes, and SOC metrics. |
 | `watchpost/hunt.py` | Hunt query parser and compiler (whitelisted fields, bound values), the `\|` stats/top/timechart stage, and saved searches. |
+| `watchpost/search_rules.py` | Saved searches promoted to threshold detection rules (`search_<slug>`): the hunt filter matched in Python over the engine's event dicts, the sliding-window count, and their labeled samples. See [Saved searches as detections](#saved-searches-as-detections). |
 | `watchpost/auth.py` | PBKDF2-SHA256 password hashing, lockout, and server-side sessions (only token hashes are stored). Also ingest-only API tokens (hashed) and the viewer < analyst < admin roles. Viewers are read-only: the server refuses every non-GET request from them except logout. |
 | `watchpost/totp.py` | RFC 6238 TOTP (HMAC-SHA1, 6 digits, 30 s, ±1 step), stdlib only. See [Two-factor sign-in and sessions](#two-factor-sign-in-and-sessions). |
 | `watchpost/ratelimit.py` | In-memory per-IP token buckets. `server.py` answers 429 with `Retry-After` when a bucket is empty. |
@@ -347,6 +348,34 @@ Every proposal runs a backtest, so an import spends one token per changed rule f
 **Labeled sample, and the enable gate.** A Sigma rule has no built-in scenario, so it brings its own: `{"malicious": [events], "benign": [events]}`, 1-50 events each, with Watchpost field names. The sample passes when every malicious event matches and no benign look-alike does. It is part of the import, or attached or replaced later with `POST /api/rules/<id>/sigma-sample` (a `sigma_sample` change request with the same two-person review; it bumps the rule version). Enabling is an ordinary `rule_update` with `enabled: true`, refused at proposal and again at approval unless the stored sample passes. In the noise lab the sample appears as the scenario `sigma_sample:<rule id>`: a passing sample counts as a detected attack and a tested look-alike, a failing one as missed or fired. Its ATT&CK techniques are therefore **mapped** while the rule is enabled without a passing sample (for example after a failing sample replaced a good one) and **validated** only while the sample passes. The built-in scenario labels never count for or against an imported rule.
 
 What it is not: a Sigma backend. The sample is written by the importer and reviewed by a second person; a passing sample proves the rule matches those events, not that it catches the technique in real traffic. A worked example is in `docs/sigma-examples/`.
+
+### Saved searches as detections
+
+Like a scheduled saved search with an alert condition: a hunt that finds something worth watching can be promoted to a threshold rule. It follows the Sigma pattern above (change request, added disabled, labeled sample gate, mapped then validated coverage) and runs inside the engine's normal scan.
+
+**Definition.** `POST /api/hunt/saved/<id>/promote` (analyst and above) with `{group_by, threshold, window_minutes, severity, techniques (optional), name (optional, defaults to the saved search's name), sample (optional), reason (optional)}`.
+
+- **Query:** the saved search's filter, copied into the request when it is promoted (editing or deleting the saved search later changes nothing). Filter only: a `|` stage is refused (the group-by and threshold do the counting), and so are time terms (`last:`, `since:`, `until:`): the window replaces them. `outcome`, `severity` and `batch_id` are refused too, because the engine does not load them into the events rules read. At least one term; the hunt limits apply (500 characters, 20 terms).
+- **group_by:** one of `src_ip`, `user`, `host`, `dest_ip`, `source`, `event_type`, `dest_port`. Events without a value are not counted. Values group exactly, except accounts: `user` groups case-insensitively, as the `user:` filter matches, so `alice`, `Alice` and `ALICE` count toward one threshold instead of each staying under it.
+- **threshold / window:** fire when at least `threshold` (1-100,000) matching events of one group value fall within `window_minutes` (1-1,440) of each other. It is a **sliding** window, inclusive at both ends: the window ending at each event holds the events at most W minutes older (N events spanning exactly W minutes fire; a millisecond more does not). Every event in a qualifying window is evidence, and evidence events closer than W become one finding, the same windowing as the built-in threshold rules (`rules._clusters`). Stored as `window_seconds` (a multiple of 60).
+- **severity:** low, medium, high or critical. **techniques:** up to 10 ATT&CK ids from the catalog.
+
+The rule id is `search_<name as lowercase letters and underscores>`. Its `params` are the compiled definition `{title, query, terms, group_by, threshold, window_seconds}`; `validate_params` re-parses the query and refuses stored terms that disagree with it.
+
+**Matching.** The filter runs in Python over the event dicts the engine already passes (`engine.RULE_EVENT_FIELDS`), with the hunt's SQL semantics: the same fields and value checks, a trailing `*` on an unquoted value is a prefix match, message terms mean "contains", and `NOT` keeps events missing the field. Case follows SQLite, which folds ASCII letters only: `user:` equality, every prefix match and message contains ignore ASCII case; other equality (host, source, IPs, event_type) is exact. `tests/test_search_rules.py` runs some 45 queries through both this matcher and `hunt.compile_query` in SQL over a varied event set (mixed case, non-ASCII, `%`/`_` in values, missing fields) and requires the same events, so the two cannot drift.
+
+**Workflow and the gate.**
+
+- `?dry_run=1` compiles the definition and previews it on stored events (the last 7 days of stored event time, through `scan_events`/`rule_findings`): events matched, findings, group keys and up to 5 sample findings. A refusal comes back as `{ok: false, refused: <reason>}`.
+- Without `dry_run` it creates a `search_add` change request whose evidence carries the same preview. A different admin approves it with the evidence digest; approval adds the rule **disabled**.
+- Both spend one token from the per-account rule-proposal backtest bucket (burst 20), and so does approving a `search_add`.
+- **Labeled sample:** `{"malicious": [events], "benign": [events]}`, 1-50 events each, Watchpost field names plus `source` (Sigma's checks). Because the rule counts, the sample is judged as a run, not event by event: it passes when the malicious events raise at least one finding and the benign look-alikes raise none. Events without a `ts` are one second apart in list order. Attach or replace it with `POST /api/rules/<id>/search-sample` (a `search_sample` change request).
+- **Enable:** an ordinary `rule_update` with `enabled: true`, refused at proposal and approval unless the stored sample passes. In the noise lab the sample is the scenario `search_sample:<rule id>`; the rule's ATT&CK techniques count as **validated** only while the rule is enabled and its sample passes, and as **mapped** otherwise.
+- **Tuning:** unlike Sigma, `threshold` and `window_seconds` are tunable through a normal `rule_update`, with the usual scenario evaluation and backtest in the evidence. Nothing else in `params` is: a different query, group-by or name means promoting a saved search again as a new rule.
+
+In the UI, each saved search on the Hunt page has **Promote to detection…** for analysts (dry run, then submit); the rule card shows the query read-only, and **Labeled sample…** and **Propose change…** work as for any rule. Viewers see promoted rules and their queries but cannot promote.
+
+What it is not: a scheduled search. It does not re-run SQL on a timer; the filter is evaluated in the detection run over each ingest's time range, like every other rule. It has no `OR`, no `| stats` thresholds beyond count-by-one-field, and no distinct-count condition.
 
 ### ECS field mapping
 

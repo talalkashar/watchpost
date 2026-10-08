@@ -12,6 +12,7 @@ Rules are deliberately simple, threshold-based, and explainable. No machine lear
 from collections import Counter, defaultdict, deque
 
 from . import geo
+from . import search_rules
 from . import sigma
 from .attack import techniques
 from .sources import log_source_silent
@@ -240,6 +241,11 @@ def validate_params(rule_id, params):
         try:
             return sigma.validate_params(params)
         except sigma.SigmaError as exc:
+            raise RuleConfigError(str(exc))
+    if search_rules.is_search(rule_id):  # a promoted saved search: only threshold and window_seconds are tunable
+        try:
+            return search_rules.validate_params(params)
+        except search_rules.SearchRuleError as exc:
             raise RuleConfigError(str(exc))
     defaults = next((r["params"] for r in DEFAULT_RULES if r["id"] == rule_id), None)
     if defaults is None:
@@ -790,9 +796,12 @@ RULE_FUNCTIONS = {
 
 
 def rule_function(rule_id):
-    """The function that runs a rule: a built-in from RULE_FUNCTIONS, or the Sigma evaluator. None if neither."""
+    """The function that runs a rule: a built-in from RULE_FUNCTIONS, the Sigma evaluator, or the search-rule
+    evaluator. None if none of them."""
     if sigma.is_sigma(rule_id):
         return sigma.run
+    if search_rules.is_search(rule_id):
+        return search_rules.run
     return RULE_FUNCTIONS.get(rule_id)
 
 
