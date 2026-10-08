@@ -662,7 +662,7 @@ def _sigma_detail(conn, rule):
 @route("GET", r"/api/rules/([a-z_]+)/history")
 def rule_history(req, rule_id):
     rows = req.conn.execute("SELECT * FROM rule_history WHERE rule_id = ? ORDER BY version DESC", (rule_id,))
-    return [row_to_dict(r, ["params"]) for r in rows]
+    return [row_to_dict(r, ["params", "grouping"]) for r in rows]
 
 
 def _backtest_quota(req, limiter, cost=1):
@@ -680,7 +680,7 @@ def _backtest_quota(req, limiter, cost=1):
 def rule_propose(req, rule_id):
     data = body_json(req)
     _backtest_quota(req, req.app.change_backtest_limiter)  # the proposal's evidence carries a backtest
-    payload = {k: data[k] for k in ("params", "enabled") if k in data}
+    payload = {k: data[k] for k in ("params", "enabled", "grouping") if k in data}
     req.status = 201
     return improve.propose_change(req.conn, "rule_update", rule_id, payload, data.get("reason"),
                                   req.user["username"])

@@ -414,7 +414,7 @@ class IncidentApiTests(ServerTestCase):
             legacy = db.execute("SELECT role, capabilities, expires_at FROM api_tokens"
                                 " WHERE name = 'legacy collector'").fetchone()
             self.assertEqual(legacy, ("analyst", '["ingest"]', None))
-            self.assertEqual(db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0], "14")
+            self.assertEqual(db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0], "15")
             actions = [r[0] for r in db.execute("SELECT action FROM audit_log ORDER BY id")]
             self.assertGreater(old_entries, 0)
             self.assertEqual(actions[old_entries], "audit_chain_started")
