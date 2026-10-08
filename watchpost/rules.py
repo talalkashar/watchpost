@@ -14,6 +14,7 @@ from collections import Counter, defaultdict, deque
 from . import geo
 from . import sigma
 from .attack import techniques
+from .sources import log_source_silent
 from .db import parse_iso
 
 LOGIN_SUCCESS_TYPES = ("auth_success", "vpn_login")
@@ -186,6 +187,20 @@ DEFAULT_RULES = [
         "severity": "medium",
         "params": {"history_seconds": 604800, "min_prior_actions": 3, "window_seconds": 3600,
                    "ignore_ips": [], "ignore_users": []},
+    },
+    {
+        "id": "log_source_silent",
+        "name": "Log source went silent",
+        "description": "Fires when a log source (one source and host) that had a learned cadence stops sending: quiet "
+                       "for more than 6x its median gap between arrivals, at least an hour, and twice its longest "
+                       "recent gap (thresholds in watchpost/sources.py). Silence is measured by arrival time against "
+                       "the wall clock, so it reads arrivals, not the events of the scanned time range. Sources still "
+                       "learning (fewer than 10 gaps, or under 2 hours of history) never alert, and time inside an "
+                       "approved maintenance window is not counted. One silence is one alert, however often detection "
+                       "runs. A silent source is an outage or someone blocking logs; the alert cannot tell which.",
+        "techniques": techniques("T1562.006"),
+        "severity": "medium",
+        "params": {"window_seconds": 3600},
     },
 ]
 
@@ -770,6 +785,7 @@ RULE_FUNCTIONS = {
     "unsanctioned_cloud_service": unsanctioned_cloud_service,
     "cloud_logging_disabled": cloud_logging_disabled,
     "admin_action_from_new_source": admin_action_from_new_source,
+    "log_source_silent": log_source_silent,
 }
 
 

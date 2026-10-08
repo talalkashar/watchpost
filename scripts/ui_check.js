@@ -166,6 +166,10 @@ async function main() {
       const triage = await page.evaluate(() => { const c = document.querySelector("#triage-metrics");
         return { rows: c ? c.querySelectorAll("tbody tr").length : 0, synth: !!c?.querySelector(".pill.synthetic") }; });
       check(triage.rows > 0 && triage.synth, `${width}px overview renders the triage metrics panel with the synthetic label (${triage.rows} rows)`);
+      await show(page, "health");
+      const sources = await page.evaluate(() => { const c = document.querySelector("#source-health");
+        return { rows: c ? c.querySelectorAll("tbody tr").length : 0, pills: c ? c.querySelectorAll(".pill").length : 0 }; });
+      check(sources.rows > 0 && sources.pills > 0, `${width}px health renders the log source health panel (${sources.rows} rows)`);
       const current = await page.evaluate(() => [...document.querySelectorAll("#nav [aria-current=page]")].map((b) => b.dataset.view));
       check(current.length <= 1, `aria-current marks at most one nav item (${current.join(",") || "none on the entity page"})`);
       await show(page, "rules");
