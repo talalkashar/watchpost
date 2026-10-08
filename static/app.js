@@ -810,6 +810,11 @@ async function rules(focus) {
         can("analyst") ? el("button", { onclick: () => guarded(async () => { const r = await api("/api/rules/suggestions", { method: "POST" }); toast(r.message); rules(); }) }, "Suggest improvements from feedback") : null,
         can("analyst") ? el("button", { class: "ghost", onclick: () => guarded(async () => { await api("/api/evaluations", { method: "POST" }); toast("Evaluation recorded"); rules(); }) }, "Run evaluation") : null,
         el("span", { class: "muted" }, evals[0] ? `Last evaluation ${fmtTime(evals[0].created_at)} (${evals[0].trigger})` : "No evaluations yet"))),
+    el("div", { class: "card" }, el("h2", {}, "Export and import tuning"),
+      el("p", { class: "muted" }, "The export holds each rule's parameters and enabled state as JSON. Detection logic is code and is not exported, so an import can only retune rules this instance already has. An import applies nothing: each rule that differs becomes a change request for the usual review and backtest."),
+      el("div", { class: "row" },
+        el("a", { class: "button", href: "/api/rules/export", download: "watchpost-rules.json" }, "Export rules (JSON)"),
+        can("analyst") ? el("button", { class: "ghost", onclick: () => importDialog() }, "Import rules…") : null)),
     el("div", { class: "card" }, el("h2", {}, `Change requests (${pending.length} pending)`),
       table(["ID", "Status", "Target", "Change", "Reason", "Scenario impact (before→after)", "Proposed by", "Reviewed", ""], changeRows)),
     el("div", { class: "card" }, el("h2", {}, `Tuning exceptions (${exceptions.filter((x) => x.active).length} active)`),
@@ -989,6 +994,54 @@ async function previewBacktest(form, rule) {
     const c = bt.counts;
     statusLine.textContent = `Backtest done: kept ${c.kept}, new ${c.new}, lost ${c.lost}${c.open_alerts_lost ? `, including ${c.open_alerts_lost} open alert(s)` : ""}.`;
   } catch (e) { statusLine.textContent = ""; $("#propose-error").textContent = e.message; }
+}
+
+// POST /api/rules/import: a dry run first shows each rule's outcome, then a confirm creates the proposals.
+const IMPORT_OUTCOMES = { would_propose: ["would propose", "st-pending"], proposed: ["proposed", "st-pending"], unchanged: ["unchanged", "st-ok"], refused: ["refused", "st-rejected"] };
+function importOutcomes(r) {
+  const s = r.summary;
+  return el("div", {},
+    el("p", {}, r.dry_run ? `Dry run: ${s.would_propose} would be proposed, ${s.unchanged} unchanged, ${s.refused} refused. Nothing has been created.`
+      : `${s.proposed} proposed for review, ${s.unchanged} unchanged, ${s.refused} refused.`),
+    table(["Rule", "Outcome", "Detail"], r.rules.map((x) => ({ cells: [el("code", {}, x.id ?? "—"), pill(...(IMPORT_OUTCOMES[x.outcome] || [x.outcome, ""])),
+      x.reason ?? (x.change_id ? `Change request #${x.change_id}` : x.changes ? el("pre", {}, JSON.stringify(x.changes)) : "Same as this instance")] }))));
+}
+
+function importDialog() {
+  let text = null, label = "";
+  const confirmBtn = el("button", { type: "button", id: "import-confirm", disabled: true }, "Create proposals");
+  const form = el("form", {},
+    el("h2", {}, "Import rules"),
+    el("p", { class: "muted" }, "Choose a file from Export rules (JSON). The preview changes nothing. Creating proposals spends one backtest per changed rule from your quota, and a different admin still has to approve each one."),
+    el("label", {}, "Rules file (JSON)", el("input", { type: "file", name: "file", required: true, accept: ".json,application/json", onchange: () => { text = null; confirmBtn.disabled = true; $("#import-preview").replaceChildren(); } })),
+    el("p", { class: "error", role: "alert", id: "import-error" }),
+    el("p", { class: "muted", role: "status", id: "import-status" }),
+    el("div", { id: "import-preview" }),
+    el("div", { class: "row" }, el("button", { type: "submit" }, "Preview (dry run)"), confirmBtn,
+      el("button", { type: "button", class: "ghost", onclick: () => $("#modal").close() }, "Cancel")));
+  const send = async (dryRun) => {
+    $("#import-error").textContent = "";
+    $("#import-status").textContent = dryRun ? "Checking the file…" : "Creating proposals…";
+    try {
+      const q = new URLSearchParams({ label });
+      if (dryRun) q.set("dry_run", "1");
+      const r = await api(`/api/rules/import?${q}`, { method: "POST", raw: text, contentType: "application/json" });
+      $("#import-preview").replaceChildren(importOutcomes(r));
+      $("#import-status").textContent = dryRun ? "Preview ready." : "Proposals created.";
+      confirmBtn.disabled = !dryRun || !r.summary.would_propose;
+      if (!dryRun) { toast(`${r.summary.proposed} proposal(s) submitted for review`); rules(); }
+    } catch (e) { $("#import-status").textContent = ""; $("#import-error").textContent = e.message; }
+  };
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const file = new FormData(form).get("file");
+    label = file.name;
+    text = await file.text();
+    await send(true);
+  });
+  confirmBtn.addEventListener("click", () => { confirmBtn.disabled = true; send(false); });
+  $("#modal-body").replaceChildren(form);
+  openModal();
 }
 
 function exceptionDialog(rule) {

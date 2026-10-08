@@ -183,6 +183,8 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | `watchpost/health.py` | Component checks, each with a status (`ok`/`degraded`/`failing`), a message, and recovery guidance. |
 | `watchpost/improve.py` | Scenario evaluation (TP/FN/FP, recall, precision), rule performance from analyst verdicts, heuristic suggestions, and two-person change review. |
 | `watchpost/backtest.py` | Replays a proposed rule change over stored events (kept / new / lost findings, open alerts it would lose) for the review evidence and the preview route. |
+| `watchpost/portability.py` | Rule export and import: tuning (params, enabled) out as versioned JSON, and back in as reviewed `rule_update` proposals. |
+| `watchpost/ecs.py` | Maps an event to Elastic Common Schema field names for export. |
 | `watchpost/syslog_listener.py` | Optional UDP/TCP syslog receiver (RFC 3164, RFC 5424, RFC 6587 framing). Runs each line through the auth.log parser, falls back to a generic `syslog` event with severity from PRI, and batches into the engine every 2 seconds. Reports itself as the `syslog` health component. |
 | `scripts/shipper.py` | Stdlib-only file tailer for Linux boxes: batches new lines to `/api/ingest/upload` with an ingest token, with backoff, rotation handling, and a position file. |
 | `watchpost/simulate.py` | Labeled synthetic scenarios and a CLI that sends only to loopback unless you explicitly allow otherwise. |
@@ -279,6 +281,42 @@ Before a rule change is approved, `watchpost/backtest.py` replays the rule over 
 - **Preview.** `GET /api/rules/<id>/backtest?params=<JSON>&days=<1-30>` backtests a draft without proposing it. The params are validated exactly as a `rule_update` proposal is (a bad value is a 400). The route needs the analyst role, like proposing. The viewer gets 403 but can read the backtest in a change request's evidence. Every backtest is rate-limited per account on top of the general request limit: previews get a burst of 6, then 12 a minute; rule proposals and approvals of rule changes, which also replay stored events, share a separate burst of 20, then 12 a minute. In the UI, **Propose change…** has a **Preview backtest** button, and **Rules & review** shows a "Backtest on stored events" block on each rule change.
 
 What it is not: it replays stored events only, so it can't predict traffic you haven't stored or behavior that hasn't happened yet. A finding that is "kept" can still change size within its group key, and an open alert raised under older params, or from events outside the window, isn't counted. On the demo, the stored events are synthetic, and the block says so.
+
+### Rule export and import
+
+`GET /api/rules/export` (viewer) downloads `watchpost-rules.json`: `{format: "watchpost-rules", format_version: 1, watchpost_version, exported_at, note, rules}`, each rule with its `id`, `name`, `version`, `enabled`, `severity`, `params`, ATT&CK technique ids and `description`. Keys and rules are sorted, so two exports of the same state differ only in `exported_at`.
+
+**What moves is tuning, not detection logic.** Rules are Python functions in `watchpost/rules.py`, and that code is not exported. An import can change the `params` and `enabled` of rules the importing instance already has. It cannot add a rule or change how one detects. `severity`, `version`, `name`, `description` and the techniques are carried for reading only and are ignored on import.
+
+`POST /api/rules/import` (analyst and above) takes that document, up to 256 KB and 200 rules. It applies nothing. A wrong `format` or `format_version`, an unknown top-level key, or a malformed document refuses the whole import. Each rule is then checked on its own: an unknown rule id, an unknown key, or params that fail the same validation a `rule_update` proposal uses are refused with a reason. Each rule whose params or enabled state differ from today's becomes an ordinary `rule_update` change request with the reason "imported from <file name>", carrying only the changed keys. The backtest evidence, the detection-loss acknowledgement, the true-positive gate and the two-person review all still apply. Identical rules are reported as `unchanged`. The response lists each rule as `proposed` (with `change_id`), `unchanged` or `refused` (with `reason`). `?dry_run=1` returns the same outcomes (`would_propose` instead of `proposed`) and creates nothing.
+
+Every proposal runs a backtest, so an import spends one token per changed rule from the same per-account bucket as hand-made rule proposals (burst 20). It spends them all up front, or refuses the import with 429 and proposes nothing. A dry run spends nothing. The import is audited as `rules_imported` with the change ids, the unchanged count and the refusal reasons. On the **Rules** page, **Export rules (JSON)** is there for every role; **Import rules…** (analyst and above) previews the dry run, then **Create proposals** sends it.
+
+### ECS field mapping
+
+`GET /api/events/<id>/ecs` (viewer) returns one stored event as an Elastic Common Schema (ECS) shaped document, for export and interop with ECS-based tools. This is a field mapping on the way out. Watchpost still stores events in its own flat schema, and the hunt language uses Watchpost names. The mapping lives in `watchpost/ecs.py`.
+
+| Watchpost field | ECS field | Note |
+|---|---|---|
+| `id` | `event.id` | as a string |
+| `ts` | `@timestamp` | |
+| `ingested_at` | `event.ingested` | when Watchpost stored it |
+| `source` | `event.module` | closest fit; Watchpost's source is a free-form log-source label |
+| `host` | `host.name` | |
+| `event_type` | `event.action` | also sets `event.category` / `event.type` where a clear pairing exists (below) |
+| `outcome` | `event.outcome` | only for `success`, `failure` or `unknown`; any other text stays as `watchpost.outcome` |
+| `user` | `user.name` | |
+| `src_ip` | `source.ip` | |
+| `dest_ip` | `destination.ip` | |
+| `dest_port` | `destination.port` | |
+| `message` | `message` | |
+| `raw` | `event.original` | the redacted original record |
+| `synthetic` | `labels.synthetic` | `"true"` / `"false"` (ECS labels are keywords) |
+| `severity` | not mapped (`watchpost.severity`) | ECS `event.severity` is a number on the source's own scale; Watchpost's is a word |
+| `bytes` | not mapped (`watchpost.bytes`) | ECS byte counts carry a direction (`source.bytes`, `destination.bytes`) or a two-way total (`network.bytes`); Watchpost's has neither, and for cloud reads it is not network traffic |
+| `batch_id` | not mapped (`watchpost.batch_id`) | no ECS counterpart |
+
+Every document also has `event.kind: "event"`. Event types with a category: `auth_failure`, `auth_success`, `vpn_login` → authentication / start; `account_lockout` → iam / user, change; `user_created` → iam / user, creation; `cloud_iam_change` → iam / change; `process_start` → process / start; `file_access` → file / access; `network_connection` → network / connection; `fw_allow` and `fw_deny` → network / allowed or denied, connection; `web_request` and `web_scan` → web / access; `web_error` → web / error. `privilege_use`, `privilege_escalation`, `cloud_api_call`, `cloud_data_access`, `syslog` and `other` get no category, because no single ECS category fits them across sources.
 
 ### Tamper-evident audit log
 
