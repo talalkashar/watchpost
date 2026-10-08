@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # prev_hash of the first audit entry. Every later entry links to the hash of the one before it.
 GENESIS_HASH = "0" * 64
@@ -185,7 +185,10 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     created_by TEXT NOT NULL,
     created_at TEXT NOT NULL,
     last_used_at TEXT,
-    revoked_at TEXT
+    revoked_at TEXT,
+    role TEXT NOT NULL DEFAULT 'analyst',
+    capabilities TEXT NOT NULL DEFAULT '["ingest"]',
+    expires_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -390,6 +393,10 @@ ADDED_COLUMNS = [
     # 8.0: a non-secret session id (for listing and revoking) and when the session was last used.
     ("sessions", "sid", "TEXT"),
     ("sessions", "last_seen_at", "TEXT"),
+    # 13.0: least-privilege bearer tokens. Existing ingest tokens retain their original behavior.
+    ("api_tokens", "role", "TEXT NOT NULL DEFAULT 'analyst'"),
+    ("api_tokens", "capabilities", "TEXT NOT NULL DEFAULT '[\"ingest\"]'"),
+    ("api_tokens", "expires_at", "TEXT"),
 ]
 
 

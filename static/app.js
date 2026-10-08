@@ -1593,13 +1593,29 @@ async function admin() {
   const tokenOut = el("div");
   const tokenForm = el("form", { class: "row" },
     el("label", {}, "Token name", el("input", { name: "name", required: true, maxlength: 64, placeholder: "e.g. web01-forwarder" })),
-    el("button", { type: "submit" }, "Create ingest token"));
+    el("label", {}, "Role", el("select", { name: "role" },
+      el("option", { value: "analyst" }, "Analyst"), el("option", { value: "viewer" }, "Viewer"))),
+    el("fieldset", {}, el("legend", {}, "Capabilities"),
+      ...["read", "ingest", "triage"].map((name) => el("label", {}, el("input", { type: "checkbox", name: "capability", value: name, checked: name === "ingest" }), ` ${name}`))),
+    el("label", {}, "Expires after (days, optional)", el("input", { name: "expires", type: "number", min: 1, max: 365 })),
+    el("button", { type: "submit" }, "Create token"));
+  tokenForm.elements.role.addEventListener("change", () => {
+    const viewer = tokenForm.elements.role.value === "viewer";
+    for (const box of tokenForm.querySelectorAll('[name="capability"]')) {
+      box.checked = viewer ? box.value === "read" : box.value === "ingest";
+      box.disabled = viewer && box.value !== "read";
+    }
+  });
   tokenForm.addEventListener("submit", (ev) => {
     ev.preventDefault();
     guarded(async () => {
-      const r = await api("/api/tokens", { method: "POST", body: { name: new FormData(tokenForm).get("name") } });
+      const f = new FormData(tokenForm);
+      const body = { name: f.get("name"), role: f.get("role"), capabilities: f.getAll("capability") };
+      if (f.get("expires")) body.expires_in_days = Number(f.get("expires"));
+      const r = await api("/api/tokens", { method: "POST", body });
       tokenOut.replaceChildren(el("div", { class: "explain" }, el("strong", {}, "Copy this now; it will not be shown again: "), el("code", {}, r.token)));
       tokenForm.reset();
+      tokenForm.elements.role.dispatchEvent(new Event("change"));
     });
   });
   const resetForm = el("form", { class: "row" },
@@ -1633,9 +1649,10 @@ async function admin() {
       }) }, "Load synthetic demo data"), demoOut),
     storyCard(),
     inventoryCard,
-    el("div", { class: "card" }, el("h2", {}, "API tokens (ingest only)"), tokenForm, tokenOut,
-      table(["Name", "Prefix", "Created", "Last used", "Status", ""], tokens.map((t) => ({ cells: [t.name, el("code", {}, `${t.prefix}…`), `${fmtTime(t.created_at)} by ${t.created_by}`, fmtTime(t.last_used_at),
-        t.revoked_at ? pill("revoked", "st-rejected") : pill("active", "st-ok"),
+    el("div", { class: "card" }, el("h2", {}, "Role-scoped API tokens"),
+      el("p", { class: "muted" }, "Viewer tokens are read-only. Analyst tokens receive only the checked capabilities; bearer tokens can never use admin endpoints."), tokenForm, tokenOut,
+      table(["Name", "Role / capabilities", "Prefix", "Created", "Expires", "Last used", "Status", ""], tokens.map((t) => ({ cells: [t.name, `${t.role}: ${t.capabilities.join(", ")}`, el("code", {}, `${t.prefix}…`), `${fmtTime(t.created_at)} by ${t.created_by}`, fmtTime(t.expires_at), fmtTime(t.last_used_at),
+        t.revoked_at ? pill("revoked", "st-rejected") : t.expires_at && new Date(t.expires_at) <= new Date() ? pill("expired", "st-rejected") : pill("active", "st-ok"),
         t.revoked_at ? "" : el("button", { class: "danger", onclick: () => confirm(`Revoke token "${t.name}"?`) && guarded(async () => { await api(`/api/tokens/${t.id}/revoke`, { method: "POST" }); admin(); }) }, "Revoke")] })))),
     el("div", { class: "card" }, el("h2", {}, "Sign-in sessions"),
       el("p", { class: "muted" }, "Every active session. Revoking one signs that browser out at its next request. For someone who lost their authenticator app, reset their two-factor here: there are no recovery codes."),
