@@ -13,11 +13,11 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (__version__, assets, attack, auth, engine, entities, geo, hunt, improve, incidents, queries, report,
-               simulate, storyline, stream)
+               simulate, storyline, stream, triage)
 from . import backtest as backtest_mod
 from .ratelimit import TokenBucketLimiter
 from .config import Config
-from .db import audit, connect, init_schema, now_iso, row_to_dict, verify_chain
+from .db import audit, connect, init_schema, now_iso, row_to_dict, utcnow, verify_chain
 from .diagnostics import configure_logging, log, record_error
 from .health import STATIC_DIR, run_health_checks
 from .normalize import EventError, parse_payload, validate_source
@@ -304,7 +304,8 @@ def event_detail(req, event_id):
 
 @route("GET", "/api/alerts")
 def alerts(req):
-    return queries.list_alerts(req.conn, req.query)
+    now = utcnow()
+    return [{**a, "sla_breach": triage.pending_breaches(a, now)} for a in queries.list_alerts(req.conn, req.query)]
 
 
 @route("GET", r"/api/alerts/(\d+)")
@@ -323,6 +324,11 @@ def alert_status(req, alert_id):
     data = body_json(req)
     return queries.update_status(req.conn, int(alert_id), req.user["username"], data.get("status"),
                                  data.get("disposition"), data.get("note"))
+
+
+@route("POST", r"/api/alerts/(\d+)/assign", role="analyst")
+def alert_assign(req, alert_id):
+    return queries.assign(req.conn, int(alert_id), req.user["username"], body_json(req).get("assignee"))
 
 
 # Incidents (correlated alerts) and ATT&CK coverage -------------------------------------
@@ -379,6 +385,11 @@ def incident_report(req, incident_id, fmt):
 @route("GET", "/api/metrics")
 def metrics(req):
     return queries.metrics(req.conn, req.query.get("hours"))
+
+
+@route("GET", "/api/metrics/triage")
+def triage_metrics(req):
+    return triage.triage_metrics(req.conn, req.query.get("window"))
 
 
 # SOC dashboard ---------------------------------------------------------------------------

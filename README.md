@@ -340,6 +340,23 @@ An address listed on several assets matches every one of them, so the order of t
 
 An update stores only the fields it changes. The evidence a reviewer sees has the asset before and after, a before/after line for each changed field, the review reasons, and the open alerts whose severity the change would move, with from and to. Approval works like other change requests: a different admin (`POST /api/changes/<id>/review`), sending the `evidence_digest` they were shown. The server re-checks the change against the inventory as it is at that moment. If the asset was deleted, its new name is taken, or it already matches, the approval is refused with 409 and nothing is applied. If the asset was edited in between, the evidence is refreshed and the old digest is refused. An approved change is applied through the same asset functions as a direct edit, then open alerts are re-weighed and incident severities refreshed. Proposals, approvals, rejections, and the asset change itself are all written to the hash-chained audit log, and the asset entry names the change request. **Admin → Asset inventory** shows pending proposals on each asset (for example "Proposed: lower db01 to low (pending review, change #12)"), and the edit dialog offers **Propose for review** when the server answers 409. **Rules & review** lists them with the other change requests.
 
+### Triage metrics
+
+`GET /api/metrics/triage?window=7d` (any role, viewer included; `window` is `24h`, `7d`, `30d` (default), `90d`, or `all`) reports, per severity, for alerts created in the window: the count, how many are still `open` and unresolved, MTTA, MTTR, and SLA breaches. **Metrics overview** shows them in a table, and the alert list puts an `SLA: ack overdue` / `resolve overdue` badge on unresolved alerts past a target.
+
+- **Acknowledged** (`alerts.acknowledged_at`, schema 7) is the first time an alert leaves `open`: *Start investigating*, or resolving straight from open. It is set once and never overwritten, even across reopens. Assigning an alert (`POST /api/alerts/<id>/assign` with `{"assignee": "<analyst or admin>"}`, analyst and up, audited) changes ownership only, not the status, so it does not count as an acknowledgement. Alerts that left `open` before schema 7 keep a NULL time; they are reported as `ack_unknown` and left out of MTTA and ack breaches rather than backfilled.
+- **MTTA** is created → acknowledged; **MTTR** is created → resolved. Each comes as mean, median, and p90 (nearest-rank) in minutes over the alerts that have reached that step. All three timestamps are this instance's wall clock, so replayed event times do not distort them.
+- **SLA breach**: the step took longer than its target, or is still pending and has been waiting longer. Late acknowledgements stay counted after the alert moves on; the list badge shows only what is overdue now.
+
+| Severity | Acknowledge within | Resolve within |
+|---|---|---|
+| critical | 15 minutes | 4 hours |
+| high | 1 hour | 24 hours |
+| medium | 4 hours | 3 days |
+| low, info | 24 hours | 7 days |
+
+The targets are a constant (`watchpost/triage.py`, `SLA_TARGETS`), chosen as common SOC starting points, not taken from any contract. **On the demo every alert comes from synthetic scenarios**, so the numbers measure how quickly someone clicked through demo alerts, not a real team's performance. The response says so: `synthetic` is `none`, `some`, or `all`, with `synthetic_alerts`, and the panel carries the synthetic label.
+
 ---
 
 ## SOC dashboard
