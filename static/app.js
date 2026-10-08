@@ -1346,13 +1346,18 @@ function exceptionDialog(rule) {
   openModal();
 }
 
+function datetimeLocalValue(value) {
+  const d = new Date(value);
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0, 16);
+}
+
 function suppressionWindowDialog(rule) {
-  const local = (d) => new Date(d).toISOString().slice(0, 16);
   const form = el("form", {},
     el("h2", {}, `Schedule rule suppression: ${rule.id}`),
     el("p", { class: "muted" }, "Every finding from this rule is suppressed during the approved interval (maximum 30 days). The reviewer must explicitly acknowledge the labeled detections the window will miss."),
-    el("label", {}, "Starts", el("input", { name: "starts_at", type: "datetime-local", value: local(Date.now()), required: true })),
-    el("label", {}, "Expires", el("input", { name: "expires_at", type: "datetime-local", value: local(Date.now() + 2 * 60 * 60 * 1000), required: true })),
+    el("label", {}, "Starts", el("input", { name: "starts_at", type: "datetime-local", value: datetimeLocalValue(Date.now()), required: true })),
+    el("label", {}, "Expires", el("input", { name: "expires_at", type: "datetime-local", value: datetimeLocalValue(Date.now() + 2 * 60 * 60 * 1000), required: true })),
     el("label", {}, "Reason (required)", el("textarea", { name: "reason", required: true, minlength: 5, maxlength: 2000 })),
     el("p", { class: "error", role: "alert", id: "suppression-window-error" }),
     el("div", { class: "row" }, el("button", { type: "submit" }, "Submit for review"), el("button", { type: "button", class: "ghost", onclick: () => $("#modal").close() }, "Cancel")));

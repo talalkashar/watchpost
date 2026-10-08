@@ -119,7 +119,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 ### Tests
 
 ```bash
-./run_tests.sh      # 572 unit/integration tests + a 26-step end-to-end smoke check
+./run_tests.sh      # 574 unit/integration tests + a 26-step end-to-end smoke check
 ```
 
 ### Replit

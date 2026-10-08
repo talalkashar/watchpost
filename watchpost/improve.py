@@ -552,10 +552,25 @@ def _evidence(conn, kind, target, payload, proposer):
                       "live_impact": _live_impact(conn, target, payload["group_key"], base["group_keys"],
                                                   proposer)}
     elif kind == "rule_suppression_add":
-        base = evaluate({target: current_params(conn, include_disabled=True)[target]})["rules"][target]
-        if not conn.execute("SELECT enabled FROM rules WHERE id = ?", (target,)).fetchone()["enabled"]:
+        params = current_params(conn, include_disabled=True)[target]
+        base = evaluate({target: params})["rules"][target]
+        family = sampled_family(target)
+        sample = family.stored_result(conn, target) if family else None
+        if sample:
+            name = family.SAMPLE_PREFIX + target
+            base = {**base,
+                    "detected": base["detected"] + [name] * sample["passes"],
+                    "missed": base["missed"] + [name] * bool(sample["missed"]),
+                    "lookalikes": base["lookalikes"] + [name],
+                    "lookalikes_fired": base["lookalikes_fired"] + [name] * bool(sample["fired"])}
+        enabled = bool(conn.execute("SELECT enabled FROM rules WHERE id = ?", (target,)).fetchone()["enabled"])
+        if not enabled:
             base = _not_running(base)
-        evaluation = {"rule": target, "before": base, "after": _not_running(base)}
+        evaluation = {"rule": target, "before": base, "after": _not_running(base),
+                      # A window temporarily stops this rule, so replay current params as running -> paused.
+                      "backtest": backtest_mod.backtest(conn, target, params,
+                                                          running=(enabled, False),
+                                                          limit=BACKTEST_EVIDENCE_LIMIT)}
     elif kind in ASSET_KINDS:
         evaluation = assets_mod.change_evidence(conn, *merged)
     elif kind == "sigma_add":
