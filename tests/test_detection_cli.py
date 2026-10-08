@@ -56,6 +56,10 @@ class DetectionChecksTests(unittest.TestCase):
             {**document("success_after_failures"), "rules": [{"id": "missing", "enabled": True, "params": {}}]},
             {**document("success_after_failures"), "rules": [{"id": "success_after_failures",
                                                                  "enabled": "yes", "params": {}}]},
+            {**document("success_after_failures"), "rules": [{"id": "success_after_failures",
+                                                                 "enabled": True, "params": {}}]},
+            {**document("success_after_failures"), "rules": [{"id": "success_after_failures", "enabled": True,
+                                                                 "params": {"failures": 5}}]},
             {**document("success_after_failures"), "rules": [{"id": "success_after_failures", "enabled": True,
                                                                  "params": {"failures": "five"}}]},
         ]
