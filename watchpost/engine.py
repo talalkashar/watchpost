@@ -194,6 +194,14 @@ def active_suppressions(conn):
         "SELECT rule_id, group_key FROM suppressions WHERE expires_at > ? AND revoked_at IS NULL", (now_iso(),))}
 
 
+def active_rule_suppressions(conn):
+    """Rule ids whose reviewed suppression window contains the current time."""
+    now = now_iso()
+    return {r["rule_id"] for r in conn.execute(
+        "SELECT rule_id FROM rule_suppression_windows"
+        " WHERE starts_at <= ? AND expires_at > ? AND ended_at IS NULL", (now, now))}
+
+
 def scan_events(conn, rules, max_id, start=None, end=None):
     """The stored events a detection run of `rules` over [start, end] reads (default: all events).
 
@@ -221,7 +229,7 @@ def scan_events(conn, rules, max_id, start=None, end=None):
     return events, history_events, scan_start
 
 
-def rule_findings(rule, events, history_events, scan_start, suppressed):
+def rule_findings(rule, events, history_events, scan_start, suppressed, suppress_rule=False):
     """One rule's findings over scanned events, as detection alerts on them.
 
     Returns (findings, skipped): findings built only from history context are dropped, and those a
@@ -244,6 +252,8 @@ def rule_findings(rule, events, history_events, scan_start, suppressed):
             skipped += 1
             continue
         findings.append(finding)
+    if suppress_rule:
+        return [], skipped + len(findings)
     return findings, skipped
 
 
@@ -274,6 +284,7 @@ def run_detection(conn, trigger="manual", start=None, end=None):
             summary["events_scanned"] = len(events) + len(history_events)
             assets_idx = assets_mod.load_index(conn)
             suppressed = active_suppressions(conn)
+            suppressed_rules = active_rule_suppressions(conn)
             with transaction(conn):
                 for rule in active:
                     if rule["id"] == sources_mod.RULE_ID:
@@ -282,10 +293,12 @@ def run_detection(conn, trigger="manual", start=None, end=None):
                         arrivals = sources_mod.arrival_events(conn, max_id)
                         synthetic_ids.update(e["id"] for e in arrivals if e["synthetic"])
                         rule = {**rule, "params": sources_mod.clock_params(conn, rule["params"])}
-                        findings, skipped = rule_findings(rule, arrivals, [], None, suppressed)
+                        findings, skipped = rule_findings(rule, arrivals, [], None, suppressed,
+                                                          rule["id"] in suppressed_rules)
                     else:
-                        findings, skipped = rule_findings(rule, events, history_events, scan_start, suppressed)
-                    summary["alerts_suppressed"] += skipped  # a reviewed tuning exception covers them
+                        findings, skipped = rule_findings(rule, events, history_events, scan_start, suppressed,
+                                                          rule["id"] in suppressed_rules)
+                    summary["alerts_suppressed"] += skipped  # a reviewed exception or rule window covers them
                     for finding in findings:
                         synthetic = all(i in synthetic_ids for i in finding["event_ids"])
                         outcome = _apply_finding(conn, rule, finding, synthetic, assets_idx)
