@@ -124,6 +124,13 @@ class ShortcutHandlerTests(unittest.TestCase):
                 with self.subTest(file=path, line=n + 1):
                     self.assertTrue(wrapped_later or wrapped_above, line.strip())
 
+    def test_datetime_local_defaults_are_built_in_local_time(self):
+        helper = function_body(self.app, "datetimeLocalValue")
+        self.assertIn("getTimezoneOffset()", helper)
+        dialog = function_body(self.app, "suppressionWindowDialog")
+        self.assertIn("datetimeLocalValue(Date.now())", dialog)
+        self.assertNotIn("new Date(d).toISOString().slice", dialog)
+
 
 class StyleTests(unittest.TestCase):
     def setUp(self):

@@ -119,7 +119,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 ### Tests
 
 ```bash
-./run_tests.sh      # 569 unit/integration tests + a 26-step end-to-end smoke check
+./run_tests.sh      # 574 unit/integration tests + a 26-step end-to-end smoke check
 ```
 
 ### Replit
@@ -253,6 +253,12 @@ The scenarios are synthetic, so "validated" means a rule detected the project's 
 After each detection run, `watchpost/correlate.py` groups related alerts into incidents: alerts whose evidence shares a source IP, account, or host within 30 minutes. An incident needs two related alerts or one critical alert, lists its kill-chain stages (ATT&CK tactics in order), and is raised one severity level when it spans three or more tactics. Reruns change nothing; new alerts join an open incident.
 
 Every rule except `log_source_silent` accepts `ignore_ips` and `ignore_users`. The engine merges overlapping findings into one open alert instead of creating duplicates, and a rescan never re-alerts on evidence already attached to an alert.
+
+An analyst can also propose a **rule suppression window** for a planned operational period. It pauses every
+finding from one rule between explicit start and expiry times (at most 30 days), so its review evidence shows
+which labeled attacks will be missed and approval by a different admin requires explicit detection-loss
+acknowledgement. Detection runs count findings skipped by an active window. Upcoming, active, expired and
+manually ended windows remain visible under Rules & review; ending one early is an audited admin action.
 
 ### Self-diagnosis
 

@@ -190,6 +190,7 @@ async function main() {
         ["resolve dialog", `alerts/${alertId}`, "button:has-text('Resolve…')"],
         ["event dialog", "events", "#view tr.clickable"],
         ["propose-change dialog", "rules", `#rule-${ruleId} button:has-text('Propose change…')`],
+        ["rule-suppression dialog", "rules", `#rule-${ruleId} button:has-text('Schedule suppression…')`],
         ["rules import dialog", "rules", "button:has-text('Import rules…')"],
         ["sigma import dialog", "rules", "button:has-text('Import Sigma rule…')"],
         ["promote dialog", "hunt", "button:has-text('Promote to detection…')"],

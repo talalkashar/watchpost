@@ -777,6 +777,25 @@ def suppressions(req):
     return improve.list_suppressions(req.conn)
 
 
+@route("POST", r"/api/rules/([a-z_]+)/suppression-windows", role="analyst")
+def rule_suppression_propose(req, rule_id):
+    data = body_json(req)
+    req.status = 201
+    return improve.propose_change(req.conn, "rule_suppression_add", rule_id,
+                                  {"starts_at": data.get("starts_at"), "expires_at": data.get("expires_at")},
+                                  data.get("reason"), req.user["username"])
+
+
+@route("GET", "/api/rule-suppression-windows")
+def rule_suppression_windows(req):
+    return improve.list_rule_suppression_windows(req.conn)
+
+
+@route("POST", r"/api/rule-suppression-windows/(\d+)/end", role="admin")
+def rule_suppression_end(req, window_id):
+    return improve.end_rule_suppression_window(req.conn, int(window_id), req.user["username"])
+
+
 @route("POST", r"/api/suppressions/(\d+)/revoke", role="admin")
 def suppression_revoke(req, suppression_id):
     """End an approved exception before it expires; it stops applying from the next detection run."""

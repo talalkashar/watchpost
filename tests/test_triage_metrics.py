@@ -230,7 +230,7 @@ class TriageApiTests(ServerTestCase):
 
 class MigrationTests(unittest.TestCase):
     def test_v6_database_gains_acknowledged_at_and_keeps_rows_null(self):
-        self.assertEqual(SCHEMA_VERSION, 11)
+        self.assertEqual(SCHEMA_VERSION, 12)
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "v6.db")
             conn = connect(path)
@@ -248,7 +248,7 @@ class MigrationTests(unittest.TestCase):
             self.addCleanup(conn.close)
             init_schema(conn)
             self.assertIn("acknowledged_at", {r["name"] for r in conn.execute("PRAGMA table_info(alerts)")})
-            self.assertEqual(conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0], "11")
+            self.assertEqual(conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0], "12")
             self.assertEqual(conn.execute("SELECT acknowledged_at FROM alerts").fetchall()[0][0], None)
             self.assertEqual([tuple(r) for r in conn.execute("SELECT * FROM audit_log ORDER BY id")], chain)
             self.assertTrue(verify_chain(conn)["ok"])
