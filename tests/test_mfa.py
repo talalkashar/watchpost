@@ -292,7 +292,7 @@ class MfaApiTests(ServerTestCase):
 
 class MigrationTests(unittest.TestCase):
     def test_v7_database_gains_mfa_and_session_ids(self):
-        self.assertEqual(SCHEMA_VERSION, 8)
+        self.assertEqual(SCHEMA_VERSION, 9)
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "v7.db")
             conn = connect(path)
@@ -314,7 +314,7 @@ class MigrationTests(unittest.TestCase):
             conn = connect(path)
             self.addCleanup(conn.close)
             init_schema(conn)
-            self.assertEqual(conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0], "8")
+            self.assertEqual(conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0], "9")
             sids = [r[0] for r in conn.execute("SELECT sid FROM sessions")]
             self.assertEqual(len(set(sids)), 2)
             self.assertTrue(all(s and len(s) == 16 for s in sids))

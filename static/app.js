@@ -762,7 +762,7 @@ async function rules(focus) {
       el("p", { class: "muted" }, r.description),
       el("p", {}, el("strong", {}, "MITRE ATT&CK: "), techniques(r.techniques)),
       el("div", { class: "grid" },
-        el("div", {}, el("h3", {}, `Parameters (v${r.version})`), el("pre", {}, JSON.stringify(r.params, null, 2))),
+        r.sigma ? sigmaDetail(r) : el("div", {}, el("h3", {}, `Parameters (v${r.version})`), el("pre", {}, JSON.stringify(r.params, null, 2))),
         el("div", {},
           el("h3", {}, "Analyst feedback"),
           el("dl", { class: "kv" }, ...[["Alerts", p.total], ["Open / investigating", `${p.open} / ${p.investigating}`], ["True positives", p.tp], ["False positives", p.fp], ["Benign", p.benign], ["Precision (TP / (TP+FP))", pct(p.precision)]]
@@ -773,6 +773,7 @@ async function rules(focus) {
       el("div", { class: "row" },
         can("analyst") ? el("button", { class: "ghost", onclick: () => proposeDialog(r) }, "Propose change…") : null,
         can("analyst") ? el("button", { class: "ghost", onclick: () => exceptionDialog(r) }, "Propose exception…") : null,
+        can("analyst") && r.sigma ? el("button", { class: "ghost", onclick: () => sigmaSampleDialog(r) }, "Labeled sample…") : null,
         el("button", { class: "ghost", onclick: () => guarded(() => historyDialog(r)) }, "History")));
   });
 
@@ -789,9 +790,9 @@ async function rules(focus) {
     ? el("div", {}, el("strong", {}, `Loses detection of labeled attack(s): ${detectionLoss(c).join(", ")}. `), "Approving requires an explicit acknowledgement.") : null);
 
   const changeRows = changes.slice(0, 30).map((c) => ({ cells: [
-    `#${c.id}`, status(c.status), el("code", {}, isAssetChange(c) ? `asset:${c.evaluation?.asset ?? c.target}` : `${{ rule_update: "rule", suppression_add: "exception" }[c.kind] || "setting"}:${c.target}`),
-    isAssetChange(c) ? assetDiff(c) : el("pre", {}, JSON.stringify(c.payload)), c.reason,
-    isAssetChange(c) ? assetImpact(c) : c.evaluation ? el("span", {}, `FP ${c.evaluation.before.fp}→${c.evaluation.after.fp}, TP ${c.evaluation.before.tp}→${c.evaluation.after.tp}, missed ${c.evaluation.after.missed.join(", ") || "none"}`, lostNote(c), liveImpact(c.evaluation.live_impact),
+    `#${c.id}`, status(c.status), el("code", {}, isAssetChange(c) ? `asset:${c.evaluation?.asset ?? c.target}` : `${{ rule_update: "rule", suppression_add: "exception", sigma_add: "sigma", sigma_sample: "sample" }[c.kind] || "setting"}:${c.target}`),
+    isAssetChange(c) ? assetDiff(c) : isSigmaChange(c) ? (c.kind === "sigma_add" ? el("code", {}, c.evaluation?.conditions ?? "—") : "labeled sample") : el("pre", {}, JSON.stringify(c.payload)), c.reason,
+    isAssetChange(c) ? assetImpact(c) : isSigmaChange(c) ? sigmaEvidence(c) : c.evaluation ? el("span", {}, `FP ${c.evaluation.before.fp}→${c.evaluation.after.fp}, TP ${c.evaluation.before.tp}→${c.evaluation.after.tp}, missed ${c.evaluation.after.missed.join(", ") || "none"}`, lostNote(c), liveImpact(c.evaluation.live_impact),
       (c.evaluation.ignore_additions || []).map((x) => el("div", {}, el("strong", {}, `${x.change === "removed" ? "Removes" : "Adds"} ${x.value} ${x.change === "removed" ? "from" : "to"} ${x.param} (permanent, no expiry).`), liveImpact(x.live_impact))),
       backtestBlock(c.evaluation.backtest)) : "—",
     c.proposed_by, c.reviewed_by ? `${c.reviewed_by}${c.review_note ? `: ${c.review_note}` : ""}` : "—",
@@ -814,7 +815,9 @@ async function rules(focus) {
       el("p", { class: "muted" }, "The export holds each rule's parameters and enabled state as JSON. Detection logic is code and is not exported, so an import can only retune rules this instance already has. An import applies nothing: each rule that differs becomes a change request for the usual review and backtest."),
       el("div", { class: "row" },
         el("a", { class: "button", href: "/api/rules/export", download: "watchpost-rules.json" }, "Export rules (JSON)"),
-        can("analyst") ? el("button", { class: "ghost", onclick: () => importDialog() }, "Import rules…") : null)),
+        can("analyst") ? el("button", { class: "ghost", onclick: () => importDialog() }, "Import rules…") : null,
+        can("analyst") ? el("button", { class: "ghost", onclick: () => sigmaDialog() }, "Import Sigma rule…") : null),
+      el("p", { class: "muted" }, "A Sigma rule (a documented subset; see the README) is the one way to add detection logic. It becomes a change request, is added disabled, and can be enabled only once its labeled sample passes.")),
     el("div", { class: "card" }, el("h2", {}, `Change requests (${pending.length} pending)`),
       table(["ID", "Status", "Target", "Change", "Reason", "Scenario impact (before→after)", "Proposed by", "Reviewed", ""], changeRows)),
     el("div", { class: "card" }, el("h2", {}, `Tuning exceptions (${exceptions.filter((x) => x.active).length} active)`),
@@ -1040,6 +1043,119 @@ function importDialog() {
     await send(true);
   });
   confirmBtn.addEventListener("click", () => { confirmBtn.disabled = true; send(false); });
+  $("#modal-body").replaceChildren(form);
+  openModal();
+}
+
+// Imported Sigma rules: sigma_add / sigma_sample change requests (evidence: improve._evidence) and the rule card.
+const isSigmaChange = (c) => c.kind.startsWith("sigma_");
+const sampleLine = (s) => (s ? el("div", {}, pill(s.passes ? "sample passes" : "sample fails", s.passes ? "st-ok" : "st-rejected"), ` ${s.summary} (${s.malicious} malicious, ${s.benign} benign)`)
+  : el("div", { class: "muted" }, "No labeled sample: the rule cannot be enabled and its ATT&CK mapping is not validated."));
+const sigmaPreview = (bt) => (bt && bt.window
+  ? el("div", { class: "muted" }, `On stored events ${fmtTime(bt.window.start)} → ${fmtTime(bt.window.end)}: ${bt.matched_events} of ${bt.events_scanned} event(s) match, ${bt.findings} finding(s)${bt.group_keys.length ? ` (${bt.group_keys.join(", ")})` : ""}${bt.synthetic_events ? `; ${bt.synthetic_events} of the scanned events are synthetic` : ""}.`)
+  : el("div", { class: "muted" }, "No stored events to preview against."));
+
+function sigmaEvidence(c) {
+  const ev = c.evaluation || {};
+  if (c.kind === "sigma_sample") {
+    return el("span", {}, ev.before ? el("div", { class: "muted" }, `Before: ${ev.before.summary}`) : null, sampleLine(ev.sample),
+      ev.enabled && ev.sample && !ev.sample.passes ? el("div", {}, el("strong", {}, "The rule is enabled: a failing sample drops its ATT&CK coverage to mapped.")) : null);
+  }
+  return el("span", {}, el("div", {}, `Added disabled. Severity ${ev.severity}; ATT&CK ${(ev.techniques || []).join(", ") || "none"}; sha256 ${(ev.sha256 || "").slice(0, 12)}…`),
+    sampleLine(ev.sample), sigmaPreview(ev.backtest), (ev.warnings || []).map((w) => el("div", { class: "muted" }, w)));
+}
+
+function sigmaDetail(r) {
+  const s = r.sigma;
+  return el("div", {}, el("h3", {}, `Imported Sigma rule (v${r.version})`),
+    el("p", {}, el("strong", {}, "Compiled: "), el("code", {}, s.conditions)),
+    sampleLine(s.sample_result),
+    el("p", { class: "muted" }, `sha256 ${s.sha256}. Imported by ${s.imported_by}, approved by ${s.approved_by}${s.change_request_id ? ` (change #${s.change_request_id})` : ""}. Not tunable: change the YAML and import it again.`),
+    el("details", {}, el("summary", {}, "Source YAML (read-only)"), el("pre", { class: "mono" }, s.source)));
+}
+
+// POST /api/rules/sigma: a dry run shows the compiled conditions or the refusal, then a confirm sends the same body.
+function sigmaDialog() {
+  let checked = null;
+  const confirmBtn = el("button", { type: "button", disabled: true }, "Submit for review");
+  const reset = () => { checked = null; confirmBtn.disabled = true; $("#sigma-preview")?.replaceChildren(); };
+  const form = el("form", {},
+    el("h2", {}, "Import Sigma rule"),
+    el("p", { class: "muted" }, "Only a documented subset of Sigma is supported; anything else is refused with a reason. The dry run compiles the rule and previews it on stored events (one backtest from your quota). Submitting creates a change request: a different admin approves it, and the rule is added disabled. It can be enabled only once its labeled sample passes."),
+    el("label", {}, "Sigma file (.yml)", el("input", { type: "file", name: "file", accept: ".yml,.yaml", onchange: async (ev) => { const file = ev.target.files[0]; if (file) form.elements.source.value = await file.text(); reset(); } })),
+    el("label", {}, "Sigma rule (YAML)", el("textarea", { name: "source", class: "mono", required: true, rows: 12, oninput: reset })),
+    el("label", {}, "Labeled sample (JSON, optional): {\"malicious\": [events], \"benign\": [events]} with Watchpost field names", el("textarea", { name: "sample", class: "mono", rows: 5, oninput: reset })),
+    el("label", {}, "Reason (optional)", el("input", { name: "reason", maxlength: 2000 })),
+    el("p", { class: "error", role: "alert", id: "sigma-error" }),
+    el("p", { class: "muted", role: "status", id: "sigma-status" }),
+    el("div", { id: "sigma-preview" }),
+    el("div", { class: "row" }, el("button", { type: "submit" }, "Dry run"), confirmBtn,
+      el("button", { type: "button", class: "ghost", onclick: () => $("#modal").close() }, "Cancel")));
+  const body = () => {
+    const f = new FormData(form);
+    const b = { source: f.get("source") };
+    const sample = (f.get("sample") || "").trim(), reason = (f.get("reason") || "").trim();
+    if (sample) b.sample = JSON.parse(sample);
+    if (reason) b.reason = reason;
+    return b;
+  };
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    $("#sigma-error").textContent = "";
+    reset();
+    let b;
+    try { b = body(); } catch { $("#sigma-error").textContent = "The sample must be valid JSON"; return; }
+    $("#sigma-status").textContent = "Compiling…";
+    try {
+      const r = await api("/api/rules/sigma?dry_run=1", { method: "POST", body: b });
+      const c = r.compiled;
+      $("#sigma-status").textContent = r.ok ? "Dry run done. Nothing has been created." : "Refused. Nothing has been created.";
+      $("#sigma-preview").replaceChildren(
+        r.refused ? el("p", { class: "error" }, `Refused: ${r.refused}`) : null,
+        c ? el("div", {},
+          el("p", {}, el("strong", {}, "Rule id: "), el("code", {}, c.rule_id), ` · severity ${c.severity} · ATT&CK ${c.techniques.map((t) => t.id).join(", ") || "none"}`),
+          el("p", {}, el("strong", {}, "Compiled conditions: "), el("code", {}, c.conditions)),
+          c.warnings.map((w) => el("p", { class: "muted" }, w)),
+          sampleLine(r.sample), sigmaPreview(r.backtest)) : null);
+      if (r.ok) { checked = b; confirmBtn.disabled = false; }
+    } catch (e) { $("#sigma-status").textContent = ""; $("#sigma-error").textContent = e.message; }
+  });
+  confirmBtn.addEventListener("click", async () => {
+    confirmBtn.disabled = true;
+    try {
+      const change = await api("/api/rules/sigma", { method: "POST", body: checked });
+      $("#modal").close();
+      toast(`Change request #${change.id} submitted for review`);
+      rules();
+    } catch (e) { $("#sigma-error").textContent = e.message; }
+  });
+  $("#modal-body").replaceChildren(form);
+  openModal();
+}
+
+// The rule's labeled sample: malicious events that must match, benign look-alikes that must not.
+function sigmaSampleDialog(rule) {
+  const current = rule.sigma?.sample ?? { malicious: [{ event_type: "" }], benign: [{ event_type: "" }] };
+  const form = el("form", {},
+    el("h2", {}, `Labeled sample: ${rule.id}`),
+    el("p", { class: "muted" }, "Every malicious event must match and no benign look-alike may. Until the sample passes, the rule cannot be enabled and its ATT&CK techniques count as mapped, not validated. A different admin approves the change."),
+    el("label", {}, "Sample (JSON)", el("textarea", { name: "sample", class: "mono", rows: 10 }, JSON.stringify(current, null, 2))),
+    el("label", {}, "Reason (required)", el("textarea", { name: "reason", required: true, minlength: 5, maxlength: 2000 })),
+    el("p", { class: "error", role: "alert", id: "sample-error" }),
+    el("div", { class: "row" }, el("button", { type: "submit" }, "Submit for review"),
+      el("button", { type: "button", class: "ghost", onclick: () => $("#modal").close() }, "Cancel")));
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const f = new FormData(form);
+    let sample;
+    try { sample = JSON.parse(f.get("sample")); } catch { $("#sample-error").textContent = "The sample must be valid JSON"; return; }
+    try {
+      await api(`/api/rules/${encodeURIComponent(rule.id)}/sigma-sample`, { method: "POST", body: { sample, reason: f.get("reason") } });
+      $("#modal").close();
+      toast("Sample submitted for review");
+      rules();
+    } catch (e) { $("#sample-error").textContent = e.message; }
+  });
   $("#modal-body").replaceChildren(form);
   openModal();
 }

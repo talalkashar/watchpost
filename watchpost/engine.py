@@ -235,7 +235,7 @@ def rule_findings(rule, events, history_events, scan_start, suppressed):
         rule_events = [e for e in history_events
                        if e["event_type"] in wanted and e["ts"] >= since] + events
     findings, skipped = [], 0
-    for finding in rules_mod.RULE_FUNCTIONS[rule["id"]](rule_events, params):
+    for finding in rules_mod.rule_function(rule["id"])(rule_events, params):
         if scan_start and finding["last_seen"] < scan_start:
             continue  # built only from history context; outside this scan
         if skips and (rule["id"], finding["group_key"]) in suppressed:
@@ -262,7 +262,7 @@ def run_detection(conn, trigger="manual", start=None, end=None):
         try:
             active = load_rules(conn)
             for rule in active:
-                if rule["id"] not in rules_mod.RULE_FUNCTIONS:
+                if rules_mod.rule_function(rule["id"]) is None:
                     raise rules_mod.RuleConfigError(f"no implementation for rule {rule['id']}")
                 rule["params"] = rules_mod.validate_params(rule["id"], rule["params"])
 
