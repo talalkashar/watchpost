@@ -42,9 +42,9 @@ every feature verifiable, every number reproducible, nothing overclaimed.
 
 When this list runs low, add more real-SIEM gaps here and keep going. Same ground rules.
 
-- [ ] 10. CI: GitHub Actions running `./run_tests.sh` on every PR (Python 3.11 to 3.14), badge in README.
-- [ ] 11. Rule backtesting: run a proposed rule change against stored history before approval and show the
-      alert diff (new / lost alerts) in the review panel, so reviewers approve evidence, not params.
+- [ ] 10. (blocked: needs owner's `gh auth refresh -s workflow`; commit on local branch ws/4.9-ci) CI: GitHub Actions running `./run_tests.sh` on every PR (Python 3.11 to 3.14), badge in README.
+- [x] 11. Rule backtesting: run a proposed rule change against stored history before approval and show the
+      alert diff (new / lost alerts) in the review panel, so reviewers approve evidence, not params. (PR #21)
 - [ ] 12. Case workflow metrics: alert assignment, acknowledge/resolve timestamps, MTTA/MTTR per severity on the
       dashboard, SLA breach badges. Numbers labeled synthetic when the data is.
 - [ ] 13. Login hardening: TOTP second factor (stdlib HMAC, RFC 6238) for admin/analyst, per-account lockout with

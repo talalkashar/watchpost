@@ -736,7 +736,8 @@ async function rules(focus) {
     `#${c.id}`, status(c.status), el("code", {}, isAssetChange(c) ? `asset:${c.evaluation?.asset ?? c.target}` : `${{ rule_update: "rule", suppression_add: "exception" }[c.kind] || "setting"}:${c.target}`),
     isAssetChange(c) ? assetDiff(c) : el("pre", {}, JSON.stringify(c.payload)), c.reason,
     isAssetChange(c) ? assetImpact(c) : c.evaluation ? el("span", {}, `FP ${c.evaluation.before.fp}→${c.evaluation.after.fp}, TP ${c.evaluation.before.tp}→${c.evaluation.after.tp}, missed ${c.evaluation.after.missed.join(", ") || "none"}`, lostNote(c), liveImpact(c.evaluation.live_impact),
-      (c.evaluation.ignore_additions || []).map((x) => el("div", {}, el("strong", {}, `${x.change === "removed" ? "Removes" : "Adds"} ${x.value} ${x.change === "removed" ? "from" : "to"} ${x.param} (permanent, no expiry).`), liveImpact(x.live_impact)))) : "—",
+      (c.evaluation.ignore_additions || []).map((x) => el("div", {}, el("strong", {}, `${x.change === "removed" ? "Removes" : "Adds"} ${x.value} ${x.change === "removed" ? "from" : "to"} ${x.param} (permanent, no expiry).`), liveImpact(x.live_impact))),
+      backtestBlock(c.evaluation.backtest)) : "—",
     c.proposed_by, c.reviewed_by ? `${c.reviewed_by}${c.review_note ? `: ${c.review_note}` : ""}` : "—",
     c.status === "pending" && can("admin") ? el("span", { class: "row" },
       el("button", { disabled: c.proposed_by === state.user.username, title: c.proposed_by === state.user.username ? "A different admin must review your own proposal" : "", onclick: () => review(c, "approve") }, "Approve"),
@@ -818,6 +819,34 @@ function assetImpact(c) {
 
 // Labeled attacks a rule change stops detecting, from the evidence on the change request.
 const detectionLoss = (c) => (c.evaluation ? c.evaluation.before.detected.filter((n) => c.evaluation.after.missed.includes(n)) : []);
+// Open alerts the backtest reproduces today and not with the change (backtest.py). Same acknowledgement.
+const openAlertsLost = (c) => c.evaluation?.backtest?.counts.open_alerts_lost || 0;
+const alertLinks = (list) => list.flatMap((a, n) => [n ? ", " : null, el("a", { href: `#alerts/${a.id}`, title: a.title }, `#${a.id}`)]);
+
+// A rule change replayed over stored events: kept, new and lost findings by group key (backtest.py).
+function backtestBlock(bt) {
+  if (!bt) return null;
+  const c = bt.counts;
+  const entities = (x) => Object.keys(ENTITY_KINDS).filter((k) => x.entities[k].length)
+    .flatMap((k) => [" · ", `${ENTITY_KINDS[k]}: `, entityLinks(k, x.entities[k])]);
+  const finding = (x) => el("li", {}, el("code", {}, x.group_key), entities(x),
+    el("div", { class: "muted" }, `${x.event_count} event(s)${x.event_count_today !== undefined && x.event_count_today !== x.event_count ? ` (today ${x.event_count_today})` : ""}, ${fmtTime(x.first_seen)} → ${fmtTime(x.last_seen)}; events #${x.evidence_event_ids.join(", #")}${x.event_count > x.evidence_event_ids.length ? " …" : ""}`),
+    x.open_alert_ids.length ? el("div", { class: "bt-warn" }, "Open alert(s) lost: ", alertLinks(x.open_alert_ids.map((id) => ({ id })))) : null);
+  const list = (label, items, n) => (n ? el("details", {}, el("summary", {}, `${label}: ${n}${items.length < n ? ` (first ${items.length} shown)` : ""}`),
+    el("ul", { class: "bt-list" }, items.map(finding))) : null);
+  return el("div", { class: "backtest" },
+    el("h3", {}, "Backtest on stored events"),
+    bt.window ? el("p", { class: "muted" }, `${fmtTime(bt.window.start)} → ${fmtTime(bt.window.end)} (last ${bt.window_days} day(s) of stored event time), ${bt.events_scanned} events scanned`,
+      bt.capped ? el("strong", {}, `; capped at ${bt.max_events} events, so the window starts later`) : null,
+      bt.synthetic !== "none" ? el("span", {}, ". ", pill(bt.synthetic === "all" ? "synthetic" : `${bt.synthetic_events} synthetic`, "synthetic")) : null,
+      ". Replays stored events only; it cannot predict traffic that has not arrived.")
+      : el("p", { class: "muted" }, "No stored events to replay."),
+    !bt.running.proposed ? el("p", {}, el("strong", {}, "The change disables the rule: every finding is lost.")) : null,
+    el("p", {}, el("strong", {}, `Kept ${c.kept} · New ${c.new} · Lost ${c.lost}`)),
+    c.open_alerts_lost ? el("p", { class: "bt-warn" }, el("strong", {}, `Warning: loses ${c.open_alerts_lost} open alert(s) `), alertLinks(bt.open_alerts_lost),
+      ". The change would not have raised them. Approving requires an explicit acknowledgement.") : null,
+    list("Lost (fire today only)", bt.lost, c.lost), list("New (fire only with the change)", bt.new, c.new), list("Kept", bt.kept, c.kept));
+}
 
 // An approval names the evidence this page rendered by its digest; the server applies nothing if it differs.
 async function sendReview(c, decision, note, acknowledged) {
@@ -829,7 +858,7 @@ async function sendReview(c, decision, note, acknowledged) {
 }
 
 async function review(c, decision) {
-  if (decision === "approve" && c.kind === "rule_update" && detectionLoss(c).length) return lossDialog(c);
+  if (decision === "approve" && c.kind === "rule_update" && (detectionLoss(c).length || openAlertsLost(c))) return lossDialog(c);
   const note = prompt(`${decision === "approve" ? "Approve" : "Reject"} change #${c.id}. Review note:`) ?? null;
   if (note === null) return;
   await guarded(() => sendReview(c, decision, note));
@@ -838,8 +867,9 @@ async function review(c, decision) {
 function lossDialog(c) {
   const form = el("form", {},
     el("h2", {}, `Approve change #${c.id}: ${c.target}`),
-    el("p", {}, "After this change the rule no longer detects these labeled attacks, which it detects today: ", el("strong", {}, detectionLoss(c).join(", ")), "."),
-    el("label", { class: "check" }, el("input", { type: "checkbox", name: "ack", required: true }), " I accept that these attacks will go undetected by this rule"),
+    detectionLoss(c).length ? el("p", {}, "After this change the rule no longer detects these labeled attacks, which it detects today: ", el("strong", {}, detectionLoss(c).join(", ")), ".") : null,
+    openAlertsLost(c) ? el("p", {}, `Replayed over stored events, the changed rule would not have raised ${openAlertsLost(c)} alert(s) that are open now: `, alertLinks(c.evaluation.backtest.open_alerts_lost), ".") : null,
+    el("label", { class: "check" }, el("input", { type: "checkbox", name: "ack", required: true }), " I accept that this activity will go undetected by this rule"),
     el("label", {}, "Review note", el("textarea", { name: "note", maxlength: 2000 })),
     el("p", { class: "error", role: "alert", id: "loss-error" }),
     el("div", { class: "row" }, el("button", { type: "submit" }, "Approve"), el("button", { type: "button", class: "ghost", onclick: () => $("#modal").close() }, "Cancel")));
@@ -860,14 +890,17 @@ function proposeDialog(rule) {
     el("label", {}, "Enabled", el("select", { name: "enabled" }, el("option", { value: "true", selected: !!rule.enabled }, "enabled"), el("option", { value: "false", selected: !rule.enabled }, "disabled"))),
     el("label", {}, "Reason (required)", el("textarea", { name: "reason", required: true, minlength: 5, maxlength: 2000 })),
     el("p", { class: "error", role: "alert", id: "propose-error" }),
-    el("div", { class: "row" }, el("button", { type: "submit" }, "Submit for review"), el("button", { type: "button", class: "ghost", onclick: () => $("#modal").close() }, "Cancel")));
+    el("p", { class: "muted", role: "status", id: "backtest-status" }),
+    el("div", { id: "backtest-preview" }),
+    el("div", { class: "row" }, el("button", { type: "submit" }, "Submit for review"),
+      el("button", { type: "button", class: "ghost", id: "backtest-run", onclick: () => previewBacktest(form, rule) }, "Preview backtest"),
+      el("button", { type: "button", class: "ghost", onclick: () => $("#modal").close() }, "Cancel")));
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const f = new FormData(form);
     const body = { reason: f.get("reason") };
     try {
-      const params = JSON.parse(f.get("params"));
-      const changed = Object.fromEntries(Object.entries(params).filter(([k, v]) => JSON.stringify(v) !== JSON.stringify(rule.params[k])));
+      const changed = changedParams(f, rule);
       if (Object.keys(changed).length) body.params = changed;
       if ((f.get("enabled") === "true") !== !!rule.enabled) body.enabled = f.get("enabled") === "true";
       await api(`/api/rules/${rule.id}/proposals`, { method: "POST", body });
@@ -878,6 +911,28 @@ function proposeDialog(rule) {
   });
   $("#modal-body").replaceChildren(form);
   openModal();
+}
+
+// Only the keys that differ from the rule's current params, as a proposal sends them. Throws SyntaxError.
+function changedParams(f, rule) {
+  const params = JSON.parse(f.get("params"));
+  return Object.fromEntries(Object.entries(params).filter(([k, v]) => JSON.stringify(v) !== JSON.stringify(rule.params[k])));
+}
+
+// Replays the draft params over stored events (GET /api/rules/{id}/backtest). Changes nothing.
+async function previewBacktest(form, rule) {
+  const statusLine = $("#backtest-status"), out = $("#backtest-preview");
+  $("#propose-error").textContent = "";
+  let changed;
+  try { changed = changedParams(new FormData(form), rule); } catch { $("#propose-error").textContent = "Parameters must be valid JSON"; return; }
+  statusLine.textContent = "Running backtest on stored events…";
+  out.replaceChildren();
+  try {
+    const bt = await api(`/api/rules/${encodeURIComponent(rule.id)}/backtest?params=${encodeURIComponent(JSON.stringify(changed))}`);
+    out.replaceChildren(backtestBlock(bt));
+    const c = bt.counts;
+    statusLine.textContent = `Backtest done: kept ${c.kept}, new ${c.new}, lost ${c.lost}${c.open_alerts_lost ? `, including ${c.open_alerts_lost} open alert(s)` : ""}.`;
+  } catch (e) { statusLine.textContent = ""; $("#propose-error").textContent = e.message; }
 }
 
 function exceptionDialog(rule) {
