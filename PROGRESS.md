@@ -294,3 +294,12 @@ validate` passes on Caddy 2.6.2, the Debian 12 version, and `caddy fmt` reports 
   change alert severity, so the owner may prefer to route them through `change_requests` later.
 - The boost table (+1 high, +2 critical, +1 sensitive, cap 2) is code, not a setting.
 - Matching is by exact host name and listed IPs only; no CIDR ranges or wildcards yet.
+
+## Watchpost 5.0.0 release (2026-10-08, branch `ws/5.0-release`)
+
+Entries after 2.1 were tracked in `docs/ROADMAP.md` and the PR descriptions instead of here. 5.0.0 collects PRs
+#21 to #34; see `CHANGELOG.md`.
+
+- `__version__` bumped from 4.0.0 to 5.0.0 (`/api/health` reports it).
+- `./run_tests.sh` on 2026-10-08: 565 tests OK, SMOKE OK (26 steps).
+- 15 built-in rules; ATT&CK coverage with the default rules: 17 of 20 catalog techniques validated, 3 mapped.
