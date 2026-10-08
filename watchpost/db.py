@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # prev_hash of the first audit entry. Every later entry links to the hash of the one before it.
 GENESIS_HASH = "0" * 64
@@ -39,6 +39,16 @@ CREATE INDEX IF NOT EXISTS idx_events_src_ip ON events(src_ip, ts);
 CREATE INDEX IF NOT EXISTS idx_events_user ON events(user, ts);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type, ts);
 CREATE INDEX IF NOT EXISTS idx_events_batch ON events(batch_id);
+-- 6.0: indexes for the hot read paths, chosen from EXPLAIN QUERY PLAN on a 100k-event load test
+-- (scripts/loadtest.py). User filters compare case-insensitively, which the BINARY idx_events_user cannot
+-- serve; the NOCASE one also serves `user LIKE 'prefix%'`. dest_ip lets `(src_ip = ? OR dest_ip = ?)` use
+-- two index lookups instead of a scan. ingested_at and synthetic back the dashboard and metrics counts.
+CREATE INDEX IF NOT EXISTS idx_events_user_nocase ON events(user COLLATE NOCASE, ts);
+CREATE INDEX IF NOT EXISTS idx_events_host ON events(host, ts);
+CREATE INDEX IF NOT EXISTS idx_events_dest_ip ON events(dest_ip, ts);
+CREATE INDEX IF NOT EXISTS idx_events_severity ON events(severity, ts);
+CREATE INDEX IF NOT EXISTS idx_events_ingested ON events(ingested_at);
+CREATE INDEX IF NOT EXISTS idx_events_synthetic ON events(synthetic);
 
 CREATE TABLE IF NOT EXISTS ingest_batches (
     id TEXT PRIMARY KEY,

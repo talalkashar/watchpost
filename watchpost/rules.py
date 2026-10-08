@@ -297,10 +297,12 @@ def _filtered(events, params, event_type):
     return out
 
 
-def _clusters(events, window, qualifies):
+def _clusters(events, window, qualifies, span=None):
     """Return clusters of events that fall inside at least one qualifying sliding window.
 
     `qualifies(window_events)` decides whether the window ending at each event meets the rule.
+    `span(first, last)`, when given, decides the same for events[first:last + 1] by index, so a rule can
+    answer from running totals instead of re-reading every window.
     Qualifying events closer than `window` seconds to each other are merged into one cluster.
     """
     marked = set()
@@ -309,7 +311,7 @@ def _clusters(events, window, qualifies):
         dq.append(idx)
         while _epoch(event) - _epoch(events[dq[0]]) > window:
             dq.popleft()
-        if qualifies([events[i] for i in dq]):
+        if span(dq[0], idx) if span else qualifies([events[i] for i in dq]):
             marked.update(dq)
     clusters, current = [], []
     for idx in sorted(marked):
@@ -592,10 +594,13 @@ def _human_bytes(n):
         n /= 1000
 
 
+EXFIL_TYPES = ("cloud_data_access", "fw_allow", "network_connection")
+
+
 def data_exfil_volume(events, params):
     limit, reads, window = params["bytes_threshold"], params["access_threshold"], params["window_seconds"]
     groups = defaultdict(list)
-    for e in _filtered(events, params, ("cloud_data_access", "fw_allow", "network_connection")):
+    for e in _filtered(events, params, EXFIL_TYPES):
         if e["event_type"] != "cloud_data_access" and not e.get("bytes"):
             continue
         key = (e.get("user") or "").lower() or e.get("src_ip")
@@ -608,7 +613,14 @@ def data_exfil_volume(events, params):
     volume = lambda w: sum(e.get("bytes") or 0 for e in w)
     accesses = lambda w: sum(e["event_type"] == "cloud_data_access" for e in w)
     for principal, group in groups.items():
-        for cluster in _clusters(group, window, lambda w: volume(w) >= limit or accesses(w) >= reads):
+        # Running totals make each window's sums O(1): an ingest rescan reads a week of a busy account's
+        # transfers, and summing every window of it was most of the detection time in the load test.
+        sent, read = [0], [0]
+        for e in group:
+            sent.append(sent[-1] + (e.get("bytes") or 0))
+            read.append(read[-1] + (e["event_type"] == "cloud_data_access"))
+        span = lambda lo, hi: sent[hi + 1] - sent[lo] >= limit or read[hi + 1] - read[lo] >= reads
+        for cluster in _clusters(group, window, None, span):
             total, count = volume(cluster), accesses(cluster)
             if not multiplier or principal not in excepted:
                 mode = ("Flat thresholds applied: " + ("baseline_multiplier is 0." if principal in excepted else
@@ -779,3 +791,13 @@ def lookback_seconds(rules):
 # Events in this span are context only: the engine ignores findings that end inside it.
 def history_seconds(rules):
     return max([r["params"].get("history_seconds", 0) for r in rules] + [0])
+
+
+# The event types each rule with a `history_seconds` param reads. On an ingest rescan the engine fetches only
+# these types from the history span before the scan window, instead of every event of the past week per
+# batch. A history rule missing here would lose its history, so a test checks the list is complete.
+HISTORY_EVENT_TYPES = {
+    "cloud_iam_change_by_new_principal": CLOUD_TYPES,
+    "data_exfil_volume": EXFIL_TYPES,
+    "admin_action_from_new_source": PRIVILEGED_TYPES,
+}
