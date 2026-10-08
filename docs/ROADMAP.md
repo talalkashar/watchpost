@@ -77,8 +77,9 @@ When this list runs low, add more real-SIEM gaps here and keep going. Same groun
 - [x] 23. Detection-as-code checks: a stdlib CLI that validates exported Watchpost rules and runs their labeled
       malicious and benign samples, with machine-readable output and a failing exit status for CI or pre-merge use.
       (PR #39)
-- [ ] 24. Case notes and timeline export: one chronological incident case record combining alert transitions,
+- [x] 24. Case notes and timeline export: one chronological incident case record combining alert transitions,
       assignments, analyst notes, and evidence, downloadable as JSON and Markdown with viewer masking preserved.
+      (PR #41)
 - [ ] 25. Role-scoped API tokens with expiry: hashed bearer tokens limited to explicit API capabilities, optional
       expiry, revocation and last-used metadata; viewer-equivalent tokens remain read-only.
 - [ ] 26. Saved dashboard views: analysts can save and share dashboard filter/layout presets, viewers can apply
