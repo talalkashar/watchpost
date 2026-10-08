@@ -178,6 +178,7 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | `watchpost/queries.py` | Event search (parameterized SQL), alert detail with evidence and a related-events timeline, notes, status changes, and SOC metrics. |
 | `watchpost/hunt.py` | Hunt query parser and compiler (whitelisted fields, bound values) and saved searches. |
 | `watchpost/auth.py` | PBKDF2-SHA256 password hashing, lockout, and server-side sessions (only token hashes are stored). Also ingest-only API tokens (hashed) and the viewer < analyst < admin roles. Viewers are read-only: the server refuses every non-GET request from them except logout. |
+| `watchpost/totp.py` | RFC 6238 TOTP (HMAC-SHA1, 6 digits, 30 s, ±1 step), stdlib only. See [Two-factor sign-in and sessions](#two-factor-sign-in-and-sessions). |
 | `watchpost/ratelimit.py` | In-memory per-IP token buckets. `server.py` answers 429 with `Retry-After` when a bucket is empty. |
 | `watchpost/health.py` | Component checks, each with a status (`ok`/`degraded`/`failing`), a message, and recovery guidance. |
 | `watchpost/improve.py` | Scenario evaluation (TP/FN/FP, recall, precision), rule performance from analyst verdicts, heuristic suggestions, and two-person change review. |
@@ -298,6 +299,23 @@ Each audit entry stores `prev_hash` and `hash`, where `hash = HMAC-SHA256(key, p
 - Anyone who has the key. Set `SIEM_AUDIT_KEY` to a long random value kept outside the database (`python3 -c "import secrets; print(secrets.token_hex(32))"`). Set it before the first start and keep it (see above).
 
 For the first two, record the head and the chain start (`id`, `hash`, `created_at`) somewhere the database cannot reach, such as a ticket, a log shipped off the box, or a daily note, and compare them later.
+
+### Two-factor sign-in and sessions
+
+Analysts and admins can add a TOTP second factor (RFC 6238: HMAC-SHA1, 6 digits, 30-second steps, codes from one step before or after accepted for clock drift). It is opt-in per account. The read-only `viewer` role cannot enroll (403), so the public demo login stays a single password step.
+
+**Enrolling** (**Account → Two-factor sign-in**, or the API): `POST /api/auth/mfa/enroll` returns `{secret, otpauth_uri}` with `otpauth://totp/Watchpost:<user>?secret=...&issuer=Watchpost`. There is no QR code: enter the secret in your authenticator app. The secret stays pending, and sign-in stays one step, until `POST /api/auth/mfa/confirm` with `{"code"}` succeeds. `POST /api/auth/mfa/disable` with a current code turns it off (or cancels an unconfirmed setup). `GET /api/auth/mfa/status` (any role) returns `{enabled, pending, available}`.
+
+**Signing in** with it on: `POST /api/auth/login` checks the password and answers `{"mfa_required": true, "mfa_token": ..., "expires_in": 300}` instead of a session. The token is server-side (only its hash is stored, in `mfa_pending`), lasts 5 minutes, and is consumed by the first successful `POST /api/auth/mfa` with `{mfa_token, code}`, which creates the real session. Both routes share the per-IP login rate limit.
+
+- **Lockout.** A wrong code counts toward the same per-account lockout as a wrong password and is audited as `login_failed` with `{"reason": "mfa"}`. A correct password does not reset the count for an enrolled account; only a correct code does, so knowing the password does not buy unlimited guesses. Locking drops the account's pending tokens.
+- **Replay.** The last accepted time step is stored per account (`users.totp_last_step`); a code from that step or an earlier one is refused, including the code used to confirm enrollment.
+- **Secrets.** The secret and codes are never logged or audited. **The secret is stored in the database as-is, not encrypted at rest**: anyone who can read the database file can generate codes. There is no key management here.
+- **Recovery.** There are no recovery codes. If someone loses their authenticator, an admin resets it: `POST /api/users/<username>/mfa/reset` (admin, not for your own account), audited as `mfa_reset`, or **Admin → Sign-in sessions → Reset two-factor**. The user then signs in with the password alone until they enroll again.
+
+**Sessions.** `GET /api/auth/sessions` lists your active sessions: `id` (a random, non-secret session id), `created_at`, `last_seen_at` (refreshed at most once a minute), `expires_at`, and `current`. The session token and its hash are never returned. IP address and user agent are not recorded. `POST /api/auth/sessions/<id>/revoke` ends one of your own sessions (analyst and up; someone else's id answers 404). Admins can list every session (`GET /api/sessions`, optional `?user=`) and revoke any (`POST /api/sessions/<id>/revoke`). Every revoke is audited as `session_revoked` with the owner as target. There is no password-change route yet, so nothing revokes sessions on a password change.
+
+Schema 8 adds `users.totp_secret`, `totp_pending`, `totp_last_step`, `sessions.sid`, `sessions.last_seen_at`, and the `mfa_pending` table; sessions from before the upgrade get an id on the next start.
 
 ### Hunting
 
