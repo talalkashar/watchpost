@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # prev_hash of the first audit entry. Every later entry links to the hash of the one before it.
 GENESIS_HASH = "0" * 64
@@ -167,6 +167,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_at TEXT NOT NULL
 );
 
+-- 8.0: the password step of a login for an account with TOTP enrolled. Short-lived; only the hash is stored.
+CREATE TABLE IF NOT EXISTS mfa_pending (
+    token_hash TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS api_tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -309,6 +317,14 @@ ADDED_COLUMNS = [
     ("suppressions", "revoked_by", "TEXT"),
     # 7.0: when an alert first left `open` (triage metrics). Rows from before stay NULL: never backfilled.
     ("alerts", "acknowledged_at", "TEXT"),
+    # 8.0: TOTP second factor. The secret is stored as-is (not encrypted at rest). `totp_pending` holds an
+    # enrollment until it is confirmed with a valid code; `totp_last_step` refuses a replayed time step.
+    ("users", "totp_secret", "TEXT"),
+    ("users", "totp_pending", "TEXT"),
+    ("users", "totp_last_step", "INTEGER"),
+    # 8.0: a non-secret session id (for listing and revoking) and when the session was last used.
+    ("sessions", "sid", "TEXT"),
+    ("sessions", "last_seen_at", "TEXT"),
 ]
 
 
@@ -366,6 +382,9 @@ def init_schema(conn):
         existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
         if column not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+    # Sessions from before 8.0 get an id so they can be listed and revoked like new ones.
+    conn.execute("UPDATE sessions SET sid = lower(hex(randomblob(8))) WHERE sid IS NULL")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_sid ON sessions(sid)")
     # 4.0: hash-chained audit log. Rows written before the chain existed are never hashed here: the server
     # would be signing whatever the database file says, including rows someone rewrote before a restart.
     with transaction(conn):
