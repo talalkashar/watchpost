@@ -182,7 +182,7 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | `watchpost/queries.py` | Event search (parameterized SQL), alert detail with evidence and a related-events timeline, notes, status changes, and SOC metrics. |
 | `watchpost/hunt.py` | Hunt query parser and compiler (whitelisted fields, bound values), the `\|` stats/top/timechart stage, and saved searches. |
 | `watchpost/search_rules.py` | Saved searches promoted to threshold detection rules (`search_<slug>`): the hunt filter matched in Python over the engine's event dicts, the sliding-window count, and their labeled samples. See [Saved searches as detections](#saved-searches-as-detections). |
-| `watchpost/auth.py` | PBKDF2-SHA256 password hashing, lockout, and server-side sessions (only token hashes are stored). Also ingest-only API tokens (hashed) and the viewer < analyst < admin roles. Viewers are read-only: the server refuses every non-GET request from them except logout. |
+| `watchpost/auth.py` | PBKDF2-SHA256 password hashing, lockout, and server-side sessions (only token hashes are stored). Also hashed API tokens with viewer/analyst roles, explicit read/ingest/triage capabilities, optional expiry, and revocation. Viewer users and tokens are read-only. |
 | `watchpost/masking.py` | Viewer data masking: keyed pseudonyms for usernames and internal IPs in viewer responses when `viewer_masking` is on. See [Viewer data masking](#viewer-data-masking). |
 | `watchpost/totp.py` | RFC 6238 TOTP (HMAC-SHA1, 6 digits, 30 s, ±1 step), stdlib only. See [Two-factor sign-in and sessions](#two-factor-sign-in-and-sessions). |
 | `watchpost/ratelimit.py` | In-memory per-IP token buckets. `server.py` answers 429 with `Retry-After` when a bucket is empty. |

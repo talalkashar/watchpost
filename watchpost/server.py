@@ -137,8 +137,10 @@ def logout(req):
 
 @route("GET", "/api/auth/me")
 def me(req):
-    return _masked_flag(req.conn, req.user, {"user": {"username": req.user["username"], "role": req.user["role"]},
-                                             "csrf_token": req.user["csrf"]})
+    payload = {"user": {"username": req.user["username"], "role": req.user["role"]}}
+    if "csrf" in req.user:
+        payload["csrf_token"] = req.user["csrf"]
+    return _masked_flag(req.conn, req.user, payload)
 
 
 # Account security: TOTP enrollment and sessions. The viewer can read its own status and sessions only.
@@ -947,13 +949,17 @@ def asset_propose(req, asset_id):
 
 @route("GET", "/api/tokens", role="admin")
 def tokens(req):
-    return [dict(r) for r in req.conn.execute(
-        "SELECT id, name, prefix, created_by, created_at, last_used_at, revoked_at FROM api_tokens ORDER BY id")]
+    return [row_to_dict(r, json_fields=("capabilities",)) for r in req.conn.execute(
+        "SELECT id, name, prefix, created_by, created_at, last_used_at, revoked_at, role, capabilities, expires_at"
+        " FROM api_tokens ORDER BY id")]
 
 
 @route("POST", "/api/tokens", role="admin")
 def token_create(req):
-    token = auth.create_api_token(req.conn, body_json(req).get("name"), req.user["username"])
+    body = body_json(req)
+    token = auth.create_api_token(req.conn, body.get("name"), req.user["username"],
+                                  body.get("role", "analyst"), body.get("capabilities"),
+                                  body.get("expires_in_days"))
     req.status = 201
     return {"token": token, "note": "Shown once. Only a hash is stored."}
 
@@ -1163,11 +1169,22 @@ class Handler(BaseHTTPRequestHandler):
             return
         header = self.headers.get("Authorization", "")
         if header.startswith("Bearer "):
-            if role != "ingest":
-                raise ApiError(403, "API tokens can only be used for ingestion endpoints")
             self.user = auth.token_user(self.conn, header[7:].strip())
             if self.user is None:
                 raise ApiError(401, "invalid or revoked API token")
+            mutation_capabilities = {
+                "ingest_json": "ingest", "ingest_upload": "ingest",
+                "alert_note": "triage", "alert_status": "triage", "alert_assign": "triage",
+                "incident_status": "triage",
+            }
+            capability = "read" if self.command == "GET" else mutation_capabilities.get(fn.__name__ if fn else "")
+            if capability is None or capability not in self.user["capabilities"]:
+                raise ApiError(403, "API token does not have the required capability")
+            minimum = "analyst" if role == "ingest" else role
+            if not auth.has_role(self.user, minimum):
+                raise ApiError(403, f"requires the {minimum} role")
+            if self.user["role"] == "viewer" and self.command != "GET":
+                raise ApiError(403, "viewer tokens are read-only")
             return  # bearer tokens are not sent automatically by browsers, so no CSRF risk
         self.user = auth.session_user(self.conn, self.session_token)
         if self.user is None:

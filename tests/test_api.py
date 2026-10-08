@@ -104,6 +104,62 @@ class AuthTests(ServerTestCase):
         self.assertEqual(bot.post("/api/ingest", [{"ts": recent()}], headers=auth)[0], 401)
         self.assertEqual(bot.post("/api/ingest", [{"ts": recent()}], headers={"Authorization": "Bearer wp_x"})[0], 401)
 
+    def test_role_scoped_tokens_have_explicit_capabilities_and_expiry(self):
+        admin, bot = self.client("admin"), self.client()
+
+        def create(body):
+            status, data, _ = admin.post("/api/tokens", body)
+            self.assertEqual(status, 201, data)
+            return {"Authorization": f"Bearer {data['token']}"}
+
+        viewer = create({"name": "readonly", "role": "viewer", "capabilities": ["read"],
+                         "expires_in_days": 30})
+        self.assertEqual(bot.get("/api/alerts", headers=viewer)[0], 200)
+        self.assertEqual(bot.get("/api/auth/me", headers=viewer)[1]["user"]["role"], "viewer")
+        self.assertEqual(bot.post("/api/ingest", [{"ts": recent()}], headers=viewer)[0], 403)
+        self.assertEqual(bot.post("/api/alerts/1/notes", {"body": "x"}, headers=viewer)[0], 403)
+
+        triage = create({"name": "soc-bot", "role": "analyst", "capabilities": ["read", "triage"]})
+        alert = bot.get("/api/alerts", headers=triage)[1]
+        if not alert:
+            self.assertEqual(admin.post("/api/demo/load")[0], 200)
+            alert = bot.get("/api/alerts", headers=triage)[1]
+        alert_id = alert[0]["id"]
+        self.assertEqual(bot.post(f"/api/alerts/{alert_id}/notes", {"body": "checked by automation"},
+                                  headers=triage)[0], 201)
+        self.assertEqual(bot.post("/api/ingest", [{"ts": recent()}], headers=triage)[0], 403)
+        self.assertEqual(bot.post("/api/demo/load", {}, headers=triage)[0], 403)
+
+        listed = {row["name"]: row for row in admin.get("/api/tokens")[1]}
+        self.assertEqual((listed["readonly"]["role"], listed["readonly"]["capabilities"]),
+                         ("viewer", ["read"]))
+        self.assertIsNotNone(listed["readonly"]["expires_at"])
+        self.assertIsNotNone(listed["readonly"]["last_used_at"])
+        self.assertEqual((listed["soc-bot"]["role"], listed["soc-bot"]["capabilities"]),
+                         ("analyst", ["read", "triage"]))
+
+        with sqlite3.connect(self.db_path) as db:
+            db.execute("UPDATE api_tokens SET expires_at = '2000-01-01T00:00:00.000Z' WHERE name = 'readonly'")
+        self.assertEqual(bot.get("/api/alerts", headers=viewer)[0], 401)
+        with sqlite3.connect(self.db_path) as db:
+            db.execute("UPDATE api_tokens SET role = 'admin', expires_at = NULL WHERE name = 'readonly'")
+        self.assertEqual(bot.get("/api/tokens", headers=viewer)[0], 401)
+
+    def test_api_token_scope_validation(self):
+        admin = self.client("admin")
+        bad = [
+            {"name": "x", "role": "admin", "capabilities": ["read"]},
+            {"name": "x", "role": "viewer", "capabilities": ["ingest"]},
+            {"name": "x", "role": "analyst", "capabilities": ["admin"]},
+            {"name": "x", "role": "analyst", "capabilities": []},
+            {"name": "x", "role": "analyst", "capabilities": ["read", "read"]},
+            {"name": "x", "role": "analyst", "capabilities": ["read"], "expires_in_days": 0},
+            {"name": "x", "role": "analyst", "capabilities": ["read"], "expires_in_days": 366},
+        ]
+        for body in bad:
+            with self.subTest(body=body):
+                self.assertEqual(admin.post("/api/tokens", body)[0], 400)
+
     def test_static_files_and_traversal(self):
         import urllib.request
         with urllib.request.urlopen(self.base + "/") as resp:
@@ -327,6 +383,11 @@ class IncidentApiTests(ServerTestCase):
     def test_existing_database_upgrades_in_place(self):
         # A 1.0 database: no techniques column, no new event columns, no incidents tables.
         with sqlite3.connect(self.db_path) as db:
+            db.execute("INSERT INTO api_tokens(name, token_hash, prefix, created_by, created_at)"
+                       " VALUES ('legacy collector', 'legacy-hash', 'wp_old', 'admin', '2020-01-01T00:00:00.000Z')")
+            db.execute("ALTER TABLE api_tokens DROP COLUMN role")
+            db.execute("ALTER TABLE api_tokens DROP COLUMN capabilities")
+            db.execute("ALTER TABLE api_tokens DROP COLUMN expires_at")
             db.execute("DROP TABLE incidents")
             db.execute("DROP TABLE incident_alerts")
             db.execute("ALTER TABLE rules DROP COLUMN techniques")
@@ -350,7 +411,10 @@ class IncidentApiTests(ServerTestCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM incidents").fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM assets").fetchone()[0], 0)
             self.assertIn("base_severity", {r[1] for r in db.execute("PRAGMA table_info(alerts)")})
-            self.assertEqual(db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0], "12")
+            legacy = db.execute("SELECT role, capabilities, expires_at FROM api_tokens"
+                                " WHERE name = 'legacy collector'").fetchone()
+            self.assertEqual(legacy, ("analyst", '["ingest"]', None))
+            self.assertEqual(db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0], "13")
             actions = [r[0] for r in db.execute("SELECT action FROM audit_log ORDER BY id")]
             self.assertGreater(old_entries, 0)
             self.assertEqual(actions[old_entries], "audit_chain_started")
