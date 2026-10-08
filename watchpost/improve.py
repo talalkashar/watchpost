@@ -461,6 +461,11 @@ def _open_alerts_lost(evaluation):
     return [a["id"] for a in bt["open_alerts_lost"]] if bt else []
 
 
+def validate_rule_update(conn, rule_id, payload):
+    """Validate a rule_update payload exactly as a proposal is. Returns the merged params, or None."""
+    return _validate_change(conn, "rule_update", rule_id, payload)
+
+
 def preview_backtest(conn, rule_id, params, window_days=backtest_mod.DEFAULT_WINDOW_DAYS):
     """Backtest a draft rule change before it is proposed. Validated exactly as a rule_update proposal."""
     if not isinstance(params, dict):
