@@ -54,6 +54,14 @@ class PureWeightingTests(unittest.TestCase):
         self.assertEqual([a["name"] for a in assets.match(idx, events)], ["DB01"])
         self.assertEqual(assets.match(idx, [{"host": "nothing"}]), [])
 
+    def test_an_address_matches_every_asset_that_lists_it(self):
+        # Order must not decide the match: a raise or re-case that reorders the inventory cannot drop an asset.
+        a, b = self.asset("zz-files", "high", ["confidential"], ["10.0.1.20"]), self.asset("web01", "high", (), ["10.0.1.20"])
+        for inventory in ([a, b], [b, a]):
+            with self.subTest(first=inventory[0]["name"]):
+                found = assets.match(assets.index(inventory), [{"dest_ip": "10.0.1.20"}])
+                self.assertEqual([x["name"] for x in found], ["web01", "zz-files"])
+
     def test_boost_levels(self):
         self.assertEqual(assets.boost([]), (0, None))
         self.assertEqual(assets.boost([self.asset("a", "low")])[0], 0)
@@ -439,6 +447,30 @@ class AssetReviewApiTests(ServerTestCase):
         self.assertEqual((status, data["proposal_route"]), (409, "/api/assets/proposals"), data)
         self.assertEqual(self.admin.get("/api/changes")[1], [])
         self.assertEqual(self.actions().count("asset_updated"), 4)
+
+    def test_one_admin_cannot_lower_severity_by_reordering_assets_that_share_an_address(self):
+        # Bypass: demo load seeds web01 (medium, 10.0.1.20) without the gate, beside an asset that already holds
+        # that address. Raising web01 (a direct edit) used to reorder the inventory so web01 took the address
+        # and zz-files' tags stopped counting, with no second admin.
+        status, data, _ = self.admin.post("/api/assets", {"name": "zz-files", "criticality": "high",
+                                                          "data_tags": ["confidential"], "addresses": ["10.0.1.20"]})
+        self.assertEqual(status, 201, data)
+        self.assertEqual(self.admin.post("/api/demo/load")[0], 200)
+
+        def weighed():
+            conn = connect(self.db_path)
+            try:
+                found = assets.match(assets.load_index(conn), [{"dest_ip": "10.0.1.20"}])
+            finally:
+                conn.close()
+            return assets.weigh("low", found)
+
+        before = weighed()
+        web01 = next(a for a in self.admin.get("/api/assets")[1]["assets"] if a["name"] == "web01")
+        self.assertEqual(self.admin.post(f"/api/assets/{web01['id']}", {**web01, "criticality": "high"})[0], 200)
+        after = weighed()
+        self.assertIn("zz-files", [a["name"] for a in after["assets"]])
+        self.assertEqual(after["severity"], before["severity"])
 
     def test_only_admins_propose_and_review(self):
         _, change, _ = self.propose({"delete": True})
