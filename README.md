@@ -119,7 +119,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 ### Tests
 
 ```bash
-./run_tests.sh      # 580 unit/integration tests + a 26-step end-to-end smoke check
+./run_tests.sh      # 583 unit/integration tests + a 26-step end-to-end smoke check
 ```
 
 ### Replit
@@ -191,6 +191,7 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | `watchpost/backtest.py` | Replays a proposed rule change over stored events (kept / new / lost findings, open alerts it would lose) for the review evidence and the preview route. |
 | `watchpost/portability.py` | Rule export and import: tuning (params, enabled) out as versioned JSON, and back in as reviewed `rule_update` proposals. |
 | `watchpost/detection_tests.py` | Detection-as-code validation and bundled malicious/benign sample checks for exported built-in rules. |
+| `watchpost/case_record.py` | Chronological incident case records combining evidence, membership, workflow transitions, assignments, and notes; renders JSON and Markdown. |
 | `watchpost/ecs.py` | Maps an event to Elastic Common Schema field names for export. |
 | `watchpost/syslog_listener.py` | Optional UDP/TCP syslog receiver (RFC 3164, RFC 5424, RFC 6587 framing). Runs each line through the auth.log parser, falls back to a generic `syslog` event with severity from PRI, and batches into the engine every 2 seconds. Reports itself as the `syslog` health component. |
 | `scripts/shipper.py` | Stdlib-only file tailer for Linux boxes: batches new lines to `/api/ingest/upload` with an ingest token, with backoff, rotation handling, and a position file. |
@@ -260,6 +261,21 @@ finding from one rule between explicit start and expiry times (at most 30 days),
 which labeled attacks will be missed and approval by a different admin requires explicit detection-loss
 acknowledgement. Detection runs count findings skipped by an active window. Upcoming, active, expired and
 manually ended windows remain visible under Rules & review; ending one early is an audited admin action.
+
+### Incident case timeline
+
+An incident detail page links to a chronological case export in JSON and Markdown. `GET /api/incidents/<id>/case.json`
+and `.md` (viewer and above) combine the incident creation and alert-membership
+times, every linked evidence event, alert assignments and status transitions, analyst notes, and incident status
+changes and their notes. Entries carry a stable `sequence` after timestamp ordering. The JSON also includes the
+current incident and alert summaries; the Markdown is a portable timeline table. Each download is audited as
+`case_exported`.
+
+The case is assembled from existing append-only activity, note, membership, evidence, and tamper-evident audit
+records; it creates no parallel case database. Viewer masking is applied to the structured case model before
+either renderer runs, so identity fields and free text are pseudonymized consistently in both formats when the
+masked viewer setting is enabled. The 1,000-event incident-detail limit also bounds case evidence; this is an
+investigation export, not a legal-hold or raw-log archive.
 
 ### Self-diagnosis
 

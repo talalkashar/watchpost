@@ -434,6 +434,8 @@ async function incidentDetail(id) {
     else actions.append(el("button", { class: "ghost", onclick: () => setIncident({ status: "open" }) }, "Reopen"));
   }
   actions.append(reportLinks("incidents", id));
+  actions.append(el("a", { class: "button", href: `/api/incidents/${id}/case.json`, download: "" }, "Case timeline (JSON)"));
+  actions.append(el("a", { class: "button", href: `/api/incidents/${id}/case.md`, download: "" }, "Case timeline (Markdown)"));
   render(
     el("p", {}, el("a", { href: "#incidents" }, "← Incidents")),
     el("div", { class: "split" },
