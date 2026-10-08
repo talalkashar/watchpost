@@ -144,7 +144,7 @@ async function main() {
     await admin.ctx.close();
 
     const views = ["dashboard", "incidents", "alerts", `alerts/${alertId}`, incidentId ? `incidents/${incidentId}` : null, "events",
-      "hunt", "hunt/user%3Aalice%20last%3A7d", "overview", "ingest", "rules", "noise", "coverage", "health", "admin",
+      "hunt", "hunt/user%3Aalice%20last%3A7d", "overview", "ingest", "rules", "noise", "coverage", "health", "admin", "account",
       "entity/user/alice"].filter(Boolean);
 
     for (const width of [1440, 390]) {

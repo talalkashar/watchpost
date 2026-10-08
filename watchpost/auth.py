@@ -8,11 +8,14 @@ import secrets
 from datetime import timedelta
 from pathlib import Path
 
+from . import totp
 from .db import audit, iso, now_iso, parse_iso, utcnow
 
 ROLES = {"viewer": 1, "analyst": 2, "admin": 3}
 PBKDF2_ITERATIONS = int(os.environ.get("SIEM_PBKDF2_ITERATIONS", "310000"))
 _DUMMY_HASH = None
+MFA_TOKEN_TTL_SECONDS = 300
+SESSION_SEEN_INTERVAL_SECONDS = 60  # last_seen_at is refreshed at most this often per session
 
 
 class AuthError(Exception):
@@ -105,10 +108,60 @@ def get_setting_int(conn, key, default):
     return int(row["value"]) if row else default
 
 
+class MfaChallenge:
+    """The password was right, but the account has TOTP enrolled: a code must follow with this token."""
+
+    def __init__(self, mfa_token):
+        self.mfa_token = mfa_token
+
+
+def _lockout_settings(conn):
+    return get_setting_int(conn, "login_lockout_threshold", 5), get_setting_int(conn, "login_lockout_minutes", 15)
+
+
+def _check_not_locked(conn, user):
+    if user["locked_until"] and parse_iso(user["locked_until"]) > utcnow():
+        audit(conn, user["username"], "login_blocked", None, {"reason": "locked"})
+        raise AuthError("account temporarily locked after repeated failures; try again later", 429)
+
+
+def _record_failure(conn, user, detail=None):
+    """Count a failed password or TOTP code toward the per-account lockout. Returns True when it locks."""
+    threshold, lock_minutes = _lockout_settings(conn)
+    failures = user["failed_logins"] + 1
+    locked_until = None
+    if failures >= threshold:
+        locked_until = iso(utcnow() + timedelta(minutes=lock_minutes))
+        failures = 0
+    conn.execute("UPDATE users SET failed_logins = ?, locked_until = ? WHERE id = ?",
+                 (failures, locked_until, user["id"]))
+    audit(conn, user["username"], "login_failed", None, {**(detail or {}), "locked": bool(locked_until)})
+    return bool(locked_until)
+
+
+def _start_session(conn, user, ttl_seconds, detail=None):
+    conn.execute("UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = ?", (user["id"],))
+    token = secrets.token_urlsafe(32)
+    csrf = secrets.token_urlsafe(24)
+    created = now_iso()
+    conn.execute(
+        "INSERT INTO sessions(token_hash, user_id, csrf_token, created_at, expires_at, sid, last_seen_at)"
+        " VALUES (?,?,?,?,?,?,?)",
+        (sha256(token), user["id"], csrf, created, iso(utcnow() + timedelta(seconds=ttl_seconds)),
+         secrets.token_hex(8), created),
+    )
+    conn.execute("DELETE FROM sessions WHERE expires_at < ?", (now_iso(),))
+    audit(conn, user["username"], "login", None, detail)
+    return token, csrf, {"username": user["username"], "role": user["role"]}
+
+
 def login(conn, username, password, ttl_seconds):
+    """Check the password. Returns (token, csrf, user), or an MfaChallenge when the account has TOTP enrolled.
+
+    For an enrolled account the password step does not reset the failure count: only a correct code does,
+    so knowing the password does not buy unlimited code guesses.
+    """
     global _DUMMY_HASH
-    threshold = get_setting_int(conn, "login_lockout_threshold", 5)
-    lock_minutes = get_setting_int(conn, "login_lockout_minutes", 15)
     user = conn.execute("SELECT * FROM users WHERE username = ?", (str(username)[:64],)).fetchone()
     if user is None:
         # Spend comparable time so response timing does not reveal valid usernames.
@@ -118,29 +171,56 @@ def login(conn, username, password, ttl_seconds):
         raise AuthError("invalid username or password")
     if user["disabled"]:
         raise AuthError("invalid username or password")
-    if user["locked_until"] and parse_iso(user["locked_until"]) > utcnow():
-        audit(conn, user["username"], "login_blocked", None, {"reason": "locked"})
-        raise AuthError("account temporarily locked after repeated failures; try again later", 429)
+    _check_not_locked(conn, user)
     if not verify_password(str(password), user["pw_hash"]):
-        failures = user["failed_logins"] + 1
-        locked_until = None
-        if failures >= threshold:
-            locked_until = iso(utcnow() + timedelta(minutes=lock_minutes))
-            failures = 0
-        conn.execute("UPDATE users SET failed_logins = ?, locked_until = ? WHERE id = ?",
-                     (failures, locked_until, user["id"]))
-        audit(conn, user["username"], "login_failed", None, {"locked": bool(locked_until)})
+        _record_failure(conn, user)
         raise AuthError("invalid username or password")
-    conn.execute("UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = ?", (user["id"],))
-    token = secrets.token_urlsafe(32)
-    csrf = secrets.token_urlsafe(24)
-    conn.execute(
-        "INSERT INTO sessions(token_hash, user_id, csrf_token, created_at, expires_at) VALUES (?,?,?,?,?)",
-        (sha256(token), user["id"], csrf, now_iso(), iso(utcnow() + timedelta(seconds=ttl_seconds))),
-    )
-    conn.execute("DELETE FROM sessions WHERE expires_at < ?", (now_iso(),))
-    audit(conn, user["username"], "login", None)
-    return token, csrf, {"username": user["username"], "role": user["role"]}
+    if user["totp_secret"]:
+        mfa_token = secrets.token_urlsafe(32)
+        conn.execute("DELETE FROM mfa_pending WHERE expires_at < ?", (now_iso(),))
+        conn.execute("INSERT INTO mfa_pending(token_hash, user_id, created_at, expires_at) VALUES (?,?,?,?)",
+                     (sha256(mfa_token), user["id"], now_iso(),
+                      iso(utcnow() + timedelta(seconds=MFA_TOKEN_TTL_SECONDS))))
+        audit(conn, user["username"], "login_mfa_challenge", None)
+        return MfaChallenge(mfa_token)
+    return _start_session(conn, user, ttl_seconds)
+
+
+def complete_mfa(conn, mfa_token, code, ttl_seconds):
+    """Second login step: a pending token from login() plus a current TOTP code. Returns (token, csrf, user).
+
+    A wrong code counts toward the same lockout as a wrong password. The pending token may be retried until
+    it expires or the account locks, and is consumed by the first success.
+    """
+    if not isinstance(mfa_token, str) or not mfa_token:
+        raise AuthError("sign-in step expired; sign in again")
+    pending = conn.execute(
+        "SELECT p.expires_at, u.* FROM mfa_pending p JOIN users u ON u.id = p.user_id WHERE p.token_hash = ?",
+        (sha256(mfa_token),),
+    ).fetchone()
+    if pending is None or parse_iso(pending["expires_at"]) < utcnow() or pending["disabled"] \
+            or not pending["totp_secret"]:
+        raise AuthError("sign-in step expired; sign in again")
+    _check_not_locked(conn, pending)
+    step = totp.verify(pending["totp_secret"], code, pending["totp_last_step"])
+    if step is None:
+        if _record_failure(conn, pending, {"reason": "mfa"}):
+            conn.execute("DELETE FROM mfa_pending WHERE user_id = ?", (pending["id"],))
+        raise AuthError("invalid authentication code")
+    # Both checks are single statements, so two requests racing with the same token or code cannot both win.
+    if not conn.execute("DELETE FROM mfa_pending WHERE token_hash = ?", (sha256(mfa_token),)).rowcount:
+        raise AuthError("sign-in step expired; sign in again")
+    if not _claim_step(conn, pending["id"], step):
+        _record_failure(conn, pending, {"reason": "mfa"})
+        raise AuthError("invalid authentication code")
+    return _start_session(conn, pending, ttl_seconds, {"mfa": True})
+
+
+def _claim_step(conn, user_id, step):
+    return conn.execute(
+        "UPDATE users SET totp_last_step = ? WHERE id = ? AND (totp_last_step IS NULL OR totp_last_step < ?)",
+        (step, user_id, step),
+    ).rowcount == 1
 
 
 def logout(conn, token):
@@ -151,13 +231,127 @@ def session_user(conn, token):
     if not token:
         return None
     row = conn.execute(
-        "SELECT u.username, u.role, u.disabled, s.csrf_token, s.expires_at FROM sessions s"
+        "SELECT u.username, u.role, u.disabled, s.csrf_token, s.expires_at, s.sid, s.last_seen_at FROM sessions s"
         " JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?",
         (sha256(token),),
     ).fetchone()
     if row is None or row["disabled"] or parse_iso(row["expires_at"]) < utcnow():
         return None
-    return {"username": row["username"], "role": row["role"], "csrf": row["csrf_token"], "via": "session"}
+    now = utcnow()
+    if not row["last_seen_at"] or \
+            (now - parse_iso(row["last_seen_at"])).total_seconds() >= SESSION_SEEN_INTERVAL_SECONDS:
+        conn.execute("UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?", (iso(now), sha256(token)))
+    return {"username": row["username"], "role": row["role"], "csrf": row["csrf_token"], "via": "session",
+            "sid": row["sid"]}
+
+
+# --- TOTP enrollment ------------------------------------------------------------------------
+
+def _user_row(conn, username):
+    user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+    if user is None:
+        raise AuthError("user not found", 404)
+    return user
+
+
+def mfa_status(conn, username):
+    user = _user_row(conn, username)
+    return {"enabled": bool(user["totp_secret"]), "pending": bool(user["totp_pending"]),
+            "available": ROLES.get(user["role"], 0) >= ROLES["analyst"]}
+
+
+def mfa_enroll(conn, username):
+    """Start (or restart) an enrollment: a new pending secret, active only once confirmed with a code."""
+    user = _user_row(conn, username)
+    if ROLES.get(user["role"], 0) < ROLES["analyst"]:
+        raise AuthError("this account cannot enroll in two-factor authentication", 403)
+    if user["totp_secret"]:
+        raise AuthError("two-factor authentication is already on; disable it first", 409)
+    secret = totp.generate_secret()
+    conn.execute("UPDATE users SET totp_pending = ? WHERE id = ?", (secret, user["id"]))
+    audit(conn, username, "mfa_enroll_started", username)
+    return {"secret": secret, "otpauth_uri": totp.otpauth_uri(username, secret)}
+
+
+def mfa_confirm(conn, username, code):
+    user = _user_row(conn, username)
+    if not user["totp_pending"]:
+        raise AuthError("no enrollment in progress; start one first", 409)
+    step = totp.verify(user["totp_pending"], code)
+    if step is None:
+        raise AuthError("invalid authentication code", 400)
+    # The confirming step is recorded as used, so the same code cannot also sign in.
+    conn.execute("UPDATE users SET totp_secret = totp_pending, totp_pending = NULL, totp_last_step = ? WHERE id = ?",
+                 (step, user["id"]))
+    audit(conn, username, "mfa_enabled", username)
+    return {"enabled": True}
+
+
+def _clear_mfa(conn, user_id):
+    conn.execute("UPDATE users SET totp_secret = NULL, totp_pending = NULL, totp_last_step = NULL WHERE id = ?",
+                 (user_id,))
+    conn.execute("DELETE FROM mfa_pending WHERE user_id = ?", (user_id,))
+
+
+def mfa_disable(conn, username, code):
+    """Turn TOTP off for your own account; needs a current code (or cancels an unconfirmed enrollment)."""
+    user = _user_row(conn, username)
+    if not user["totp_secret"]:
+        if user["totp_pending"]:
+            _clear_mfa(conn, user["id"])
+            audit(conn, username, "mfa_enroll_cancelled", username)
+            return {"enabled": False}
+        raise AuthError("two-factor authentication is not on", 409)
+    step = totp.verify(user["totp_secret"], code, user["totp_last_step"])
+    if step is None or not _claim_step(conn, user["id"], step):
+        audit(conn, username, "mfa_disable_failed", username)
+        raise AuthError("invalid authentication code", 400)
+    _clear_mfa(conn, user["id"])
+    audit(conn, username, "mfa_disabled", username)
+    return {"enabled": False}
+
+
+def mfa_admin_reset(conn, username, actor):
+    """The recovery path: an admin turns off another user's TOTP. There are no recovery codes."""
+    if username == actor:
+        raise AuthError("use your own disable step (with a current code) for your account", 400)
+    user = _user_row(conn, username)
+    if not user["totp_secret"] and not user["totp_pending"]:
+        raise AuthError("that user has no two-factor authentication to reset", 409)
+    _clear_mfa(conn, user["id"])
+    audit(conn, actor, "mfa_reset", username)
+    return {"enabled": False}
+
+
+# --- Sessions -------------------------------------------------------------------------------
+
+def list_sessions(conn, username=None, current_sid=None):
+    """Active sessions (all users when `username` is None). Never includes the token or its hash."""
+    sql = ("SELECT s.sid, u.username, s.created_at, s.last_seen_at, s.expires_at FROM sessions s"
+           " JOIN users u ON u.id = s.user_id WHERE s.expires_at >= ?")
+    args = [now_iso()]
+    if username is not None:
+        sql += " AND u.username = ?"
+        args.append(username)
+    rows = conn.execute(sql + " ORDER BY s.created_at DESC", args).fetchall()
+    return [{"id": r["sid"], "username": r["username"], "created_at": r["created_at"],
+             "last_seen_at": r["last_seen_at"], "expires_at": r["expires_at"],
+             "current": r["sid"] == current_sid} for r in rows]
+
+
+def revoke_session(conn, sid, actor, owner=None):
+    """End one session by its id. With `owner`, only that user's sessions match (404 otherwise)."""
+    sql = "SELECT s.token_hash, u.username FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.sid = ?"
+    args = [str(sid)]
+    if owner is not None:
+        sql += " AND u.username = ?"
+        args.append(owner)
+    row = conn.execute(sql, args).fetchone()
+    if row is None:
+        raise AuthError("session not found", 404)
+    conn.execute("DELETE FROM sessions WHERE token_hash = ?", (row["token_hash"],))
+    audit(conn, actor, "session_revoked", row["username"], {"session": sid})
+    return {"ok": True}
 
 
 def create_api_token(conn, name, actor):

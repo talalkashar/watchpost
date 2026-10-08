@@ -93,8 +93,22 @@ def body_json(req):
 @route("POST", "/api/auth/login", role="public", csrf=False)
 def login(req):
     data = body_json(req)
-    token, csrf, user = auth.login(req.conn, data.get("username", ""), data.get("password", ""),
-                                   req.app.config.session_ttl_seconds)
+    result = auth.login(req.conn, data.get("username", ""), data.get("password", ""),
+                        req.app.config.session_ttl_seconds)
+    if isinstance(result, auth.MfaChallenge):
+        # Not a session: a short-lived, single-use token for POST /api/auth/mfa.
+        return {"mfa_required": True, "mfa_token": result.mfa_token,
+                "expires_in": auth.MFA_TOKEN_TTL_SECONDS}
+    token, csrf, user = result
+    req.set_cookie = token
+    return {"user": user, "csrf_token": csrf}
+
+
+@route("POST", "/api/auth/mfa", role="public", csrf=False)
+def login_mfa(req):
+    data = body_json(req)
+    token, csrf, user = auth.complete_mfa(req.conn, data.get("mfa_token"), data.get("code"),
+                                          req.app.config.session_ttl_seconds)
     req.set_cookie = token
     return {"user": user, "csrf_token": csrf}
 
@@ -110,6 +124,38 @@ def logout(req):
 def me(req):
     return {"user": {"username": req.user["username"], "role": req.user["role"]},
             "csrf_token": req.user["csrf"]}
+
+
+# Account security: TOTP enrollment and sessions. The viewer can read its own status and sessions only.
+
+@route("GET", "/api/auth/mfa/status")
+def mfa_status(req):
+    return auth.mfa_status(req.conn, req.user["username"])
+
+
+@route("POST", "/api/auth/mfa/enroll", role="analyst")
+def mfa_enroll(req):
+    return auth.mfa_enroll(req.conn, req.user["username"])
+
+
+@route("POST", "/api/auth/mfa/confirm", role="analyst")
+def mfa_confirm(req):
+    return auth.mfa_confirm(req.conn, req.user["username"], body_json(req).get("code"))
+
+
+@route("POST", "/api/auth/mfa/disable", role="analyst")
+def mfa_disable(req):
+    return auth.mfa_disable(req.conn, req.user["username"], body_json(req).get("code"))
+
+
+@route("GET", "/api/auth/sessions")
+def my_sessions(req):
+    return auth.list_sessions(req.conn, req.user["username"], req.user.get("sid"))
+
+
+@route("POST", r"/api/auth/sessions/([0-9a-f]{16})/revoke", role="analyst")
+def my_session_revoke(req, sid):
+    return auth.revoke_session(req.conn, sid, req.user["username"], owner=req.user["username"])
 
 
 @route("GET", "/api/health", role="public")
@@ -681,6 +727,21 @@ def token_revoke(req, token_id):
     return {"ok": True}
 
 
+@route("GET", "/api/sessions", role="admin")
+def sessions(req):
+    return auth.list_sessions(req.conn, req.query.get("user") or None, req.user.get("sid"))
+
+
+@route("POST", r"/api/sessions/([0-9a-f]{16})/revoke", role="admin")
+def session_revoke(req, sid):
+    return auth.revoke_session(req.conn, sid, req.user["username"])
+
+
+@route("POST", r"/api/users/(\w{3,32})/mfa/reset", role="admin")
+def user_mfa_reset(req, username):
+    return auth.mfa_admin_reset(req.conn, username, req.user["username"])
+
+
 @route("GET", "/api/audit", role="admin")
 def audit_log(req):
     return [dict(r) for r in req.conn.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT 200")]
@@ -768,7 +829,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _rate_limited(self, path):
         """Spend a token from the login or general bucket; on an empty bucket send 429 and return True."""
-        is_login = self.command == "POST" and path == "/api/auth/login"
+        is_login = self.command == "POST" and path in ("/api/auth/login", "/api/auth/mfa")
         limiter = self.app.login_limiter if is_login else self.app.request_limiter
         if limiter is None:
             return False
