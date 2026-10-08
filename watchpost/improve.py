@@ -18,7 +18,7 @@ from . import search_rules
 from . import sigma
 from . import simulate
 from . import sources as sources_mod
-from .db import audit, iso, now_iso, row_to_dict, transaction, utcnow
+from .db import audit, iso, now_iso, parse_iso, row_to_dict, transaction, utcnow
 from .engine import active_suppressions, apply_rule_change, correlate_alerts, load_rules
 
 SECURITY_SETTINGS = {
@@ -28,6 +28,7 @@ SECURITY_SETTINGS = {
 }
 MIN_FEEDBACK_FOR_SUGGESTION = 2
 MAX_SUPPRESSION_DAYS = 90  # tuning exceptions always expire
+MAX_RULE_SUPPRESSION_DAYS = 30
 ASSET_KINDS = ("asset_add", "asset_update", "asset_delete")  # inventory edits; see assets.review_reasons
 SIGMA_KINDS = ("sigma_add", "sigma_sample")  # import a Sigma rule (added disabled); attach its labeled sample
 SEARCH_KINDS = ("search_add", "search_sample")  # promote a saved search to a rule (added disabled); its sample
@@ -315,6 +316,24 @@ def _validate_change(conn, kind, target, payload):
         if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= MAX_SUPPRESSION_DAYS:
             raise ChangeError(f"days must be an integer between 1 and {MAX_SUPPRESSION_DAYS}")
         return None
+    if kind == "rule_suppression_add":
+        if conn.execute("SELECT 1 FROM rules WHERE id = ?", (target,)).fetchone() is None:
+            raise ChangeError(f"unknown rule {target!r}", 404)
+        if set(payload) != {"starts_at", "expires_at"}:
+            raise ChangeError("a rule suppression window requires starts_at and expires_at")
+        try:
+            starts, expires = parse_iso(payload["starts_at"]), parse_iso(payload["expires_at"])
+        except (AttributeError, TypeError, ValueError):
+            raise ChangeError("starts_at and expires_at must be ISO-8601 timestamps")
+        if starts.tzinfo is None or expires.tzinfo is None:
+            raise ChangeError("starts_at and expires_at must include a timezone")
+        if expires <= starts:
+            raise ChangeError("expires_at must be after starts_at")
+        if expires - starts > timedelta(days=MAX_RULE_SUPPRESSION_DAYS):
+            raise ChangeError(f"a rule suppression window may last at most {MAX_RULE_SUPPRESSION_DAYS} days")
+        # Store UTC in the same canonical form used by now_iso(), so indexed text comparisons remain temporal.
+        payload["starts_at"], payload["expires_at"] = iso(starts), iso(expires)
+        return None
     if kind == "maintenance_add":
         try:
             sources_mod.validate_window(target, payload)
@@ -330,7 +349,8 @@ def _validate_change(conn, kind, target, payload):
         return _validate_sigma(conn, kind, target, payload)
     if kind in SEARCH_KINDS:
         return _validate_search(conn, kind, target, payload)
-    raise ChangeError(f"kind must be rule_update, setting_update, suppression_add, maintenance_add or one of "
+    raise ChangeError(f"kind must be rule_update, setting_update, suppression_add, rule_suppression_add, "
+                      f"maintenance_add or one of "
                       f"{', '.join(ASSET_KINDS + SIGMA_KINDS + SEARCH_KINDS)}")
 
 
@@ -531,6 +551,11 @@ def _evidence(conn, kind, target, payload, proposer):
                       ["rules"][target],
                       "live_impact": _live_impact(conn, target, payload["group_key"], base["group_keys"],
                                                   proposer)}
+    elif kind == "rule_suppression_add":
+        base = evaluate({target: current_params(conn, include_disabled=True)[target]})["rules"][target]
+        if not conn.execute("SELECT enabled FROM rules WHERE id = ?", (target,)).fetchone()["enabled"]:
+            base = _not_running(base)
+        evaluation = {"rule": target, "before": base, "after": _not_running(base)}
     elif kind in ASSET_KINDS:
         evaluation = assets_mod.change_evidence(conn, *merged)
     elif kind == "sigma_add":
@@ -700,7 +725,7 @@ def review_change(conn, change_id, decision, reviewer, note="", digest=None, ack
                 audit(conn, reviewer, "change_evidence_refreshed", f"{change['kind']}:{change['target']}",
                       {"id": change_id})
             refusal = _refusal(change["kind"], fresh)
-            if change["kind"] == "rule_update":
+            if change["kind"] in ("rule_update", "rule_suppression_add"):
                 lost, lost_alerts = _detection_loss(fresh), _open_alerts_lost(fresh)
             if refusal:
                 problem = ChangeError(refusal)
@@ -730,6 +755,14 @@ def review_change(conn, change_id, decision, reviewer, note="", digest=None, ack
                 audit(conn, reviewer, "suppression_added", change["target"],
                       {"group_key": change["payload"]["group_key"], "expires_at": expires,
                        "change_request": change_id})
+            elif change["kind"] == "rule_suppression_add":
+                conn.execute(
+                    "INSERT INTO rule_suppression_windows(rule_id, starts_at, expires_at, reason, proposed_by,"
+                    " approved_by, change_request_id, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                    (change["target"], change["payload"]["starts_at"], change["payload"]["expires_at"],
+                     change["reason"], change["proposed_by"], reviewer, change_id, now_iso()))
+                audit(conn, reviewer, "rule_suppression_window_added", change["target"],
+                      {**change["payload"], "change_request": change_id})
             elif change["kind"] == "maintenance_add":
                 sources_mod.add_window(conn, change["target"], change["payload"], change["reason"],
                                        change["proposed_by"], reviewer, change_id)
@@ -814,6 +847,42 @@ def revoke_suppression(conn, suppression_id, actor):
         audit(conn, actor, "suppression_revoked", row["rule_id"],
               {"id": suppression_id, "group_key": row["group_key"], "change_request": row["change_request_id"]})
     return next(s for s in list_suppressions(conn) if s["id"] == suppression_id)
+
+
+def list_rule_suppression_windows(conn):
+    """Every approved rule-wide window, including upcoming, expired and ended history."""
+    now = now_iso()
+    result = []
+    for row in conn.execute("SELECT * FROM rule_suppression_windows ORDER BY id DESC"):
+        item = dict(row)
+        if item["ended_at"] is not None:
+            state = "ended"
+        elif item["starts_at"] > now:
+            state = "upcoming"
+        elif item["expires_at"] <= now:
+            state = "expired"
+        else:
+            state = "active"
+        result.append({**item, "state": state, "active": state == "active"})
+    return result
+
+
+def end_rule_suppression_window(conn, window_id, actor):
+    """End an active or upcoming window early while retaining its approved interval as history."""
+    with transaction(conn):
+        row = conn.execute("SELECT * FROM rule_suppression_windows WHERE id = ?", (window_id,)).fetchone()
+        if row is None:
+            raise ChangeError("rule suppression window not found", 404)
+        if row["ended_at"] is not None:
+            raise ChangeError("rule suppression window is already ended", 409)
+        if row["expires_at"] <= now_iso():
+            raise ChangeError("rule suppression window has already expired", 409)
+        ended = now_iso()
+        conn.execute("UPDATE rule_suppression_windows SET ended_at = ?, ended_by = ? WHERE id = ?",
+                     (ended, actor, window_id))
+        audit(conn, actor, "rule_suppression_window_ended", row["rule_id"],
+              {"id": window_id, "change_request": row["change_request_id"]})
+    return next(w for w in list_rule_suppression_windows(conn) if w["id"] == window_id)
 
 
 def _verdict(rule, r, other):
