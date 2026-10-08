@@ -204,6 +204,7 @@ def main():
         status, res = analyst.call("POST", f"/api/alerts/{target['id']}/status",
                                    {"status": "resolved", "disposition": "true_positive"})
         check(status == 200 and res["status"] == "resolved", f"resolve: {status} {res}")
+        check(res["acknowledged_at"] and res["acknowledged_at"] <= res["resolved_at"], f"acknowledged_at: {res}")
 
         step("incident report downloads as PDF and Markdown")
         status, pdf, headers = analyst.download(f"/api/alerts/{target['id']}/report.pdf")
@@ -345,7 +346,7 @@ def main():
         check(tok["token"] not in out.stderr, "shipper logged its token")
         print("      syslog frame and shipped auth.log line both searchable")
 
-        step("metrics and health are consistent")
+        step("metrics, triage metrics and health are consistent")
         status, m = analyst.call("GET", "/api/metrics")
         check(m["alerts_resolved"] >= 2 and m["events_total"] > 0, f"metrics: {m}")
         status, h = admin.call("GET", "/api/health/details")
@@ -353,6 +354,12 @@ def main():
         check(any(c["name"] == "syslog" and c["status"] == "ok" for c in h["checks"]), "syslog health missing")
         check(m["time_to_resolve_by_severity"] and m["false_positive_rate_by_rule"]
               and len(m["open_alert_aging"]["buckets"]) == 5 and m["omitted_metrics"], f"SOC metrics: {m}")
+        status, tri = analyst.call("GET", "/api/metrics/triage?window=7d")
+        crit = next(s for s in tri["severities"] if s["severity"] == "critical")
+        check(status == 200 and tri["synthetic"] == "all" and crit["mtta"]["samples"] >= 1
+              and crit["mttr"]["p90_minutes"] is not None and crit["sla"]["ack_target_minutes"] == 15,
+              f"triage metrics: {status} {tri}")
+        check(analyst.call("GET", "/api/metrics/triage?window=1y")[0] == 400, "bad triage window accepted")
         print(f"      time to resolve for {len(m['time_to_resolve_by_severity'])} severities, false-positive rate for "
               f"{len(m['false_positive_rate_by_rule'])} rules, {sum(b['count'] for b in m['open_alert_aging']['buckets'])} "
               f"open alerts aged")
@@ -395,7 +402,8 @@ def main():
         check(viewer.call("GET", "/api/attack/coverage")[0] == 200, "viewer cannot read ATT&CK coverage")
         check(viewer.download(f"/api/incidents/{incident_id}/report.pdf")[0] == 200, "viewer cannot download a report")
         for path, body in [("/api/ingest", []), (f"/api/incidents/{incident_id}/status", {"status": "resolved"}),
-                           ("/api/demo/load", {}), ("/api/tokens", {"name": "x"})]:
+                           ("/api/demo/load", {}), ("/api/tokens", {"name": "x"}),
+                           (f"/api/alerts/{target['id']}/assign", {"assignee": "analyst"})]:
             status, _ = viewer.call("POST", path, body)
             check(status == 403, f"viewer POST {path} returned {status}")
         statuses = [Session(base).call("POST", "/api/auth/login", {"username": "nobody", "password": "x" * 12})[0]

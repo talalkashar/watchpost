@@ -4,7 +4,7 @@ from datetime import timedelta
 
 import json
 
-from .db import iso, now_iso, parse_iso, row_to_dict, transaction, utcnow
+from .db import audit, iso, now_iso, parse_iso, row_to_dict, transaction, utcnow
 from .normalize import EVENT_TYPES, SEVERITIES, EventError, parse_timestamp
 
 ALERT_STATUSES = ("open", "investigating", "resolved")
@@ -221,19 +221,46 @@ def update_status(conn, alert_id, actor, status, disposition=None, note=None):
         if alert is None:
             raise QueryError("alert not found", 404)
         now = now_iso()
+        # Acknowledged = the first time the alert leaves `open`. COALESCE keeps the first value through reopens,
+        # and an alert that left `open` before the column existed (7.0) stays NULL instead of getting a guess.
+        ack = now if alert["status"] == "open" and status != "open" else None
         if status == "resolved":
-            conn.execute("UPDATE alerts SET status = ?, disposition = ?, resolved_at = ?, updated_at = ?"
-                         " WHERE id = ?", (status, disposition, now, now, alert_id))
+            conn.execute("UPDATE alerts SET status = ?, disposition = ?, resolved_at = ?, updated_at = ?,"
+                         " acknowledged_at = COALESCE(acknowledged_at, ?) WHERE id = ?",
+                         (status, disposition, now, now, ack, alert_id))
         else:
             # Reopening clears the previous verdict so feedback metrics stay accurate.
             conn.execute("UPDATE alerts SET status = ?, disposition = NULL, resolved_at = NULL,"
-                         " assignee = CASE WHEN ? = 'investigating' THEN ? ELSE assignee END, updated_at = ?"
-                         " WHERE id = ?", (status, status, actor, now, alert_id))
+                         " assignee = CASE WHEN ? = 'investigating' THEN ? ELSE assignee END, updated_at = ?,"
+                         " acknowledged_at = COALESCE(acknowledged_at, ?) WHERE id = ?",
+                         (status, status, actor, now, ack, alert_id))
         detail = f"{alert['status']} -> {status}" + (f" ({disposition})" if disposition else "")
         conn.execute("INSERT INTO alert_activity(alert_id, actor, action, detail, created_at) VALUES (?,?,?,?,?)",
                      (alert_id, actor, "status_changed", detail, now))
+        audit(conn, actor, "alert_status_changed", str(alert_id),
+              {"from": alert["status"], "to": status, "disposition": disposition})
     if note:
         add_note(conn, alert_id, actor, note)
+    return dict(conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone())
+
+
+def assign(conn, alert_id, actor, assignee):
+    """Hand an alert to an enabled analyst or admin account. Ownership only: the status does not change."""
+    if not isinstance(assignee, str) or not assignee.strip():
+        raise QueryError("assignee must be a username")
+    with transaction(conn):
+        alert = conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone()
+        if alert is None:
+            raise QueryError("alert not found", 404)
+        user = conn.execute("SELECT username FROM users WHERE username = ? AND disabled = 0"
+                            " AND role IN ('analyst', 'admin')", (assignee.strip(),)).fetchone()
+        if user is None:
+            raise QueryError("assignee must be an enabled analyst or admin account")
+        now = now_iso()
+        conn.execute("UPDATE alerts SET assignee = ?, updated_at = ? WHERE id = ?", (user["username"], now, alert_id))
+        conn.execute("INSERT INTO alert_activity(alert_id, actor, action, detail, created_at) VALUES (?,?,?,?,?)",
+                     (alert_id, actor, "assigned", f"{alert['assignee'] or 'nobody'} -> {user['username']}", now))
+        audit(conn, actor, "alert_assigned", str(alert_id), {"from": alert["assignee"], "to": user["username"]})
     return dict(conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone())
 
 
