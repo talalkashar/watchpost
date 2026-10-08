@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import hmac
+import json
 import os
 import secrets
 from datetime import timedelta
@@ -12,6 +13,7 @@ from . import totp
 from .db import audit, iso, now_iso, parse_iso, transaction, utcnow
 
 ROLES = {"viewer": 1, "analyst": 2, "admin": 3}
+TOKEN_CAPABILITIES = {"read", "ingest", "triage"}
 PBKDF2_ITERATIONS = int(os.environ.get("SIEM_PBKDF2_ITERATIONS", "310000"))
 _DUMMY_HASH = None
 MFA_TOKEN_TTL_SECONDS = 300
@@ -391,29 +393,58 @@ def revoke_session(conn, sid, actor, owner=None):
     return {"ok": True}
 
 
-def create_api_token(conn, name, actor):
+def create_api_token(conn, name, actor, role="analyst", capabilities=None, expires_in_days=None):
     if not isinstance(name, str) or not (1 <= len(name.strip()) <= 64):
         raise AuthError("token name must be 1-64 characters", 400)
+    capabilities = ["ingest"] if capabilities is None else capabilities
+    if role not in ("viewer", "analyst"):
+        raise AuthError("token role must be viewer or analyst", 400)
+    if not isinstance(capabilities, list) or not capabilities or any(
+            not isinstance(item, str) for item in capabilities):
+        raise AuthError("capabilities must be a non-empty list", 400)
+    if len(set(capabilities)) != len(capabilities) or not set(capabilities) <= TOKEN_CAPABILITIES:
+        raise AuthError("capabilities must be unique and chosen from read, ingest, triage", 400)
+    if role == "viewer" and capabilities != ["read"]:
+        raise AuthError("viewer tokens can only have the read capability", 400)
+    if expires_in_days is not None and (isinstance(expires_in_days, bool)
+                                        or not isinstance(expires_in_days, int)
+                                        or not 1 <= expires_in_days <= 365):
+        raise AuthError("expires_in_days must be an integer from 1 to 365", 400)
+    expires_at = iso(utcnow() + timedelta(days=expires_in_days)) if expires_in_days is not None else None
     token = "wp_" + secrets.token_urlsafe(32)
     conn.execute(
-        "INSERT INTO api_tokens(name, token_hash, prefix, created_by, created_at) VALUES (?,?,?,?,?)",
-        (name.strip(), sha256(token), token[:7], actor, now_iso()),
+        "INSERT INTO api_tokens(name, token_hash, prefix, created_by, created_at, role, capabilities, expires_at)"
+        " VALUES (?,?,?,?,?,?,?,?)",
+        (name.strip(), sha256(token), token[:7], actor, now_iso(), role, json.dumps(capabilities), expires_at),
     )
-    audit(conn, actor, "api_token_created", name.strip())
+    audit(conn, actor, "api_token_created", name.strip(),
+          {"role": role, "capabilities": capabilities, "expires_at": expires_at})
     return token
 
 
 def token_user(conn, token):
-    """API tokens are ingest-only credentials; they map to a limited 'ingest' principal."""
+    """Return a bearer principal when the token is active and unexpired."""
     if not token or not token.startswith("wp_"):
         return None
     row = conn.execute(
-        "SELECT id, name FROM api_tokens WHERE token_hash = ? AND revoked_at IS NULL", (sha256(token),)
+        "SELECT id, name, role, capabilities, expires_at FROM api_tokens"
+        " WHERE token_hash = ? AND revoked_at IS NULL", (sha256(token),)
     ).fetchone()
-    if row is None:
+    if row is None or row["role"] not in ("viewer", "analyst"):
+        return None
+    try:
+        capabilities = json.loads(row["capabilities"])
+        expired = row["expires_at"] and parse_iso(row["expires_at"]) <= utcnow()
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if expired or not isinstance(capabilities, list) or not capabilities \
+            or any(not isinstance(item, str) for item in capabilities) \
+            or len(set(capabilities)) != len(capabilities) or not set(capabilities) <= TOKEN_CAPABILITIES \
+            or row["role"] == "viewer" and capabilities != ["read"]:
         return None
     conn.execute("UPDATE api_tokens SET last_used_at = ? WHERE id = ?", (now_iso(), row["id"]))
-    return {"username": f"token:{row['name']}", "role": "ingest", "via": "token"}
+    return {"username": f"token:{row['name']}", "role": row["role"],
+            "capabilities": capabilities, "via": "token"}
 
 
 def has_role(user, minimum):
