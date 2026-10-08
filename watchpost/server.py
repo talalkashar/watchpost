@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (__version__, assets, attack, auth, engine, entities, geo, hunt, improve, incidents, queries, report,
                simulate, storyline, stream)
+from . import backtest as backtest_mod
 from .ratelimit import TokenBucketLimiter
 from .config import Config
 from .db import audit, connect, init_schema, now_iso, row_to_dict, verify_chain
@@ -48,10 +49,12 @@ class App:
             self.credentials_file = auth.bootstrap_users(conn, config, Path(config.db_path).parent)
         finally:
             conn.close()
-        self.login_limiter = self.request_limiter = None
+        self.login_limiter = self.request_limiter = self.backtest_limiter = None
         if config.rate_limit_enabled:
             self.login_limiter = TokenBucketLimiter(config.login_rate_burst, config.login_rate_per_minute)
             self.request_limiter = TokenBucketLimiter(config.rate_burst, config.rate_per_minute)
+            # Per account: each preview replays up to backtest.MAX_EVENTS stored events twice.
+            self.backtest_limiter = TokenBucketLimiter(BACKTEST_BURST, BACKTEST_PER_MINUTE)
         self.storyline = storyline.Runner(self.conn)
 
     def conn(self):
@@ -456,6 +459,31 @@ def rule_propose(req, rule_id):
     req.status = 201
     return improve.propose_change(req.conn, "rule_update", rule_id, payload, data.get("reason"),
                                   req.user["username"])
+
+
+BACKTEST_BURST, BACKTEST_PER_MINUTE = 6, 12
+
+
+@route("GET", r"/api/rules/([a-z_]+)/backtest", role="analyst")
+def rule_backtest(req, rule_id):
+    """Preview a draft rule change on stored events before proposing it. Changes nothing.
+
+    Analyst and above, like proposing; a viewer sees the backtest inside a change request's evidence.
+    ?params=<JSON object of the params to change>&days=<1-30, default 7>.
+    """
+    try:
+        params = json.loads(req.query.get("params") or "{}")
+    except json.JSONDecodeError:
+        raise ApiError(400, "params must be a JSON object")
+    days = req.query.get("days", str(backtest_mod.DEFAULT_WINDOW_DAYS))
+    if not days.isdigit() or not 1 <= int(days) <= backtest_mod.MAX_WINDOW_DAYS:
+        raise ApiError(400, f"days must be an integer between 1 and {backtest_mod.MAX_WINDOW_DAYS}")
+    limiter = req.app.backtest_limiter
+    if limiter is not None:
+        allowed, retry_after = limiter.allow(req.user["username"])
+        if not allowed:
+            raise ApiError(429, f"too many backtests; retry in {retry_after} s")
+    return improve.preview_backtest(req.conn, rule_id, params, int(days))
 
 
 @route("POST", r"/api/rules/([a-z_]+)/suppressions", role="analyst")

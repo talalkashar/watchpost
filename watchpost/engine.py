@@ -192,6 +192,59 @@ def active_suppressions(conn):
         "SELECT rule_id, group_key FROM suppressions WHERE expires_at > ? AND revoked_at IS NULL", (now_iso(),))}
 
 
+def scan_events(conn, rules, max_id, start=None, end=None):
+    """The stored events a detection run of `rules` over [start, end] reads (default: all events).
+
+    Returns (events, history_events, scan_start). The range is widened by the longest rule window;
+    rules that compare with earlier activity also get the span before it as history context.
+    Shared by run_detection and the rule backtest, so a backtest reads what detection reads.
+    """
+    sql, args = f"SELECT {RULE_EVENT_FIELDS} FROM events WHERE id <= ?", [max_id]
+    if not (start and end):
+        return [dict(r) for r in conn.execute(sql, args)], [], None
+    pad = timedelta(seconds=rules_mod.lookback_seconds(rules))
+    scan_start = iso(parse_iso(start) - pad)
+    events = [dict(r) for r in conn.execute(sql + " AND ts >= ? AND ts <= ?",
+                                            args + [scan_start, iso(parse_iso(end) + pad)])]
+    # Rules that compare with earlier activity also get the span before the scan window, but only
+    # the event types they read: a week of every event per batch was most of the ingest time.
+    history_events = []
+    history = timedelta(seconds=rules_mod.history_seconds(rules))
+    types = sorted({t for r in rules if r["params"].get("history_seconds")
+                    for t in rules_mod.HISTORY_EVENT_TYPES[r["id"]]})
+    if history and types:
+        history_events = [dict(r) for r in conn.execute(
+            sql + f" AND ts >= ? AND ts < ? AND event_type IN ({','.join('?' for _ in types)})",
+            args + [iso(parse_iso(scan_start) - history), scan_start, *types])]
+    return events, history_events, scan_start
+
+
+def rule_findings(rule, events, history_events, scan_start, suppressed):
+    """One rule's findings over scanned events, as detection alerts on them.
+
+    Returns (findings, skipped): findings built only from history context are dropped, and those a
+    reviewed tuning exception covers are skipped and counted.
+    """
+    # For the exfil rule an exception is passed in as a baseline principal, not skipped here.
+    params = rules_mod.exception_params(rule["id"], rule["params"], suppressed)
+    skips = rule["id"] not in rules_mod.EXCEPTION_ENABLES_BASELINE
+    rule_events = events
+    if history_events and params.get("history_seconds"):
+        since = iso(parse_iso(scan_start) - timedelta(seconds=params["history_seconds"]))
+        wanted = rules_mod.HISTORY_EVENT_TYPES[rule["id"]]
+        rule_events = [e for e in history_events
+                       if e["event_type"] in wanted and e["ts"] >= since] + events
+    findings, skipped = [], 0
+    for finding in rules_mod.RULE_FUNCTIONS[rule["id"]](rule_events, params):
+        if scan_start and finding["last_seen"] < scan_start:
+            continue  # built only from history context; outside this scan
+        if skips and (rule["id"], finding["group_key"]) in suppressed:
+            skipped += 1
+            continue
+        findings.append(finding)
+    return findings, skipped
+
+
 def run_detection(conn, trigger="manual", start=None, end=None):
     """Run all enabled rules over a time range (default: all events).
 
@@ -214,45 +267,16 @@ def run_detection(conn, trigger="manual", start=None, end=None):
                 rule["params"] = rules_mod.validate_params(rule["id"], rule["params"])
 
             max_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
-            sql, args = f"SELECT {RULE_EVENT_FIELDS} FROM events WHERE id <= ?", [max_id]
-            scan_start, history_events = None, []
-            if start and end:
-                pad = timedelta(seconds=rules_mod.lookback_seconds(active))
-                scan_start = iso(parse_iso(start) - pad)
-                events = [dict(r) for r in conn.execute(sql + " AND ts >= ? AND ts <= ?",
-                                                        args + [scan_start, iso(parse_iso(end) + pad)])]
-                # Rules that compare with earlier activity also get the span before the scan window, but only
-                # the event types they read: a week of every event per batch was most of the ingest time.
-                history = timedelta(seconds=rules_mod.history_seconds(active))
-                types = sorted({t for r in active if r["params"].get("history_seconds")
-                                for t in rules_mod.HISTORY_EVENT_TYPES[r["id"]]})
-                if history and types:
-                    history_events = [dict(r) for r in conn.execute(
-                        sql + f" AND ts >= ? AND ts < ? AND event_type IN ({','.join('?' for _ in types)})",
-                        args + [iso(parse_iso(scan_start) - history), scan_start, *types])]
-            else:
-                events = [dict(r) for r in conn.execute(sql, args)]
+            events, history_events, scan_start = scan_events(conn, active, max_id, start, end)
             synthetic_ids = {e["id"] for e in events + history_events if e["synthetic"]}
             summary["events_scanned"] = len(events) + len(history_events)
             assets_idx = assets_mod.load_index(conn)
             suppressed = active_suppressions(conn)
             with transaction(conn):
                 for rule in active:
-                    # For the exfil rule an exception is passed in as a baseline principal, not skipped here.
-                    params = rules_mod.exception_params(rule["id"], rule["params"], suppressed)
-                    skips = rule["id"] not in rules_mod.EXCEPTION_ENABLES_BASELINE
-                    rule_events = events
-                    if history_events and params.get("history_seconds"):
-                        since = iso(parse_iso(scan_start) - timedelta(seconds=params["history_seconds"]))
-                        wanted = rules_mod.HISTORY_EVENT_TYPES[rule["id"]]
-                        rule_events = [e for e in history_events
-                                       if e["event_type"] in wanted and e["ts"] >= since] + events
-                    for finding in rules_mod.RULE_FUNCTIONS[rule["id"]](rule_events, params):
-                        if scan_start and finding["last_seen"] < scan_start:
-                            continue  # built only from history context; outside this scan
-                        if skips and (rule["id"], finding["group_key"]) in suppressed:
-                            summary["alerts_suppressed"] += 1  # a reviewed tuning exception covers it
-                            continue
+                    findings, skipped = rule_findings(rule, events, history_events, scan_start, suppressed)
+                    summary["alerts_suppressed"] += skipped  # a reviewed tuning exception covers them
+                    for finding in findings:
                         synthetic = all(i in synthetic_ids for i in finding["event_ids"])
                         outcome = _apply_finding(conn, rule, finding, synthetic, assets_idx)
                         if outcome == "created":
