@@ -206,7 +206,7 @@ async function refreshBanner() {
 
 // ---------- metrics overview (the 1.0 dashboard) ----------
 async function overview() {
-  const m = await api("/api/metrics");
+  const [m, tri] = await Promise.all([api("/api/metrics"), api("/api/metrics/triage")]);
   const kpi = (v, l) => el("div", { class: "kpi" }, el("div", { class: "v" }, v ?? "—"), el("div", { class: "l" }, l));
   const hist = m.activity_last_24h_of_data;
   const max = Math.max(1, ...hist.map((h) => h.events));
@@ -257,11 +257,33 @@ async function overview() {
         table(["Rule", "Reviewed", "False positive", "Benign", "FP rate"], m.false_positive_rate_by_rule.map((r) => ({ cells: [el("code", {}, r.rule_id), { num: r.reviewed }, { num: r.false_positive }, { num: r.benign }, { num: pct(r.false_positive_rate) }] })))),
       el("div", { class: "card" }, el("h2", {}, "Open-alert aging"), hbars(m.open_alert_aging.buckets, "label"),
         el("p", { class: "muted" }, m.open_alert_aging.oldest_minutes === null ? "No open alerts." : `Oldest open alert has waited ${Math.round(m.open_alert_aging.oldest_minutes)} minutes.`))),
+    triageCard(tri),
     el("div", { class: "card" }, el("h2", {}, "Left out on purpose"),
       el("p", { class: "muted" }, "The numbers above use the times this instance created and resolved each alert, and verdicts analysts recorded. These metrics are not shown because replayed synthetic timestamps would make them misleading:"),
       el("ul", { class: "muted" }, m.omitted_metrics.map((o) => el("li", {}, el("code", {}, o.metric), `: ${o.reason}`)))),
   );
 }
+
+// Triage metrics (/api/metrics/triage): created → acknowledged and created → resolved, per severity.
+const minutes = (v) => (v === null || v === undefined ? "—" : `${v}m`);
+const timeStats = (t) => (t.samples ? `${minutes(t.mean_minutes)} / ${minutes(t.median_minutes)} / ${minutes(t.p90_minutes)}` : "—");
+function triageCard(t) {
+  const rows = t.severities.filter((r) => r.count);
+  const unknown = t.severities.reduce((n, r) => n + r.ack_unknown, 0);
+  return el("div", { class: "card", id: "triage-metrics" },
+    el("div", { class: "row", style: { justifyContent: "space-between" } },
+      el("h2", {}, `Triage metrics — alerts created ${t.window === "all" ? "at any time" : `in the last ${t.window}`}`),
+      t.synthetic !== "none" ? pill(t.synthetic === "all" ? "synthetic" : `${t.synthetic_alerts} synthetic`, "synthetic") : null),
+    table(["Severity", "Alerts", "Open", "MTTA mean / median / p90", "MTTR mean / median / p90", "SLA target (ack / resolve)", "Ack breaches", "Resolve breaches"],
+      rows.map((r) => ({ cells: [sev(r.severity), { num: r.count }, { num: r.open }, { num: timeStats(r.mtta) }, { num: timeStats(r.mttr) },
+        { num: `${minutes(r.sla.ack_target_minutes)} / ${minutes(r.sla.resolve_target_minutes)}` }, { num: r.sla.ack_breaches }, { num: r.sla.resolve_breaches }] }))),
+    el("p", { class: "muted" }, "MTTA: alert created to first acknowledgement (leaving open). MTTR: created to resolved. p90 is nearest-rank. A breach is a step that took, or has been pending for, longer than its target.",
+      unknown ? ` ${unknown} alert(s) left open before acknowledgements were recorded and are not counted for MTTA or ack breaches.` : ""));
+}
+
+// SLA badge for unresolved alerts past their ack or resolve target (sla_breach from /api/alerts).
+const slaBadge = (list) => (list && list.length ? el("span", { class: "pill sev-critical", title: `Past the ${list.join(" and ")} target for this severity` },
+  `SLA: ${list.join(" + ")} overdue`) : null);
 
 // ---------- alerts ----------
 async function alerts() {
@@ -291,7 +313,7 @@ async function alerts() {
     form, el("div", { class: "card", "data-kbd-list": "alerts" }, table(
     ["Severity", "Alert", "Rule", "Status", "Events", "Last seen", ""],
     list.map((a) => ({ id: a.id, cells: [sev(a.severity), a.title, el("code", {}, a.rule_id),
-      el("span", {}, status(a.status), a.disposition ? ` ${a.disposition.replace("_", " ")}` : ""),
+      el("span", {}, status(a.status), a.disposition ? ` ${a.disposition.replace("_", " ")}` : "", a.sla_breach?.length ? " " : null, slaBadge(a.sla_breach)),
       { num: a.event_count }, fmtTime(a.last_seen), synth(a.synthetic)] })),
     (r) => go("alerts", r.id))));
   restoreSelection(`[data-kbd-list] tr[data-id="${state.restore}"]`);
@@ -346,7 +368,7 @@ async function alertDetail(id) {
       el("div", {},
         el("div", { class: "card" }, el("h2", {}, "Details"), el("dl", { class: "kv" },
           ...[["Alert", `#${a.id}`], ["Group", a.group_key], ["First seen", fmtTime(a.first_seen)], ["Last seen", fmtTime(a.last_seen)],
-            ["Assignee", a.assignee ?? "—"], ["Verdict", a.disposition ?? "—"], ["Resolved", fmtTime(a.resolved_at)]]
+            ["Assignee", a.assignee ?? "—"], ["Acknowledged", fmtTime(a.acknowledged_at)], ["Verdict", a.disposition ?? "—"], ["Resolved", fmtTime(a.resolved_at)]]
             .flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]))),
         el("div", { class: "card" }, el("h2", {}, "Notes"),
           a.notes.length ? a.notes.map((n) => el("div", { class: "note" }, el("div", { class: "muted" }, `${n.author} · ${fmtTime(n.created_at)}`), el("div", {}, n.body)))
