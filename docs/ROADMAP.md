@@ -47,8 +47,8 @@ When this list runs low, add more real-SIEM gaps here and keep going. Same groun
       alert diff (new / lost alerts) in the review panel, so reviewers approve evidence, not params. (PR #21)
 - [x] 12. Case workflow metrics: alert assignment, acknowledge/resolve timestamps, MTTA/MTTR per severity on the
       dashboard, SLA breach badges. Numbers labeled synthetic when the data is. (PR #24)
-- [ ] 13. Login hardening: TOTP second factor (stdlib HMAC, RFC 6238) for admin/analyst, per-account lockout with
-      audit entries, session list with revoke.
+- [x] 13. Login hardening: TOTP second factor (stdlib HMAC, RFC 6238) for admin/analyst, per-account lockout with
+      audit entries, session list with revoke. (PR #25; lockout already existed)
 - [ ] 14. Explainable entity risk: per-user/host score from alert severities, asset weight, and recency with a
       visible breakdown; no ML, every point traceable to an alert.
 - [ ] 15. Detection content portability: export/import rules as versioned JSON, plus a documented field mapping

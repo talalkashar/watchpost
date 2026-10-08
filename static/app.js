@@ -60,7 +60,7 @@ async function api(path, { method = "GET", body, raw, contentType, allow = [] } 
   const res = await fetch(path, { method, headers, body: payload, credentials: "same-origin" });
   let data = null;
   try { data = await res.json(); } catch { /* empty body */ }
-  if (res.status === 401 && path !== "/api/auth/login") { showLogin(); throw new Error("Session expired"); }
+  if (res.status === 401 && path !== "/api/auth/login" && path !== "/api/auth/mfa") { showLogin(); throw new Error("Session expired"); }
   if (!res.ok && res.status !== 207 && !allow.includes(res.status)) {
     const err = new Error((data && data.error) || `HTTP ${res.status}`);
     err.status = res.status; err.data = data;
@@ -112,6 +112,7 @@ function showLogin() {
   Live.stop();
   document.body.classList.remove("authed");
   $("#login-view").hidden = false;
+  mfaStep(null);
   $("#rail").hidden = true; $("#strip").hidden = true; $("#who").hidden = true;
   render();
 }
@@ -124,7 +125,7 @@ async function boot() {
     try {
       const data = await api("/api/auth/login", { method: "POST", body: { username: f.get("username"), password: f.get("password") } });
       ev.target.reset();
-      onLogin(data);
+      if (data.mfa_required) mfaStep(data.mfa_token); else onLogin(data);
     } catch (e) { $("#login-error").textContent = e.message; }
   });
   $("#logout").addEventListener("click", async () => { await api("/api/auth/logout", { method: "POST" }).catch(() => {}); showLogin(); });
@@ -144,6 +145,38 @@ async function boot() {
   document.addEventListener("keydown", onShortcut);
   window.addEventListener("hashchange", () => route());
   try { onLogin(await api("/api/auth/me")); } catch { showLogin(); }
+}
+
+// Second sign-in step for an account with an authenticator app enrolled. The token from the password step is
+// short-lived and kept only in this closure; null removes the step and shows the password form again.
+function mfaStep(mfaToken) {
+  $("#mfa-form")?.remove();
+  $("#login-form").hidden = Boolean(mfaToken);
+  if (!mfaToken) return;
+  const error = el("p", { class: "error", role: "alert" });
+  const code = el("input", { id: "mfa-code", name: "code", inputmode: "numeric", autocomplete: "one-time-code", pattern: "[0-9]{6}", maxlength: 6, required: true });
+  const form = el("form", { id: "mfa-form" },
+    el("p", {}, "Enter the 6-digit code from your authenticator app."),
+    el("label", {}, "Authentication code", code),
+    el("button", { type: "submit" }, "Verify"),
+    el("button", { type: "button", class: "ghost", onclick: () => mfaStep(null) }, "Back"),
+    error);
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    error.textContent = "";
+    try {
+      const data = await api("/api/auth/mfa", { method: "POST", body: { mfa_token: mfaToken, code: code.value.trim() } });
+      mfaStep(null);
+      onLogin(data);
+    } catch (e) {
+      error.textContent = e.message;
+      code.value = "";
+      // An expired or locked step cannot be retried: back to the password.
+      if (e.status === 429 || /expired/.test(e.message)) { mfaStep(null); $("#login-error").textContent = e.message; }
+    }
+  });
+  $("#login-form").after(form);
+  code.focus();
 }
 
 function onLogin(data) {
@@ -180,7 +213,7 @@ function route() {
   if (view !== "dashboard") Dash.unmount();
   const views = { dashboard: socDashboard, incidents: () => (id ? incidentDetail(Number(id)) : incidentsView()),
     alerts: () => (id ? alertDetail(Number(id)) : alerts()), events, overview, ingest, rules: () => rules(id),
-    noise: noiseLab, coverage: coverageView, health, admin, hunt: () => huntView(huntQueryFromHash([id, ...rest].join("/"))),
+    noise: noiseLab, coverage: coverageView, health, admin, account, hunt: () => huntView(huntQueryFromHash([id, ...rest].join("/"))),
     entity: () => entityDetail(id, decodeURIComponent(rest.join("/"))) };
   guarded(views[view] || socDashboard);
 }
@@ -1128,7 +1161,7 @@ async function health() {
 // ---------- admin ----------
 async function admin() {
   if (!can("admin")) return render(el("p", {}, "Admins only."));
-  const [tokens, audit, inventory, chain] = await Promise.all([api("/api/tokens"), api("/api/audit"), api("/api/assets"), api("/api/audit/verify")]);
+  const [tokens, audit, inventory, chain, sessions] = await Promise.all([api("/api/tokens"), api("/api/audit"), api("/api/assets"), api("/api/audit/verify"), api("/api/sessions")]);
   const tokenOut = el("div");
   const tokenForm = el("form", { class: "row" },
     el("label", {}, "Token name", el("input", { name: "name", required: true, maxlength: 64, placeholder: "e.g. web01-forwarder" })),
@@ -1140,6 +1173,15 @@ async function admin() {
       tokenOut.replaceChildren(el("div", { class: "explain" }, el("strong", {}, "Copy this now; it will not be shown again: "), el("code", {}, r.token)));
       tokenForm.reset();
     });
+  });
+  const resetForm = el("form", { class: "row" },
+    el("label", {}, "Username", el("input", { name: "username", required: true, maxlength: 32, autocomplete: "off" })),
+    el("button", { type: "submit", class: "danger" }, "Reset two-factor"));
+  resetForm.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const username = new FormData(resetForm).get("username").trim();
+    if (!confirm(`Turn off two-factor sign-in for "${username}"? They sign in with the password alone until they enroll again.`)) return;
+    guarded(async () => { await api(`/api/users/${encodeURIComponent(username)}/mfa/reset`, { method: "POST" }); toast(`Two-factor reset for ${username}`); admin(); });
   });
   const demoOut = el("div");
   let inventoryCard = assetsCard(inventory);
@@ -1167,8 +1209,65 @@ async function admin() {
       table(["Name", "Prefix", "Created", "Last used", "Status", ""], tokens.map((t) => ({ cells: [t.name, el("code", {}, `${t.prefix}…`), `${fmtTime(t.created_at)} by ${t.created_by}`, fmtTime(t.last_used_at),
         t.revoked_at ? pill("revoked", "st-rejected") : pill("active", "st-ok"),
         t.revoked_at ? "" : el("button", { class: "danger", onclick: () => confirm(`Revoke token "${t.name}"?`) && guarded(async () => { await api(`/api/tokens/${t.id}/revoke`, { method: "POST" }); admin(); }) }, "Revoke")] })))),
+    el("div", { class: "card" }, el("h2", {}, "Sign-in sessions"),
+      el("p", { class: "muted" }, "Every active session. Revoking one signs that browser out at its next request. For someone who lost their authenticator app, reset their two-factor here: there are no recovery codes."),
+      sessionsTable(sessions, "/api/sessions", admin, true), resetForm),
     el("div", { class: "card" }, el("h2", {}, "Audit log"), chainBadge(chain),
       table(["When", "Actor", "Action", "Target", "Detail"], audit.map((a) => ({ cells: [fmtTime(a.created_at), a.actor, a.action, a.target ?? "", el("code", {}, a.detail ?? "")] })))),
+  );
+}
+
+// ---------- account security ----------
+// Sessions are addressed by a non-secret id; the API never returns a session token or its hash.
+function sessionsTable(rows, base, redraw, showUser = false) {
+  const revoke = (r) => confirm(r.current ? "Revoke this session? You will be signed out." : `Revoke the session started ${fmtTime(r.created_at)}?`) && guarded(async () => {
+    await api(`${base}/${r.id}/revoke`, { method: "POST" });
+    if (r.current) return showLogin();
+    toast("Session revoked");
+    redraw();
+  });
+  return table([...(showUser ? ["User"] : []), "Started", "Last seen", "Expires", ""], rows.map((r) => ({ cells: [
+    ...(showUser ? [r.username] : []), fmtTime(r.created_at), fmtTime(r.last_seen_at), fmtTime(r.expires_at),
+    el("span", { class: "row" }, r.current ? pill("this browser", "st-ok") : null,
+      can("analyst") ? el("button", { class: "danger", "aria-label": `Revoke session started ${fmtTime(r.created_at)}${showUser ? ` for ${r.username}` : ""}`, onclick: () => revoke(r) }, "Revoke") : null)] })));
+}
+
+async function account() {
+  const [mfa, sessions] = await Promise.all([api("/api/auth/mfa/status"), api("/api/auth/sessions")]);
+  const out = el("div");
+  const codeForm = (label, action, onDone) => {
+    const code = el("input", { name: "code", inputmode: "numeric", autocomplete: "one-time-code", pattern: "[0-9]{6}", maxlength: 6, required: true });
+    const form = el("form", { class: "row" }, el("label", {}, "Authentication code", code), el("button", { type: "submit" }, label));
+    form.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      guarded(async () => { await api(action, { method: "POST", body: { code: code.value.trim() } }); onDone(); });
+    });
+    return form;
+  };
+  let twoFactor;
+  if (!mfa.available) {
+    twoFactor = el("p", { class: "muted" }, "This read-only account signs in with a password only.");
+  } else if (mfa.enabled) {
+    twoFactor = el("div", {}, el("p", {}, pill("on", "st-ok"), " Sign-in asks for a code from your authenticator app after the password."),
+      el("p", { class: "muted" }, "To turn it off, enter a current code."),
+      codeForm("Turn off two-factor", "/api/auth/mfa/disable", () => { toast("Two-factor sign-in is off"); account(); }));
+  } else {
+    const start = el("button", { onclick: () => guarded(async () => {
+      const r = await api("/api/auth/mfa/enroll", { method: "POST" });
+      out.replaceChildren(el("div", { class: "explain" },
+        el("p", {}, "Enter this in your authenticator app (time-based, 6 digits, 30 seconds), then confirm with the code it shows. It is not active until you confirm."),
+        el("p", {}, el("strong", {}, "Secret: "), el("code", {}, r.secret)),
+        el("p", {}, el("strong", {}, "Setup URI: "), el("code", { style: { wordBreak: "break-all" } }, r.otpauth_uri)),
+        codeForm("Confirm and turn on", "/api/auth/mfa/confirm", () => { toast("Two-factor sign-in is on"); account(); })));
+    }) }, mfa.pending ? "Start over with a new secret" : "Set up two-factor sign-in");
+    twoFactor = el("div", {}, el("p", {}, pill("off", "st-degraded"), " Add a code from an authenticator app to your sign-in."),
+      mfa.pending ? el("p", { class: "muted" }, "A setup was started but not confirmed; it is not active.") : null, start, out);
+  }
+  render(
+    el("h1", {}, "Account security"),
+    el("div", { class: "card" }, el("h2", {}, "Two-factor sign-in"), twoFactor,
+      mfa.available ? el("p", { class: "muted" }, "There are no recovery codes: if you lose the app, an admin can reset your two-factor.") : null),
+    el("div", { class: "card" }, el("h2", {}, "Your sessions"), sessionsTable(sessions, "/api/auth/sessions", account)),
   );
 }
 
