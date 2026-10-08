@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import (__version__, assets, attack, auth, case_record, ecs, engine, entities, geo, hunt, improve, incidents,
+from . import (__version__, assets, attack, auth, case_record, dashboard_views, ecs, engine, entities, geo, hunt, improve, incidents,
                masking, portability, queries, report, search_rules, sigma, simulate, sources, storyline, stream,
                triage)
 from . import backtest as backtest_mod
@@ -551,6 +551,27 @@ def triage_metrics(req):
 
 GEO_MAX_IPS = 200
 DASHBOARD_ENTITIES = 8
+
+
+@route("GET", "/api/dashboard/views")
+def dashboard_view_list(req):
+    return dashboard_views.list_views(req.conn, req.user["username"])
+
+
+@route("POST", "/api/dashboard/views", role="analyst")
+def dashboard_view_create(req):
+    req.status = 201
+    return dashboard_views.save(req.conn, body_json(req), req.user["username"])
+
+
+@route("POST", r"/api/dashboard/views/(\d+)", role="analyst")
+def dashboard_view_update(req, view_id):
+    return dashboard_views.save(req.conn, body_json(req), req.user["username"], int(view_id))
+
+
+@route("POST", r"/api/dashboard/views/(\d+)/delete", role="analyst")
+def dashboard_view_delete(req, view_id):
+    return dashboard_views.delete(req.conn, int(view_id), req.user["username"])
 
 
 @route("GET", "/api/dashboard")

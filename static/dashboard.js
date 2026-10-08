@@ -18,6 +18,17 @@ const TACTICS = [
 ];
 const HQ_DEFAULT = { city: "Watchpost HQ (internal)", lat: 39.1, lon: -94.6, internal: true, synthetic: true };
 const FEED_MAX = 140;
+const DASH_PANELS = ["p-map", "p-feed", "p-timeline", "p-attackers", "p-attack", "p-board", "p-rules", "p-health", "p-entities"];
+const DASH_LAYOUTS = {
+  full: DASH_PANELS,
+  triage: ["p-board", "p-timeline", "p-feed", "p-entities"],
+  telemetry: ["p-map", "p-feed", "p-attackers", "p-health"],
+};
+const DASH_FILTERS = {
+  all: ["critical", "high", "medium", "low"],
+  elevated: ["critical", "high"],
+  critical: ["critical"],
+};
 
 // ---------- small helpers ----------
 function svgNode(markup) {
@@ -316,6 +327,7 @@ const Live = {
 const Dash = {
   mounted: false, data: null, coverage: { state: "loading" }, details: null,
   queue: [], feedCount: 0, paused: false, live: new Map(), mapSize: null, timers: {}, observer: null,
+  views: [], currentView: null, severities: DASH_FILTERS.all, layout: DASH_LAYOUTS.full,
 
   mount() {
     this.unmount();
@@ -323,7 +335,8 @@ const Dash = {
     this.mapSize = null;
     this.feedCount = 0;
     const pause = el("button", { class: "mini ghost", id: "feed-pause", onclick: () => this.togglePause() }, "Pause");
-    render(el("div", { class: "soc", id: "soc" },
+    render(el("div", { class: "card", id: "dashboard-view-bar" }, el("p", { class: "muted" }, "Loading saved dashboard views…")),
+      el("div", { class: "soc", id: "soc" },
       panel("p-map", "Attack map", [chip("SYNTHETIC GEO", "synthetic"), el("span", { class: "muted", id: "map-count" })],
         el("div", { class: "mapwrap", id: "map" }),
         el("div", { class: "map-side", id: "map-side" }),
@@ -350,6 +363,7 @@ const Dash = {
       this.observer = new ResizeObserver(onResize);
       this.observer.observe(soc);
     }
+    this.loadViews();
   },
   unmount() {
     if (!this.mounted) return;
@@ -378,6 +392,71 @@ const Dash = {
   redraw() {
     if (!this.mounted || !this.data) return;
     this.renderMap(); this.renderTimeline(); this.renderAttackers(); this.renderRules(); this.renderEntities(); this.renderMatrix(); this.renderBoard(); this.renderHealth();
+    this.applyView();
+  },
+  async loadViews() {
+    if (!this.mounted) return;
+    try { this.views = await api("/api/dashboard/views"); }
+    catch (e) { return $("#dashboard-view-bar")?.replaceChildren(el("p", { class: "error" }, e.message)); }
+    this.renderViewBar();
+  },
+  viewPayload(form) {
+    const f = new FormData(form);
+    return { name: f.get("name").trim(), visibility: f.get("visibility"),
+      filters: { severities: DASH_FILTERS[f.get("filter")] }, layout: DASH_LAYOUTS[f.get("layout")] };
+  },
+  renderViewBar() {
+    const bar = $("#dashboard-view-bar");
+    if (!bar) return;
+    const picker = el("select", { name: "saved_view", "aria-label": "Saved dashboard view" },
+      el("option", { value: "" }, "Default view"),
+      ...this.views.map((v) => el("option", { value: v.id }, `${v.name} · ${v.visibility}${v.owner === state.user.username ? " · mine" : ""}`)));
+    const apply = () => {
+      const selected = this.views.find((v) => String(v.id) === picker.value);
+      this.currentView = selected || null;
+      this.severities = selected ? selected.filters.severities : DASH_FILTERS.all;
+      this.layout = selected ? selected.layout : DASH_LAYOUTS.full;
+      this.applyView(); this.renderViewBar();
+    };
+    picker.value = this.currentView ? String(this.currentView.id) : "";
+    const controls = [el("label", {}, "Saved view", picker), el("button", { type: "button", onclick: apply }, "Apply")];
+    if (can("analyst")) {
+      const form = el("form", { class: "row" },
+        el("label", {}, "Name", el("input", { name: "name", required: true, maxlength: 80 })),
+        el("label", {}, "Severity", el("select", { name: "filter" },
+          el("option", { value: "all" }, "All severities"), el("option", { value: "elevated" }, "Critical + high"), el("option", { value: "critical" }, "Critical only"))),
+        el("label", {}, "Panels", el("select", { name: "layout" },
+          el("option", { value: "full" }, "Full dashboard"), el("option", { value: "triage" }, "Triage focus"), el("option", { value: "telemetry" }, "Telemetry focus"))),
+        el("label", {}, "Visibility", el("select", { name: "visibility" },
+          el("option", { value: "private" }, "Private"), el("option", { value: "shared" }, "Shared"))),
+        el("button", { type: "submit" }, "Save new"));
+      form.addEventListener("submit", (ev) => { ev.preventDefault(); guarded(async () => {
+        this.currentView = await api("/api/dashboard/views", { method: "POST", body: this.viewPayload(form) });
+        this.severities = this.currentView.filters.severities; this.layout = this.currentView.layout;
+        await this.loadViews(); this.applyView(); toast(`Saved dashboard view "${this.currentView.name}"`);
+      }); });
+      controls.push(form);
+      if (this.currentView?.owner === state.user.username) controls.push(
+        el("button", { type: "button", class: "danger", onclick: () => confirm(`Delete dashboard view "${this.currentView.name}"?`) && guarded(async () => {
+          await api(`/api/dashboard/views/${this.currentView.id}/delete`, { method: "POST" });
+          this.currentView = null; this.severities = DASH_FILTERS.all; this.layout = DASH_LAYOUTS.full;
+          await this.loadViews(); this.applyView();
+        }) }, "Delete mine"));
+    }
+    bar.replaceChildren(el("h2", {}, this.currentView ? this.currentView.name : "Dashboard view"), el("div", { class: "row" }, ...controls));
+  },
+  applyView() {
+    const soc = $("#soc");
+    if (!soc) return;
+    for (const id of DASH_PANELS) {
+      const panelNode = $(`#${id}`);
+      if (!panelNode) continue;
+      panelNode.hidden = !this.layout.includes(id);
+      if (!panelNode.hidden) soc.append(panelNode);
+    }
+    for (const severity of SEV_ORDER) {
+      for (const node of soc.querySelectorAll(`.sev-${severity}`)) node.hidden = !this.severities.includes(severity);
+    }
   },
   width(id, fallback = 300) { const n = $(id); return n ? Math.max(120, n.clientWidth) : fallback; },
 
