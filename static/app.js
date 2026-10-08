@@ -591,6 +591,9 @@ const HUNT_SYNTAX = [
   ["NOT term or -term", "NOT src_ip:10.0.0.5", "Excludes (events missing the field are kept)"],
   ["last:15m|24h|7d", "last:24h", "Time window up to now (at most 365d)"],
   ["since: / until:", "since:2026-10-01 until:2026-10-02T06:00Z", "ISO times, UTC unless stated"],
+  ["| stats count[, dc(f)] [by f1[, f2]]", "event_type:auth_failure | stats count, dc(user) by src_ip", "Grouped counts, largest first (at most 1000 groups)"],
+  ["| top [N] field", "event_type:auth_failure | top 10 src_ip", "Top N values (1–100, default 10), count and percent of matched events"],
+  ["| timechart span=5m|15m|1h|6h|1d [count] [by f]", "last:24h | timechart span=1h by user", "Events per time bucket (at most 500 buckets); by keeps the top 5 plus other"],
 ];
 const HUNT_FIELDS = "user host source outcome src_ip dest_ip ip batch_id event_type severity dest_port synthetic message last since until";
 const huntHref = (q) => `#hunt/${encodeURIComponent(q)}`;
@@ -617,6 +620,8 @@ async function huntView(query = "", offset = 0) {
       can("analyst") ? el("button", { type: "button", class: "ghost", onclick: () => saveHuntDialog(input.value.trim()) }, "Save search") : null),
     el("details", { style: { marginTop: "10px" } }, el("summary", { class: "muted" }, "Syntax"),
       el("p", { class: "muted" }, "Terms are ANDed; there is no OR. Fields: ", el("code", {}, HUNT_FIELDS), ". ip matches source or destination."),
+      el("p", { class: "muted" }, "One ", el("code", {}, "|"), " stage may follow the filter to aggregate it (a | inside quotes is part of the value). ",
+        "Group by any field except message, ip and the time filters. Click a value in the result to add it to the filter."),
       table(["Form", "Example", "Meaning"], HUNT_SYNTAX.map(([f, x, m]) => ({ cells: [el("code", {}, f), el("code", {}, x), m] })))));
   form.addEventListener("submit", (ev) => {
     ev.preventDefault();
@@ -641,6 +646,11 @@ async function huntView(query = "", offset = 0) {
   }
   const parsed = el("div", { class: "row", style: { alignItems: "center" } }, el("span", { class: "muted" }, "Parsed as:"),
     data.terms.length ? data.terms.map((t) => pill(t.text, "technique")) : el("span", { class: "muted" }, "no terms, so every event"));
+  if (data.kind) {
+    if (state.focusSearch) { state.focusSearch = false; queueMicrotask(() => input.focus()); }
+    render(el("h1", {}, "Hunt"), form, el("div", { class: "card", id: "hunt-agg" }, parsed, huntAggregate(data)), savedCard);
+    return;
+  }
   const pager = el("div", { class: "row" },
     el("span", { class: "muted" }, `${data.total.toLocaleString()} matching events · showing ${data.total ? offset + 1 : 0}–${offset + data.events.length}`),
     el("button", { class: "ghost", disabled: offset === 0, onclick: () => guarded(() => huntView(query, Math.max(0, offset - 100))) }, "Newer"),
@@ -650,6 +660,59 @@ async function huntView(query = "", offset = 0) {
     table(["Time", "Severity", "Type", "User", "Source IP", "Host", "Source", "Message"],
       data.events.map((e) => ({ id: e.id, cells: [fmtTime(e.ts), sev(e.severity), e.event_type, e.user ?? "—", el("code", {}, e.src_ip ?? "—"), e.host ?? "—", el("span", {}, e.source, " ", synth(e.synthetic)), e.message ?? ""] })),
       (r) => guarded(() => eventDialog(r.id)))), savedCard);
+}
+
+// Pipeline results (| stats, | top, | timechart). Value cells pivot: they add field:value to the filter
+// (the part before the |) and show the matching events.
+const HUNT_FIELD_NAMES = HUNT_FIELDS.split(" ");
+const huntPivot = (filter, field, value) => el("a", { href: huntHref(`${filter} ${field}:${huntValue(String(value))}`.trim()),
+  title: `Add ${field}:${value} to the filter and show the events` }, String(value));
+
+function huntAggregate(data) {
+  const note = data.truncated ? el("p", { class: "muted", role: "status" }, data.kind === "top"
+    ? `More values exist than the ${data.rows.length} shown.` : `Showing the first ${data.rows.length} groups; narrow the filter to see the rest.`) : null;
+  if (data.kind === "timechart") return [note, huntTimechart(data)];
+  const cell = (c, v) => (HUNT_FIELD_NAMES.includes(c) ? huntPivot(data.filter, c, v) : { num: c === "percent" ? `${v}%` : Number(v).toLocaleString() });
+  return [note, el("p", { class: "muted" }, `${data.rows.length.toLocaleString()} ${data.kind === "top" ? "values" : "rows"}`),
+    table(data.columns, data.rows.map((r) => ({ cells: r.map((v, i) => cell(data.columns[i], v)) })))];
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+function svgEl(tag, attrs = {}, ...children) {
+  const node = document.createElementNS(SVG_NS, tag);
+  // style is set through CSSOM like el(); the CSP (style-src 'self') blocks style attributes.
+  for (const [k, v] of Object.entries(attrs)) if (k === "style") Object.assign(node.style, v); else node.setAttribute(k, v);
+  for (const c of children.flat()) if (c !== null && c !== undefined) node.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  return node;
+}
+
+// Bars for one series, lines for several (by), and the same numbers as a table for screen readers and copying.
+function huntTimechart(data) {
+  if (!data.rows.length) return el("p", { class: "muted" }, "No matching events.");
+  const series = data.columns.slice(1);
+  const colors = ["--accent", "--high", "--low", "--med", "--synthetic", "--info"];
+  const W = 760, H = 200, L = 44, B = 22, T = 8, n = data.rows.length;
+  const max = Math.max(1, ...data.rows.flatMap((r) => r.slice(1)));
+  const x = (i) => L + ((W - L - 4) * i) / n, y = (v) => T + (H - T - B) * (1 - v / max), step = (W - L - 4) / n;
+  const label = (t) => fmtTime(t).slice(0, 16);
+  const marks = series.length === 1
+    ? data.rows.map((r, i) => svgEl("rect", { x: x(i) + step * 0.1, y: y(r[1]), width: Math.max(0.5, step * 0.8), height: y(0) - y(r[1]), style: { fill: "var(--accent)" } },
+      svgEl("title", {}, `${label(r[0])}: ${r[1]}`)))
+    : series.map((s, k) => svgEl("polyline", { fill: "none", "stroke-width": 1.5, style: { stroke: `var(${colors[k % colors.length]})` },
+      points: data.rows.map((r, i) => `${x(i) + step / 2},${y(r[k + 1])}`).join(" ") }, svgEl("title", {}, s)));
+  const peak = Math.max(...data.rows.flatMap((r) => r.slice(1)));
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img", style: { maxWidth: "100%", height: "auto" },
+    "aria-label": `Events per bucket from ${label(data.rows[0][0])} to ${label(data.rows[n - 1][0])} (${n} buckets, peak ${peak}), series: ${series.join(", ")}` },
+    svgEl("line", { x1: L, x2: W - 4, y1: y(0), y2: y(0), style: { stroke: "var(--line-2)" } }),
+    svgEl("text", { x: L - 6, y: y(max) + 4, "text-anchor": "end", "font-size": 11, style: { fill: "var(--muted)" } }, String(max)),
+    svgEl("text", { x: L - 6, y: y(0), "text-anchor": "end", "font-size": 11, style: { fill: "var(--muted)" } }, "0"),
+    svgEl("text", { x: L, y: H - 4, "font-size": 11, style: { fill: "var(--muted)" } }, label(data.rows[0][0])),
+    svgEl("text", { x: W - 4, y: H - 4, "text-anchor": "end", "font-size": 11, style: { fill: "var(--muted)" } }, label(data.rows[n - 1][0])),
+    marks);
+  const legend = series.length > 1 ? el("div", { class: "row", "aria-hidden": "true" }, series.map((s, k) =>
+    el("span", { class: "muted" }, el("span", { style: { display: "inline-block", width: "10px", height: "10px", marginRight: "4px", background: `var(${colors[k % colors.length]})` } }), s))) : null;
+  return [svg, legend, el("details", {}, el("summary", { class: "muted" }, "Data table"),
+    table(["Time", ...series], data.rows.map((r) => ({ cells: [fmtTime(r[0]), ...r.slice(1).map((v) => ({ num: v.toLocaleString() }))] }))))];
 }
 
 function saveHuntDialog(query) {

@@ -170,6 +170,11 @@ async function main() {
       const sources = await page.evaluate(() => { const c = document.querySelector("#source-health");
         return { rows: c ? c.querySelectorAll("tbody tr").length : 0, pills: c ? c.querySelectorAll(".pill").length : 0 }; });
       check(sources.rows > 0 && sources.pills > 0, `${width}px health renders the log source health panel (${sources.rows} rows)`);
+      await show(page, `hunt/${encodeURIComponent("event_type:auth_failure | top src_ip")}`);
+      const top = await page.evaluate(() => { const t = document.querySelector("#hunt-agg table");
+        return { cols: t ? [...t.querySelectorAll("th")].map((h) => h.textContent).join(",") : "", links: t ? t.querySelectorAll("tbody a").length : 0 }; });
+      check(top.cols === "src_ip,count,percent" && top.links > 0, `${width}px hunt "| top src_ip" renders a table with pivot links (${top.links})`);
+      await auditView(page, "hunt top", width);
       const current = await page.evaluate(() => [...document.querySelectorAll("#nav [aria-current=page]")].map((b) => b.dataset.view));
       check(current.length <= 1, `aria-current marks at most one nav item (${current.join(",") || "none on the entity page"})`);
       await show(page, "rules");
