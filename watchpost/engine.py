@@ -8,14 +8,16 @@ from datetime import timedelta
 from . import assets as assets_mod
 from . import correlate as correlate_mod
 from . import rules as rules_mod
+from . import sources as sources_mod
 from . import stream
 from .db import audit, iso, now_iso, parse_iso, row_to_dict, transaction
 from .diagnostics import describe_exception, record_error
 
 EVENT_COLUMNS = ["ts", "source", "host", "event_type", "outcome", "severity",
                  "user", "src_ip", "dest_ip", "dest_port", "bytes", "message", "raw"]
-# Fields detection rules can read.
-RULE_EVENT_FIELDS = "id, ts, event_type, user, src_ip, host, dest_ip, dest_port, bytes, message, synthetic"
+# Fields detection rules can read. source and ingested_at let a backtest replay log_source_silent's gaps.
+RULE_EVENT_FIELDS = ("id, ts, event_type, user, src_ip, host, dest_ip, dest_port, bytes, message, synthetic,"
+                     " source, ingested_at")
 
 # Detection runs are serialized so concurrent ingests cannot create duplicate alerts.
 _detection_lock = threading.Lock()
@@ -274,7 +276,15 @@ def run_detection(conn, trigger="manual", start=None, end=None):
             suppressed = active_suppressions(conn)
             with transaction(conn):
                 for rule in active:
-                    findings, skipped = rule_findings(rule, events, history_events, scan_start, suppressed)
+                    if rule["id"] == sources_mod.RULE_ID:
+                        # Silence is an absence: the rule reads each source's recent arrivals and the wall
+                        # clock, not the events of the scanned time range.
+                        arrivals = sources_mod.arrival_events(conn, max_id)
+                        synthetic_ids.update(e["id"] for e in arrivals if e["synthetic"])
+                        rule = {**rule, "params": sources_mod.clock_params(conn, rule["params"])}
+                        findings, skipped = rule_findings(rule, arrivals, [], None, suppressed)
+                    else:
+                        findings, skipped = rule_findings(rule, events, history_events, scan_start, suppressed)
                     summary["alerts_suppressed"] += skipped  # a reviewed tuning exception covers them
                     for finding in findings:
                         synthetic = all(i in synthetic_ids for i in finding["event_ids"])

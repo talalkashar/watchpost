@@ -229,6 +229,20 @@ def admin_new_source(day, rng):
     return events
 
 
+def log_source_stops(day, rng):
+    """dc01's endpoint telemetry arrives every five minutes from midnight; at 13:40 its forwarder is stopped.
+
+    Silence is judged by arrival: in the noise lab each event arrives at its timestamp and the scenario is
+    judged at the end of its day. Loaded as demo data it arrives as one upload, so it stays "learning".
+    """
+    start, events = _at(day, 0, 0), []
+    for i in range(165):
+        events.append(_event(start + timedelta(minutes=5 * i), "log_source_stops", "process_start", None, "10.0.0.5",
+                             host="dc01", message="[SYNTHETIC] process start: scheduled health probe"))
+    events[-1]["message"] = "[SYNTHETIC] service stop: the log forwarder service entered the stopped state"
+    return events
+
+
 # --- Benign look-alikes (noise lab) ------------------------------------------------------
 # Each one is ordinary activity that resembles what one rule looks for. Whether the rule
 # fires on it is measured, not assumed: several of these do trip their rule.
@@ -364,6 +378,20 @@ def trail_maintenance(day, rng):
                                         "StartLogging", "GetTrailStatus"])]
 
 
+def office_badge_reader(day, rng):
+    """A door controller logs badge swipes every half hour in office hours on three days, then the office empties.
+
+    Quiet every evening and night: its overnight gap is part of its cadence, so the evening is not a silence.
+    """
+    events = []
+    for back in (2, 1, 0):
+        opening = _at(day - timedelta(days=back), 8, 0)
+        events += [_event(opening + timedelta(minutes=30 * i), "office_badge_reader", "auth_success",
+                          EMPLOYEES[i % len(EMPLOYEES)], "10.0.70.4", host="door01",
+                          message="[SYNTHETIC] badge accepted at the front door") for i in range(20)]
+    return events
+
+
 def admin_known_source(day, rng):
     """ops-admin's routine IAM change from the office, and a read-only check from the remote site."""
     events = admin_new_source(day, rng)[:-2]  # the same three office mornings, without the outside use
@@ -419,6 +447,10 @@ SCENARIOS = {
                          "expected": {"cloud_logging_disabled": "svc-deploy-tmp"},
                          "description": "The rogue principal svc-deploy-tmp stops and then deletes the CloudTrail "
                                         "trail."},
+    "log_source_stops": {"build": log_source_stops, "malicious": True,
+                         "expected": {"log_source_silent": "demo:log_source_stops|dc01"},
+                         "description": "dc01 has sent telemetry every five minutes since midnight; at 13:40 its log "
+                                        "forwarder is stopped and nothing more arrives."},
     "admin_new_source": {"build": admin_new_source, "malicious": True,
                          "expected": {"admin_action_from_new_source": "ops-admin|198.51.100.77"},
                          "description": "ops-admin changes IAM from the office each morning; at 19:10 it creates an "
@@ -442,6 +474,8 @@ SCENARIO_TECHNIQUES = {
     "exfiltration": ["T1530"],
     "shadow_it": ["T1567"],
     "logging_disabled": ["T1562.008"],
+    # Stopping a host's log forwarder blocks its events from reaching the SIEM.
+    "log_source_stops": ["T1562.006"],
     # A valid cloud account used from new infrastructure. Its CreateAccessKey is also T1098.001, but the rule
     # that detects it does not map T1098.001, so the tag would prove nothing.
     "admin_new_source": ["T1078.004"],
@@ -502,6 +536,11 @@ SCENARIOS.update({
         "build": trail_maintenance, "malicious": False, "expected": {}, "lookalike_of": "cloud_logging_disabled",
         "description": "An administrator replaces the audit trail under a change ticket: creates a trail, sets event "
                        "selectors, updates it, and starts logging. Logging stays on."},
+    "office_badge_reader": {
+        "build": office_badge_reader, "malicious": False, "expected": {}, "lookalike_of": "log_source_silent",
+        "description": "A door controller logs badge swipes every half hour in office hours, three days running, and "
+                       "goes quiet each evening. Its overnight gap is part of its cadence, so the evening is not a "
+                       "silence."},
     "admin_known_source": {
         "build": admin_known_source, "malicious": False, "expected": {},
         "lookalike_of": "admin_action_from_new_source",

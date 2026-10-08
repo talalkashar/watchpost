@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (__version__, assets, attack, auth, ecs, engine, entities, geo, hunt, improve, incidents, portability,
-               queries, report, sigma, simulate, storyline, stream, triage)
+               queries, report, sigma, simulate, sources, storyline, stream, triage)
 from . import backtest as backtest_mod
 from .ratelimit import TokenBucketLimiter
 from .config import Config
@@ -175,6 +175,31 @@ def health_details(req):
     report["recent_detection_runs"] = [dict(r) for r in req.conn.execute(
         "SELECT * FROM detection_runs ORDER BY id DESC LIMIT 10")]
     return report
+
+
+# Log source health ------------------------------------------------------------------------
+# Not a check in /api/health: that endpoint reports Watchpost's own health, and a silent upstream source is
+# not a fault of this service. It is a detection (log_source_silent) and this inventory.
+
+@route("GET", "/api/sources/health")
+def sources_health(req):
+    return sources.inventory(req.conn)
+
+
+@route("POST", "/api/sources/maintenance", role="admin")
+def maintenance_propose(req):
+    """Propose a maintenance window; it excuses silence only once a second admin approves it."""
+    data = body_json(req)
+    req.status = 201
+    return improve.propose_change(req.conn, "maintenance_add", data.get("source"),
+                                  {k: data[k] for k in ("host", "start", "end") if k in data},
+                                  data.get("reason"), req.user["username"])
+
+
+@route("POST", r"/api/sources/maintenance/(\d+)/end", role="admin")
+def maintenance_end(req, window_id):
+    """End a window early: silence counts again from now. Stricter detection, so no review is needed."""
+    return sources.end_window(req.conn, int(window_id), req.user["username"])
 
 
 @route("POST", "/api/detection/run", role="analyst")
@@ -981,7 +1006,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(self.status, result, extra_headers=headers)
         except ApiError as exc:
             self._send(exc.status, {"error": str(exc)})
-        except (auth.AuthError, queries.QueryError, improve.ChangeError, assets.AssetError) as exc:
+        except (auth.AuthError, queries.QueryError, improve.ChangeError, assets.AssetError,
+                sources.WindowError) as exc:
             self._send(getattr(exc, "status", 400), {"error": str(exc)})
         except Exception as exc:
             record_error(self.conn, "api", exc, guidance=f"Unhandled error on {self.command} {parsed.path}")

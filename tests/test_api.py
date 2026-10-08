@@ -254,7 +254,7 @@ class IncidentApiTests(ServerTestCase):
     def test_attack_coverage_and_rule_techniques(self):
         analyst = self.client("analyst")
         rules = analyst.get("/api/rules")[1]
-        self.assertEqual(len(rules), 14)
+        self.assertEqual(len(rules), 15)
         for rule in rules:
             with self.subTest(rule=rule["id"]):
                 self.assertTrue(rule["techniques"])
@@ -350,7 +350,7 @@ class IncidentApiTests(ServerTestCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM incidents").fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM assets").fetchone()[0], 0)
             self.assertIn("base_severity", {r[1] for r in db.execute("PRAGMA table_info(alerts)")})
-            self.assertEqual(db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0], "9")
+            self.assertEqual(db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0], "10")
             actions = [r[0] for r in db.execute("SELECT action FROM audit_log ORDER BY id")]
             self.assertGreater(old_entries, 0)
             self.assertEqual(actions[old_entries], "audit_chain_started")

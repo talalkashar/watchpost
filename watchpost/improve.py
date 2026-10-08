@@ -16,6 +16,7 @@ from . import backtest as backtest_mod
 from . import rules as rules_mod
 from . import sigma
 from . import simulate
+from . import sources as sources_mod
 from .db import audit, iso, now_iso, row_to_dict, transaction, utcnow
 from .engine import active_suppressions, apply_rule_change, correlate_alerts, load_rules
 
@@ -65,6 +66,8 @@ def evaluate(rule_params, seed=7, suppressions=()):
     scenarios = simulate.build(list(simulate.SCENARIOS), seed=seed, now=now)
     # Events dated before the scenario day are history context, as in the engine's rescan.
     day_start = iso(datetime.combine(simulate.demo_day(now), time.min, tzinfo=timezone.utc))
+    # The silence rule judges each scenario as of the end of its day: events arrive at their timestamps there.
+    day_end = iso(datetime.combine(simulate.demo_day(now) + timedelta(days=1), time.min, tzinfo=timezone.utc))
     results = {rid: {"tp": 0, "fn": 0, "fp": 0, "detected": [], "missed": [], "false_positives": [],
                      "lookalikes": [], "lookalikes_fired": [], "suppressed": 0, "group_keys": set()}
                for rid in rule_params}
@@ -78,6 +81,8 @@ def evaluate(rule_params, seed=7, suppressions=()):
         lookalike_of = simulate.SCENARIOS[name].get("lookalike_of")
         for rule_id, params in rule_params.items():
             run_params = rules_mod.exception_params(rule_id, params, suppressions)
+            if rule_id == sources_mod.RULE_ID:
+                run_params = {**run_params, "now": day_end}
             findings = [f for f in rules_mod.rule_function(rule_id)(copy.deepcopy(events), run_params)
                         if f["last_seen"] >= day_start]
             r = results[rule_id]
@@ -290,6 +295,12 @@ def _validate_change(conn, kind, target, payload):
         if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= MAX_SUPPRESSION_DAYS:
             raise ChangeError(f"days must be an integer between 1 and {MAX_SUPPRESSION_DAYS}")
         return None
+    if kind == "maintenance_add":
+        try:
+            sources_mod.validate_window(target, payload)
+        except sources_mod.WindowError as exc:
+            raise ChangeError(str(exc), exc.status)
+        return None
     if kind in ASSET_KINDS:
         try:
             return assets_mod.plan_change(conn, kind, target, payload)  # (before, after)
@@ -297,7 +308,7 @@ def _validate_change(conn, kind, target, payload):
             raise ChangeError(str(exc), exc.status)
     if kind in SIGMA_KINDS:
         return _validate_sigma(conn, kind, target, payload)
-    raise ChangeError(f"kind must be rule_update, setting_update, suppression_add or one of "
+    raise ChangeError(f"kind must be rule_update, setting_update, suppression_add, maintenance_add or one of "
                       f"{', '.join(ASSET_KINDS + SIGMA_KINDS)}")
 
 
@@ -648,6 +659,9 @@ def review_change(conn, change_id, decision, reviewer, note="", digest=None, ack
                 audit(conn, reviewer, "suppression_added", change["target"],
                       {"group_key": change["payload"]["group_key"], "expires_at": expires,
                        "change_request": change_id})
+            elif change["kind"] == "maintenance_add":
+                sources_mod.add_window(conn, change["target"], change["payload"], change["reason"],
+                                       change["proposed_by"], reviewer, change_id)
             elif change["kind"] == "sigma_add":
                 compiled, sample = _validate_sigma(conn, "sigma_add", change["target"], change["payload"])
                 sigma.add_rule(conn, compiled, change["payload"]["source"], sample, change["proposed_by"],
