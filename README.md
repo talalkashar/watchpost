@@ -322,6 +322,30 @@ The landing view is a dark SOC console built for a 1280×800 screen: a status st
 
 **The map positions are synthetic.** `watchpost/geo.py` maps only the RFC 5737 documentation ranges to fictional city names at fixed coordinates, and the RFC 1918 ranges to internal sites. It is not a geo lookup. Any other address is listed as "unknown" and never guessed. The map is labeled "synthetic geo".
 
+### Keyboard shortcuts
+
+| Key | Where | Action |
+| --- | --- | --- |
+| `j` / `k` | Alerts list, Incidents board | Select the next / previous alert or incident (focus ring shows the selection) |
+| `Enter` | Alerts list, Incidents board | Open the selected item |
+| `a` | Alert or incident page | Start investigating (analyst and admin only) |
+| `r` | Alert page | Open the resolve dialog (analyst and admin only) |
+| `Esc` | Alert or incident page | Back to the list, with the item still selected; in a dialog, closes it |
+| `/` | Any view | Focus the view's search box, or open Hunt when the view has none |
+| `?` | Any view | Show the shortcut help (also the "Keyboard shortcuts" button in the side rail) |
+
+Shortcuts never fire while you type in an input, textarea, or select, while a dialog is open, or with Ctrl, Alt, or Cmd held. The read-only viewer can move and open but gets no action keys.
+
+### Accessibility and small screens
+
+What was done: `nav` and `main` landmarks with a skip link, `aria-current` on the current view, a label or `aria-label` on every form control, clickable table rows reachable with Tab and opened with Enter, dialogs on the native `<dialog>` (focus stays inside, Esc closes, focus returns to the trigger), live regions for toasts and errors, status shown by shape and text as well as color, text alternatives on the charts, and no animation under `prefers-reduced-motion`. Text and badge colors meet WCAG AA (4.5:1) against every panel color of the one dark theme. Below 760px the nav folds behind a Menu button, controls are at least 40px tall, and wide tables scroll inside their card.
+
+How it was checked: automated checks only, not a screen-reader audit. `tests/test_ui_a11y.py` asserts the cheap static parts (landmarks, labels in `index.html`, the shortcut handler ignoring typing and dialogs, color contrast computed from the CSS variables). `scripts/ui_check.js` drives headless Chromium through every view and the main dialogs at 1440px and 390px wide, as admin and as viewer: no horizontal page scroll, no unlabeled control or link (a small in-page audit, not axe), 40px tap targets at 390px, no JS errors, and the `j`/`k`/`Enter`/`a`/`r`/`Esc`/`/`/`?` flow. It needs `playwright-core` and a Chromium outside the repo:
+
+```bash
+NODE_PATH=/path/to/node_modules CHROME=/path/to/chrome-headless-shell node scripts/ui_check.js
+```
+
 ## Attack storyline
 
 Admin → "Attack storyline (synthetic)" replays a scripted six-stage intrusion over about two minutes (or faster): web scanning and a port sweep from `203.0.113.80`, a password spray then brute force against `dave`, a VPN login with the cracked password, sudo to root and a new `svc-deploy-tmp` account, a hop to `db01` and cloud IAM changes by that new principal, then bulk storage reads and large outbound transfers. Ten detection rules fire in order and correlation folds them into one Reconnaissance → Exfiltration incident while the dashboard updates live. Every record is labeled synthetic and uses RFC 5737 documentation addresses; the same replay runs in the test suite (`tests/test_storyline.py`) and the smoke check.
@@ -428,6 +452,7 @@ labs/siem/
 ├── samples/            synthetic log files for upload
 ├── scripts/smoke.py    end-to-end smoke check against a real server process
 ├── scripts/loadtest.py seeded load test: ingest, detection, and read-path latency (stdlib only)
+├── scripts/ui_check.js headless browser check: every view at 1440px and 390px, labels, keyboard triage
 ├── scripts/shipper.py  log file shipper for Linux boxes (stdlib only)
 ├── tests/              unittest suite
 ├── docs/API.md         API reference
