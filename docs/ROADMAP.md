@@ -66,5 +66,5 @@ When this list runs low, add more real-SIEM gaps here and keep going. Same groun
       workflow (backtest, two-person review, scenario before enable, like Sigma rules). (PR #33)
 - [x] 20. Viewer data masking: usernames and internal IPs masked for the viewer role in API responses and exports,
       consistent across endpoints, with tests that walk every viewer GET route. (PR #34; off by default)
-- [ ] 21. Release 5.0 (PR titles already used 4.1-4.9): version bump, CHANGELOG from merged PRs, README numbers refreshed from a test run,
-      `LINKEDIN_3.md` draft refreshed (draft only, never posted).
+- [x] 21. Release 5.0 (PR titles already used 4.1-4.9): version bump, CHANGELOG from merged PRs, README numbers refreshed from a test run,
+      `LINKEDIN_3.md` draft refreshed (draft only, never posted). (PR #36)

@@ -4,7 +4,7 @@ All bundled data is synthetic. PR numbers refer to https://github.com/talalkasha
 
 ## 5.0.0 (2026-10-08)
 
-PRs #21 to #34. The PR titles used 4.1 to 4.9 for these rounds; none of them was released under its own version.
+PRs #21 to #35. The PR titles used 4.1 to 4.9 for these rounds; none of them was released under its own version.
 
 ### Detection content
 
@@ -27,6 +27,7 @@ PRs #21 to #34. The PR titles used 4.1 to 4.9 for these rounds; none of them was
 - Fix (found by automated security review of #22): the shared quota had loosened the preview limit; previews are back to a burst of 6, and proposals and approvals use a separate bucket. (#23)
 - Fix (found by automated security review of #25): parallel TOTP guesses could race past the lockout threshold; each attempt now checks and counts in one transaction. Wrong codes on `/api/auth/mfa/disable` now count toward the same lockout budget. (#27)
 - Fix (found by automated security review of #29): a Sigma condition that repeated selections could compile a 63 KB rule to 8.2 MB; compiled detections are now capped at 2,000 values and 128 KB. (#30)
+- Fix (found by automated security review of #34): masking now fails closed. Error messages, rule-export JSON and live streams opened before masking was turned on are masked for viewers, and past 10,000 distinct usernames a viewer gets a 503 instead of raw names. (#35)
 
 ### Hunting
 
@@ -36,7 +37,7 @@ PRs #21 to #34. The PR titles used 4.1 to 4.9 for these rounds; none of them was
 
 - ECS field mapping for export: `GET /api/events/{id}/ecs`. (#28)
 - `__version__` is 5.0.0, so `/api/health` reports 5.0.0.
-- `./run_tests.sh`: 565 tests and the 26-step smoke check pass.
+- `./run_tests.sh`: 569 tests and the 26-step smoke check pass.
 
 ## 4.0.0
 
