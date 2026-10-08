@@ -272,7 +272,8 @@ const Live = {
   },
   renderSpark() {
     const vals = this.epm.slice(-30).map((m) => m.count);
-    mountSvg($("#k-epm-spark"), WPCharts.sparkline(vals, { w: 84, h: 22, cls: "accent", label: "events per minute, last 30 minutes" }));
+    const summary = vals.length ? `: latest ${vals[vals.length - 1]}, peak ${Math.max(...vals)}` : ": no data yet";
+    mountSvg($("#k-epm-spark"), WPCharts.sparkline(vals, { w: 84, h: 22, cls: "accent", label: `events per minute, last 30 minutes${summary}` }));
   },
   renderStrip() {
     const d = this.summary;
@@ -291,7 +292,8 @@ const Live = {
     this.renderSpark();
     const checks = Object.entries(this.health);
     $("#k-health").replaceChildren(...(checks.length ? checks.map(([name, s]) =>
-      el("span", { class: `hc st-${s}`, title: `${name}: ${s}` }, el("i"), { storage: "store", ingestion: "ingest", detection: "detect", dependencies: "deps" }[name] || name)) : [el("span", { class: "muted" }, "…")]));
+      el("span", { class: `hc st-${s}`, title: `${name}: ${s}` }, el("i"), { storage: "store", ingestion: "ingest", detection: "detect", dependencies: "deps" }[name] || name,
+        el("span", { class: "sr-only" }, ` ${s}`))) : [el("span", { class: "muted" }, "…")]));
   },
 
   async pollStory() {
@@ -553,7 +555,7 @@ const Dash = {
     mountSvg(box, WPCharts.stackedBars(t.bins, keys, {
       w, h, overlay: t.bins.map((b) => b.events), labels: t.bins.map((b) => shortTime(b.start)),
       title: (b) => `${fmtTime(b.start)}\n${keys.slice().reverse().map((k) => `${k}: ${b[k]}`).join("  ")}\nevents: ${b.events}`,
-      label: "alerts over time by severity",
+      label: `alerts over time by severity, ${t.bins.length} buckets: ${keys.slice().reverse().map((k) => `${k} ${t.bins.reduce((n, b) => n + (b[k] || 0), 0)}`).join(", ")}`,
     }));
   },
   renderAttackers() {
@@ -566,14 +568,14 @@ const Dash = {
         subCls: loc === null ? "unknown" : "", title: `${a.ip}: ${a.events} evidence events in ${a.alerts} alerts (${a.open_alerts} open)` };
     });
     if (!rows.length) { box.replaceChildren(el("p", { class: "empty-note" }, "No attacker IPs in alert evidence yet.")); return; }
-    mountSvg(box, WPCharts.hbars(rows, { w: this.width("#atk-chart"), rowH: 25, labelW: 136, label: "top attacker IPs" }));
+    mountSvg(box, WPCharts.hbars(rows, { w: this.width("#atk-chart"), rowH: 25, labelW: 136, label: `top attacker IPs by evidence events: ${rows.map((r) => `${r.label} ${r.value}`).join(", ")}` }));
   },
   renderRules() {
     const box = $("#rules-chart");
     if (!box) return;
     const rows = this.data.top_rules.map((r) => ({ label: r.name || r.rule_id, sub: `${r.rule_id} · ${r.open} open`, value: r.alerts, cls: sevOf(r.severity) }));
     if (!rows.length) { box.replaceChildren(el("p", { class: "empty-note" }, "No rule has fired yet.")); return; }
-    mountSvg(box, WPCharts.hbars(rows.slice(0, 7), { w: this.width("#rules-chart"), rowH: 25, labelW: 150, label: "alerts by rule" }));
+    mountSvg(box, WPCharts.hbars(rows.slice(0, 7), { w: this.width("#rules-chart"), rowH: 25, labelW: 150, label: `alerts by rule: ${rows.slice(0, 7).map((r) => `${r.label} ${r.value}`).join(", ")}` }));
   },
   renderEntities() {
     const box = $("#ent-list");
@@ -615,7 +617,7 @@ const Dash = {
       const hot = cov.list.filter((t) => t.hits > 0).length;
       meta.textContent = `${validated}/${cov.list.length} techniques validated on synthetic scenarios · ${hot} observed · `;
       meta.append(el("a", { href: "#coverage" }, "details"));
-      mountSvg(box, WPCharts.heatMatrix(columns, { w, cellH: 21, maxRows: Math.max(3, Math.min(7, ...[Math.max(...columns.map((c) => c.cells.length))])), label: "ATT&CK coverage heat matrix" }));
+      mountSvg(box, WPCharts.heatMatrix(columns, { w, cellH: 21, maxRows: Math.max(3, Math.min(7, ...[Math.max(...columns.map((c) => c.cells.length))])), label: `ATT&CK coverage heat matrix: ${validated} of ${cov.list.length} techniques validated, ${hot} seen in alerts. The Coverage view lists every technique as text.` }));
       return;
     }
     meta.textContent = cov.state === "pending" ? "" : cov.state === "error" ? cov.error : "loading…";
@@ -649,11 +651,11 @@ const Dash = {
     const runs = d ? d.recent_detection_runs.slice().reverse() : [];
     box.replaceChildren(...[
       ...checks.map(([name, s, msg, ms]) => el("div", { class: "hrow2", title: msg || "" },
-        el("span", { class: `hc st-${s}` }, el("i")), el("b", {}, name), el("span", { class: "muted hmsg" }, msg), el("span", { class: "hms" }, ms === null ? "" : `${ms} ms`))),
+        el("span", { class: `hc st-${s}` }, el("i"), el("span", { class: "sr-only" }, `${s}: `)), el("b", {}, name), el("span", { class: "muted hmsg" }, msg), el("span", { class: "hms" }, ms === null ? "" : `${ms} ms`))),
       el("div", { class: "hrow2" }, el("span", { class: `hc st-${Live.mode === "live" ? "ok" : Live.mode === "poll" ? "degraded" : "failing"}` }, el("i")),
         el("b", {}, "stream"), el("span", { class: "muted hmsg" }, `${$("#k-live-text").textContent}${Live.subscribers ? ` · ${Live.subscribers} viewer(s)` : ""}`), el("span", { class: "hms" }, "")),
       runs.length ? el("div", { class: "runs" }, el("span", { class: "muted" }, "detection runs"),
-        el("span", { class: "rundots" }, ...runs.map((r) => el("i", { class: `st-${r.status === "ok" ? "ok" : r.status === "failed" ? "failing" : "degraded"}`, title: `#${r.id} ${r.trigger} · ${r.status} · ${r.events_scanned} scanned · +${r.alerts_created}` })))) : null].filter(Boolean));
+        el("span", { class: "rundots", role: "img", "aria-label": `${runs.length} recent runs: ${runs.filter((r) => r.status === "ok").length} ok, ${runs.filter((r) => r.status === "failed").length} failed` }, ...runs.map((r) => el("i", { class: `st-${r.status === "ok" ? "ok" : r.status === "failed" ? "failing" : "degraded"}`, title: `#${r.id} ${r.trigger} · ${r.status} · ${r.events_scanned} scanned · +${r.alerts_created}` })))) : null].filter(Boolean));
   },
 };
 
@@ -700,5 +702,6 @@ async function incidentsView() {
       inc.state === "ok" ? el("span", { class: "muted" }, `${inc.list.length} incidents`) : chip("INCIDENTS PENDING · SHOWING ALERTS", "pendingchip")),
     inc.state !== "ok" ? el("p", { class: "muted" }, inc.state === "error" ? inc.error
       : "Alerts become incidents once the correlation engine ships (GET /api/incidents). Until then this board groups alerts by status.") : null,
-    el("div", { class: "board big" }, ...incidentBoard(inc, alerts, 50)));
+    el("div", { class: "board big", "data-kbd-list": "incidents" }, ...incidentBoard(inc, alerts, 50)));
+  restoreSelection(`[data-kbd-list] a.bcard[href="#incidents/${state.restore}"]`);
 }
