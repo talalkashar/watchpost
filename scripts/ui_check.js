@@ -335,6 +335,7 @@ async function main() {
         "viewer: rules export link shown, no import buttons");
       await show(page, "hunt");
       check(await page.locator("button:has-text('Promote to detection…')").count() === 0, "viewer: no promote button on saved searches");
+      check(await page.locator("#masked-pill").count() === 0, "viewer: no Masked view pill while viewer_masking is off (the default)");
       check(!errors.length, `viewer: no JS errors${errors.length ? `: ${errors.join(" | ")}` : ""}`);
       await ctx.close();
     }
