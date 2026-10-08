@@ -18,6 +18,10 @@ It uses only the Python standard library (3.10+). No packages to install, no pai
      incident-detail.png (kill-chain stages, techniques by tactic), incident-report-pdf.png (first page of the PDF),
      storyline-running.png (dashboard mid-storyline with the stage tile). -->
 
+## What's new in 5.0
+
+5.0 collects PRs #21 to #34: rule backtesting, triage metrics, TOTP and session management, rule export/import with ECS mapping, a Sigma subset import, log source health, hunt aggregations, saved searches as detections, and viewer data masking. See [CHANGELOG.md](CHANGELOG.md) for the full list, including the security fixes found by automated review.
+
 ## What's new in 4.0
 
 4.0 is about making each claim checkable: every feature has a test, every number comes from a script you can rerun, and the limits are written down next to the feature.
@@ -115,7 +119,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 ### Tests
 
 ```bash
-./run_tests.sh      # 418 unit/integration tests + a 26-step end-to-end smoke check
+./run_tests.sh      # 569 unit/integration tests + a 26-step end-to-end smoke check
 ```
 
 ### Replit
@@ -173,7 +177,7 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | `watchpost/normalize.py` | Parses JSON, JSONL, CSV, Linux `auth.log` (OpenSSH), and Windows Security events (4624/4625/4672/4688/4720/4740). Accepts common field aliases, including ECS-style nesting. Validates timestamps, IPs, severities, and lengths, strips control characters, and redacts secrets. Every rejected record gets a reason and a position. |
 | `watchpost/correlate.py`, `watchpost/incidents.py` | Pure alert-to-incident grouping; incident queries, status changes, and ATT&CK coverage. |
 | `watchpost/attack.py`, `watchpost/geo.py` | Static ATT&CK subset; synthetic geo table for demo IP ranges (never a real lookup). |
-| `watchpost/rules.py` | Fourteen explainable rules as pure functions over event lists, each with a plain-English explanation. Also validates rule parameters. |
+| `watchpost/rules.py` | Fifteen built-in explainable rules as pure functions over event lists, each with a plain-English explanation. Also validates rule parameters. |
 | `watchpost/engine.py` | Stores each batch atomically, then runs detection over the batch's time range plus the longest rule window. Rules that compare with earlier activity (`history_seconds`) also get their own history span before that, of only the event types they read. Deduplicates and extends open alerts, and records every detection run. |
 | `watchpost/queries.py` | Event search (parameterized SQL), alert detail with evidence and a related-events timeline, notes, status changes, and SOC metrics. |
 | `watchpost/hunt.py` | Hunt query parser and compiler (whitelisted fields, bound values), the `\|` stats/top/timechart stage, and saved searches. |
@@ -663,7 +667,7 @@ What these numbers do and do not say:
 
 ## What is real vs. synthetic vs. future
 
-**Real, working, and tested:** everything in the architecture section. That includes the ingestion API and file upload, normalization, persistence, search, the fourteen rules, the noise lab, tuning exceptions, entity risk scores, ATT&CK mapping and coverage, incident correlation, Markdown and PDF reports, the SSE dashboard, the syslog listener and shipper, alerts with evidence and timelines, notes, status and verdicts, metrics, health checks and recovery, authentication, roles (including the read-only viewer), per-IP rate limiting, CSRF protection, API tokens, redaction, feedback-driven suggestions, two-person review (including asset inventory edits), evaluation history, hunting and saved searches, keyboard triage, and the hash-chained audit log.
+**Real, working, and tested:** everything in the architecture section. That includes the ingestion API and file upload, normalization, persistence, search, the fifteen built-in rules, the noise lab, tuning exceptions, entity risk scores, ATT&CK mapping and coverage, incident correlation, Markdown and PDF reports, the SSE dashboard, the syslog listener and shipper, alerts with evidence and timelines, notes, status and verdicts, metrics, health checks and recovery, authentication, roles (including the read-only viewer), per-IP rate limiting, CSRF protection, API tokens, redaction, feedback-driven suggestions, two-person review (including asset inventory edits), evaluation history, hunting and saved searches, keyboard triage, and the hash-chained audit log.
 
 **Synthetic:** all bundled data. The demo dataset and simulator scenarios (`watchpost/simulate.py`) and the files in `samples/` are invented. External IPs come from the RFC 5737 documentation ranges. Synthetic events are stored with `synthetic=1`, sourced `demo:*`, and tagged in the UI. The evaluation scores (recall and precision) measure the rules against these hand-labeled scenarios only. They say nothing about real-world accuracy.
 
@@ -676,7 +680,7 @@ What these numbers do and do not say:
 - Rules cover authentication, web, firewall/VPN, cloud audit, and host scenarios with fixed thresholds. Geo for impossible travel comes from a synthetic table covering only documentation and private ranges.
 - There is no scheduled detection. Detection runs on ingest and on demand.
 
-**Future ideas (not implemented):** Sigma rule import, GeoIP and threat-intel enrichment (both need external data), scheduled runs and retention, user management, MFA, and case management beyond incidents.
+**Future ideas (not implemented):** GeoIP and threat-intel enrichment (both need external data), scheduled runs and retention, user management, and case management beyond incidents.
 
 ---
 
