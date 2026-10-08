@@ -26,7 +26,7 @@ It uses only the Python standard library (3.10+). No packages to install, no pai
 |---|---|
 | **Tamper-evident audit log** | Audit entries form a hash chain (HMAC-SHA256 with `SIEM_AUDIT_KEY`, plain SHA-256 without). `GET /api/audit/verify` (admin) walks it and reports `verified`, `partial`, or `broken` with the first break; **Admin → Audit log** shows a badge. What it does and does not detect is listed under [Tamper-evident audit log](#tamper-evident-audit-log). |
 | **ATT&CK coverage graded by evidence** | Each technique is **validated** (an enabled rule detects a labeled scenario that shows it), **mapped**, **disabled**, or a **gap**. With the default rules, 16 of 19 catalog techniques are validated and 3 are only mapped. Validated means detected on the project's own synthetic scenarios, not in real traffic. See [ATT&CK coverage](#attck-coverage). |
-| **Hunting** | A one-line query language over events (`field:value`, prefixes, `NOT`, `last:7d`, `since:`/`until:`), compiled from a field whitelist with bound values. Saved searches for analysts and admins; the viewer can run them. See [Hunting](#hunting). |
+| **Hunting** | A one-line query language over events (`field:value`, prefixes, `NOT`, `last:7d`, `since:`/`until:`), compiled from a field whitelist with bound values, plus one `| stats`, `| top` or `| timechart` aggregation stage. Saved searches for analysts and admins; the viewer can run them. See [Hunting](#hunting). |
 | **Two new detections** | `cloud_logging_disabled` (T1562.008) and `admin_action_from_new_source` (T1078), fourteen rules in total. Each has a labeled attack and a benign look-alike in the noise lab, and the cold-start limits are documented. |
 | **Load test and indexes** | `scripts/loadtest.py` (seeded, stdlib only) ingests 100,000 synthetic events and times the read routes. New indexes and narrower per-batch history reads; one laptop run ingested 5,314 events/s. See [Performance](#performance). |
 | **Reviewed asset edits** | Builds on Juan Carlos Munera's asset inventory (PR #9): an edit that could lower alert severity (lower criticality, drop a tag or address, rename, delete, claim another asset's address) needs a second admin, with before/after evidence and the alerts it would move. An address listed on several assets now matches all of them, so inventory order never decides the weighting. See [Asset inventory review](#asset-inventory-review). |
@@ -176,7 +176,7 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | `watchpost/rules.py` | Fourteen explainable rules as pure functions over event lists, each with a plain-English explanation. Also validates rule parameters. |
 | `watchpost/engine.py` | Stores each batch atomically, then runs detection over the batch's time range plus the longest rule window. Rules that compare with earlier activity (`history_seconds`) also get their own history span before that, of only the event types they read. Deduplicates and extends open alerts, and records every detection run. |
 | `watchpost/queries.py` | Event search (parameterized SQL), alert detail with evidence and a related-events timeline, notes, status changes, and SOC metrics. |
-| `watchpost/hunt.py` | Hunt query parser and compiler (whitelisted fields, bound values) and saved searches. |
+| `watchpost/hunt.py` | Hunt query parser and compiler (whitelisted fields, bound values), the `\|` stats/top/timechart stage, and saved searches. |
 | `watchpost/auth.py` | PBKDF2-SHA256 password hashing, lockout, and server-side sessions (only token hashes are stored). Also ingest-only API tokens (hashed) and the viewer < analyst < admin roles. Viewers are read-only: the server refuses every non-GET request from them except logout. |
 | `watchpost/totp.py` | RFC 6238 TOTP (HMAC-SHA1, 6 digits, 30 s, ±1 step), stdlib only. See [Two-factor sign-in and sessions](#two-factor-sign-in-and-sessions). |
 | `watchpost/ratelimit.py` | In-memory per-IP token buckets. `server.py` answers 429 with `Retry-After` when a bucket is empty. |
@@ -432,6 +432,27 @@ user:alice event_type:auth_failure NOT src_ip:10.0.0.5 host:web* "invalid passwo
 ip:203.0.113.* event_type:fw_deny last:7d
 event_type:auth_success -source:demo:* since:2026-10-01
 ```
+
+#### Aggregations (`|` pipeline)
+
+One stage may follow the filter, after a `|`. The filter picks the events and the stage counts them in SQL (`GROUP BY` with a `LIMIT`), so nothing loads the whole table into Python.
+
+| Stage | Example | Result |
+|---|---|---|
+| `stats <agg>[, <agg>] [by <f1>[, <f2>]]` | `event_type:auth_failure \| stats count, dc(user) by src_ip` | One row per group, largest first (ties by value). Aggregates: `count`, `dc(<field>)` (also written `count(distinct <field>)`), at most 3. Without `by`, one row for all matched events. |
+| `top [N] <field>` | `event_type:auth_failure \| top 10 src_ip` | The N most common values (1 to 100, default 10) with count and percent of all matched events. |
+| `timechart span=<5m\|15m\|1h\|6h\|1d> [count] [by <field>]` | `host:web* last:24h \| timechart span=1h by user` | Events per time bucket. Buckets start on UTC boundaries (midnight for `1d`, 00/06/12/18 for `6h`) and are computed in SQL from the stored `ts`. Empty buckets are 0. With `by`, the 5 largest series are kept and everything else (including events without the field) is summed into `other`. |
+
+Caps and rules:
+
+- `stats` returns at most 1000 groups, and `top` at most N values. The response says `"truncated": true` when there were more.
+- Groups compare values exactly, so `by user` lists `Alice` and `alice` separately even though the `user:` filter ignores case. A pivot on either one shows both.
+- `timechart` covers the query's time window (`last:`, `since:`, `until:`), or the first to last matching event when there is none, and draws at most 500 buckets. A larger range is refused with the bucket count and a hint to narrow the time range or use a wider span, rather than silently trimmed. `last:24h` works with every span, `last:7d` needs `1h` or wider.
+- Group-by and `dc()` fields come from the same whitelist as filter terms: any of them except `message` (free text), `ip` (use `src_ip` or `dest_ip`) and the time filters, each refused with the reason. Events with no value in a `by` field are left out of `stats` and `top` groups, but still count toward `top`'s percent.
+- Only one stage. A second `|`, an unknown command, an unknown aggregate, or a field name that is not on the whitelist is a 400 that lists what is supported. Field names in the stage become SQL only through the whitelist, and values stay bound parameters.
+- A `|` starts the stage only at the start of a word. Inside a quoted value (`"a | b"`) or an unquoted word (`host:a|b`) it is part of the value.
+
+The response is `{"kind": "stats"|"top"|"timechart", "columns": [...], "rows": [[...], ...], "truncated": bool, "terms": [...], "query": "...", "filter": "..."}`, where `filter` is the query text before the `|`. A query without a stage keeps the event page shape. In the UI, `stats` and `top` render as a table where each value is a link that adds `field:value` to the filter and shows the matching events. `timechart` renders as an inline SVG chart (bars, or one line per series with `by`) with the numbers in a data table below it. Saved searches can hold a stage, and it is checked on save. The viewer can run aggregations but still cannot save.
 
 Each term compiles to a fixed SQL fragment chosen from a field whitelist, with the value as a bound parameter, so a value like `user:"x' OR 1=1 --"` matches that literal user name and nothing else. Any role can run a hunt and read saved searches. Analysts and admins can save a search (the query is checked on save) and delete their own; admins can delete any. Each save and delete is written to the audit log.
 
