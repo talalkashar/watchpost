@@ -84,5 +84,6 @@ When this list runs low, add more real-SIEM gaps here and keep going. Same groun
       expiry, revocation and last-used metadata; viewer-equivalent tokens remain read-only. (PR #43)
 - [x] 26. Saved dashboard views: analysts can save and share dashboard filter/layout presets, viewers can apply
       them read-only, and changes are audited with ownership and visibility enforced server-side. (PR #45)
-- [ ] 27. Per-rule alert grouping keys: reviewed grouping configuration with a preview of deduplication effects,
+- [x] 27. Per-rule alert grouping keys: reviewed grouping configuration with a preview of deduplication effects,
       stable evidence attachment, and clear documentation of how grouping differs from incident correlation.
+      (PR #47)
