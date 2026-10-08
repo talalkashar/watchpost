@@ -1,5 +1,7 @@
 # Watchpost: a small, working SIEM
 
+[![tests](https://github.com/talalkashar/watchpost/actions/workflows/tests.yml/badge.svg)](https://github.com/talalkashar/watchpost/actions/workflows/tests.yml)
+
 Watchpost is a self-contained Security Information and Event Management (SIEM) lab. It ingests authentication, web, firewall/VPN, cloud audit, and host logs, normalizes them into one schema, and stores them in SQLite. It runs explainable detection rules, raises alerts with evidence, and supports an analyst workflow from triage to resolution. It also reports its own health and learns nothing on its own: rule changes come from analyst feedback and need approval from a second person.
 
 It uses only the Python standard library (3.10+). No packages to install, no paid services, no outbound network calls.
