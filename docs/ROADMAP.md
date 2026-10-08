@@ -37,3 +37,21 @@ every feature verifiable, every number reproducible, nothing overclaimed.
       owner; coordinate on the PR, credit him).
 - [ ] 8. UI pass: keyboard triage, mobile width, accessibility labels.
 - [ ] 9. Refresh `LINKEDIN_3.md` draft and README numbers from the latest test run.
+
+## Next wave (added 2026-10-07: owner: "the siem can be endlessly better and closer to a real siem")
+
+When this list runs low, add more real-SIEM gaps here and keep going. Same ground rules.
+
+- [ ] 10. CI: GitHub Actions running `./run_tests.sh` on every PR (Python 3.11 to 3.14), badge in README.
+- [ ] 11. Rule backtesting: run a proposed rule change against stored history before approval and show the
+      alert diff (new / lost alerts) in the review panel, so reviewers approve evidence, not params.
+- [ ] 12. Case workflow metrics: alert assignment, acknowledge/resolve timestamps, MTTA/MTTR per severity on the
+      dashboard, SLA breach badges. Numbers labeled synthetic when the data is.
+- [ ] 13. Login hardening: TOTP second factor (stdlib HMAC, RFC 6238) for admin/analyst, per-account lockout with
+      audit entries, session list with revoke.
+- [ ] 14. Explainable entity risk: per-user/host score from alert severities, asset weight, and recency with a
+      visible breakdown; no ML, every point traceable to an alert.
+- [ ] 15. Detection content portability: export/import rules as versioned JSON, plus a documented field mapping
+      from Watchpost's event schema to ECS names.
+- [ ] 16. Sigma subset: import a documented subset of Sigma rules (stdlib parser for the YAML subset Sigma uses),
+      refuse anything outside it with a clear reason, scenario required before enable.
