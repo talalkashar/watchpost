@@ -124,7 +124,7 @@ def review_reasons(before, after, taken=frozenset()):
     """Why the edit from `before` to `after` (clean asset dicts; None when absent) needs a second admin.
 
     Returns short phrases, empty when the edit may apply directly. `taken` holds the addresses already on
-    other assets: claiming one can take over that asset's matches, since an address matches one asset only.
+    other assets: claiming one is still reviewed, though `match` counts every asset that lists an address.
     """
     if after is None:
         return ["deletes the asset"]
@@ -149,12 +149,16 @@ def _public(asset):
 
 
 def index(assets):
-    """Lookup tables for fast matching: lowercase host name -> asset, IP string -> asset."""
+    """Lookup tables for fast matching: lowercase host name -> asset, IP string -> every asset listing it.
+
+    An address shared by several assets matches all of them, so inventory order (which a direct raise or
+    re-case can change) never decides which asset an alert keeps.
+    """
     by_name, by_ip = {}, {}
     for a in assets:
         by_name[a["name"].lower()] = a
         for ip in a.get("addresses") or []:
-            by_ip.setdefault(ip, a)
+            by_ip.setdefault(ip, []).append(a)
     return {"by_name": by_name, "by_ip": by_ip}
 
 
@@ -168,8 +172,7 @@ def match(idx, events):
             found[a["name"]] = a
         for field in ("dest_ip", "src_ip"):
             ip = e.get(field)
-            if ip and ip in idx["by_ip"]:
-                a = idx["by_ip"][ip]
+            for a in idx["by_ip"].get(ip, []) if ip else []:
                 found[a["name"]] = a
     return [found[k] for k in sorted(found)]
 
