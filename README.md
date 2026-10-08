@@ -119,7 +119,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow
 ### Tests
 
 ```bash
-./run_tests.sh      # 574 unit/integration tests + a 26-step end-to-end smoke check
+./run_tests.sh      # 580 unit/integration tests + a 26-step end-to-end smoke check
 ```
 
 ### Replit
@@ -190,6 +190,7 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | `watchpost/improve.py` | Scenario evaluation (TP/FN/FP, recall, precision), rule performance from analyst verdicts, heuristic suggestions, and two-person change review. |
 | `watchpost/backtest.py` | Replays a proposed rule change over stored events (kept / new / lost findings, open alerts it would lose) for the review evidence and the preview route. |
 | `watchpost/portability.py` | Rule export and import: tuning (params, enabled) out as versioned JSON, and back in as reviewed `rule_update` proposals. |
+| `watchpost/detection_tests.py` | Detection-as-code validation and bundled malicious/benign sample checks for exported built-in rules. |
 | `watchpost/ecs.py` | Maps an event to Elastic Common Schema field names for export. |
 | `watchpost/syslog_listener.py` | Optional UDP/TCP syslog receiver (RFC 3164, RFC 5424, RFC 6587 framing). Runs each line through the auth.log parser, falls back to a generic `syslog` event with severity from PRI, and batches into the engine every 2 seconds. Reports itself as the `syslog` health component. |
 | `scripts/shipper.py` | Stdlib-only file tailer for Linux boxes: batches new lines to `/api/ingest/upload` with an ingest token, with backoff, rotation handling, and a position file. |
@@ -329,6 +330,21 @@ What it is not: it replays stored events only, so it can't predict traffic you h
 `POST /api/rules/import` (analyst and above) takes that document, up to 256 KB and 200 rules. It applies nothing. A wrong `format` or `format_version`, an unknown top-level key, or a malformed document refuses the whole import. Each rule is then checked on its own: an unknown rule id, an unknown key, or params that fail the same validation a `rule_update` proposal uses are refused with a reason. Each rule whose params or enabled state differ from today's becomes an ordinary `rule_update` change request with the reason "imported from <file name>", carrying only the changed keys. The backtest evidence, the detection-loss acknowledgement, the true-positive gate and the two-person review all still apply. Identical rules are reported as `unchanged`. The response lists each rule as `proposed` (with `change_id`), `unchanged` or `refused` (with `reason`). `?dry_run=1` returns the same outcomes (`would_propose` instead of `proposed`) and creates nothing.
 
 Every proposal runs a backtest, so an import spends one token per changed rule from the same per-account bucket as hand-made rule proposals (burst 20). It spends them all up front, or refuses the import with 429 and proposes nothing. A dry run spends nothing. The import is audited as `rules_imported` with the change ids, the unchanged count and the refusal reasons. On the **Rules** page, **Export rules (JSON)** is there for every role; **Import rules…** (analyst and above) previews the dry run, then **Create proposals** sends it.
+
+### Detection-as-code checks
+
+`python3 scripts/test_detections.py watchpost-rules.json` validates an exported rules document and runs each
+enabled built-in rule against its labeled malicious scenarios and targeted benign look-alikes. It writes only
+JSON to stdout: exit 0 means every sample passed, exit 1 means at least one detection test failed, and exit 2
+means the export or its JSON was invalid. Pass `-` instead of a file name to read stdin. Disabled rules are
+validated and reported as skipped; an empty export, duplicate or unknown rule, unknown key, invalid parameter,
+or document over 256 KB fails closed.
+
+The checks use the built-in samples and detection code in the same checkout, so the export supplies tuning,
+not executable logic. Sigma and promoted-search samples live in the Watchpost database and are not part of the
+version 1 export; the CLI refuses those rule ids rather than reporting an untested pass. Several default rules
+intentionally still fire on known benign look-alikes in the noise lab, so a full default export currently exits
+1 and names those scenarios. That is test evidence to tune, not a waived baseline.
 
 ### Sigma rule import
 
@@ -700,6 +716,7 @@ labs/siem/
 ├── samples/            synthetic log files for upload
 ├── scripts/smoke.py    end-to-end smoke check against a real server process
 ├── scripts/loadtest.py seeded load test: ingest, detection, and read-path latency (stdlib only)
+├── scripts/test_detections.py validate a rule export and run labeled detection samples (stdlib only)
 ├── scripts/ui_check.js headless browser check: every view at 1440px and 390px, labels, keyboard triage
 ├── scripts/shipper.py  log file shipper for Linux boxes (stdlib only)
 ├── tests/              unittest suite
