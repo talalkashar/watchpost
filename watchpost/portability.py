@@ -1,6 +1,6 @@
 """Rule export and import: move rule tuning between Watchpost instances.
 
-What moves is tuning, the `params` and `enabled` of rules this code already has. Detection logic is Python
+What moves is tuning: `params`, `enabled`, and reviewed alert `grouping` of rules this code already has. Detection logic is Python
 code in rules.py and is not exported, so an import cannot add a rule or change how one detects.
 
 An import applies nothing. Each rule whose tuning differs from today's becomes an ordinary `rule_update`
@@ -15,19 +15,20 @@ from .db import audit, now_iso
 from .engine import load_rules
 
 FORMAT, FORMAT_VERSION = "watchpost-rules", 1
-NOTE = ("Rule tuning only (params, enabled). Detection logic is Python code in watchpost/rules.py and is not "
+NOTE = ("Rule tuning only (params, enabled, grouping). Detection logic is Python code in watchpost/rules.py and is not "
         "exported: an import can retune rules the importing instance already has, never add or change logic.")
 MAX_IMPORT_BYTES = 256 * 1024
 MAX_IMPORT_RULES = 200
 DOCUMENT_KEYS = {"format", "format_version", "watchpost_version", "exported_at", "note", "rules"}
 # Keys an exported rule carries. Only params and enabled are imported; the rest describe the rule as it was.
-RULE_KEYS = {"id", "name", "version", "enabled", "severity", "params", "techniques", "description"}
+RULE_KEYS = {"id", "name", "version", "enabled", "severity", "params", "grouping", "techniques", "description"}
 
 
 def export_rules(conn):
     """Every rule's tuning and description, sorted by id. Callers serialize with sorted keys."""
     rules = [{"id": r["id"], "name": r["name"], "version": r["version"], "enabled": bool(r["enabled"]),
               "severity": r["severity"], "params": rules_mod.validate_params(r["id"], r["params"]),
+              "grouping": r["grouping"],
               "techniques": [t["id"] for t in r["techniques"]], "description": r["description"]}
              for r in load_rules(conn, enabled_only=False)]
     return {"format": FORMAT, "format_version": FORMAT_VERSION, "watchpost_version": __version__,
@@ -75,7 +76,7 @@ def plan_import(conn, doc):
         elif rule_id not in current:
             item.update(outcome="refused", reason=f"unknown rule {rule_id!r}; an import cannot add detection logic")
         else:
-            payload = {k: entry[k] for k in ("params", "enabled") if k in entry}
+            payload = {k: entry[k] for k in ("params", "enabled", "grouping") if k in entry}
             try:
                 merged = improve.validate_rule_update(conn, rule_id, payload)
             except improve.ChangeError as exc:
@@ -88,6 +89,8 @@ def plan_import(conn, doc):
                     changes["params"] = params
                 if "enabled" in payload and payload["enabled"] != bool(current[rule_id]["enabled"]):
                     changes["enabled"] = payload["enabled"]
+                if "grouping" in payload and payload["grouping"] != current[rule_id]["grouping"]:
+                    changes["grouping"] = payload["grouping"]
                 if changes:
                     item.update(outcome="would_propose", changes=changes)
                 else:

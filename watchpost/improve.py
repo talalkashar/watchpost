@@ -13,6 +13,7 @@ from datetime import datetime, time, timedelta, timezone
 
 from . import assets as assets_mod
 from . import backtest as backtest_mod
+from . import grouping
 from . import rules as rules_mod
 from . import search_rules
 from . import sigma
@@ -265,8 +266,13 @@ def _validate_change(conn, kind, target, payload):
         rule = conn.execute("SELECT params FROM rules WHERE id = ?", (target,)).fetchone()
         if rule is None:
             raise ChangeError(f"unknown rule {target!r}", 404)
-        if not set(payload) <= {"params", "enabled"} or not payload:
-            raise ChangeError("rule changes may only contain 'params' and/or 'enabled'")
+        if not set(payload) <= {"params", "enabled", "grouping"} or not payload:
+            raise ChangeError("rule changes may only contain params, enabled and/or grouping")
+        if "grouping" in payload:
+            try:
+                grouping.validate(payload["grouping"])
+            except ValueError as exc:
+                raise ChangeError(str(exc))
         if "enabled" in payload and not isinstance(payload["enabled"], bool):
             raise ChangeError("enabled must be true or false")
         if sigma.is_sigma(target):
@@ -542,6 +548,8 @@ def _evidence(conn, kind, target, payload, proposer):
                       "backtest": backtest_mod.backtest(conn, target, after[target],
                                                         running=(enabled, payload.get("enabled", enabled)),
                                                         limit=BACKTEST_EVIDENCE_LIMIT)}
+        if "grouping" in payload:
+            evaluation["grouping_preview"] = grouping.preview(conn, target, payload["grouping"])
     elif kind == "suppression_add":
         params = {target: current_params(conn, include_disabled=True)[target]}
         active = active_suppressions(conn)
