@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # prev_hash of the first audit entry. Every later entry links to the hash of the one before it.
 GENESIS_HASH = "0" * 64
@@ -49,6 +49,8 @@ CREATE INDEX IF NOT EXISTS idx_events_dest_ip ON events(dest_ip, ts);
 CREATE INDEX IF NOT EXISTS idx_events_severity ON events(severity, ts);
 CREATE INDEX IF NOT EXISTS idx_events_ingested ON events(ingested_at);
 CREATE INDEX IF NOT EXISTS idx_events_synthetic ON events(synthetic);
+-- 10.0: log source health reads each (source, host) pair's arrivals, newest first (watchpost/sources.py).
+CREATE INDEX IF NOT EXISTS idx_events_source_host ON events(source, host, ingested_at);
 
 CREATE TABLE IF NOT EXISTS ingest_batches (
     id TEXT PRIMARY KEY,
@@ -303,6 +305,23 @@ CREATE TABLE IF NOT EXISTS sigma_rules (
     approved_by TEXT NOT NULL,
     change_request_id INTEGER,
     created_at TEXT NOT NULL
+);
+
+-- 10.0: planned silence for a log source (host NULL: every host of the source). Added only through an approved
+-- change request; an admin can end one early (ended_at). The row stays as history.
+CREATE TABLE IF NOT EXISTS maintenance_windows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    host TEXT,
+    starts_at TEXT NOT NULL,
+    ends_at TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    proposed_by TEXT NOT NULL,
+    approved_by TEXT NOT NULL,
+    change_request_id INTEGER,
+    created_at TEXT NOT NULL,
+    ended_at TEXT,
+    ended_by TEXT
 );
 
 CREATE TABLE IF NOT EXISTS saved_searches (

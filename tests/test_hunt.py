@@ -276,7 +276,7 @@ class HuntApiTests(ServerTestCase):
         from watchpost.server import App
         App(self.config)
         with sqlite3.connect(self.db_path) as db:
-            self.assertEqual(db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0], "9")
+            self.assertEqual(db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0], "10")
             columns = [r[1] for r in db.execute("PRAGMA table_info(saved_searches)")]
         self.assertEqual(columns, ["id", "name", "query", "description", "owner", "created_at"])
         self.assertEqual(self.client("analyst").post("/api/hunt/saved", {"name": "after", "query": "user:a"})[0], 201)

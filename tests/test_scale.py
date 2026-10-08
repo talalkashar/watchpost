@@ -39,7 +39,7 @@ class SchemaSixUpgradeTests(unittest.TestCase):
             self.addCleanup(conn.close)
             self.assertEqual(conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0],
                              str(SCHEMA_VERSION))
-            self.assertEqual(SCHEMA_VERSION, 9)
+            self.assertEqual(SCHEMA_VERSION, 10)
             indexes = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
             self.assertLessEqual(set(NEW_INDEXES), indexes)
             # The upgrade writes no audit entry and rewrites none: the chain is byte-for-byte what it was.
