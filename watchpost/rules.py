@@ -12,6 +12,7 @@ Rules are deliberately simple, threshold-based, and explainable. No machine lear
 from collections import Counter, defaultdict, deque
 
 from . import geo
+from . import sigma
 from .attack import techniques
 from .db import parse_iso
 
@@ -220,6 +221,11 @@ class RuleConfigError(ValueError):
 def validate_params(rule_id, params):
     import ipaddress
 
+    if sigma.is_sigma(rule_id):  # an imported Sigma rule: its params are the compiled detection, not tunable
+        try:
+            return sigma.validate_params(params)
+        except sigma.SigmaError as exc:
+            raise RuleConfigError(str(exc))
     defaults = next((r["params"] for r in DEFAULT_RULES if r["id"] == rule_id), None)
     if defaults is None:
         raise RuleConfigError(f"unknown rule {rule_id!r}")
@@ -765,6 +771,13 @@ RULE_FUNCTIONS = {
     "cloud_logging_disabled": cloud_logging_disabled,
     "admin_action_from_new_source": admin_action_from_new_source,
 }
+
+
+def rule_function(rule_id):
+    """The function that runs a rule: a built-in from RULE_FUNCTIONS, or the Sigma evaluator. None if neither."""
+    if sigma.is_sigma(rule_id):
+        return sigma.run
+    return RULE_FUNCTIONS.get(rule_id)
 
 
 # Rules where a tuning exception does not skip findings but turns on the principal's baseline instead.

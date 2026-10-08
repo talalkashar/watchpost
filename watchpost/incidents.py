@@ -1,6 +1,6 @@
 """Read-side incident queries, incident status changes, and ATT&CK coverage."""
 
-from . import assets, attack, improve, simulate
+from . import assets, attack, improve, sigma, simulate
 from .db import audit, now_iso, row_to_dict, transaction
 from .engine import load_rules
 from .normalize import SEVERITIES
@@ -111,4 +111,6 @@ def coverage(conn):
     hits = {r["rule_id"]: r["count"] for r in conn.execute(
         "SELECT rule_id, COUNT(*) AS count FROM alerts GROUP BY rule_id")}
     cov = attack.coverage(load_rules(conn, enabled_only=False), hits)
-    return attack.evidence(cov, improve.cached_noise_lab(conn)["rules"], simulate.SCENARIOS)
+    # Imported Sigma rules are proved by their own labeled sample, never by the built-in scenarios.
+    return attack.evidence(cov, improve.cached_noise_lab(conn)["rules"],
+                           {**simulate.SCENARIOS, **sigma.sample_scenarios(conn)})

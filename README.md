@@ -292,6 +292,36 @@ What it is not: it replays stored events only, so it can't predict traffic you h
 
 Every proposal runs a backtest, so an import spends one token per changed rule from the same per-account bucket as hand-made rule proposals (burst 20). It spends them all up front, or refuses the import with 429 and proposes nothing. A dry run spends nothing. The import is audited as `rules_imported` with the change ids, the unchanged count and the refusal reasons. On the **Rules** page, **Export rules (JSON)** is there for every role; **Import rules…** (analyst and above) previews the dry run, then **Create proposals** sends it.
 
+### Sigma rule import
+
+`watchpost/sigma.py` imports a [Sigma](https://github.com/SigmaHQ/sigma) rule as a new Watchpost rule. It is the only way to add detection logic without code, and it supports a deliberately small subset. Anything outside it is refused with a reason that names the problem; nothing is silently approximated.
+
+**YAML.** A stdlib parser for the YAML that Sigma rules use: mappings, block lists (including lists of mappings), plain, single- and double-quoted scalars, comments, simple one-line `[a, b]` lists of scalars, `|` and `>` text blocks (for `description`), and `|` modifiers in keys. Refused: anchors, aliases, tags (`!`, `!!`), flow mappings, nested flow lists, multiple documents, directives, complex keys, merge keys, tabs, duplicate keys, and multi-line plain or quoted scalars. A rule is at most 64 KB and 2,000 lines.
+
+**Rule keys.** `title` (required; it names the rule id), `id`, `status`, `description`, `level` (`informational` and `low` → low, `medium`, `high`, `critical`; default medium), `tags` (`attack.tXXXX[.XXX]` becomes an ATT&CK technique when it is in the catalog; other tags are listed as warnings and kept out of coverage), and `detection`. `logsource` is accepted but **informational only**: the rule runs on every stored event, whatever its source. Other keys (`author`, `references`, `falsepositives`, ...) are ignored.
+
+**Detection.** Named selections and one `condition` string.
+
+- A selection is a map of field → value or list of values: OR within a list, AND across fields. A list of maps is OR of the maps. A bare value or list of values (keywords) matches as a case-insensitive substring of `message`.
+- Values match case-insensitively, as in Sigma. `*` and `?` are wildcards (`\*`, `\?`, `\\` are literals); `null` matches an empty field. Numbers compare as text (`dest_port: 22`).
+- Modifiers: `contains`, `startswith`, `endswith`, `all` (every value must match, instead of any), and `cidr` (stdlib `ipaddress`). At most one of contains/startswith/endswith/cidr per field, plus `all`.
+- Conditions: a selection name, `and`, `or`, `not`, parentheses, `1 of <pattern>`, `all of <pattern>` (`sel*` style), `1 of them`, `all of them`.
+- Refused with a reason: the `re` modifier (an imported pattern could take unbounded time), base64 and other encoding modifiers, `windash`, numeric comparisons, `exists`, aggregations (`| count() by ...`), `near`, `timeframe`, `N of` other than 1, lists of conditions, unknown selection names, and any field without a Watchpost counterpart (the reason names the field).
+- Fields: Watchpost names (`event_type`, `user`, `src_ip`, `host`, `dest_ip`, `dest_port`, `bytes`, `message`), their ECS names from `ecs.py` (`event.action`, `user.name`, `source.ip`, `host.name`, `destination.ip`, `destination.port`, `message`), and a few Sigma names with a clean mapping: `SourceIp`/`IpAddress`/`src_ip` → src_ip, `DestinationIp`/`dst_ip` → dest_ip, `DestinationPort`/`dst_port` → dest_port, `User`/`TargetUserName` → user, `Computer`/`ComputerName`/`hostname` → host. `EventID`, `Image`, `CommandLine` and the like are refused: Watchpost events do not carry them.
+
+**Compiled form.** The detection compiles to a small JSON tree (`and`/`or`/`not`/`match`), stored as the rule's `params`, and an interpreter walks it over each event. There is no `eval` or `exec`, and no regular expression is built from the rule: wildcards are matched by a linear-time glob routine. The params are not tunable; change the YAML and import it again under a new title. The original YAML and its sha256 are stored with the rule (`sigma_rules` table, schema 9) and shown read-only on the rule card.
+
+**Findings.** Every matching event is evidence (there is no threshold). Matching events are grouped by source IP; events without one by host, then by user. Within a group, events more than an hour apart start a new finding. The rule id is `sigma_<title as lowercase letters and underscores>`, so it never collides with a built-in rule.
+
+**Workflow.** `POST /api/rules/sigma` (analyst and above) takes `{source, sample (optional), reason (optional)}`.
+
+- `?dry_run=1` compiles the rule and returns the compiled conditions, warnings, the sample result, and a preview on stored events (events scanned and matched, findings, group keys over the last 7 days of stored event time, through the engine's own `scan_events`/`rule_findings`). A refusal comes back as `{ok: false, refused: <reason>}`. A dry run spends one token from the per-account preview backtest bucket (burst 6).
+- Without `dry_run` it creates a `sigma_add` change request (spending one token from the rule-proposal bucket, burst 20, as its evidence carries the same preview). A different admin approves it with the evidence digest; approval adds the rule **disabled**.
+
+**Labeled sample, and the enable gate.** A Sigma rule has no built-in scenario, so it brings its own: `{"malicious": [events], "benign": [events]}`, 1-50 events each, with Watchpost field names. The sample passes when every malicious event matches and no benign look-alike does. It is part of the import, or attached or replaced later with `POST /api/rules/<id>/sigma-sample` (a `sigma_sample` change request with the same two-person review; it bumps the rule version). Enabling is an ordinary `rule_update` with `enabled: true`, refused at proposal and again at approval unless the stored sample passes. In the noise lab the sample appears as the scenario `sigma_sample:<rule id>`: a passing sample counts as a detected attack and a tested look-alike, a failing one as missed or fired. Its ATT&CK techniques are therefore **mapped** while the rule is enabled without a passing sample (for example after a failing sample replaced a good one) and **validated** only while the sample passes. The built-in scenario labels never count for or against an imported rule.
+
+What it is not: a Sigma backend. The sample is written by the importer and reviewed by a second person; a passing sample proves the rule matches those events, not that it catches the technique in real traffic. A worked example is in `docs/sigma-examples/`.
+
 ### ECS field mapping
 
 `GET /api/events/<id>/ecs` (viewer) returns one stored event as an Elastic Common Schema (ECS) shaped document, for export and interop with ECS-based tools. This is a field mapping on the way out. Watchpost still stores events in its own flat schema, and the hunt language uses Watchpost names. The mapping lives in `watchpost/ecs.py`.
