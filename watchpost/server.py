@@ -1099,10 +1099,10 @@ class Handler(BaseHTTPRequestHandler):
                 result = self.masker.mask(result)
             self._send(self.status, result, extra_headers=headers)
         except ApiError as exc:
-            self._send(exc.status, {"error": str(exc)})
+            self._send_error(exc.status, str(exc))
         except (auth.AuthError, queries.QueryError, improve.ChangeError, assets.AssetError,
-                sources.WindowError) as exc:
-            self._send(getattr(exc, "status", 400), {"error": str(exc)})
+                sources.WindowError, masking.Unavailable) as exc:
+            self._send_error(getattr(exc, "status", 400), str(exc))
         except Exception as exc:
             record_error(self.conn, "api", exc, guidance=f"Unhandled error on {self.command} {parsed.path}")
             self._send(500, {"error": "internal error; it has been recorded on the Health page"})
@@ -1110,12 +1110,19 @@ class Handler(BaseHTTPRequestHandler):
             if self.conn is not None:
                 self.conn.close()
 
+    def _send_error(self, status, message):
+        """Errors echo request values, and a viewer's pivot has already resolved to the real value: mask them."""
+        payload = {"error": message}
+        self._send(status, self.masker.mask(payload) if self.masker is not None else payload)
+
     def _download_body(self, download):
         if download.render is not None:
             return download.render(self.masker.mask(download.data) if self.masker else download.data)
         if self.masker is None:
             return download.body
-        if not download.content_type.startswith(("text/", "application/json")):
+        if download.content_type.startswith("application/json"):  # as data: escaped names, identity fields
+            return json.dumps(self.masker.mask(json.loads(download.body)), sort_keys=True, indent=2).encode()
+        if not download.content_type.startswith("text/"):
             raise ApiError(403, "this download is not available in the masked view")  # fail closed
         return self.masker.text(download.body.decode("utf-8")).encode("utf-8")
 
@@ -1182,11 +1189,11 @@ class Handler(BaseHTTPRequestHandler):
             stream.BROKER.unsubscribe(sub)
 
     def _frame(self, kind, data, retry=None):
-        if self.masker is not None:  # rebuilt per frame: the setting or the known usernames may have changed
+        if self.user["role"] == "viewer":  # rebuilt per frame: the setting or the known usernames may have changed
             conn = self.app.conn()
             try:
                 masker = masking.for_user(conn, self.user)
-            except sqlite3.Error:
+            except (sqlite3.Error, masking.Unavailable):
                 raise ConnectionAbortedError("masking unavailable; end the stream rather than send it unmasked")
             finally:
                 conn.close()

@@ -15,6 +15,7 @@ import tempfile
 import time
 import unittest
 import urllib.error
+from unittest import mock
 import urllib.request
 from urllib.parse import quote
 
@@ -371,6 +372,59 @@ class MaskingServerTests(ServerTestCase):
                              self.analyst.get(f"/api/events?ip={event['src_ip']}")[1]["total"])
         # An unknown pseudonym resolves to nothing rather than erroring.
         self.assertEqual(self.viewer.get("/api/events?user=user-00000000")[1]["total"], 0)
+
+
+    # --- fail closed (security review of the masking commit) --------------------------------------------
+
+    def test_error_messages_do_not_echo_a_resolved_pivot(self):
+        """A pivot resolves to the real value before the route runs; an error that echoes it must be masked."""
+        set_masking(self, 1)
+        event = self.analyst.get("/api/events?user=dave")[1]["events"][0]
+        pseudo = self.viewer.get(f"/api/events/{event['id']}")[1]["user"]
+        for q in (f"{pseudo}:x", f"* | stats {pseudo}", f"* | top 5 {pseudo}"):
+            with self.subTest(q=q):
+                status, body, _ = self.viewer.get("/api/hunt?q=" + quote(q))
+                self.assertEqual(status, 400)
+                self.assertNotIn("dave", body["error"])
+                self.assertIn(pseudo, body["error"])
+
+    def test_more_usernames_than_the_bound_refuses_the_masked_view(self):
+        """Names past CANDIDATE_LIMIT cannot be matched in free text, so the viewer is refused, not shown them."""
+        set_masking(self, 1)
+        with mock.patch.object(masking, "CANDIDATE_LIMIT", 3):
+            status, body, _ = self.viewer.get("/api/alerts")
+            self.assertEqual(status, 503)
+            self.assertNotIn("dave", json.dumps(body))
+            self.assertEqual(self.analyst.get("/api/alerts")[0], 200)
+        self.assertEqual(self.viewer.get("/api/alerts")[0], 200)
+
+    def test_stream_opened_before_masking_was_turned_on_is_masked_after(self):
+        def trigger():
+            set_masking(self, 1)
+            self.analyst.post("/api/demo/simulate", {"scenario": "impossible_travel", "seed": 11})
+        frames = self.read_stream(self.viewer, trigger)
+        data = "\n".join(f for f in frames if re.search(r"event: (event|alert)\n", f))
+        self.assertIn("event: alert", data)
+        self.assertRegex(data, PSEUDO_USER)
+        self.assertEqual(self.leaks(data, *self.seeded()), [])
+
+    def test_json_download_is_masked_as_data_not_as_text(self):
+        """Masked as serialized text, a non-ASCII name escaped as \\u00e9 slipped past exact matching."""
+        db = sqlite3.connect(self.db_path)
+        with db:
+            db.execute("INSERT INTO events(ts, ingested_at, source, event_type, severity, user) VALUES "
+                       "('2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'test', 'auth_success', 'low', 'jos\u00e9')")
+            rule_id, params = db.execute("SELECT id, params FROM rules WHERE params LIKE '%ignore_users%'"
+                                         " ORDER BY id").fetchone()
+            params = dict(json.loads(params), ignore_users=["jos\u00e9"], ignore_ips=["10.0.1.23"])
+            db.execute("UPDATE rules SET params = ? WHERE id = ?", (json.dumps(params), rule_id))
+        db.close()
+        set_masking(self, 1)
+        status, _, body = self.get_raw(self.viewer, "/api/rules/export")
+        self.assertEqual(status, 200)
+        rule = next(r for r in json.loads(body)["rules"] if r["id"] == rule_id)
+        self.assertRegex(rule["params"]["ignore_users"][0], PSEUDO_USER)
+        self.assertRegex(rule["params"]["ignore_ips"][0], PSEUDO_IP)
 
 
 if __name__ == "__main__":
