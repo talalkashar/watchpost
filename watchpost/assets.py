@@ -8,7 +8,12 @@ evidence touches an important asset. The boost is explainable: the alert keeps i
 Boost rule (capped at two levels, never past `critical`):
     criticality high      +1        criticality critical  +2
     any sensitive-data tag +1
-Pure helpers (`match`, `boost`, `weigh`) take plain dicts; the rest reads and writes the database.
+Pure helpers (`match`, `boost`, `weigh`, `review_reasons`) take plain dicts; the rest reads and writes the
+database.
+
+Two-person review: an edit that could lower an alert's severity (`review_reasons`) is never applied by one
+admin. It becomes a change request (improve.py, kinds asset_add/asset_update/asset_delete) that a different
+admin approves; `plan_change` checks it against the inventory at proposal and again at approval.
 """
 
 import ipaddress
@@ -58,6 +63,15 @@ class AssetError(ValueError):
         self.status = status
 
 
+class ReviewRequired(AssetError):
+    """A direct edit that could lower alert severity: it has to be proposed and approved by a second admin."""
+
+    def __init__(self, reasons):
+        super().__init__(f"this edit could lower alert severity ({'; '.join(reasons)}), so a second admin must "
+                         "approve it", 409)
+        self.reasons = reasons
+
+
 # --- Validation ----------------------------------------------------------------------------
 
 def validate(data):
@@ -98,6 +112,34 @@ def validate(data):
     return {"name": name, "kind": kind, "criticality": criticality, "data_tags": tags,
             "addresses": sorted(set(clean)), "owner": owner, "description": description,
             "synthetic": int(bool(data.get("synthetic")))}
+
+
+# --- Review gate ------------------------------------------------------------------------------
+
+# The asset-side counterpart of the hiding-edit gate on rules (rules.HIDING_EDITS): these are the edits that
+# can make an alert lose severity or stop matching an asset. Criticality and data tags feed `boost`; the name
+# and the addresses decide what `match` finds. Anything else (a new asset, higher criticality, more tags or
+# addresses, owner, kind, description) can only keep or raise severity, so it applies at once and is audited.
+def review_reasons(before, after, taken=frozenset()):
+    """Why the edit from `before` to `after` (clean asset dicts; None when absent) needs a second admin.
+
+    Returns short phrases, empty when the edit may apply directly. `taken` holds the addresses already on
+    other assets: claiming one can take over that asset's matches, since an address matches one asset only.
+    """
+    if after is None:
+        return ["deletes the asset"]
+    reasons = []
+    if before is not None:
+        if CRITICALITIES.index(after["criticality"]) < CRITICALITIES.index(before["criticality"]):
+            reasons.append(f"lowers criticality from {before['criticality']} to {after['criticality']}")
+        reasons += [f"removes sensitive-data tag {t}" for t in sorted(set(before["data_tags"]) - set(after["data_tags"]))]
+        reasons += [f"removes address {a}" for a in sorted(set(before["addresses"]) - set(after["addresses"]))]
+        if after["name"].lower() != before["name"].lower():  # matching ignores case, so a re-case is no rename
+            reasons.append(f"renames {before['name']} to {after['name']}")
+    old = set(before["addresses"]) if before else set()
+    reasons += [f"claims address {a}, which another asset already has" for a in after["addresses"]
+                if a in taken and a not in old]
+    return reasons
 
 
 # --- Pure weighting --------------------------------------------------------------------------
@@ -185,42 +227,149 @@ def get_asset(conn, asset_id):
     return _row(row)
 
 
-def save_asset(conn, data, actor, asset_id=None):
-    """Create an asset, or update the one with this id. Names are unique, ignoring case."""
-    asset = validate(data)
+def _snapshot(asset):
+    """The fields a change compares and a reviewer is shown (no timestamps: a no-op save is no change)."""
+    return {"id": asset["id"], **{k: asset[k] for k in ASSET_COLUMNS}}
+
+
+def _current(conn, asset_id):
+    row = conn.execute("SELECT * FROM assets WHERE id = ?", (asset_id,)).fetchone()
+    return None if row is None else _snapshot(_row(row))
+
+
+def _taken_addresses(conn, asset_id=None):
+    """Addresses inventoried on assets other than this one."""
+    return {ip for a in list_assets(conn) if a["id"] != asset_id for ip in a["addresses"]}
+
+
+def _check_name_free(conn, name, asset_id):
+    clash = conn.execute("SELECT id FROM assets WHERE name = ? COLLATE NOCASE", (name,)).fetchone()
+    if clash and clash["id"] != asset_id:
+        raise AssetError(f"an asset named {name!r} already exists", 409)
+
+
+def _write(conn, asset, actor, asset_id=None, detail=None):
+    """Insert or update a validated asset inside the caller's transaction; returns its id."""
     now = now_iso()
+    _check_name_free(conn, asset["name"], asset_id)
+    values = [asset["name"], asset["kind"], asset["criticality"], json.dumps(asset["data_tags"]),
+              json.dumps(asset["addresses"]), asset["owner"], asset["description"], asset["synthetic"]]
+    if asset_id is None:
+        asset_id = conn.execute(
+            f"INSERT INTO assets({', '.join(ASSET_COLUMNS)}, created_at, updated_at, updated_by)"
+            f" VALUES ({', '.join('?' for _ in ASSET_COLUMNS)}, ?, ?, ?)",
+            (*values, now, now, actor)).lastrowid
+        action = "asset_created"
+    else:
+        cur = conn.execute(
+            f"UPDATE assets SET {', '.join(c + ' = ?' for c in ASSET_COLUMNS)}, updated_at = ?, updated_by = ?"
+            " WHERE id = ?", (*values, now, actor, asset_id))
+        if not cur.rowcount:
+            raise AssetError("asset not found", 404)
+        action = "asset_updated"
+    audit(conn, actor, action, asset["name"], {"id": asset_id, "criticality": asset["criticality"],
+                                                "data_tags": asset["data_tags"], **(detail or {})})
+    return asset_id
+
+
+def _delete(conn, asset_id, actor, detail=None):
+    row = conn.execute("SELECT name FROM assets WHERE id = ?", (asset_id,)).fetchone()
+    if row is None:
+        raise AssetError("asset not found", 404)
+    conn.execute("DELETE FROM assets WHERE id = ?", (asset_id,))
+    audit(conn, actor, "asset_deleted", row["name"], {"id": asset_id, **(detail or {})})
+
+
+def save_asset(conn, data, actor, asset_id=None, gated=False):
+    """Create an asset, or update the one with this id. Names are unique, ignoring case.
+
+    With `gated` (the admin API), an edit that `review_reasons` flags raises ReviewRequired and changes
+    nothing; the check and the write share one transaction, so the asset cannot change in between.
+    """
+    asset = validate(data)
     with transaction(conn):
-        clash = conn.execute("SELECT id FROM assets WHERE name = ? COLLATE NOCASE", (asset["name"],)).fetchone()
-        if clash and clash["id"] != asset_id:
-            raise AssetError(f"an asset named {asset['name']!r} already exists", 409)
-        values = [asset["name"], asset["kind"], asset["criticality"], json.dumps(asset["data_tags"]),
-                  json.dumps(asset["addresses"]), asset["owner"], asset["description"], asset["synthetic"]]
-        if asset_id is None:
-            asset_id = conn.execute(
-                f"INSERT INTO assets({', '.join(ASSET_COLUMNS)}, created_at, updated_at, updated_by)"
-                f" VALUES ({', '.join('?' for _ in ASSET_COLUMNS)}, ?, ?, ?)",
-                (*values, now, now, actor)).lastrowid
-            action = "asset_created"
-        else:
-            cur = conn.execute(
-                f"UPDATE assets SET {', '.join(c + ' = ?' for c in ASSET_COLUMNS)}, updated_at = ?, updated_by = ?"
-                " WHERE id = ?", (*values, now, actor, asset_id))
-            if not cur.rowcount:
+        if gated:
+            before = None if asset_id is None else _current(conn, asset_id)
+            if asset_id is not None and before is None:
                 raise AssetError("asset not found", 404)
-            action = "asset_updated"
-        audit(conn, actor, action, asset["name"], {"id": asset_id, "criticality": asset["criticality"],
-                                                    "data_tags": asset["data_tags"]})
+            reasons = review_reasons(before, asset, _taken_addresses(conn, asset_id))
+            if reasons:
+                raise ReviewRequired(reasons)
+        asset_id = _write(conn, asset, actor, asset_id)
     return get_asset(conn, asset_id)
 
 
 def delete_asset(conn, asset_id, actor):
     with transaction(conn):
-        row = conn.execute("SELECT name FROM assets WHERE id = ?", (asset_id,)).fetchone()
-        if row is None:
-            raise AssetError("asset not found", 404)
-        conn.execute("DELETE FROM assets WHERE id = ?", (asset_id,))
-        audit(conn, actor, "asset_deleted", row["name"], {"id": asset_id})
+        _delete(conn, asset_id, actor)
     return {"ok": True}
+
+
+# --- Reviewed changes (called from improve.py) ---------------------------------------------------
+
+def edit_payload(conn, asset_id, data):
+    """The fields an edit to this asset changes, from the full asset the editor submitted."""
+    before = get_asset(conn, asset_id)
+    after = validate(data)
+    return {k: after[k] for k in ASSET_COLUMNS if after[k] != before[k]}
+
+
+def plan_change(conn, kind, target, payload):
+    """Check a proposed inventory change against the inventory as it is now: (before, after) snapshots.
+
+    Runs when the change is proposed and again when it is approved, because the asset may have been
+    edited, deleted, or lost its name to another asset in between. A conflict raises AssetError with 409.
+    An update stores only the fields it changes and is applied on top of the asset as it is at approval.
+    """
+    if kind == "asset_add":
+        after = validate(payload)
+        if after["name"] != target:
+            raise AssetError("an asset_add targets the name of the asset it adds")
+        _check_name_free(conn, after["name"], None)
+        return None, after
+    before = _current(conn, int(target)) if str(target).isdigit() else None
+    if before is None:
+        raise AssetError(f"asset #{target} no longer exists; nothing was applied", 409)
+    if kind == "asset_delete":
+        if payload:
+            raise AssetError("an asset_delete takes an empty payload")
+        return before, None
+    unknown = set(payload) - set(ASSET_COLUMNS)
+    if unknown:
+        raise AssetError(f"unknown asset field(s) {', '.join(sorted(unknown))}")
+    after = {"id": before["id"], **validate({**before, **payload})}
+    _check_name_free(conn, after["name"], before["id"])
+    if after == before:
+        raise AssetError("the asset already matches this change; nothing to apply", 409)
+    return before, after
+
+
+def change_evidence(conn, before, after, recent=5):
+    """What a reviewer is shown for an inventory change, computed from the current database.
+
+    The before/after snapshots, each field that differs, why the change needs review (empty when it would
+    apply directly anyway), and the open alerts whose severity it would change, without writing anything.
+    """
+    fields = ("name", "kind", "criticality", "data_tags", "addresses", "owner", "description")
+    changes = [{"field": f, "before": (before or {}).get(f), "after": (after or {}).get(f)}
+               for f in fields if (before or {}).get(f) != (after or {}).get(f)]
+    inventory = [a for a in list_assets(conn) if before is None or a["id"] != before["id"]] + ([after] if after else [])
+    inventory.sort(key=lambda a: (-CRITICALITIES.index(a["criticality"]), a["name"].lower()))  # as list_assets
+    shifts = [{"id": alert["id"], "title": alert["title"], "from": alert["severity"], "to": weighed["severity"]}
+              for alert, weighed in _reweigh_open(conn, index(inventory)) if weighed["severity"] != alert["severity"]]
+    shifts.sort(key=lambda x: -x["id"])
+    return {"asset": (after or before)["name"], "before": before, "after": after, "changes": changes,
+            "needs_review": review_reasons(before, after, _taken_addresses(conn, before and before["id"])),
+            "severity_changes": {"alerts": len(shifts), "recent": shifts[:recent]}}
+
+
+def apply_change(conn, kind, target, payload, actor, detail):
+    """Apply an approved change inside the caller's transaction, re-checked against the current inventory."""
+    before, after = plan_change(conn, kind, target, payload)
+    if after is None:
+        _delete(conn, before["id"], actor, detail)
+    else:
+        _write(conn, {k: after[k] for k in ASSET_COLUMNS}, actor, before and before["id"], detail)
 
 
 def seed_demo_assets(conn, actor):
@@ -247,12 +396,7 @@ def rescore_open_alerts(conn, idx=None):
     idx = idx or load_index(conn)
     changed = 0
     with transaction(conn):
-        rows = conn.execute("SELECT id, severity, base_severity FROM alerts WHERE status != 'resolved'").fetchall()
-        for alert in rows:
-            events = [dict(r) for r in conn.execute(
-                "SELECT e.host, e.src_ip, e.dest_ip FROM events e JOIN alert_events ae ON ae.event_id = e.id"
-                " WHERE ae.alert_id = ?", (alert["id"],))]
-            weighed = weigh(alert["base_severity"] or alert["severity"], match(idx, events))
+        for alert, weighed in _reweigh_open(conn, idx):
             now = now_iso()
             conn.execute("UPDATE alerts SET severity = ?, base_severity = ?, assets = ?, severity_note = ?,"
                          " updated_at = CASE WHEN severity = ? THEN updated_at ELSE ? END WHERE id = ?",
@@ -265,6 +409,16 @@ def rescore_open_alerts(conn, idx=None):
                     (alert["id"], "assets", "severity_changed",
                      f"{alert['severity']} -> {weighed['severity']} ({weighed['severity_note']})", now))
     return changed
+
+
+def _reweigh_open(conn, idx):
+    """(alert row, weigh() result) for every unresolved alert against this inventory index. Writes nothing."""
+    rows = conn.execute("SELECT id, title, severity, base_severity FROM alerts WHERE status != 'resolved'").fetchall()
+    for alert in rows:
+        events = [dict(r) for r in conn.execute(
+            "SELECT e.host, e.src_ip, e.dest_ip FROM events e JOIN alert_events ae ON ae.event_id = e.id"
+            " WHERE ae.alert_id = ?", (alert["id"],))]
+        yield alert, weigh(alert["base_severity"] or alert["severity"], match(idx, events))
 
 
 def for_entities(conn, hosts, ips):
