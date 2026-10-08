@@ -208,6 +208,25 @@ class MfaApiTests(ServerTestCase):
         self.assertEqual(self.password_step("analyst", ANALYST_PW)[1], 200)
         self.assertEqual(len(self.audit("mfa_disabled")), 1)
 
+    def test_wrong_disable_codes_count_toward_the_lockout(self):
+        analyst = self.client("analyst")
+        secret = self.enroll(analyst)
+        codes = [analyst.post("/api/auth/mfa/disable", {"code": "000000"})[0] for _ in range(6)]
+        self.assertEqual(codes, [400] * 5 + [429])
+        self.assertEqual(analyst.post("/api/auth/mfa/disable", {"code": self.code(secret)})[0], 429)
+        self.assertTrue(analyst.get("/api/auth/mfa/status")[1]["enabled"])
+
+    def test_parallel_code_guesses_cannot_outrun_the_lockout(self):
+        from concurrent.futures import ThreadPoolExecutor
+        self.enroll(self.client("analyst"))
+        client, _, body = self.password_step("analyst", ANALYST_PW)
+        guess = lambda _: Client(self.base).post("/api/auth/mfa", {"mfa_token": body["mfa_token"], "code": "000000"})[0]
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            statuses = list(pool.map(guess, range(24)))
+        # Every attempt is counted before its code is checked: at most the threshold (5) codes are ever checked.
+        self.assertLessEqual(len(self.audit("login_failed")), 5)
+        self.assertEqual(statuses.count(401) + statuses.count(429), 24)
+
     def test_admin_reset_is_audited(self):
         self.enroll(self.client("analyst"))
         admin = self.client("admin")
