@@ -151,7 +151,7 @@ class ScenarioTechniqueTests(unittest.TestCase):
         levels = {t["id"]: t["level"] for t in result["techniques"]}
         # web_scan probes and injects but never exploits; exfiltration reads storage with no protocol shown.
         self.assertEqual({i for i, lvl in levels.items() if lvl != "validated"}, {"T1190", "T1048", "T1595.001"})
-        self.assertEqual(len(attack.TECHNIQUES), 19)  # milestone 5 added T1562.008
+        self.assertEqual(len(attack.TECHNIQUES), 20)  # milestone 5 added T1562.008, milestone 17 T1562.006
         self.assertEqual(result["summary"]["levels"],
                          {"validated": len(attack.TECHNIQUES) - 3, "mapped": 3, "disabled": 0, "gap": 0})
         by_id = {t["id"]: t for t in result["techniques"]}

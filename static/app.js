@@ -790,7 +790,7 @@ async function rules(focus) {
     ? el("div", {}, el("strong", {}, `Loses detection of labeled attack(s): ${detectionLoss(c).join(", ")}. `), "Approving requires an explicit acknowledgement.") : null);
 
   const changeRows = changes.slice(0, 30).map((c) => ({ cells: [
-    `#${c.id}`, status(c.status), el("code", {}, isAssetChange(c) ? `asset:${c.evaluation?.asset ?? c.target}` : `${{ rule_update: "rule", suppression_add: "exception", sigma_add: "sigma", sigma_sample: "sample" }[c.kind] || "setting"}:${c.target}`),
+    `#${c.id}`, status(c.status), el("code", {}, isAssetChange(c) ? `asset:${c.evaluation?.asset ?? c.target}` : `${{ rule_update: "rule", suppression_add: "exception", sigma_add: "sigma", sigma_sample: "sample", maintenance_add: "maintenance" }[c.kind] || "setting"}:${c.target}`),
     isAssetChange(c) ? assetDiff(c) : isSigmaChange(c) ? (c.kind === "sigma_add" ? el("code", {}, c.evaluation?.conditions ?? "—") : "labeled sample") : el("pre", {}, JSON.stringify(c.payload)), c.reason,
     isAssetChange(c) ? assetImpact(c) : isSigmaChange(c) ? sigmaEvidence(c) : c.evaluation ? el("span", {}, `FP ${c.evaluation.before.fp}→${c.evaluation.after.fp}, TP ${c.evaluation.before.tp}→${c.evaluation.after.tp}, missed ${c.evaluation.after.missed.join(", ") || "none"}`, lostNote(c), liveImpact(c.evaluation.live_impact),
       (c.evaluation.ignore_additions || []).map((x) => el("div", {}, el("strong", {}, `${x.change === "removed" ? "Removes" : "Adds"} ${x.value} ${x.change === "removed" ? "from" : "to"} ${x.param} (permanent, no expiry).`), liveImpact(x.live_impact))),
@@ -1303,8 +1303,67 @@ async function coverageView() {
 }
 
 // ---------- health ----------
+// ---------- log source health ----------
+// GET /api/sources/health: per (source, host) status computed from arrival times against the wall clock.
+const SOURCE_STATUS = { healthy: "st-ok", late: "st-degraded", silent: "st-failing", learning: "st-pending" };
+function agoText(ts) {
+  if (!ts) return "—";
+  const s = Math.max(0, (Date.now() - Date.parse(ts)) / 1000);
+  return s < 60 ? `${Math.round(s)}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago` : s < 86400 ? `${Math.round(s / 3600)}h ago` : `${Math.round(s / 86400)}d ago`;
+}
+const durationText = (sec) => (sec === null || sec === undefined ? "—" : sec < 60 ? `${Math.round(sec)}s` : sec < 3600 ? `${Math.round(sec / 60)}m` : sec < 86400 ? `${(sec / 3600).toFixed(1)}h` : `${(sec / 86400).toFixed(1)}d`);
+const sourceHunt = (r) => `source:${huntValue(r.source)}${r.host ? ` host:${huntValue(r.host)}` : ""} last:7d`;
+
+function sourceHealthCard(s) {
+  if (!s) return el("div", { class: "card", id: "source-health" }, el("h2", {}, "Log source health"), el("p", { class: "muted" }, "Could not load source health."));
+  const t = s.thresholds;
+  const where = (r) => `${r.source}${r.host ? ` on ${r.host}` : ""}`;
+  const rows = s.sources.map((r) => ({ cells: [
+    el("span", {}, el("code", {}, r.source), " ", synth(r.synthetic)),
+    r.host ?? el("span", { class: "muted" }, "(no host)"),
+    el("span", { class: "row" }, el("span", { class: `pill ${SOURCE_STATUS[r.status]}` }, r.status),
+      r.maintenance ? el("span", { class: "pill st-pending", title: r.maintenance.reason }, `maintenance until ${fmtTime(r.maintenance.effective_end)}`) : null),
+    el("time", { datetime: r.last_seen, title: fmtTime(r.last_seen) }, agoText(r.last_seen)),
+    durationText(r.cadence_seconds), { num: r.events_24h },
+    el("span", {}, r.reasons.join("; "),
+      r.status === "late" || r.status === "silent"
+        ? [" ", el("a", { href: huntHref(sourceHunt(r)), "aria-label": `Hunt its events: ${where(r)}` }, "Hunt its events")] : null)] }));
+  const card = el("div", { class: "card", id: "source-health" },
+    el("h2", {}, "Log source health"),
+    el("p", { class: "muted" }, `Each source and host, by when its events arrived (not their timestamps) against the clock now. Cadence is the median gap between arrivals. `
+      + `Late: quiet over ${t.late_multiplier}x cadence, ${durationText(t.late_floor_seconds)}, and its longest recent gap. Silent: over ${t.silent_multiplier}x cadence, ${durationText(t.silent_floor_seconds)}, and twice that gap (rule log_source_silent alerts). `
+      + `Learning: under ${t.min_gaps} gaps or ${durationText(t.min_history_seconds)} of history.`),
+    el("p", {}, ["silent", "late", "healthy", "learning"].map((k) => [el("span", { class: `pill ${SOURCE_STATUS[k]}` }, `${k} ${s.summary[k]}`), " "])),
+    table(["Source", "Host", "Status", "Last arrival", "Cadence", "Events 24h", "Why"], rows),
+    s.maintenance_windows.length ? el("div", {}, el("h3", {}, "Maintenance windows"),
+      table(["#", "Source", "Host", "Window", "Reason", "Approved by", ""], s.maintenance_windows.map((w) => ({ cells: [
+        `#${w.id}`, el("code", {}, w.source), w.host ?? "every host", `${fmtTime(w.starts_at)} – ${fmtTime(w.effective_end)}${w.active ? " (active)" : ""}`, w.reason, w.approved_by,
+        can("admin") ? el("button", { class: "ghost", "aria-label": `End now: maintenance window ${w.id}`, onclick: () => guarded(async () => { await api(`/api/sources/maintenance/${w.id}/end`, { method: "POST" }); toast(`Maintenance window #${w.id} ended`); health(); }) }, "End now") : ""] })))) : null);
+  if (can("admin")) {
+    const form = el("form", { class: "row", "aria-label": "Propose a maintenance window" },
+      el("label", {}, "Source", el("input", { name: "source", required: true, maxlength: 64 })),
+      el("label", {}, "Host (blank: every host)", el("input", { name: "host", maxlength: 255 })),
+      el("label", {}, "Start", el("input", { name: "start", type: "datetime-local", required: true })),
+      el("label", {}, "End", el("input", { name: "end", type: "datetime-local", required: true })),
+      el("label", {}, "Reason", el("input", { name: "reason", required: true, minlength: 5, maxlength: 2000 })),
+      el("button", { type: "submit" }, "Propose window"));
+    form.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      const f = new FormData(form);
+      guarded(async () => {
+        const c = await api("/api/sources/maintenance", { method: "POST", body: { source: f.get("source").trim(), host: f.get("host").trim() || null,
+          start: new Date(f.get("start")).toISOString(), end: new Date(f.get("end")).toISOString(), reason: f.get("reason") } });
+        toast(`Change request #${c.id} created: a second admin approves it on the Rules page`);
+        form.reset();
+      });
+    });
+    card.append(el("h3", {}, "Propose a maintenance window"), el("p", { class: "muted" }, "Silence inside an approved window does not alert. Times are your local time."), form);
+  }
+  return card;
+}
+
 async function health() {
-  const h = await api("/api/health/details");
+  const [h, srcs] = await Promise.all([api("/api/health/details"), api("/api/sources/health").catch(() => null)]);
   render(
     el("h1", {}, "System health"),
     el("div", { class: "card" },
@@ -1319,6 +1378,7 @@ async function health() {
         el("div", {}, el("div", {}, c.message),
           c.guidance ? el("div", { class: "guidance" }, el("strong", {}, "What to do: "), c.guidance) : null,
           el("details", {}, el("summary", { class: "muted" }, "details"), el("pre", {}, JSON.stringify(c.details, null, 2))))))),
+    sourceHealthCard(srcs),
     el("div", { class: "card" }, el("h2", {}, "Recent errors (redacted)"),
       table(["When", "Component", "Error", "Guidance"], h.recent_errors.map((e) => ({ cells: [fmtTime(e.created_at), e.component, el("code", {}, e.message), e.guidance ?? ""] })))),
     el("div", { class: "card" }, el("h2", {}, "Recent detection runs"),

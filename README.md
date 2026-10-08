@@ -216,8 +216,9 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | `unsanctioned_cloud_service` | an account uses a cloud service that is not on the sanctioned list (or a subdomain of one) | medium |
 | `cloud_logging_disabled` | a cloud audit event records `StopLogging`, `DeleteTrail` or `DeleteFlowLogs` (the `logging_actions` list) | high |
 | `admin_action_from_new_source` | an account makes a privileged action (privilege use/escalation, cloud IAM change) from an IP it used for none of its privileged actions in the previous 7 days, and it made ≥ 3 in that span | medium |
+| `log_source_silent` | a source and host with a learned cadence stops sending: quiet for > 6× its median gap between arrivals, > 1 h, and > twice its longest recent gap ([Log source health](#log-source-health)) | medium |
 
-Every rule maps to MITRE ATT&CK techniques from a small static catalog (`watchpost/attack.py`, 19 techniques, no network fetch). `GET /api/attack/coverage` grades each technique by evidence (below) and counts how often its rules fired.
+Every rule maps to MITRE ATT&CK techniques from a small static catalog (`watchpost/attack.py`, 20 techniques, no network fetch). `GET /api/attack/coverage` grades each technique by evidence (below) and counts how often its rules fired.
 
 The two newest rules use only fields the schema already carries, and each has a labeled attack and a benign look-alike in the noise lab (both detect their attack, tp 1 / fn 0 / fp 0, and stay quiet on their look-alike):
 
@@ -237,7 +238,7 @@ A rule mapping to a technique is a claim, not proof. The **Coverage** view (and 
 | **disabled** | Only disabled rules map to it. |
 | **gap** | No rule maps to it. |
 
-Each malicious scenario in `watchpost/simulate.py` lists the techniques its events actually show (`SCENARIO_TECHNIQUES`), which is narrower than the rules' own mappings. With the default rules, 16 of 19 techniques are validated. T1595.001 (`firewall_port_sweep`: one outside source sweeping one host's ports is not scanning IP blocks), T1190 (`web_scanner`: the scan probes and sends injection strings but never exploits anything) and T1048 (`data_exfil_volume`: the scenario reads cloud storage but shows no exfiltration channel) are only mapped. Each technique lists its rules with their noise-lab verdict, the proving scenarios, and live alert counts; the Navigator layer is colored by the same levels.
+Each malicious scenario in `watchpost/simulate.py` lists the techniques its events actually show (`SCENARIO_TECHNIQUES`), which is narrower than the rules' own mappings. With the default rules, 17 of 20 techniques are validated. T1595.001 (`firewall_port_sweep`: one outside source sweeping one host's ports is not scanning IP blocks), T1190 (`web_scanner`: the scan probes and sends injection strings but never exploits anything) and T1048 (`data_exfil_volume`: the scenario reads cloud storage but shows no exfiltration channel) are only mapped. Each technique lists its rules with their noise-lab verdict, the proving scenarios, and live alert counts; the Navigator layer is colored by the same levels.
 
 The scenarios are synthetic, so "validated" means a rule detected the project's own labeled data, not that it would catch the technique in real traffic. The catalog holds only techniques a Watchpost rule maps to, so the counts are not a measure against all of ATT&CK.
 
@@ -245,7 +246,7 @@ The scenarios are synthetic, so "validated" means a rule detected the project's 
 
 After each detection run, `watchpost/correlate.py` groups related alerts into incidents: alerts whose evidence shares a source IP, account, or host within 30 minutes. An incident needs two related alerts or one critical alert, lists its kill-chain stages (ATT&CK tactics in order), and is raised one severity level when it spans three or more tactics. Reruns change nothing; new alerts join an open incident.
 
-Every rule accepts `ignore_ips` and `ignore_users`. The engine merges overlapping findings into one open alert instead of creating duplicates, and a rescan never re-alerts on evidence already attached to an alert.
+Every rule except `log_source_silent` accepts `ignore_ips` and `ignore_users`. The engine merges overlapping findings into one open alert instead of creating duplicates, and a rescan never re-alerts on evidence already attached to an alert.
 
 ### Self-diagnosis
 
@@ -260,6 +261,31 @@ Every rule accepts `ignore_ips` and `ignore_users`. The engine merges overlappin
 | syslog (only when `SIEM_SYSLOG=1`) | port can't be bound, invalid allow list, or a listener thread stopped (failing); last batch failed to store or frames dropped in the last 10 min (degraded) |
 
 If detection fails, the events stay stored, the ingest response says `"detection": {"status": "failed", ...}`, and the UI shows a banner. A full **Run detection** processes the backlog and marks those batches `recovered`. Tests cover each of these paths.
+
+### Log source health
+
+Silence hides attacks: a log forwarder that stops (crashed, uninstalled, or stopped by an intruder) looks exactly like a quiet network. Watchpost keeps no agent heartbeat; it reads the events it already stores. `GET /api/sources/health` (viewer) lists every (source, host) pair with its first and last arrival, events in the last 24 h, cadence, status and the reason for it, and the Health view shows it as the **Log source health** panel. A late or silent source links to its events in Hunt (`source:<x> host:<y>`). The code is `watchpost/sources.py`.
+
+| Term | Definition (constants in `watchpost/sources.py`) |
+|---|---|
+| arrival | when Watchpost stored an event (`ingested_at`). Events stored in one batch are one arrival. |
+| cadence | the median gap between consecutive arrivals, over the newest 100 gaps inside the 24 h before the pair's last arrival |
+| learning | fewer than 10 gaps in that window, or under 2 h between first and last arrival. A burst (40 events in 3 minutes) is not a cadence. Never alerts. |
+| healthy | not late or silent |
+| late | quiet for more than 3× cadence, more than 15 min, and longer than the longest gap in the sample |
+| silent | quiet for more than 6× cadence, more than 1 h, and more than twice the longest gap in the sample. `log_source_silent` alerts. |
+
+The longest-gap terms are what keep bursty sources quiet: a nightly backup or an office-hours badge reader has a short median gap but a long overnight one, and without them it would go "silent" every evening.
+
+**The clock.** Silence runs from the last arrival to the wall clock, not to the newest stored event. Entity scores (`entities.py`) anchor on the newest data so replayed demo data keeps its meaning; here a source going quiet is the very thing to see, so "now" has to be the real now. Arrival time, not event time, because replayed and back-filled data carries old timestamps: the demo dataset is dated on the previous weekday, so by `ts` every demo source would look dead since yesterday, while by arrival it is one upload, and so learning. Arrival time also ignores a host's clock skew. The cost: one upload of a week of logs is one arrival, and a forwarder that buffers and resends looks alive while it resends.
+
+**The rule.** `log_source_silent` maps to T1562.006 (Impair Defenses: Indicator Blocking): stopping or blocking a host's log forwarding is that technique, and ATT&CK's own detection advice for it is to watch for a sensor that stops reporting. It does not read the events of the scanned time range like the other rules: each detection run (after every stored batch, and on **Run detection**) hands it each pair's newest 102 arrivals and the clock. It judges each finished gap against the cadence as of its start, and the current silence against the cadence now. The evidence is the last event before the silence, so one silence is one alert however often detection runs, and a resolved one is not raised again for the same silence. The noise lab judges its scenarios as of the end of the scenario day, where each event arrives at its timestamp: attack `log_source_stops` (dc01's telemetry every 5 min since midnight, forwarder stopped at 13:40) is detected, look-alike `office_badge_reader` (three office days of badge swipes, quiet each evening) is not. Loaded as demo data, `log_source_stops` is one upload and stays learning. The live storyline replayed every 10 minutes never goes silent (a test replays 5 hours of it).
+
+**Maintenance windows.** A window (source, optional host, start, end, at most 30 days) excuses silence: quiet time inside it does not count, and the clock resumes when it ends. Windows are added like tuning exceptions, because they reduce detection: an admin proposes one (`POST /api/sources/maintenance` with `source`, `host`, `start`, `end`, `reason`, or the form on the Health view) as a `maintenance_add` change request, and a different admin approves it under Rules → Change requests. An admin can end a window early (`POST /api/sources/maintenance/{id}/end`), which only makes detection stricter, so it is a direct, audited action. Viewers and analysts can do neither.
+
+**Not in `/api/health`.** That endpoint reports Watchpost's own health and returns 503 when it fails. A silent upstream source is not a fault of this service, so it is an alert and this inventory, not a health check.
+
+**Limits.** Computed per query: nothing runs on a timer, so the rule is evaluated only when some batch arrives or someone runs detection; if every source stops at once, nothing raises the alert until the next run (the inventory still shows it). This is not a replacement for agent heartbeats: it cannot tell a crashed forwarder from a stopped one or from a host that is simply idle, a source that was never seen is not missing, and a source that sends less than ten times in its first day stays learning. Each detection run reads every pair's arrivals, one indexed query per pair, which is cheap for tens of sources and grows with thousands of hosts. A backtest of this rule replays only silences that ended, since it has no clock.
 
 ### Continuous improvement (what it actually does)
 
