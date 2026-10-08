@@ -179,6 +179,7 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | `watchpost/hunt.py` | Hunt query parser and compiler (whitelisted fields, bound values), the `\|` stats/top/timechart stage, and saved searches. |
 | `watchpost/search_rules.py` | Saved searches promoted to threshold detection rules (`search_<slug>`): the hunt filter matched in Python over the engine's event dicts, the sliding-window count, and their labeled samples. See [Saved searches as detections](#saved-searches-as-detections). |
 | `watchpost/auth.py` | PBKDF2-SHA256 password hashing, lockout, and server-side sessions (only token hashes are stored). Also ingest-only API tokens (hashed) and the viewer < analyst < admin roles. Viewers are read-only: the server refuses every non-GET request from them except logout. |
+| `watchpost/masking.py` | Viewer data masking: keyed pseudonyms for usernames and internal IPs in viewer responses when `viewer_masking` is on. See [Viewer data masking](#viewer-data-masking). |
 | `watchpost/totp.py` | RFC 6238 TOTP (HMAC-SHA1, 6 digits, 30 s, ±1 step), stdlib only. See [Two-factor sign-in and sessions](#two-factor-sign-in-and-sessions). |
 | `watchpost/ratelimit.py` | In-memory per-IP token buckets. `server.py` answers 429 with `Retry-After` when a bucket is empty. |
 | `watchpost/health.py` | Component checks, each with a status (`ok`/`degraded`/`failing`), a message, and recovery guidance. |
@@ -439,6 +440,38 @@ Analysts and admins can add a TOTP second factor (RFC 6238: HMAC-SHA1, 6 digits,
 **Sessions.** `GET /api/auth/sessions` lists your active sessions: `id` (a random, non-secret session id), `created_at`, `last_seen_at` (refreshed at most once a minute), `expires_at`, and `current`. The session token and its hash are never returned. IP address and user agent are not recorded. `POST /api/auth/sessions/<id>/revoke` ends one of your own sessions (analyst and up; someone else's id answers 404). Admins can list every session (`GET /api/sessions`, optional `?user=`) and revoke any (`POST /api/sessions/<id>/revoke`). Every revoke is audited as `session_revoked` with the owner as target. There is no password-change route yet, so nothing revokes sessions on a password change.
 
 Schema 8 adds `users.totp_secret`, `totp_pending`, `totp_last_step`, `sessions.sid`, `sessions.last_seen_at`, and the `mfa_pending` table; sessions from before the upgrade get an id on the next start.
+
+### Viewer data masking
+
+Real SIEMs restrict sensitive fields by role. With the security setting `viewer_masking` set to 1, every response to a `viewer` account shows usernames and internal IP addresses as pseudonyms: `user-3f9a2c1b`, `internal-8b21e0d4`. Analyst and admin responses are not touched (a test compares them byte for byte with masking on and off). **It is off by default**, so the public demo is unchanged until the owner turns it on.
+
+**Turning it on.** It is a reviewed setting like the lockout ones: one admin proposes, a different admin approves, and both steps are in the audit log (`setting_changed`). In the UI, **Rules & review → Security settings**; or with the API:
+
+```bash
+curl -b admin.cookies -H "X-CSRF-Token: $CSRF" -H 'Content-Type: application/json' \
+  -d '{"value": 1, "reason": "mask the public demo"}' http://127.0.0.1:8080/api/settings/viewer_masking/proposals
+# then a different admin: POST /api/changes/<id>/review {"decision": "approve"}
+```
+
+Send `{"value": 0}` the same way to turn it off. A viewer with masking on gets `"masked": true` from login and `/api/auth/me`, and the header shows a **Masked view** pill.
+
+**What is masked.**
+- Usernames: every distinct `events.user` and every account name, matched as exact known values (case-insensitive, bounded to 10,000 distinct names), in structured fields and inside free text: event `message` and `raw`, alert `title`/`explanation`/`group_key`, incident text, notes, entity ids, change-request evidence, and report text. Identity fields (`assignee`, `author`, `actor`, `proposed_by`, ...) are masked whatever their value. An account named after a role (`analyst`) is masked in those fields but not as a word in text, where it is the product's own vocabulary ("Analyst notes"). The signed-in viewer's own name is not hidden from them.
+- Internal IPs: RFC 1918, loopback, link-local and IPv6 ULA (`fc00::/7`), found with an IPv4/IPv6 pattern and confirmed with `ipaddress`, in fields, text and JSON keys.
+- **Public IPs stay visible on purpose.** They are the attacker side, which is what the demo is about (the brute-force source, the spray source, the impossible-travel login). The synthetic demo uses documentation ranges (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`); Python's `is_private` counts those as private, so masking lists its own internal networks instead.
+- Host names are not masked.
+
+**One choke point.** `server.Handler` builds a masker after authorization when the account is a viewer and the setting is on, and masks every JSON response, every download (Markdown and PDF reports are rendered from a masked model; other text downloads are masked as text; a binary download without a model is refused rather than sent unmasked), and every live-stream frame (the stream re-reads the setting and the known names per frame). Routes do nothing themselves.
+
+**Pseudonyms and the key.** A pseudonym is HMAC-SHA256 of the value, truncated to 8 hex characters. The key is derived from `SIEM_AUDIT_KEY` (HMAC of a fixed label, so the audit key itself is never used directly) when that is set; otherwise it is a random 32-byte secret created in the database's `meta` table on first start. Either way the same value gets the same pseudonym on every endpoint and across restarts, and no viewer route returns the key. Changing `SIEM_AUDIT_KEY` changes every pseudonym.
+
+**Pivots still work.** Consistency is what lets a viewer pivot. A pseudonym in a query parameter or path segment is resolved server-side before the route runs: `user:user-3f9a2c1b` in Hunt, `?user=` and `?ip=` on event search, and `/api/entities/user/user-3f9a2c1b`. Resolution hashes the candidate values (the known usernames and up to 10,000 distinct event IPs) and keeps that map only for the request; no reverse map is stored. Wildcards on a pseudonym (`user:user-3f*`) do not resolve, and an unknown pseudonym simply matches nothing.
+
+**Threat model, honestly.** This is presentation-layer masking for a low-trust, read-only role, not anonymization. It hides names and internal addresses from casual viewing of the public demo. It is not a privacy guarantee:
+- Pseudonyms over a small username space can be brute-forced by anyone holding the key. The key never leaves the server, but anyone who can read the database file (or the environment) can reverse them.
+- Context still identifies people: timestamps, host names, counts, and patterns in the data remain visible, and a viewer who already knows a username can confirm it by pivoting on it.
+- A username past the 10,000-name bound is masked in identity fields but may appear in free text. Text that splits a name or address in unusual ways (escaped, encoded, or broken across tokens) can slip past exact matching.
+- Static UI text (help strings in `app.js`) is not data and is not masked.
 
 ### Hunting
 

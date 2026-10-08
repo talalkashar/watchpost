@@ -24,6 +24,7 @@ from .engine import active_suppressions, apply_rule_change, correlate_alerts, lo
 SECURITY_SETTINGS = {
     "login_lockout_threshold": (3, 20, 5, "Failed logins before an account is temporarily locked"),
     "login_lockout_minutes": (1, 1440, 15, "Minutes an account stays locked"),
+    "viewer_masking": (0, 1, 0, "1: viewer accounts see pseudonyms for usernames and internal IPs (masking.py)"),
 }
 MIN_FEEDBACK_FOR_SUGGESTION = 2
 MAX_SUPPRESSION_DAYS = 90  # tuning exceptions always expire
