@@ -25,7 +25,7 @@ When the list runs out, add a new wave of real-SIEM gaps and keep going.
 1. Branch `ws/<n>-<slug>` from `origin/main`.
 2. Tests first, then code. Stdlib-only Python, plain-JS UI (build nodes with the `el()` helper, never innerHTML;
    the CSP blocks inline style attributes).
-3. `./run_tests.sh` must pass (about 5 to 6 minutes; ~569 tests plus a 26-step smoke check). The smoke step
+3. `./run_tests.sh` must pass (about 30 to 60 seconds with modules run in parallel, `SERIAL=1` for the old run; ~598 tests plus a 26-step smoke check). The smoke step
    "login attempts were not rate limited" can flake on a loaded machine; rerun `python3 scripts/smoke.py` before
    assuming a regression.
 4. Headless browser pass: start a server on **port 8090** (8080 is the owner's AI router), e.g.
