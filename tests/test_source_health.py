@@ -348,3 +348,12 @@ class ApiTests(ServerTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NestedChildrenTests(unittest.TestCase):
+    def test_no_el_child_list_is_nested_two_deep(self):
+        # el() flattens one level, so `.map(x => [el(...), " "])` renders "[object HTMLSpanElement]"; use flatMap.
+        import re
+        from pathlib import Path
+        app = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text()
+        self.assertEqual(re.findall(r"\.map\(\([^)]*\) => \[el\(", app), [])

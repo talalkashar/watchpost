@@ -1536,7 +1536,7 @@ function sourceHealthCard(s) {
     el("p", { class: "muted" }, `Each source and host, by when its events arrived (not their timestamps) against the clock now. Cadence is the median gap between arrivals. `
       + `Late: quiet over ${t.late_multiplier}x cadence, ${durationText(t.late_floor_seconds)}, and its longest recent gap. Silent: over ${t.silent_multiplier}x cadence, ${durationText(t.silent_floor_seconds)}, and twice that gap (rule log_source_silent alerts). `
       + `Learning: under ${t.min_gaps} gaps or ${durationText(t.min_history_seconds)} of history.`),
-    el("p", {}, ["silent", "late", "healthy", "learning"].map((k) => [el("span", { class: `pill ${SOURCE_STATUS[k]}` }, `${k} ${s.summary[k]}`), " "])),
+    el("p", {}, ["silent", "late", "healthy", "learning"].flatMap((k) => [el("span", { class: `pill ${SOURCE_STATUS[k]}` }, `${k} ${s.summary[k]}`), " "])),
     table(["Source", "Host", "Status", "Last arrival", "Cadence", "Events 24h", "Why"], rows),
     s.maintenance_windows.length ? el("div", {}, el("h3", {}, "Maintenance windows"),
       table(["#", "Source", "Host", "Window", "Reason", "Approved by", ""], s.maintenance_windows.map((w) => ({ cells: [
