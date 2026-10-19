@@ -5,7 +5,7 @@ Each module already isolates itself (temp directories, port 0, :memory: database
 so modules can run side by side. Output ends the same way as `unittest discover`:
 "Ran N tests in Xs" then "OK" or "FAILED", and a failing module's full output is printed.
 
-Usage: python3 scripts/run_tests_parallel.py [-j JOBS]   (default: CPU count)
+Usage: python3 scripts/run_tests_parallel.py [-j JOBS]   (default: half the CPU count)
 """
 
 import argparse
@@ -30,7 +30,8 @@ def run_module(module):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 4)
+    # Half the CPUs: at full CPU count the timing-sensitive syslog/live-ingest tests flaked (2 of 7 local runs).
+    parser.add_argument("-j", "--jobs", type=int, default=max(1, (os.cpu_count() or 4) // 2))
     args = parser.parse_args()
 
     files = sorted((ROOT / "tests").glob("test_*.py"), key=lambda p: -p.stat().st_size)  # biggest first
