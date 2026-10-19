@@ -18,6 +18,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+# Real sockets with short timeouts: flaky when CPU-starved by other modules (CI and locally), so run alone after.
+RUN_ALONE = {"tests.test_live_ingest"}
 
 
 def run_module(module):
@@ -38,7 +40,8 @@ def main():
     modules = [f"tests.{p.stem}" for p in files]
     start = time.monotonic()
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        results = list(pool.map(run_module, modules))
+        results = list(pool.map(run_module, [m for m in modules if m not in RUN_ALONE]))
+    results += [run_module(m) for m in modules if m in RUN_ALONE]
 
     failed = [r for r in results if r[1] != 0]
     for module, _, _, _, output in failed:
