@@ -65,6 +65,8 @@ class TailedFile:
             self._open(0 if (saved or from_start) else st.st_size)
 
     def _open(self, offset):
+        if not os.path.isfile(self.path):  # follows symlinks; rejects directories, devices, FIFOs
+            raise FatalError(f"{self.path}: not a regular file")
         self.handle = open(self.path, "rb")
         self.inode = os.fstat(self.handle.fileno()).st_ino
         self.handle.seek(offset)
@@ -126,6 +128,8 @@ class TailedFile:
 class Shipper:
     def __init__(self, url, token, files, state_path, batch_lines=500, batch_bytes=1024 * 1024,
                  year=None, from_start=False, cafile=None, timeout=30, sleep=time.sleep):
+        if urllib.parse.urlparse(url).scheme not in ("http", "https"):
+            raise FatalError(f"url must be http(s), got {url!r}")  # urlopen would also take file:// and ftp://
         self.url, self.token = url.rstrip("/"), token
         self.state_path = Path(state_path)
         self.batch_lines, self.batch_bytes, self.year = batch_lines, batch_bytes, year

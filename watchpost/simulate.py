@@ -599,6 +599,8 @@ def main(argv=None):
     token = args.token or os.environ.get("SIEM_INGEST_TOKEN")
     if not token:
         parser.error("an ingest token is required (--token or SIEM_INGEST_TOKEN)")
+    if urllib.parse.urlparse(args.url).scheme not in ("http", "https"):
+        parser.error("--url must be an http(s) URL")
     if not _is_loopback(args.url) and not args.allow_remote:
         parser.error("refusing to send to a non-loopback URL without --allow-remote")
 
