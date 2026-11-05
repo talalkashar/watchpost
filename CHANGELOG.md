@@ -2,6 +2,12 @@
 
 All bundled data is synthetic. PR numbers refer to https://github.com/talalkashar/watchpost.
 
+## Unreleased
+
+### Fixed
+
+- Sigma import: unquoted values with a leading zero, such as the keyboard layout ID `00000429`, stay text instead of becoming the number 429, so `contains` matches the full identifier. Found by comparing the parser with PyYAML on all 3,164 SigmaHQ rules; every rule now parses identically. (#66)
+
 ## 5.0.0 (2026-10-08)
 
 PRs #21 to #35. The PR titles used 4.1 to 4.9 for these rounds; none of them was released under its own version.

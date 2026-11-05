@@ -26,6 +26,10 @@ def compiled(detection):
 
 
 class YamlSubsetTests(unittest.TestCase):
+    def test_leading_zero_numbers_stay_text(self):
+        doc = sigma.parse_yaml("ids:\n  - 00000429\n  - 00050429\n  - 0\n  - 7\n  - -3\n")
+        self.assertEqual(doc["ids"], ["00000429", "00050429", 0, 7, -3])
+
     def test_supported_subset(self):
         doc = sigma.parse_yaml(
             "---\n"
@@ -110,6 +114,12 @@ class YamlSubsetTests(unittest.TestCase):
 
 
 class CompileTests(unittest.TestCase):
+    def test_leading_zero_values_match_literal_text(self):
+        # Keyboard layout IDs such as 00000429 are text. Read as the number 429 they would match any value with "429".
+        p = compiled("  sel:\n    message|contains:\n      - 00000429\n  condition: sel\n")
+        self.assertTrue(sigma.matches(p, {"message": "00000429"}))
+        self.assertFalse(sigma.matches(p, {"message": "retry after 429 seconds"}))
+
     def test_modifiers(self):
         p = compiled("  sel:\n    message|contains: Union Select\n  condition: sel\n")
         self.assertTrue(sigma.matches(p, {"message": "id=1 UNION SELECT pw"}))  # case-insensitive
