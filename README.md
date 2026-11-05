@@ -74,7 +74,7 @@ Watchpost is a portfolio and learning project, not a production SIEM. All bundle
 
 ## Credits
 
-Built by [Talal Kashar](https://github.com/talalkashar). Juan Carlos Munera contributed the asset inventory (PR #9) and suggested several hardening changes after reviewing the project.
+Built by [Talal Kashar](https://github.com/talalkashar). Juan Carlos Munera ([LinkedIn](https://www.linkedin.com/in/juanmunera), [GitHub](https://github.com/juancarlosmunera)) contributed the asset inventory (PR #9) and suggested several hardening changes after reviewing the project.
 
 ## License
 
