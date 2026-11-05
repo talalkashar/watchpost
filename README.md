@@ -116,7 +116,7 @@ export SIEM_VIEWER_PASSWORD='a-read-only-demo-login'     # optional; creates a r
 
 If you don't set the password variables, Watchpost generates random passwords on first start. It writes them to `data/initial_credentials.txt` (mode 0600) and never prints them to the logs.
 
-Then sign in as `admin`, open **Admin → Load synthetic demo data**, and follow [DEMO_SCRIPT.md](DEMO_SCRIPT.md).
+Then sign in as `admin`, open **Admin → Load synthetic demo data**.
 
 ### Tests
 
@@ -746,7 +746,6 @@ labs/siem/
 ├── docs/API.md         API reference
 ├── docs/LIVE_INGEST.md syslog listener, rsyslog forwarding, and the file shipper
 ├── deploy/             Debian 12 kit: systemd unit, install.sh, Caddyfile, nginx self-signed config
-├── DEMO_SCRIPT.md      30-second shot list and 2-minute walkthrough
-├── LINKEDIN.md         project entry, post, and honest limits
-└── PROGRESS.md         milestones, verification evidence, next steps
+├── SECURITY.md         how to report a vulnerability
+└── LICENSE             MIT
 ```
