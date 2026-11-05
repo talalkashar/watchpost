@@ -45,7 +45,8 @@ class SigmaError(ValueError):
 
 # --- YAML subset ---------------------------------------------------------------------------
 
-_INT_RE = re.compile(r"[-+]?[0-9]+")
+# A leading zero (00000429) marks an identifier, not a number: keep the text so matching sees every digit.
+_INT_RE = re.compile(r"[-+]?(?:0|[1-9][0-9]*)")
 _NULLS = {"", "~", "null", "Null", "NULL"}
 _TRUE = {"true", "True", "TRUE"}
 _FALSE = {"false", "False", "FALSE"}
