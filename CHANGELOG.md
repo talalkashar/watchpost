@@ -6,7 +6,7 @@ All bundled data is synthetic. PR numbers refer to https://github.com/talalkasha
 
 ### Fixed
 
-- Sigma import: unquoted values with a leading zero, such as the keyboard layout ID `00000429`, stay text instead of becoming the number 429, so `contains` matches the full identifier. Found by comparing the parser with PyYAML on all 3,164 SigmaHQ rules; every rule now parses identically. (#66)
+- Sigma import: unquoted values with a leading zero, such as the keyboard layout ID `00000429`, stay text instead of becoming the number 429, so `contains` matches the full identifier. Found by comparing the parser with PyYAML on all 3,164 SigmaHQ rules; every rule now parses identically. (#67)
 
 ## 5.0.0 (2026-10-08)
 
