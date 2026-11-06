@@ -1,0 +1,6 @@
+target-version = "py311"
+extend-exclude = ["data"]
+
+[lint]
+# Default rules, minus two style checks that read worse than the code they flag (short test lambdas, `l` in comprehensions).
+ignore = ["E731", "E741"]

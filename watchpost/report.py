@@ -7,7 +7,7 @@ Both return the same model shape.
 
 import json
 
-from . import __version__, assets as assets_mod, attack, incidents
+from . import __version__, attack, incidents
 from .db import now_iso
 from .pdfwriter import Document
 from .queries import QueryError, get_alert

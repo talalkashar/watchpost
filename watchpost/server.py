@@ -7,7 +7,6 @@ import queue
 import mimetypes
 import re
 import sqlite3
-from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
