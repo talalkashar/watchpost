@@ -14,6 +14,19 @@ def alert(aid, minute, ip=None, user=None, host=None, incident_id=None, severity
             "entities": {"src_ip": [ip] if ip else [], "user": [user] if user else [], "host": [host] if host else []}}
 
 
+def _at(seconds):
+    return f"2026-09-15T10:{seconds // 60:02d}:{seconds % 60:02d}.000Z"
+
+
+def instant(aid, seconds, ip=None, user=None, host=None, tactics=None):
+    """An alert whose span is a single instant, so window edges can be asserted exactly."""
+    ts = _at(seconds)
+    return {"id": aid, "first_seen": ts, "last_seen": ts, "severity": "medium", "incident_id": None,
+            "tactics": tactics or [], "synthetic": 1,
+            "entities": {"src_ip": [ip] if ip else [], "user": [user] if user else [],
+                         "host": [host] if host else []}}
+
+
 class CorrelateTests(unittest.TestCase):
     def test_shared_entities_chain_within_window(self):
         alerts = [alert(1, 0, ip="203.0.113.5"), alert(2, 10, ip="203.0.113.5", user="frank"),
@@ -26,6 +39,27 @@ class CorrelateTests(unittest.TestCase):
         alerts = [alert(1, 0, ip="203.0.113.5"), alert(2, 50, ip="203.0.113.5")]
         self.assertEqual(len(correlate.correlate(alerts, window_seconds=600)), 2)
         self.assertEqual(len(correlate.correlate(alerts, window_seconds=3600)), 1)
+
+    def test_window_edge_is_inclusive_and_one_second_past_is_not(self):
+        # The window is closed at the edge: a gap of exactly `window_seconds` still links,
+        # one more second does not.
+        ip = "203.0.113.5"
+        self.assertEqual(len(correlate.correlate([instant(1, 0, ip=ip), instant(2, 600, ip=ip)],
+                                                 window_seconds=600)), 1)
+        self.assertEqual(len(correlate.correlate([instant(1, 0, ip=ip), instant(2, 601, ip=ip)],
+                                                 window_seconds=600)), 2)
+
+    def test_two_chains_link_only_through_a_third_alert(self):
+        # 1-2 share an ip and 3-4 share a user; nothing links 1 to 4 except alert 3, which
+        # carries both the host of 2 and the user of 4. The chain must reach all four.
+        chained = [alert(1, 0, ip="203.0.113.5"), alert(2, 1, ip="203.0.113.5", host="web01"),
+                   alert(3, 2, host="web01", user="frank"), alert(4, 3, user="FRANK")]
+        self.assertEqual([g["alert_ids"] for g in correlate.correlate(chained, window_seconds=600)],
+                         [[1, 2, 3, 4]])
+        # Drop the bridge and the two pairs stay apart, so the test above is really chaining.
+        self.assertEqual([g["alert_ids"] for g in correlate.correlate(chained[:2] + chained[3:],
+                                                                     window_seconds=600)],
+                         [[1, 2], [4]])
 
     def test_sightings_keep_long_alerts_from_swallowing_a_busy_host(self):
         # A travel alert spans hours, but web01 only appears in its last event.
@@ -59,6 +93,20 @@ class CorrelateTests(unittest.TestCase):
                                              "synthetic": 0}])
         self.assertEqual((three["severity"], three["escalated"], three["synthetic"]), ("critical", True, 0))
         self.assertEqual(three["alert_count"], 3)
+
+    def test_escalation_needs_three_distinct_tactics(self):
+        def summary(*tactics):
+            return correlate.summarize([instant(i + 1, i * 5, ip="203.0.113.5", tactics=[t])
+                                        for i, t in enumerate(tactics)])
+
+        self.assertFalse(summary("Initial Access", "Credential Access")["escalated"])
+        # Repeats are one tactic, not three: the count is distinct stages.
+        repeated = summary("Initial Access", "Initial Access", "Initial Access")
+        self.assertFalse(repeated["escalated"])
+        self.assertEqual(repeated["stages"], ["Initial Access"])
+        three = summary("Initial Access", "Credential Access", "Privilege Escalation")
+        self.assertTrue(three["escalated"])
+        self.assertEqual((three["severity"], three["escalated"]), ("high", True))
 
     def test_should_open(self):
         self.assertFalse(correlate.should_open([alert(1, 0)]))
