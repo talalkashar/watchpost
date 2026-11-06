@@ -103,6 +103,16 @@ class PureMaskerTests(unittest.TestCase):
     def test_own_name_is_not_masked(self):
         self.assertEqual(self.m.mask({"username": "viewer", "role": "viewer"}), {"username": "viewer", "role": "viewer"})
 
+    def test_user_fields_mask_role_names_kept_in_free_text(self):
+        out = self.m.mask({
+            "assignee": "analyst",
+            "reviewed_by": "ANALYST",
+            "note": "Analyst notes from analyst",
+        })
+        self.assertEqual(out["assignee"], self.m.user("analyst"))
+        self.assertEqual(out["reviewed_by"], self.m.user("analyst"))
+        self.assertEqual(out["note"], "Analyst notes from analyst")
+
 
 class MaskingKeyTests(unittest.TestCase):
     def setUp(self):
