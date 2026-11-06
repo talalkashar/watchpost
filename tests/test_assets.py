@@ -330,7 +330,7 @@ class AssetReviewApiTests(ServerTestCase):
         self.assertIn("second person", data["error"])
         self.assertEqual(self.review(self.admin, change, "reject")[0], 403)
         self.assertEqual(self.current()["criticality"], "critical")
-        self.assertEqual(self.admin.get(f"/api/changes")[1][0]["status"], "pending")
+        self.assertEqual(self.admin.get("/api/changes")[1][0]["status"], "pending")
 
     def test_approval_applies_the_change_and_reweighs_open_alerts(self):
         self.analyst.post("/api/ingest", {"source": "t", "events": failures("db01")})

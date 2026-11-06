@@ -117,7 +117,7 @@ def web_scan(day, rng):
                      message=f"GET {path} -> 404 [SYNTHETIC scanner probe]", bytes=162)
               for i, path in enumerate(SCAN_PROBES)]
     events += [_event(start + timedelta(seconds=30 * i), "web_scan", "web_request", None, f"10.0.1.{20 + i}",
-                      message=f"GET /app/dashboard -> 200 [SYNTHETIC]", bytes=5120) for i in range(4)]
+                      message="GET /app/dashboard -> 200 [SYNTHETIC]", bytes=5120) for i in range(4)]
     return events
 
 

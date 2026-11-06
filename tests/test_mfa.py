@@ -2,15 +2,13 @@
 
 import base64
 import os
-import sqlite3
 import tempfile
 import unittest
 from datetime import timedelta
 from unittest import mock
 
-from tests.helpers import ADMIN_PW, ANALYST_PW, VIEWER_PW, Client, ServerTestCase
+from tests.helpers import ANALYST_PW, VIEWER_PW, Client, ServerTestCase
 from watchpost import auth, totp
-from watchpost.config import Config
 from watchpost.db import SCHEMA_VERSION, connect, init_schema, iso, utcnow
 
 RFC_KEY = b"12345678901234567890"  # RFC 6238 Appendix B, SHA-1 seed
