@@ -163,9 +163,10 @@ class SyslogListenerTests(unittest.TestCase):
         self.assertTrue(all(e["source"] == "syslog" and e["synthetic"] == 0 for e in events))
         batches = self.rows("SELECT * FROM ingest_batches")
         self.assertTrue(batches and all(b["submitted_by"] == "syslog-listener" for b in batches))
-        check = self.health()["syslog"]
+        # The flush commits rows before it bumps the counter, so wait for the counter too.
+        check = wait_for(lambda: (c := self.health()["syslog"])["details"]["events_ingested"] == 3 and c)
+        self.assertTrue(check, "events_ingested never reached 3")
         self.assertEqual(check["status"], "ok")
-        self.assertEqual(check["details"]["events_ingested"], 3)
 
     def test_nginx_and_firewall_frames_land_with_specific_types(self):
         listener = self.listener()
