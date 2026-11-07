@@ -6,6 +6,7 @@
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776ab)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-2ea44f)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/talalkashar/watchpost/badge)](https://scorecard.dev/viewer/?uri=github.com/talalkashar/watchpost)
 
 **[Live demo](https://watchpost-nxxu.onrender.com)** · read-only login `viewer` / `watchpost-viewer-demo` (free tier: the first load can take a minute) · [Full reference](docs/REFERENCE.md)
 
