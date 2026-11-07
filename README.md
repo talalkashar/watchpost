@@ -65,6 +65,7 @@ CI runs the suite on Python 3.11 through 3.14.
 | [Reference](docs/REFERENCE.md) | Every feature, the architecture, configuration, performance numbers and limits |
 | [API](docs/API.md) | HTTP API reference |
 | [Live ingestion](docs/LIVE_INGEST.md) | Syslog listener, rsyslog forwarding, the file shipper |
+| [Threat model](docs/THREAT-MODEL.md) | What it protects, what it assumes, and what it does not cover |
 | [Deployment](deploy/README.md) | Debian 12 kit: hardened systemd service behind Caddy or nginx |
 | [Changelog](CHANGELOG.md) | What changed in each release |
 
