@@ -10,7 +10,7 @@ from .normalize import EVENT_TYPES, SEVERITIES, EventError, parse_timestamp
 ALERT_STATUSES = ("open", "investigating", "resolved")
 DISPOSITIONS = ("true_positive", "false_positive", "benign")
 EVENT_FIELDS = "id, ts, ingested_at, source, host, event_type, outcome, severity, user, src_ip, dest_ip, dest_port, " \
-               "bytes, message, synthetic, batch_id"
+               "bytes, message, synthetic, batch_id, threat"
 
 
 class QueryError(ValueError):
@@ -161,6 +161,8 @@ def get_alert(conn, alert_id):
     alert["activity"] = [dict(r) for r in conn.execute(
         "SELECT * FROM alert_activity WHERE alert_id = ? ORDER BY id", (alert_id,))]
     alert["timeline"] = related_timeline(conn, alert)
+    from . import playbooks  # here, not at the top: playbooks imports this module
+    alert["playbook"] = playbooks.get(conn, alert_id)
     return alert
 
 

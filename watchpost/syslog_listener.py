@@ -1,4 +1,4 @@
-"""Live syslog receiver over UDP and TCP (RFC 3164 and RFC 5424 messages, RFC 6587 TCP framing).
+"""Live syslog receiver over UDP, TCP and TLS (RFC 3164 and RFC 5424 messages, RFC 6587 framing, RFC 5425 TLS).
 
 Each frame first goes through the existing auth.log parser, so sshd, sudo, UFW/iptables
 firewall and OpenVPN lines get the same event types as uploaded files. A message the
@@ -7,8 +7,12 @@ line (web_request, web_scan, web_error). Anything else becomes a generic
 `syslog` event whose severity comes from the PRI field. Frames are queued and
 handed to engine.ingest in one batch every `flush_interval` seconds.
 
-Syslog has no authentication. The listener binds to loopback by default; binding
-elsewhere should be paired with SIEM_SYSLOG_ALLOW and a host firewall.
+Plain UDP and TCP syslog have no authentication and no encryption. The listener binds to
+loopback by default; binding elsewhere should be paired with SIEM_SYSLOG_ALLOW and a host
+firewall, or use TLS instead. A server certificate (SIEM_SYSLOG_TLS_CERT, SIEM_SYSLOG_TLS_KEY)
+encrypts the stream and proves the listener to the sender. A client CA
+(SIEM_SYSLOG_TLS_CLIENT_CA) also makes every sender prove a certificate from that CA before
+one frame is read.
 Failures are logged to error_log and reported through the `syslog` health
 component. They never stop the web server.
 """
@@ -17,6 +21,7 @@ import ipaddress
 import re
 import socket
 import socketserver
+import ssl
 import threading
 import time
 from collections import deque
@@ -31,6 +36,7 @@ SUBMITTED_BY = "syslog-listener"
 MAX_FRAME_BYTES = 16 * 1024   # longer frames are truncated
 MAX_QUEUE = 50000             # frames held between flushes; beyond this they are dropped and counted
 TCP_IDLE_TIMEOUT = 300
+TLS_HANDSHAKE_TIMEOUT = 10    # seconds a peer gets to finish the TLS handshake
 DEFAULT_PRI = 13              # user.notice, RFC 3164 section 4.3.3
 RECENT_SECONDS = 600          # drops or flush failures this recent make the component degraded
 
@@ -164,6 +170,17 @@ def _is_loopback(host):
         return host == "localhost"
 
 
+def plain_address(peer):
+    """A peer's address as its owner would write it. A listener bound to `::` sees an IPv4 sender as an
+    IPv4-mapped IPv6 address (::ffff:192.0.2.5); this gives back 192.0.2.5, so the allow list and the
+    stored host name mean the same thing whichever way the listener is bound."""
+    try:
+        address = ipaddress.ip_address(peer)
+    except ValueError:
+        return peer
+    return str(getattr(address, "ipv4_mapped", None) or address)
+
+
 def parse_allow(value):
     """Comma-separated IPs or CIDR networks. Empty means any peer."""
     nets = []
@@ -173,9 +190,64 @@ def parse_allow(value):
     return nets
 
 
+def _refuse_passphrase():
+    raise ValueError("the private key is passphrase-protected; Watchpost cannot ask for a passphrase, so it "
+                     "needs an unencrypted key file that only its own user can read")
+
+
+def _readable(*paths):
+    for path in paths:
+        with open(path, "rb"):  # the ssl module's own "No such file or directory" does not name the file
+            pass
+
+
+def tls_context(cert, key, client_ca=None):
+    """Server-side context for syslog over TLS (RFC 5425). Raises ValueError when a file cannot be used.
+
+    TLS 1.2 is the floor. With `client_ca`, a handshake completes only for a sender whose certificate
+    chains to that CA bundle (mutual TLS). The system trust store is never consulted.
+    """
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    # Some Python builds (3.11.2 on Debian 12, for one) turn this on for every new context. It makes a
+    # stream that was cut off read like one that ended properly, and _TLSHandler must tell the two apart.
+    context.options &= ~getattr(ssl, "OP_IGNORE_UNEXPECTED_EOF", 0)
+    # No TLS 1.3 session tickets. A sender only writes, so a ticket stays unread in its socket buffer,
+    # and rsyslog then takes a connection this side has closed for a live one (see _TLSHandler). A
+    # long-lived syslog connection has no use for session resumption anyway.
+    context.num_tickets = 0
+    part = "certificate and key"
+    try:
+        _readable(cert, key)
+        context.load_cert_chain(cert, key, password=_refuse_passphrase)
+        if client_ca:
+            part = "client CA"
+            _readable(client_ca)
+            context.load_verify_locations(cafile=client_ca)
+            context.verify_mode = ssl.CERT_REQUIRED
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"cannot load the TLS {part}: {describe_exception(exc)}") from exc
+    return context
+
+
+def _read_frames(listener, rfile, peer):
+    """Queue frames from one stream. True when the peer ended it cleanly; False on a timeout, a broken
+    stream, or shutdown."""
+    try:
+        while not listener.stopping.is_set():
+            frame = read_tcp_frame(rfile)
+            if frame is None:
+                return True
+            if frame.strip():
+                listener.submit(frame, peer, checked=True)
+    except OSError:  # idle timeout, reset, or a TLS stream cut short
+        pass
+    return False
+
+
 class _UDPHandler(socketserver.BaseRequestHandler):
     def handle(self):
-        self.server.listener.submit(self.request[0], self.client_address[0])
+        self.server.listener.submit(self.request[0], plain_address(self.client_address[0]))
 
 
 class _TCPHandler(socketserver.StreamRequestHandler):
@@ -183,19 +255,51 @@ class _TCPHandler(socketserver.StreamRequestHandler):
 
     def handle(self):
         listener = self.server.listener
-        peer = self.client_address[0]
+        peer = plain_address(self.client_address[0])
         if not listener.allowed(peer):
             listener.count("denied")
             return
-        try:
-            while not listener.stopping.is_set():
-                frame = read_tcp_frame(self.rfile)
-                if frame is None:
-                    return
-                if frame.strip():
-                    listener.submit(frame, peer, checked=True)
-        except (socket.timeout, ConnectionError):
+        _read_frames(listener, self.rfile, peer)
+
+
+class _TLSHandler(socketserver.BaseRequestHandler):
+    """Syslog over TLS (RFC 5425): the TCP framing, inside a TLS session.
+
+    The handshake runs here, in the connection's own thread, so a peer that stalls it cannot hold up
+    the accept loop. The allow list is checked first, so a denied peer costs no handshake.
+
+    Closing follows RFC 5425 section 4.4 where the sender starts it: its close_notify is answered with
+    ours. When this side ends the connection (idle timeout, shutdown) it sends no close_notify, on
+    purpose. rsyslog tells a closed connection from a live one by peeking at its socket for unread
+    bytes; a close_notify waiting there hides the close, and rsyslog then loses its next message.
+    Measured with rsyslog 8.2302 and GnuTLS 3.7: every first message after an idle close was lost
+    with close_notify (or with session tickets), none without.
+    """
+
+    def handle(self):
+        listener = self.server.listener
+        peer = plain_address(self.client_address[0])
+        if not listener.allowed(peer):
+            listener.count("denied")
             return
+        self.request.settimeout(TLS_HANDSHAKE_TIMEOUT)
+        try:
+            # suppress_ragged_eofs=False: a stream cut off without close_notify raises instead of reading
+            # as a normal end, so a half-received last frame is dropped, not stored as if it were whole.
+            conn = listener.tls_context.wrap_socket(self.request, server_side=True, suppress_ragged_eofs=False)
+        except OSError as exc:  # no or untrusted client certificate, plaintext on this port, a stalled peer
+            listener.tls_failed(peer, exc)
+            return
+        with conn:
+            conn.settimeout(TCP_IDLE_TIMEOUT)
+            with conn.makefile("rb") as rfile:
+                ended_cleanly = _read_frames(listener, rfile, peer)
+            if ended_cleanly:  # the sender said close_notify: answer it
+                try:
+                    conn.settimeout(0)  # one small record: never wait on a peer that is already leaving
+                    conn.unwrap()
+                except OSError:
+                    pass
 
 
 def _server_class(base, bind):
@@ -206,18 +310,23 @@ def _server_class(base, bind):
 
 class SyslogListener:
     def __init__(self, db_path, bind="127.0.0.1", port=5514, flush_interval=2.0,
-                 max_batch=20000, allow="", udp=True, tcp=True):
+                 max_batch=20000, allow="", udp=True, tcp=True,
+                 tls_port=6514, tls_cert=None, tls_key=None, tls_client_ca=None):
         self.db_path, self.bind, self.port = db_path, bind, port
         self.flush_interval, self.max_batch = flush_interval, max_batch
-        self.error = None
+        self.error = self.guidance = None
         try:
             self.allow = parse_allow(allow)
         except ValueError as exc:
             self.allow = []
-            self.error = f"invalid SIEM_SYSLOG_ALLOW entry: {exc}"  # fail closed: do not listen
+            self._fail(f"invalid SIEM_SYSLOG_ALLOW entry: {exc}",  # fail closed: do not listen
+                       "Fix SIEM_SYSLOG_ALLOW (comma-separated IPs or CIDR networks), then restart.")
         self.want_udp, self.want_tcp = udp, tcp
-        self.udp_server = self.tcp_server = None
-        self.udp_port = self.tcp_port = None
+        self.tls_cert, self.tls_key, self.tls_client_ca = tls_cert, tls_key, tls_client_ca
+        self._tls_port = tls_port
+        self.tls_context = None
+        self.udp_server = self.tcp_server = self.tls_server = None
+        self.udp_port = self.tcp_port = self.tls_port = None
         self.stopping = threading.Event()
         self._queue = deque()
         self._lock = threading.Lock()
@@ -226,17 +335,18 @@ class SyslogListener:
         self.flush_error = None
         self.last_drop_at = None
         self.stats = {"frames_received": 0, "events_ingested": 0, "rejected": 0, "dropped": 0,
-                      "denied": 0, "lost_on_failure": 0, "batches": 0,
-                      "last_frame_at": None, "last_flush_at": None}
+                      "denied": 0, "tls_failed": 0, "lost_on_failure": 0, "batches": 0,
+                      "last_frame_at": None, "last_flush_at": None, "last_tls_failure": None}
 
     # --- lifecycle -----------------------------------------------------------------
 
     def start(self):
         """Bind and start threads. Returns False (and reports failing health) instead of raising."""
         health.register_check("syslog", self.health_check)
-        if self.error:
-            self._record(self.error, "Fix SIEM_SYSLOG_ALLOW (comma-separated IPs or CIDR networks), then restart.")
+        if self.error or not self._load_tls():
+            self._record(self.error, self.guidance)
             return False
+        port = self.port
         try:
             if self.want_tcp:
                 self.tcp_server = _server_class(socketserver.ThreadingTCPServer, self.bind)(
@@ -248,27 +358,40 @@ class SyslogListener:
                     (self.bind, self.port), _UDPHandler)
                 self.udp_server.listener = self
                 self.udp_port = self.udp_server.server_address[1]
+            if self.tls_context is not None:
+                port = self._tls_port
+                self.tls_server = _server_class(socketserver.ThreadingTCPServer, self.bind)(
+                    (self.bind, port), _TLSHandler)
+                self.tls_server.listener = self
+                self.tls_port = self.tls_server.server_address[1]
         except OSError as exc:
-            self.error = f"could not bind {self.bind}:{self.port}: {describe_exception(exc)}"
-            self._record(self.error, "Choose a free SIEM_SYSLOG_PORT (ports below 1024 need root), then restart.")
-            self._close_servers()
+            self._fail(f"could not bind {self.bind}:{port}: {describe_exception(exc)}",
+                       "Choose a free SIEM_SYSLOG_PORT and SIEM_SYSLOG_TLS_PORT (ports below 1024 need root), "
+                       "then restart.")
+            self._record(self.error, self.guidance)
+            self._close_servers()  # all or nothing: a transport that did bind does not stay up alone
             return False
         for name, target in (("syslog-udp", self.udp_server and self.udp_server.serve_forever),
                              ("syslog-tcp", self.tcp_server and self.tcp_server.serve_forever),
+                             ("syslog-tls", self.tls_server and self.tls_server.serve_forever),
                              ("syslog-flush", self._flush_loop)):
             if target:
                 thread = threading.Thread(target=target, name=name, daemon=True)
                 thread.start()
                 self._threads.append(thread)
-        if not _is_loopback(self.bind) and not self.allow:
-            log.warning("Syslog listener bound to %s with no SIEM_SYSLOG_ALLOW list: any host that can "
-                        "reach it can inject events. Restrict it with a firewall or SIEM_SYSLOG_ALLOW.", self.bind)
-        log.info("Syslog listener on %s (udp %s, tcp %s)", self.bind, self.udp_port, self.tcp_port)
+        open_to_any = [name for name, on in (("udp", self.udp_server), ("tcp", self.tcp_server),
+                                             ("tls without client certificates",
+                                              self.tls_server and not self.tls_client_ca)) if on]
+        if open_to_any and not _is_loopback(self.bind) and not self.allow:
+            log.warning("Syslog listener bound to %s with no SIEM_SYSLOG_ALLOW list and no sender authentication "
+                        "(%s): any host that can reach it can inject events. Restrict it with a firewall, "
+                        "SIEM_SYSLOG_ALLOW, or TLS client certificates.", self.bind, ", ".join(open_to_any))
+        log.info("Syslog listener on %s (%s)", self.bind, self._transports())
         return True
 
     def stop(self):
         self.stopping.set()
-        for server in (self.udp_server, self.tcp_server):
+        for server in (self.udp_server, self.tcp_server, self.tls_server):
             if server is not None:
                 server.shutdown()
         self._close_servers()
@@ -278,9 +401,44 @@ class SyslogListener:
         health.unregister_check("syslog", self.health_check)
 
     def _close_servers(self):
-        for server in (self.udp_server, self.tcp_server):
+        # The references go too: shutdown() on a server whose loop never started would block stop() forever.
+        for server in (self.udp_server, self.tcp_server, self.tls_server):
             if server is not None:
                 server.server_close()
+        self.udp_server = self.tcp_server = self.tls_server = None
+        self.udp_port = self.tcp_port = self.tls_port = None
+
+    def _fail(self, error, guidance):
+        self.error, self.guidance = error, guidance
+        return False
+
+    def _load_tls(self):
+        """Build the TLS context when TLS is configured. False (with self.error set) when the settings
+        cannot be honoured: a broken TLS setup stops the listener, it never falls back to plaintext."""
+        if not (self.tls_cert or self.tls_key or self.tls_client_ca):
+            if self.want_udp or self.want_tcp:
+                return True
+            return self._fail("plaintext syslog is turned off and no TLS certificate is set, so there is "
+                              "nothing to listen on",
+                              "Set SIEM_SYSLOG_TLS_CERT and SIEM_SYSLOG_TLS_KEY, or remove "
+                              "SIEM_SYSLOG_PLAINTEXT=0, then restart.")
+        guidance = ("Point SIEM_SYSLOG_TLS_CERT and SIEM_SYSLOG_TLS_KEY at a PEM certificate and its key (no "
+                    "passphrase), and SIEM_SYSLOG_TLS_CLIENT_CA, if set, at the PEM CA that signs sender "
+                    "certificates. The Watchpost user must be able to read all of them. Then restart.")
+        if not (self.tls_cert and self.tls_key):
+            return self._fail("syslog TLS needs both SIEM_SYSLOG_TLS_CERT and SIEM_SYSLOG_TLS_KEY", guidance)
+        try:
+            self.tls_context = tls_context(self.tls_cert, self.tls_key, self.tls_client_ca)
+        except ValueError as exc:
+            return self._fail(str(exc), guidance)
+        return True
+
+    def _transports(self):
+        parts = [f"{name} {port}" for name, port in (("udp", self.udp_port), ("tcp", self.tcp_port))
+                 if port is not None]
+        if self.tls_port is not None:
+            parts.append(f"tls {self.tls_port}" + (", client certificates required" if self.tls_client_ca else ""))
+        return ", ".join(parts)
 
     # --- intake --------------------------------------------------------------------
 
@@ -288,7 +446,7 @@ class SyslogListener:
         if not self.allow:
             return True
         try:
-            address = ipaddress.ip_address(peer)
+            address = ipaddress.ip_address(plain_address(peer))
         except ValueError:
             return False
         return any(address in net for net in self.allow)
@@ -296,6 +454,12 @@ class SyslogListener:
     def count(self, key, n=1):
         with self._lock:
             self.stats[key] += n
+
+    def tls_failed(self, peer, exc):
+        """A TLS handshake did not complete. Nothing was read from that peer."""
+        with self._lock:
+            self.stats["tls_failed"] += 1
+            self.stats["last_tls_failure"] = f"{now_iso()} {peer}: {describe_exception(exc)}"
 
     def submit(self, data, peer, checked=False):
         if not checked and not self.allowed(peer):
@@ -377,10 +541,11 @@ class SyslogListener:
     def health_check(self):
         with self._lock:
             details = {"bind": self.bind, "udp_port": self.udp_port, "tcp_port": self.tcp_port,
+                       "tls_port": self.tls_port,
+                       "tls_client_certificates": bool(self.tls_port is not None and self.tls_client_ca),
                        "allow": [str(n) for n in self.allow], "queued": len(self._queue), **self.stats}
         if self.error:
-            return ("failing", f"syslog listener is not running: {self.error}",
-                    "Fix the cause (usually the port is in use or needs root), then restart Watchpost.", details)
+            return ("failing", f"syslog listener is not running: {self.error}", self.guidance, details)
         dead = [t.name for t in self._threads if not t.is_alive()]
         if dead and not self.stopping.is_set():
             return ("failing", f"syslog thread(s) stopped: {', '.join(dead)}",
@@ -392,7 +557,7 @@ class SyslogListener:
             return ("degraded", f"{details['dropped']} frame(s) dropped because the queue was full",
                     "Senders are faster than ingestion. Reduce forwarded facilities or rate-limit in rsyslog.",
                     details)
-        return ("ok", f"listening on {self.bind} (udp {self.udp_port}, tcp {self.tcp_port})", None, details)
+        return ("ok", f"listening on {self.bind} ({self._transports()})", None, details)
 
 
 def start_if_enabled(app):
@@ -400,7 +565,13 @@ def start_if_enabled(app):
     config = app.config
     if not config.syslog_enabled:
         return None
+    tls = bool(config.syslog_tls_cert or config.syslog_tls_key or config.syslog_tls_client_ca)
+    # TLS replaces the plaintext listeners unless SIEM_SYSLOG_PLAINTEXT=1 asks to keep them next to it.
+    plaintext = not tls if config.syslog_plaintext is None else config.syslog_plaintext
     listener = SyslogListener(config.db_path, config.syslog_bind, config.syslog_port,
-                              max_batch=config.max_batch_events, allow=config.syslog_allow)
+                              max_batch=config.max_batch_events, allow=config.syslog_allow,
+                              udp=plaintext, tcp=plaintext, tls_port=config.syslog_tls_port,
+                              tls_cert=config.syslog_tls_cert, tls_key=config.syslog_tls_key,
+                              tls_client_ca=config.syslog_tls_client_ca)
     listener.start()
     return listener
