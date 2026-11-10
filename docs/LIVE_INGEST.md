@@ -1,11 +1,12 @@
 # Live ingestion: point a Linux box at Watchpost
 
-Watchpost can take real logs as they are written, over syslog (plain or TLS) or from the file shipper:
+Watchpost can take real logs as they are written, over syslog (plain or TLS), from the file shipper, or from AWS CloudTrail:
 
 | Path | Transport | Auth | Best for |
 |---|---|---|---|
 | **Syslog listener** (`SIEM_SYSLOG=1`) | UDP or TCP syslog, RFC 3164 and RFC 5424 | none (address allow list only) | the Watchpost host itself, or boxes on a private network or SSH tunnel |
 | **Syslog over TLS** (add `SIEM_SYSLOG_TLS_CERT` and `SIEM_SYSLOG_TLS_KEY`) | the same syslog inside TLS 1.2+, RFC 5425 | the listener's certificate; sender certificates with `SIEM_SYSLOG_TLS_CLIENT_CA` | other machines that already run rsyslog |
+| **CloudTrail collector** (`scripts/cloudtrail_collector.py`) | AWS API over HTTPS, then HTTPS `POST /api/ingest` | a read-only AWS identity, and an ingest-only API token | AWS accounts, read through an auditor identity |
 | **File shipper** (`scripts/shipper.py`) | HTTPS `POST /api/ingest/upload` | ingest-only API token | any box, including over the internet behind HTTPS |
 
 Events from all of these are real, so they are stored with `synthetic=0`. They go through the same parsers as uploaded files: sshd and sudo lines become `auth_failure`, `auth_success`, `privilege_use`, and `privilege_escalation`; UFW/iptables lines become `fw_deny` and `fw_allow`; OpenVPN logins become `vpn_login`; nginx/Apache access lines become `web_request`, `web_scan`, and `web_error`. Detection runs on every batch.
@@ -367,6 +368,71 @@ journalctl -u watchpost-shipper -f
 
 ---
 
+## 3. CloudTrail collector
+
+`scripts/cloudtrail_collector.py` is one file with no dependencies. It reads AWS CloudTrail with a read-only identity and posts the events to `POST /api/ingest` with an ingest token. They arrive as `cloud_api_call`, `cloud_iam_change` and `cloud_data_access` events, the ones the cloud rules read.
+
+It calls one AWS API, CloudTrail `LookupEvents`. It never changes anything in AWS.
+
+- **Read-only identity:** `cloudtrail:LookupEvents` is all it needs. The AWS managed policies `SecurityAudit` and `ReadOnlyAccess` both include it, so an auditor identity works as it is.
+- **Accounts and regions:** `LookupEvents` answers for one account and one region. Pass `--region` once per region and `--role-arn` once per account. The collector assumes each role (STS `AssumeRole`) with the identity it was started with. Without `--role-arn` it reads the identity's own account.
+- **Polling:** every 60 seconds it asks for the events since the last poll, minus 15 minutes, because CloudTrail can deliver an event that late. It remembers the event IDs it has sent, so the overlap is not sent twice.
+- **State file:** the time reached and those IDs, per account and region, written after every accepted batch. A restart resumes there. The first run reads the last 60 minutes (`--lookback`).
+- **Backoff:** network errors, throttling and 5xx answers retry with exponential backoff, from 1 s up to 60 s. A batch Watchpost refuses as invalid is logged and skipped.
+- **Secrets:** the AWS keys come from `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`, the Watchpost token from `$WATCHPOST_TOKEN` or `--token-file`. None of them is accepted on the command line or written to the log. Plain HTTP is refused for anything but loopback.
+
+### AWS side
+
+The smallest policy, for the identity itself or for a role it assumes in each account:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{"Effect": "Allow", "Action": "cloudtrail:LookupEvents", "Resource": "*"}]
+}
+```
+
+To read several accounts from one auditor identity, create a role with that policy in each account, let the auditor identity assume it in the role's trust policy, and allow the identity `sts:AssumeRole` on those roles:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{"Effect": "Allow", "Principal": {"AWS": "arn:aws:iam::999999999999:user/watchpost-auditor"}, "Action": "sts:AssumeRole"}]
+}
+```
+
+### Run it
+
+Create an ingest token as for the shipper (**Admin > API tokens**), then:
+
+```bash
+export AWS_ACCESS_KEY_ID=...  AWS_SECRET_ACCESS_KEY=...     # the read-only identity
+export WATCHPOST_TOKEN=wp_...
+python3 scripts/cloudtrail_collector.py --url https://siem.example.internal \
+    --region us-east-1 --region eu-west-1 \
+    --role-arn arn:aws:iam::111111111111:role/WatchpostReadOnly \
+    --role-arn arn:aws:iam::222222222222:role/WatchpostReadOnly \
+    --state /var/lib/watchpost-cloudtrail/state.json --once
+```
+
+Drop `--once` to keep polling, for example from a systemd unit like the shipper's, with the keys and the token in an `EnvironmentFile` that only root can read. The events show up under **Events** with `source=cloudtrail`, and the host column holds the AWS account ID.
+
+| Option | Meaning |
+|---|---|
+| `--url` | Watchpost base URL. Use `https://` for anything that is not loopback |
+| `--region` | Repeatable. Default: `$AWS_REGION` or `$AWS_DEFAULT_REGION` |
+| `--role-arn` | Repeatable, one read-only role per account. Default: the identity's own account |
+| `--state` | State file (default `./watchpost-cloudtrail-state.json`) |
+| `--lookback` | Minutes to read on the first run (default 60) |
+| `--interval` | Seconds between polls (default 60) |
+| `--once` / `--max-retries N` | Read once and exit, giving up after N retries |
+| `--source` | Source name for the events (default `cloudtrail`) |
+| `--token-env` / `--token-file` | Where the Watchpost token comes from (default env `WATCHPOST_TOKEN`) |
+| `--cafile` | CA bundle for a self-signed Watchpost HTTPS certificate |
+| `--endpoint-url` / `--sts-endpoint-url` | CloudTrail and STS endpoints, for VPC endpoints |
+
+---
+
 ## Limits
 
 - Plain UDP and TCP syslog are unauthenticated and unencrypted. Use loopback, an SSH tunnel, an allow list and firewall, or TLS. The limits of the TLS listener are listed under [What TLS covers here, and what it does not](#what-tls-covers-here-and-what-it-does-not).
@@ -377,4 +443,6 @@ journalctl -u watchpost-shipper -f
   - A file was rotated while the shipper was stopped, and the old file had unsent lines. On restart, the new file is read from the start, but the old file's tail is not.
   - A file was rotated twice between two polls.
   - A file was truncated and grew past the old offset between two polls.
+- The CloudTrail collector reads management events of the last 90 days, which is what `LookupEvents` returns. Data events (S3 object reads, Lambda invocations) go only to a trail's S3 bucket, and the collector does not read buckets.
+- The CloudTrail collector's request signing is checked against AWS's published Signature Version 4 examples, and the collector is tested against a local stand-in for the two AWS APIs. It has not been run against an AWS account.
 - One process and SQLite, as with the rest of Watchpost: a lab and demo setup, not a fleet collector.

@@ -10,6 +10,8 @@ All bundled data is synthetic. PR numbers refer to https://github.com/talalkasha
 
 - Firewalls over syslog, part of the second item of #8. Syslog lines from pfSense/OPNsense (`filterlog`), FortiGate, Cisco ASA/FTD and Palo Alto (`TRAFFIC`) become `fw_deny` and `fw_allow` events with source, destination and port, and firewall admin and VPN logins become `auth_failure` and `auth_success`. Lines in other formats stay generic `syslog` events. The parsers follow the published log formats and are tested on synthetic lines, not on the devices. New sample: `samples/firewall_syslog.log`.
 
+- CloudTrail collection with a read-only account, part of the second item of #8. `scripts/cloudtrail_collector.py` (standard library only) reads CloudTrail `LookupEvents` across regions and, through one assumed read-only role per account, across accounts, and posts the events to the ingest API. It needs only `cloudtrail:LookupEvents`, which `SecurityAudit` and `ReadOnlyAccess` include. Request signing matches AWS's published Signature Version 4 examples; the collector is tested against a local stand-in for the AWS APIs, not against an AWS account.
+
 ### Fixed
 
 - Syslog listener: when one of its ports could be bound and another could not, the listener reported `failing` but shutdown then blocked forever. A transport that did bind is now released, and shutdown returns.
