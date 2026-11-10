@@ -119,7 +119,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**.
 ### Tests
 
 ```bash
-./run_tests.sh      # 628 unit/integration tests + a 26-step end-to-end smoke check
+./run_tests.sh      # 646 unit/integration tests + a 26-step end-to-end smoke check
 ```
 
 ### Replit
@@ -201,6 +201,7 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | `watchpost/syslog_listener.py` | Optional syslog receiver over UDP, TCP and TLS (RFC 3164, RFC 5424, RFC 6587 framing, RFC 5425 TLS with optional client certificates). Runs each line through the auth.log parser, falls back to a generic `syslog` event with severity from PRI, and batches into the engine every 2 seconds. Reports itself as the `syslog` health component. |
 | `scripts/shipper.py` | Stdlib-only file tailer for Linux boxes: batches new lines to `/api/ingest/upload` with an ingest token, with backoff, rotation handling, and a position file. |
 | `scripts/cloudtrail_collector.py` | Stdlib-only AWS CloudTrail collector: reads `LookupEvents` with a read-only identity (one assumed role per account, any number of regions), signs requests with Signature Version 4, dedupes across its polling overlap, and posts the records to `/api/ingest` with an ingest token. |
+| `scripts/wef_collector.py` | Stdlib-only, experimental Windows Event Forwarding collector: an HTTPS endpoint with mutual TLS that Windows' built-in forwarder pushes events to (WS-Management, source-initiated subscription). Hands each host one subscription, acknowledges a batch only after `/api/ingest` accepted it, keeps one bookmark per host, and reads SLDC-compressed deliveries. Tested against a simulated sender, not against Windows. |
 | `watchpost/simulate.py` | Labeled synthetic scenarios and a CLI that sends only to loopback unless you explicitly allow otherwise. |
 | `watchpost/report.py` | Incident and alert reports: one model (summary, timeline, entities, alerts with evidence, ATT&CK techniques by tactic, notes, recommended actions) rendered as Markdown or PDF. |
 | `watchpost/pdfwriter.py` | Minimal hand-written PDF 1.4 writer (Helvetica, wrapping, tables, page breaks, xref). |
@@ -747,6 +748,7 @@ labs/siem/
 ├── scripts/ui_check.js headless browser check: every view at 1440px and 390px, labels, keyboard triage
 ├── scripts/shipper.py  log file shipper for Linux boxes (stdlib only)
 ├── scripts/cloudtrail_collector.py AWS CloudTrail collector for a read-only identity (stdlib only)
+├── scripts/wef_collector.py Windows Event Forwarding collector, agentless, experimental (stdlib only)
 ├── tests/              unittest suite
 ├── docs/API.md         API reference
 ├── docs/LIVE_INGEST.md syslog listener, rsyslog forwarding, and the file shipper
