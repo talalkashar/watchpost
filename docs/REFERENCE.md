@@ -60,7 +60,7 @@ A small follow-up round. Nothing here changes how the rules detect.
 | **Entity risk** | (added) | Every user, source IP, and host gets a risk score: each alert adds a severity weight (critical 40, high 20, medium 10, low 5, info 1) that halves every 24 hours, and alerts closed as false positive or benign add nothing. `GET /api/entities` and an entity page list the contributing alerts and their weights, so the score can be checked by hand. Asset criticality counts through severity: an alert on a critical or sensitive asset is raised before it is stored, and the breakdown shows the rule's base severity and the asset note next to the raised one. No ML; every point traces to an alert. The dashboard has a **Riskiest entities** panel. |
 | **SOC metrics** | (added) | Time to resolve by severity, false-positive rate by rule, and open-alert aging. Time to detect and dwell time are deliberately left out: the demo replays synthetic events with old timestamps, which would make both numbers meaningless. |
 
-Left for a contributor's pull requests ([issue #8](https://github.com/talalkashar/watchpost/issues/8)): encrypted syslog, more log sources, orchestration, hot/warm/cold retention, stronger correlation, and threat intelligence.
+Left for a contributor's pull requests ([issue #8](https://github.com/talalkashar/watchpost/issues/8)): more log sources, orchestration, hot/warm/cold retention, stronger correlation, and threat intelligence. Encrypted syslog, the first item on that list, has since been added: see [Syslog over TLS](LIVE_INGEST.md#syslog-over-tls).
 
 ## What's new in 2.0
 
@@ -119,7 +119,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**.
 ### Tests
 
 ```bash
-./run_tests.sh      # 599 unit/integration tests + a 26-step end-to-end smoke check
+./run_tests.sh      # 621 unit/integration tests + a 26-step end-to-end smoke check
 ```
 
 ### Replit
@@ -137,9 +137,13 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**.
 | `SIEM_SECURE_COOKIES` | `0` | Set `1` behind HTTPS |
 | `SIEM_SESSION_TTL` | `28800` | Session lifetime in seconds |
 | `SIEM_MAX_UPLOAD_BYTES` / `SIEM_MAX_BATCH_EVENTS` | 5 MB / 20000 | Ingestion limits |
-| `SIEM_SYSLOG` | `0` | `1` also starts the UDP/TCP syslog listener ([docs/LIVE_INGEST.md](LIVE_INGEST.md)) |
+| `SIEM_SYSLOG` | `0` | `1` also starts the syslog listener: UDP/TCP, or TLS when a certificate is set ([docs/LIVE_INGEST.md](LIVE_INGEST.md)) |
 | `SIEM_SYSLOG_BIND` / `SIEM_SYSLOG_PORT` | `127.0.0.1` / `5514` | Syslog listener address (same port for UDP and TCP) |
 | `SIEM_SYSLOG_ALLOW` | empty (any) | Comma-separated IPs/CIDRs allowed to send syslog |
+| `SIEM_SYSLOG_TLS_CERT` / `SIEM_SYSLOG_TLS_KEY` | unset | PEM certificate and key (no passphrase). Setting both starts syslog over TLS (RFC 5425) and turns the plaintext listeners off |
+| `SIEM_SYSLOG_TLS_PORT` | `6514` | TCP port for syslog over TLS |
+| `SIEM_SYSLOG_TLS_CLIENT_CA` | unset | PEM CA bundle. When set, a sender must present a certificate signed by it |
+| `SIEM_SYSLOG_PLAINTEXT` | `1` without TLS, `0` with it | `1` keeps the plaintext UDP/TCP listeners running next to TLS |
 | `SIEM_DEMO_LOOP` / `SIEM_DEMO_LOOP_SPEED` | `0` / `1` | Minutes between automatic replays of the synthetic attack storyline (0 = off) and its speed multiplier |
 | `SIEM_RATE_LIMIT` | `1` | `0` turns off per-IP rate limiting |
 | `SIEM_LOGIN_RATE_BURST` / `SIEM_LOGIN_RATE_PER_MIN` | `10` / `10` | Token bucket for `POST /api/auth/login`, per client IP |
@@ -175,6 +179,7 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | Module | Responsibility |
 |---|---|
 | `watchpost/normalize.py` | Parses JSON, JSONL, CSV, Linux `auth.log` (OpenSSH), and Windows Security events (4624/4625/4672/4688/4720/4740). Accepts common field aliases, including ECS-style nesting. Validates timestamps, IPs, severities, and lengths, strips control characters, and redacts secrets. Every rejected record gets a reason and a position. |
+| `watchpost/firewall.py` | Reads firewall appliance syslog lines (pfSense/OPNsense `filterlog`, FortiGate, Cisco ASA/FTD, Palo Alto `TRAFFIC`) into `fw_deny`, `fw_allow` and login events. Default log formats only; tested on synthetic lines. |
 | `watchpost/correlate.py`, `watchpost/incidents.py` | Pure alert-to-incident grouping; incident queries, status changes, and ATT&CK coverage. |
 | `watchpost/attack.py`, `watchpost/geo.py` | Static ATT&CK subset; synthetic geo table for demo IP ranges (never a real lookup). |
 | `watchpost/rules.py` | Fifteen built-in explainable rules as pure functions over event lists, each with a plain-English explanation. Also validates rule parameters. |
@@ -193,7 +198,7 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | `watchpost/detection_tests.py` | Detection-as-code validation and bundled malicious/benign sample checks for exported built-in rules. |
 | `watchpost/case_record.py` | Chronological incident case records combining evidence, membership, workflow transitions, assignments, and notes; renders JSON and Markdown. |
 | `watchpost/ecs.py` | Maps an event to Elastic Common Schema field names for export. |
-| `watchpost/syslog_listener.py` | Optional UDP/TCP syslog receiver (RFC 3164, RFC 5424, RFC 6587 framing). Runs each line through the auth.log parser, falls back to a generic `syslog` event with severity from PRI, and batches into the engine every 2 seconds. Reports itself as the `syslog` health component. |
+| `watchpost/syslog_listener.py` | Optional syslog receiver over UDP, TCP and TLS (RFC 3164, RFC 5424, RFC 6587 framing, RFC 5425 TLS with optional client certificates). Runs each line through the auth.log parser, falls back to a generic `syslog` event with severity from PRI, and batches into the engine every 2 seconds. Reports itself as the `syslog` health component. |
 | `scripts/shipper.py` | Stdlib-only file tailer for Linux boxes: batches new lines to `/api/ingest/upload` with an ingest token, with backoff, rotation handling, and a position file. |
 | `watchpost/simulate.py` | Labeled synthetic scenarios and a CLI that sends only to loopback unless you explicitly allow otherwise. |
 | `watchpost/report.py` | Incident and alert reports: one model (summary, timeline, entities, alerts with evidence, ATT&CK techniques by tactic, notes, recommended actions) rendered as Markdown or PDF. |
@@ -287,7 +292,7 @@ investigation export, not a legal-hold or raw-log archive.
 | ingestion | server-side ingestion errors in 24 h, or > 25 % of records rejected (degraded) |
 | detection | last run failed (failing); batches ingested while detection was failing and not yet reprocessed, no enabled rules, or a run stuck > 5 min (degraded) |
 | dependencies | Python < 3.10, SQLite < 3.35, or DB directory not writable (failing); UI files missing (degraded) |
-| syslog (only when `SIEM_SYSLOG=1`) | port can't be bound, invalid allow list, or a listener thread stopped (failing); last batch failed to store or frames dropped in the last 10 min (degraded) |
+| syslog (only when `SIEM_SYSLOG=1`) | a port can't be bound, invalid allow list, unusable TLS certificate, key or client CA, or a listener thread stopped (failing); last batch failed to store or frames dropped in the last 10 min (degraded) |
 
 If detection fails, the events stay stored, the ingest response says `"detection": {"status": "failed", ...}`, and the UI shows a banner. A full **Run detection** processes the backlog and marks those batches `recovered`. Tests cover each of these paths.
 
@@ -716,10 +721,10 @@ time window; changing an alert grouping key does not change that incident logic.
 
 **Limitations:**
 - Single process with SQLite. Measured up to 250,000 events on one laptop (see [Performance](#performance)); larger volumes are untested, and this is not enterprise volume. No retention or rollup.
-- Live ingestion is basic: an optional syslog listener (unauthenticated, no TLS; loopback by default) and a single-file-per-flag shipper script. See [docs/LIVE_INGEST.md](LIVE_INGEST.md) for its limits.
+- Live ingestion is basic: an optional syslog listener (plaintext and loopback by default; TLS with optional client certificates when configured, without revocation checks or certificate reload) and a single-file-per-flag shipper script. See [docs/LIVE_INGEST.md](LIVE_INGEST.md) for its limits.
 - Timestamps without a zone are treated as UTC. BSD syslog lines carry no year, so you pass one or the current year is assumed.
 - Seeded accounts only (admin, analyst, and an optional viewer); there is no user-management UI or API. Accounts can be added with `watchpost.auth.create_user`.
-- No TLS in the app itself; `deploy/` puts Caddy or nginx in front for HTTPS. Rate limits live in memory and reset on restart.
+- No TLS for the web UI and API in the app itself; `deploy/` puts Caddy or nginx in front for HTTPS. Rate limits live in memory and reset on restart.
 - Rules cover authentication, web, firewall/VPN, cloud audit, and host scenarios with fixed thresholds. Geo for impossible travel comes from a synthetic table covering only documentation and private ranges.
 - There is no scheduled detection. Detection runs on ingest and on demand.
 

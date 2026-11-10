@@ -189,6 +189,55 @@ class FirewallAndHostTests(unittest.TestCase):
         fw = normalize_authlog_line(cases[0][0], "host", now=NOW)
         self.assertEqual((fw["dest_ip"], fw["dest_port"], fw["host"]), ("10.0.0.10", 3306, "fw01"))
 
+    def test_firewall_appliance_syslog(self):
+        # (line, event type, user, source, destination, port)
+        cases = [
+            ("Sep 15 10:00:01 pf01 filterlog[5121]: 5,,,1000000103,em0,match,block,in,4,0x0,,64,0,0,DF,6,tcp,60,"
+             "203.0.113.9,192.0.2.10,40000,22,0,S,123,,64240,,mss", "fw_deny", None, "203.0.113.9", "192.0.2.10", 22),
+            ("Sep 15 10:00:02 pf01 filterlog[5121]: 9,,,1000000104,em1,match,pass,out,6,0x00,0x00000,64,udp,17,76,"
+             "2001:db8::5,2001:db8::53,50000,53,76", "fw_allow", None, "2001:db8::5", "2001:db8::53", 53),
+            ("Sep 15 10:00:03 pf01 filterlog[5121]: 5,,,1000000103,em0,match,reject,in,4,0x0,,64,0,0,none,1,icmp,84,"
+             "203.0.113.9,192.0.2.10,request,1,1,64", "fw_deny", None, "203.0.113.9", "192.0.2.10", None),
+            ('Sep 15 10:00:04 asa01 %ASA-4-106023: Deny tcp src outside:203.0.113.9/40000 dst inside:192.0.2.10/3389 '
+             'by access-group "outside_in" [0x0, 0x0]', "fw_deny", None, "203.0.113.9", "192.0.2.10", 3389),
+            ("Sep 15 10:00:05 asa01 %ASA-2-106001: Inbound TCP connection denied from 203.0.113.9/40001 to "
+             "192.0.2.10/23 flags SYN on interface outside", "fw_deny", None, "203.0.113.9", "192.0.2.10", 23),
+            ("Sep 15 10:00:06 asa01 %ASA-6-302013: Built inbound TCP connection 77 for outside:198.51.100.7/51000 "
+             "(198.51.100.7/51000) to dmz:192.0.2.20/443 (192.0.2.20/443)",
+             "fw_allow", None, "198.51.100.7", "192.0.2.20", 443),
+            # An outbound connection is logged outside peer first, although the inside host opened it.
+            ("Sep 15 10:00:07 asa01 %ASA-6-302013: Built outbound TCP connection 78 for outside:198.51.100.9/443 "
+             "(198.51.100.9/443) to inside:10.0.1.5/52000 (192.0.2.1/52000)",
+             "fw_allow", None, "10.0.1.5", "198.51.100.9", 443),
+            ("Sep 15 10:00:08 asa01 %ASA-6-106100: access-list outside_in denied tcp outside/203.0.113.9(40002) -> "
+             "inside/192.0.2.10(445) hit-cnt 1 first hit [0x0, 0x0]", "fw_deny", None, "203.0.113.9", "192.0.2.10", 445),
+            ("Sep 15 10:00:09 asa01 %ASA-6-113005: AAA user authentication Rejected : reason = AAA failure : "
+             "server = 10.0.0.5 : user = bob : user IP = 203.0.113.9", "auth_failure", "bob", "203.0.113.9", None, None),
+            ('Sep 15 10:00:10 asa01 %ASA-6-605005: Login permitted from 10.0.1.5/52001 to inside:10.0.0.1/ssh for '
+             'user "netadmin"', "auth_success", "netadmin", "10.0.1.5", None, None),
+            # Message IDs and formats that are not handled stay generic instead of being guessed at.
+            ("Sep 15 10:00:11 asa01 %ASA-5-111008: User 'netadmin' executed the 'show run' command.",
+             "other", None, None, None, None),
+            ("Sep 15 10:00:12 pf01 filterlog[5121]: 5,,,1000000103,em0,match,block,in,4,0x0",
+             "other", None, None, None, None),
+            ("Sep 15 10:00:13 app01 exporter: rows,TRAFFIC,written logid=7 type=batch", "other", None, None, None, None),
+        ]
+        for line, *expected in cases:
+            with self.subTest(line=line[:60]):
+                e = normalize_authlog_line(line, "fw", now=NOW)
+                self.assertEqual([e["event_type"], e["user"], e["src_ip"], e["dest_ip"], e["dest_port"]], expected)
+        with self.assertRaises(EventError):  # an address that is not one is rejected, like anywhere else
+            normalize_authlog_line("Sep 15 10:00:14 pf01 filterlog[1]: 5,,,1,em0,match,block,in,4,0x0,,64,0,0,DF,6,"
+                                   "tcp,60,not-an-ip,192.0.2.10,40000,22,0,S", "fw", now=NOW)
+
+    def test_firewall_sample_shows_a_port_sweep(self):
+        from pathlib import Path
+        text = (Path(__file__).resolve().parent.parent / "samples" / "firewall_syslog.log").read_text()
+        events, _ = parse_payload(text, "auto", "sample", year=2026, now=NOW)
+        swept = {e["dest_port"] for e in events if e["event_type"] == "fw_deny" and e["src_ip"] == "198.51.100.150"}
+        self.assertEqual(len(swept), 16)
+        self.assertEqual({e["event_type"] for e in events}, {"fw_deny", "fw_allow", "auth_failure", "auth_success"})
+
     def test_windows_runas_and_file_access(self):
         self.assertEqual(normalize_record({"ts": "2026-09-15T10:00:00Z", "EventID": 4648}, "w", NOW)["event_type"],
                          "privilege_escalation")
@@ -233,7 +282,7 @@ class SampleFileTests(unittest.TestCase):
         from pathlib import Path
         samples = Path(__file__).resolve().parent.parent / "samples"
         expected = {"nginx_access.log": "web_scan", "firewall.csv": "fw_deny", "cloudtrail.json": "cloud_iam_change",
-                    "linux_host.log": "privilege_escalation"}
+                    "linux_host.log": "privilege_escalation", "firewall_syslog.log": "fw_deny"}
         for name, event_type in expected.items():
             with self.subTest(sample=name):
                 events, rejections = parse_payload((samples / name).read_text(), "auto", "sample", year=2026, now=NOW)

@@ -15,6 +15,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote_plus
 
+from . import firewall
 from .db import iso, utcnow
 from .diagnostics import redact
 
@@ -267,7 +268,7 @@ def normalize_record(record, default_source, now=None):
 
 _SYSLOG_PREFIX = re.compile(
     r"^(?:(?P<iso>\d{4}-\d{2}-\d{2}T\S+)|(?P<bsd>[A-Z][a-z]{2}\s+\d{1,2}\s\d{2}:\d{2}:\d{2}))"
-    r"\s+(?P<host>\S+)\s+(?P<prog>[\w\-/.]+)(?:\[\d+\])?:\s*(?P<msg>.*)$"
+    r"\s+(?P<host>\S+)\s+(?P<prog>%?[\w\-/.]+)(?:\[\d+\])?:\s*(?P<msg>.*)$"
 )
 _SSH_PATTERNS = [
     (re.compile(r"^Failed (?:password|publickey|keyboard-interactive/pam) for (?:invalid user )?"
@@ -319,11 +320,17 @@ def normalize_authlog_line(line, default_source, year=None, now=None):
             fields = found.groupdict()
             event_type = _FIREWALL_ACTIONS[fields["action"]] if kind == "firewall" else kind
             break
+    appliance = firewall.parse(match.group("prog"), message) if event_type == "other" else None
+    if appliance:  # a firewall appliance's own format: pfSense/OPNsense, FortiGate, Cisco ASA, Palo Alto
+        event_type = appliance["event_type"]
+        fields = {"user": appliance.get("user"), "ip": appliance.get("src_ip"), "dst": appliance.get("dest_ip"),
+                  "dpt": appliance.get("dest_port"), "bytes": appliance.get("bytes")}
+        ts_value = appliance.get("ts") or ts_value
 
     record = {
-        "ts": ts_value, "host": match.group("host"), "event_type": event_type,
+        "ts": ts_value, "host": (appliance or {}).get("host") or match.group("host"), "event_type": event_type,
         "user": fields.get("user"), "src_ip": fields.get("ip"), "dest_ip": fields.get("dst"),
-        "dest_port": fields.get("dpt"), "message": message,
+        "dest_port": fields.get("dpt"), "bytes": fields.get("bytes"), "message": message,
         "program": match.group("prog"),
     }
     event = normalize_record(record, default_source, now)

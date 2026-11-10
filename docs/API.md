@@ -93,7 +93,7 @@ If only `detection.correlation.status` is `"failed"`, alerts were stored and onl
 
 ### `POST /api/ingest/upload?format=&source=&synthetic=&year=` (analyst session or token)
 
-Raw UTF-8 file body (`Content-Type: text/plain`). `format` is `auto` (default), `json`, `jsonl`, `csv`, `authlog`, or `weblog`. `authlog` also understands sudo/su, useradd, auditd `exe=`/`type=PATH` records, UFW/iptables `[BLOCK]`/`[ALLOW]` lines, and OpenVPN "Peer Connection Initiated" lines. `weblog` is the nginx/Apache combined access log; requests for scanner paths (`/.env`, `/wp-login.php`, `.git`, …), injection strings, or scanner user agents become `web_scan`, 5xx responses `web_error`. `year` applies only to BSD syslog lines, which carry no year. `synthetic=1` tags events and prefixes the source with `demo:`.
+Raw UTF-8 file body (`Content-Type: text/plain`). `format` is `auto` (default), `json`, `jsonl`, `csv`, `authlog`, or `weblog`. `authlog` also understands firewall appliance lines (pfSense/OPNsense `filterlog`, Cisco ASA), and sudo/su, useradd, auditd `exe=`/`type=PATH` records, UFW/iptables `[BLOCK]`/`[ALLOW]` lines, and OpenVPN "Peer Connection Initiated" lines. `weblog` is the nginx/Apache combined access log; requests for scanner paths (`/.env`, `/wp-login.php`, `.git`, …), injection strings, or scanner user agents become `web_scan`, 5xx responses `web_error`. `year` applies only to BSD syslog lines, which carry no year. `synthetic=1` tags events and prefixes the source with `demo:`.
 
 ```bash
 curl -X POST "http://127.0.0.1:8080/api/ingest/upload?format=authlog&source=bastion01&year=2026" \
@@ -103,7 +103,7 @@ curl -X POST "http://127.0.0.1:8080/api/ingest/upload?format=authlog&source=bast
 ### Live ingestion (no new routes)
 
 - **File shipper.** `scripts/shipper.py` tails files and posts complete new lines to `POST /api/ingest/upload` with `Authorization: Bearer wp_...`, using `format` and `source` query parameters. It keeps a position file and retries network errors, 5xx, and 401/403 with backoff. It skips batches refused with 400, 413, 415, or 422.
-- **Syslog listener.** With `SIEM_SYSLOG=1`, Watchpost also accepts RFC 3164 and RFC 5424 syslog over UDP and TCP on `SIEM_SYSLOG_BIND:SIEM_SYSLOG_PORT` (default `127.0.0.1:5514`). Frames are stored as batches with `source=syslog`, `format=syslog`, and `submitted_by=syslog-listener`. Lines that no parser recognizes get `event_type=syslog`, with severity taken from PRI.
+- **Syslog listener.** With `SIEM_SYSLOG=1`, Watchpost also accepts RFC 3164 and RFC 5424 syslog over UDP and TCP on `SIEM_SYSLOG_BIND:SIEM_SYSLOG_PORT` (default `127.0.0.1:5514`). With `SIEM_SYSLOG_TLS_CERT` and `SIEM_SYSLOG_TLS_KEY` it takes the same frames over TLS (RFC 5425) on `SIEM_SYSLOG_TLS_PORT` (default `6514`) instead, and with `SIEM_SYSLOG_TLS_CLIENT_CA` only from senders that present a certificate from that CA. Frames are stored as batches with `source=syslog`, `format=syslog`, and `submitted_by=syslog-listener`. Lines that no parser recognizes get `event_type=syslog`, with severity taken from PRI.
 
 Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 
