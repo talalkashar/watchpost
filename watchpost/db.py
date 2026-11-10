@@ -381,6 +381,65 @@ CREATE TABLE IF NOT EXISTS dashboard_views (
     updated_at TEXT NOT NULL,
     UNIQUE(owner, name COLLATE NOCASE)
 );
+
+-- Tiered retention (retention.py): one row per arrival day that left the events table. `tier` is warm, cold
+-- or deleted; a deleted row is the record that the day's file was disposed of.
+CREATE TABLE IF NOT EXISTS archives (
+    day TEXT PRIMARY KEY,
+    tier TEXT NOT NULL,
+    file TEXT NOT NULL,
+    events INTEGER NOT NULL,
+    synthetic_events INTEGER NOT NULL,
+    first_id INTEGER,
+    last_id INTEGER,
+    first_ts TEXT,
+    last_ts TEXT,
+    bytes INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    moved_at TEXT,
+    warm_until TEXT,
+    deleted_at TEXT,
+    verified_at TEXT,
+    problem TEXT
+);
+
+-- Response playbooks (playbooks.py). The steps' titles and instructions live in code; these rows hold state.
+CREATE TABLE IF NOT EXISTS playbook_runs (
+    alert_id INTEGER PRIMARY KEY,
+    playbook_id TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS playbook_steps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    alert_id INTEGER NOT NULL,
+    position INTEGER NOT NULL,
+    step_key TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    actor TEXT,
+    note TEXT,
+    target TEXT,
+    updated_at TEXT,
+    UNIQUE(alert_id, step_key)
+);
+
+-- Webhook deliveries waiting to be sent, and the record of those that were.
+CREATE TABLE IF NOT EXISTS playbook_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    alert_id INTEGER NOT NULL,
+    step_key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT NOT NULL,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    sent_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_playbook_outbox_due ON playbook_outbox(status, next_attempt_at);
 """
 
 # Columns added after 1.0. Existing databases gain them in place on startup.

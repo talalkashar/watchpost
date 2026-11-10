@@ -14,7 +14,7 @@ from watchpost.config import Config
 from watchpost.db import connect, init_schema
 
 # Sample values for the capture groups in route patterns, tried in order until one matches.
-GROUP_SAMPLES = ["1", "brute_force_ip", "login_lockout_threshold", "md", "0123456789abcdef"]
+GROUP_SAMPLES = ["1", "brute_force_ip", "login_lockout_threshold", "md", "0123456789abcdef", "2026-01-01"]
 # Non-GET routes a viewer may call.
 VIEWER_POSTS = {"/api/auth/login", "/api/auth/mfa", "/api/auth/logout"}  # login steps are public
 

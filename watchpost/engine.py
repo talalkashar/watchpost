@@ -8,6 +8,7 @@ from datetime import timedelta
 from . import assets as assets_mod
 from . import correlate as correlate_mod
 from . import grouping
+from . import playbooks
 from . import rules as rules_mod
 from . import sources as sources_mod
 from . import stream
@@ -186,6 +187,7 @@ def _apply_finding(conn, rule, finding, synthetic, assets_idx):
             (alert_id, "assets", "severity_changed",
              f"{rule['severity']} -> {weighed['severity']} ({weighed['severity_note']})", now),
         )
+    playbooks.start(conn, conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone())
     return "created"
 
 

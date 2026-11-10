@@ -393,6 +393,7 @@ async function alertDetail(id) {
           el("p", {}, el("strong", {}, "Assets: "), assetChips(a.assets),
             a.base_severity && a.base_severity !== a.severity ? el("span", { class: "muted" }, ` Rule severity ${a.base_severity}; ${a.severity_note}.`) : null),
           actions),
+        playbookCard(a),
         el("div", { class: "card" }, el("h2", {}, `Evidence (${a.evidence.length} events)`),
           table(["Time", "Type", "User", "Source IP", "Host", "Message"],
             a.evidence.map((e) => ({ cells: [fmtTime(e.ts), e.event_type, entityLink("user", e.user), el("code", {}, entityLink("src_ip", e.src_ip)), entityLink("host", e.host), e.message ?? ""] })))),
@@ -412,6 +413,135 @@ async function alertDetail(id) {
         el("div", { class: "card" }, el("h2", {}, "Activity"),
           a.activity.map((x) => el("div", { class: "note" }, el("span", { class: "muted" }, `${fmtTime(x.created_at)} · ${x.actor} `), `${x.action.replace("_", " ")}${x.detail ? ` — ${x.detail}` : ""}`))))),
   );
+}
+
+// ---------- tiered retention (see watchpost/retention.py) ----------
+const fmtBytes = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n ?? 0} B`);
+const TIER_PILL = { warm: "st-investigating", cold: "sev-info", deleted: "st-open" };
+
+// Admin: the policy, what each tier holds, and the controls.
+function retentionCard(r) {
+  if (!r.enabled) {
+    return el("div", { class: "card" }, el("h2", {}, "Retention"),
+      el("p", { class: "muted" }, `Retention is off: all ${r.hot.events.toLocaleString()} events stay in the database and nothing is deleted. Set SIEM_RETENTION_HOT_DAYS to move older events to archive files.`));
+  }
+  const p = r.policy, t = r.tiers, run = r.last_run;
+  const act = (path, done) => guarded(async () => { const out = await api(path, { method: "POST", body: {} }); toast(done(out)); admin(); });
+  return el("div", { class: "card" }, el("h2", {}, "Retention"),
+    el("p", {}, `Events stay in the database for ${p.hot_days_in_force} days after they arrive`,
+      p.hot_days_in_force !== p.hot_days ? ` (${p.hot_days} configured; the rules read further back)` : "",
+      `, then move to one compressed file per day. The files ${p.warm_days ? `go to cold storage after ${p.warm_days} days` : "stay in warm storage"} and ${p.total_days ? `are deleted after ${p.total_days} days` : "are never deleted"}.`),
+    el("p", { class: "muted" }, `Database: ${r.hot.events.toLocaleString()} events. Warm: ${t.warm.archives} file(s), ${t.warm.events.toLocaleString()} events, ${fmtBytes(t.warm.bytes)}. Cold: ${t.cold.archives} file(s), ${t.cold.events.toLocaleString()} events, ${fmtBytes(t.cold.bytes)}. Deleted at the end of retention: ${t.deleted.archives} file(s), ${t.deleted.events.toLocaleString()} events.`),
+    el("p", { class: "muted" }, run ? `Last run ${fmtTime(run.finished_at)}: ${run.archived_events} events archived, ${run.moved_to_cold} file(s) to cold, ${run.deleted_archives} deleted, ${run.errors.length} error(s).` : "No run yet."),
+    run?.errors.length ? el("ul", { class: "error", role: "alert" }, run.errors.map((e) => el("li", {}, e))) : null,
+    el("div", { class: "row" },
+      el("button", { onclick: () => act("/api/retention/run", (o) => `Retention ran: ${o.archived_events} events archived, ${o.errors.length} errors`) }, "Run now"),
+      el("button", { class: "ghost", onclick: () => act("/api/retention/verify", (o) => (o.problems.length ? `${o.problems.length} archive(s) have a problem` : "Every archive matches its recorded hash")) }, "Verify files")),
+    table(["Arrival day", "Tier", "Events", "Size", "Checked", "SHA-256", ""],
+      r.archives.map((a) => ({ cells: [a.day, pill(a.tier, TIER_PILL[a.tier] ?? "sev-info"), { num: a.events }, a.tier === "deleted" ? "—" : fmtBytes(a.bytes),
+        a.problem ? el("span", { class: "error" }, a.problem) : fmtTime(a.tier === "deleted" ? a.deleted_at : a.verified_at),
+        el("code", { title: a.sha256 }, a.sha256.slice(0, 12)),
+        a.tier === "cold" ? el("button", { class: "ghost", onclick: () => act(`/api/retention/archives/${a.day}/thaw`, () => `${a.day} is searchable again for a week`) }, "Bring back") : ""] }))));
+}
+
+// Events view: search one archived day. Analysts and admins; archive files are not masked, so viewers only see the note.
+function archiveCard(r) {
+  const warm = r.archives.filter((a) => a.tier === "warm");
+  if (!r.enabled || !r.archives.length) return null;
+  const note = el("p", { class: "muted" }, `Events that arrived more than ${r.policy.hot_days_in_force} days ago are in archive files, one per day. ${warm.length} day(s) can be searched here; ${r.tiers.cold.archives} are in cold storage.`);
+  if (!can("analyst") || !warm.length) return el("div", { class: "card" }, el("h2", {}, "Archived events"), note);
+  const out = el("div", { role: "status" });
+  const form = el("form", { class: "row" },
+    el("label", {}, "Arrival day", el("select", { name: "day" }, warm.map((a) => el("option", { value: a.day }, `${a.day} (${a.events.toLocaleString()} events)`)))),
+    el("label", {}, "User", el("input", { name: "user", size: 10 })),
+    el("label", {}, "IP (src or dest)", el("input", { name: "ip", size: 13 })),
+    el("label", {}, "Message contains", el("input", { name: "q", size: 14 })),
+    el("button", { type: "submit" }, "Search archive"));
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const f = new FormData(form), q = new URLSearchParams({ limit: "200" });
+    for (const k of ["user", "ip", "q"]) if (f.get(k).trim()) q.set(k, f.get(k).trim());
+    guarded(async () => {
+      const found = await api(`/api/retention/archives/${f.get("day")}/events?${q}`);
+      out.replaceChildren(
+        el("p", { class: "muted" }, `${found.matched.toLocaleString()} of ${found.scanned.toLocaleString()} archived events match${found.truncated ? `; showing the first ${found.events.length}` : ""}.`),
+        table(["Time", "Severity", "Type", "User", "Source IP", "Host", "Source", "Message"],
+          found.events.map((e) => ({ cells: [fmtTime(e.ts), sev(e.severity), e.event_type, e.user ?? "—", el("code", {}, e.src_ip ?? "—"), e.host ?? "—", el("span", {}, e.source, " ", synth(e.synthetic)), e.message ?? ""] }))));
+    });
+  });
+  return el("div", { class: "card" }, el("h2", {}, "Archived events"), note, form, out);
+}
+
+// ---------- response playbook (an alert's steps: see watchpost/playbooks.py) ----------
+const STEP_STATUS = { pending: ["to do", "st-open"], requested: ["sending", "st-investigating"], done: ["done", "st-resolved"],
+  skipped: ["skipped", "sev-info"], failed: ["failed", "sev-critical"] };
+
+function playbookCard(a) {
+  const id = a.id, p = a.playbook, open = a.status !== "resolved";
+  const send = (path, body) => guarded(async () => { await api(`/api/alerts/${id}/playbook${path}`, { method: "POST", body }); alertDetail(id); });
+  if (!p) {
+    return el("div", { class: "card" }, el("h2", {}, "Response playbook"),
+      el("p", { class: "muted" }, "This alert was created before playbooks existed, so it has no steps yet."),
+      can("analyst") ? el("button", { onclick: () => send("", {}) }, "Start its playbook") : null);
+  }
+  const controls = (s) => {
+    if (!can("analyst") || s.kind === "auto") return null;
+    if (s.kind === "manual") {
+      return s.status === "pending"
+        ? el("div", { class: "row" },
+          el("button", { onclick: () => send(`/steps/${s.key}`, { status: "done" }) }, "Done"),
+          el("button", { class: "ghost", onclick: () => stepDialog(`Skip: ${s.title}`, "Why is this step skipped?", "Skip", true, (note) => send(`/steps/${s.key}`, { status: "skipped", note })) }, "Skip…"))
+        : el("div", { class: "row" }, el("button", { class: "ghost", onclick: () => send(`/steps/${s.key}`, { status: "pending" }) }, "Reopen"));
+    }
+    if (!open) return null;
+    if (!s.targets.length) return el("p", { class: "muted" }, "Nothing in this alert's evidence that this action applies to.");
+    return el("div", { class: "row" }, el("button", { class: "ghost", onclick: () => actionDialog(s, send) }, s.status === "pending" ? "Request…" : "Request again…"));
+  };
+  const step = (s) => el("li", { class: "note" },
+    el("div", { class: "row" }, pill(s.phase, "stage"), el("strong", {}, s.title), pill(...(STEP_STATUS[s.status] ?? [s.status, "sev-info"])),
+      s.kind === "auto" ? el("span", { class: "muted" }, "automatic") : null),
+    el("div", { class: "muted" }, s.detail),
+    s.note || s.target ? el("div", {}, s.target ? el("code", {}, s.target) : null, s.target && s.note ? " " : "", s.note ?? "",
+      el("span", { class: "muted" }, ` (${s.actor ?? "—"}, ${fmtTime(s.updated_at)})`)) : null,
+    controls(s));
+  return el("div", { class: "card" }, el("h2", {}, `Response playbook: ${p.name}`),
+    el("p", { class: "muted" }, `${p.description} ${p.progress.closed} of ${p.progress.total} steps closed${p.completed_at ? `, finished ${fmtTime(p.completed_at)}` : ""}.`),
+    el("ol", { class: "steps" }, p.steps.map(step)));
+}
+
+// A one-field dialog for a step: a note, required or not.
+function stepDialog(title, label, button, required, onSubmit) {
+  const form = el("form", {},
+    el("h2", {}, title),
+    el("label", {}, label, el("textarea", { name: "note", maxlength: 1000, required })),
+    el("div", { class: "row" }, el("button", { type: "submit" }, button),
+      el("button", { type: "button", class: "ghost", onclick: () => $("#modal").close() }, "Cancel")));
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    $("#modal").close();
+    onSubmit(new FormData(form).get("note"));
+  });
+  $("#modal-body").replaceChildren(form);
+  openModal();
+}
+
+// A response action: Watchpost does not carry it out, it posts the request to the operator's webhook.
+function actionDialog(s, send) {
+  const form = el("form", {},
+    el("h2", {}, s.title),
+    el("p", { class: "muted" }, "Watchpost does not carry this out itself. It posts the request to the configured webhook, where your own automation acts on it. Without a webhook, or on a synthetic alert, the request is recorded and not sent."),
+    el("label", {}, "Target (from this alert's evidence)", el("select", { name: "target", required: true }, s.targets.map((t) => el("option", { value: t }, t)))),
+    el("label", {}, "Reason (kept in the audit log)", el("textarea", { name: "reason", maxlength: 1000, required: true })),
+    el("div", { class: "row" }, el("button", { type: "submit" }, "Request"),
+      el("button", { type: "button", class: "ghost", onclick: () => $("#modal").close() }, "Cancel")));
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const f = new FormData(form);
+    $("#modal").close();
+    send(`/steps/${s.key}/request`, { target: f.get("target"), reason: f.get("reason") });
+  });
+  $("#modal-body").replaceChildren(form);
+  openModal();
 }
 
 // Report downloads (every role, viewers included). kind is "alerts" or "incidents"; plain GET links carry the session cookie.
@@ -555,8 +685,8 @@ async function events(offset = 0) {
   const query = new URLSearchParams(saved);
   if (query.get("severity")) query.set("severity_mode", "min");
   query.set("limit", "100"); query.set("offset", String(offset));
-  let data;
-  try { data = await api(`/api/events?${query}`); }
+  let data, kept;
+  try { [data, kept] = await Promise.all([api(`/api/events?${query}`), api("/api/retention")]); }
   catch (e) { render(el("h1", {}, "Event search"), form, el("p", { class: "error", role: "alert" }, e.message)); return; }
   const pager = el("div", { class: "row" },
     el("span", { class: "muted" }, `${data.total.toLocaleString()} matching events · showing ${data.total ? offset + 1 : 0}–${offset + data.events.length}`),
@@ -565,7 +695,8 @@ async function events(offset = 0) {
   render(el("h1", {}, "Event search"), form, el("div", { class: "card" }, pager,
     table(["Time", "Severity", "Type", "User", "Source IP", "Host", "Source", "Message"],
       data.events.map((e) => ({ id: e.id, cells: [fmtTime(e.ts), sev(e.severity), e.event_type, e.user ?? "—", el("code", {}, e.src_ip ?? "—"), e.host ?? "—", el("span", {}, e.source, " ", synth(e.synthetic)), e.message ?? ""] })),
-      (r) => guarded(() => eventDialog(r.id)))));
+      (r) => guarded(() => eventDialog(r.id)))),
+    archiveCard(kept));
 }
 
 async function eventDialog(id) {
@@ -1594,7 +1725,7 @@ async function health() {
 // ---------- admin ----------
 async function admin() {
   if (!can("admin")) return render(el("p", {}, "Admins only."));
-  const [tokens, audit, inventory, chain, sessions] = await Promise.all([api("/api/tokens"), api("/api/audit"), api("/api/assets"), api("/api/audit/verify"), api("/api/sessions")]);
+  const [tokens, audit, inventory, chain, sessions, kept] = await Promise.all([api("/api/tokens"), api("/api/audit"), api("/api/assets"), api("/api/audit/verify"), api("/api/sessions"), api("/api/retention")]);
   const tokenOut = el("div");
   const tokenForm = el("form", { class: "row" },
     el("label", {}, "Token name", el("input", { name: "name", required: true, maxlength: 64, placeholder: "e.g. web01-forwarder" })),
@@ -1662,6 +1793,7 @@ async function admin() {
     el("div", { class: "card" }, el("h2", {}, "Sign-in sessions"),
       el("p", { class: "muted" }, "Every active session. Revoking one signs that browser out at its next request. For someone who lost their authenticator app, reset their two-factor here: there are no recovery codes."),
       sessionsTable(sessions, "/api/sessions", admin, true), resetForm),
+    retentionCard(kept),
     el("div", { class: "card" }, el("h2", {}, "Audit log"), chainBadge(chain),
       table(["When", "Actor", "Action", "Target", "Detail"], audit.map((a) => ({ cells: [fmtTime(a.created_at), a.actor, a.action, a.target ?? "", el("code", {}, a.detail ?? "")] })))),
   );
