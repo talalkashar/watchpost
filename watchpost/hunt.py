@@ -34,7 +34,7 @@ NAME_MAX, DESCRIPTION_MAX = 80, 300
 FIELDS = {
     "user": ("text", "user"), "host": ("text", "host"), "source": ("text", "source"),
     "outcome": ("text", "outcome"), "src_ip": ("text", "src_ip"), "dest_ip": ("text", "dest_ip"),
-    "batch_id": ("text", "batch_id"), "ip": ("ip", None),
+    "batch_id": ("text", "batch_id"), "ip": ("ip", None), "threat": ("text", "threat"),
     "event_type": ("enum", "event_type"), "severity": ("enum", "severity"),
     "dest_port": ("port", "dest_port"), "synthetic": ("flag", "synthetic"), "message": ("message", "message"),
     "last": ("time", None), "since": ("time", None), "until": ("time", None),
