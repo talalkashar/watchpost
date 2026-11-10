@@ -8,6 +8,7 @@ Watchpost can take real logs as they are written, over syslog (plain or TLS), fr
 | **Syslog over TLS** (add `SIEM_SYSLOG_TLS_CERT` and `SIEM_SYSLOG_TLS_KEY`) | the same syslog inside TLS 1.2+, RFC 5425 | the listener's certificate; sender certificates with `SIEM_SYSLOG_TLS_CLIENT_CA` | other machines that already run rsyslog |
 | **CloudTrail collector** (`scripts/cloudtrail_collector.py`) | AWS API over HTTPS, then HTTPS `POST /api/ingest` | a read-only AWS identity, and an ingest-only API token | AWS accounts, read through an auditor identity |
 | **Windows Event Forwarding collector** (`scripts/wef_collector.py`, experimental) | HTTPS from Windows' built-in forwarder, then HTTPS `POST /api/ingest` | certificates both ways, and an ingest-only API token | Windows hosts, with no agent installed |
+| **Windows Event Collector forwarder** (`scripts/wec_forwarder.ps1`, experimental) | reads the collector's *ForwardedEvents* log, then HTTPS `POST /api/ingest` | an ingest-only API token | Windows domains that already collect with the built-in collector service |
 | **File shipper** (`scripts/shipper.py`) | HTTPS `POST /api/ingest/upload` | ingest-only API token | any box, including over the internet behind HTTPS |
 
 Events from all of these are real, so they are stored with `synthetic=0`. They go through the same parsers as uploaded files: sshd and sudo lines become `auth_failure`, `auth_success`, `privilege_use`, and `privilege_escalation`; UFW/iptables lines become `fw_deny` and `fw_allow`; OpenVPN logins become `vpn_login`; nginx/Apache access lines become `web_request`, `web_scan`, and `web_error`. Detection runs on every batch.
@@ -514,7 +515,7 @@ wef: Subscription Manager policy value: Server=https://wef.example.internal:5986
 | `--token-env` / `--token-file` | Where the Watchpost token comes from (default env `WATCHPOST_TOKEN`) |
 | `--cafile` | CA bundle for a self-signed Watchpost HTTPS certificate |
 
-The collector is standard-library Python, so it should also run on a Windows server, started at boot by a scheduled task (`schtasks /create /tn WatchpostWEF /sc onstart /ru SYSTEM /tr "python C:\watchpost\wef_collector.py ..."`). That has not been tried either.
+The collector is standard-library Python, so it should also run on a Windows server. That has not been tried. A site that already runs the built-in Windows Event Collector does not need it: see [section 5](#5-forwarder-for-a-windows-event-collector).
 
 ### Windows side
 
@@ -561,6 +562,67 @@ Each event becomes one record. `EventID`, `TimeCreated`, `Computer`, `TargetUser
 
 ---
 
+## 5. Forwarder for a Windows Event Collector
+
+> **Experimental, and not yet run on Windows.** `scripts/wec_forwarder.ps1` is tested with PowerShell 7 on Linux, against a stand-in for the event log and a real Watchpost server. Nobody has run it on a Windows collector yet. If you do, expect to correct something, and please report what you find.
+
+A Windows domain usually already gathers logs with the built-in **Windows Event Collector** service: the hosts push their events to one collector server over Kerberos, with nothing installed on them, and the events land in that server's *ForwardedEvents* log. If that is your setup, you do not need the certificate-based collector of section 4. Put this one script on the collector server instead. It reads *ForwardedEvents* and posts each event to `POST /api/ingest`.
+
+Use section 4 when the hosts are not in a domain, or when you have no Windows collector. Use this section when you have one.
+
+- **One file, nothing to install:** Windows PowerShell 5.1 or newer, which every supported Windows Server has.
+- **Resumes where it stopped:** it remembers the record number of the last event Watchpost accepted. On its first run it starts at the newest event; `-FromStart` sends what the log already holds.
+- **Does not lose a batch:** network errors and 5xx answers are retried with a growing pause, and the position does not move until Watchpost has accepted the batch. A batch Watchpost refuses as invalid is logged and skipped.
+- **Secrets:** the token comes from `$env:WATCHPOST_TOKEN` or a file, never the command line. The token and the contents of events are never written to the output. Plain HTTP is refused unless the URL points at the same machine.
+
+### Set it up
+
+1. **Have a collector that works.** Microsoft's guide covers it: [Windows Event Collector](https://learn.microsoft.com/en-us/windows/win32/wec/windows-event-collector). You should see forwarded events under *Event Viewer > Windows Logs > Forwarded Events* before going on.
+2. **Create an ingest token** in Watchpost (**Admin > API tokens**), then on the collector server, in an elevated PowerShell:
+
+   ```powershell
+   New-Item -ItemType Directory -Force C:\Watchpost, C:\ProgramData\Watchpost | Out-Null
+   Copy-Item .\wec_forwarder.ps1 C:\Watchpost\
+   Set-Content C:\ProgramData\Watchpost\token.txt 'wp_...'
+   icacls C:\ProgramData\Watchpost\token.txt /inheritance:r /grant:r "SYSTEM:R" "Administrators:F"
+   ```
+
+3. **Try it once:**
+
+   ```powershell
+   powershell -NoProfile -File C:\Watchpost\wec_forwarder.ps1 -Url https://siem.example.internal -Once
+   ```
+
+   It prints `first run: starting after record N of ForwardedEvents`, and on later runs `sent N event(s), up to record M`. The events appear in Watchpost under **Events** with `source=wec`. If PowerShell refuses to run the script, your execution policy requires it to be signed: sign it, or allow local scripts with `Set-ExecutionPolicy RemoteSigned`.
+4. **Start it with the machine.** The collector is the Windows service; the forwarder runs beside it as a scheduled task under `SYSTEM`, which can read the log:
+
+   ```powershell
+   $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+       -Argument '-NoProfile -File C:\Watchpost\wec_forwarder.ps1 -Url https://siem.example.internal'
+   $trigger = New-ScheduledTaskTrigger -AtStartup
+   $settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
+       -ExecutionTimeLimit ([TimeSpan]::Zero)
+   Register-ScheduledTask -TaskName 'Watchpost WEC forwarder' -Action $action -Trigger $trigger `
+       -Settings $settings -User 'SYSTEM' -RunLevel Highest
+   Start-ScheduledTask -TaskName 'Watchpost WEC forwarder'
+   ```
+
+| Option | Meaning |
+|---|---|
+| `-Url` | Watchpost base URL. `https://` for anything that is not the same machine |
+| `-LogName` | The log to read (default `ForwardedEvents`) |
+| `-StatePath` | Where the position is kept (default `%ProgramData%\Watchpost\wec-forwarder.json`) |
+| `-TokenPath` | File holding the token, used when `$env:WATCHPOST_TOKEN` is not set (default `%ProgramData%\Watchpost\token.txt`) |
+| `-Source` | Source name for the events (default `wec`) |
+| `-BatchSize` | Events per request, at most (default 500) |
+| `-IntervalSeconds` | Pause between looks at the log when there is nothing new (default 15) |
+| `-Once` | Send what is waiting and exit, giving up after 5 retries |
+| `-FromStart` | On the first run, send the events the log already holds |
+
+The records have the same shape as those of section 4 ([What arrives](#what-arrives)), with `wec_collector` (the collector server's name) in place of `wef_sender`.
+
+---
+
 ## Limits
 
 - Plain UDP and TCP syslog are unauthenticated and unencrypted. Use loopback, an SSH tunnel, an allow list and firewall, or TLS. The limits of the TLS listener are listed under [What TLS covers here, and what it does not](#what-tls-covers-here-and-what-it-does-not).
@@ -579,4 +641,6 @@ Each event becomes one record. `EventID`, `TimeCreated`, `Computer`, `TargetUser
   - Each host connection gets a thread, up to 256 connections.
   - The OpenWEC project reports that with certificate authentication a Windows host can start its subscription over after the collector restarts and skip the events logged while the collector was down. Whether this collector shows the same behaviour is unknown.
   - Microsoft's guide asks that both sides can check certificate revocation. Certificates from a private `openssl` CA carry no revocation address; other projects use such certificates, but it is one more thing to look at if a host refuses to connect.
+- The Windows Event Collector forwarder has not been run on Windows. Its logic is tested with PowerShell 7 on Linux against a stand-in for `Get-WinEvent` and a real Watchpost server (`tests/wec_forwarder_check.ps1`); the scheduled-task commands above are untested. It is written for Windows PowerShell 5.1, and a test refuses newer syntax, but only a real run can confirm it.
+- The forwarder keeps one number, the last record sent. If the *ForwardedEvents* log is cleared, delete the state file so it starts again.
 - One process and SQLite, as with the rest of Watchpost: a lab and demo setup, not a fleet collector.

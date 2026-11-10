@@ -57,7 +57,7 @@ cd watchpost
 Passwords are generated on first start and written to `data/initial_credentials.txt` (mode 0600); set `SIEM_ADMIN_PASSWORD`, `SIEM_ANALYST_PASSWORD` and `SIEM_VIEWER_PASSWORD` to choose your own. Sign in as `admin`, then open **Admin → Load synthetic demo data**.
 
 ```bash
-./run_tests.sh    # 696 unit and integration tests + a 27-step end-to-end smoke check
+./run_tests.sh    # 700 unit and integration tests + a 27-step end-to-end smoke check
 ```
 
 CI runs the suite on Python 3.11 through 3.14.
@@ -68,7 +68,7 @@ CI runs the suite on Python 3.11 through 3.14.
 |---|---|
 | [Reference](docs/REFERENCE.md) | Every feature, the architecture, configuration, performance numbers and limits |
 | [API](docs/API.md) | HTTP API reference |
-| [Live ingestion](docs/LIVE_INGEST.md) | Syslog listener (plain and TLS), rsyslog forwarding, firewalls, the file shipper, the CloudTrail collector, the Windows Event Forwarding collector |
+| [Live ingestion](docs/LIVE_INGEST.md) | Syslog listener (plain and TLS), rsyslog forwarding, firewalls, the file shipper, the CloudTrail collector, the Windows Event Forwarding collector and the Windows Event Collector forwarder |
 | [Threat model](docs/THREAT-MODEL.md) | What it protects, what it assumes, and what it does not cover |
 | [Deployment](deploy/README.md) | Debian 12 kit: hardened systemd service behind Caddy or nginx |
 | [Changelog](CHANGELOG.md) | What changed in each release |
