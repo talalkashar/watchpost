@@ -342,6 +342,7 @@ def main():
             time.sleep(0.2)
         check(res["total"] == 1 and res["events"][0]["event_type"] == "syslog", f"syslog event: {res}")
         sender = ssl.create_default_context(cafile=tls_cert)  # verifies the listener's certificate and name
+        sender.minimum_version = ssl.TLSVersion.TLSv1_2
         with socket.create_connection(("127.0.0.1", syslog_tls_port), timeout=10) as tcp:
             with sender.wrap_socket(tcp, server_hostname="localhost") as tls:
                 tls.sendall(b"<11>1 2026-09-28T10:00:01Z smoke-tls-host smokeapp 1 - - live syslog frame over TLS\n")

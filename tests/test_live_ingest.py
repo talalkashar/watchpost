@@ -296,6 +296,7 @@ class SyslogTlsTests(ListenerTestCase):
     def connect(self, listener, identity=None, hostname="localhost"):
         """What a sender does: trust the CA, check the listener's name, optionally present a certificate."""
         context = ssl.create_default_context(cafile=self.ca)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         if identity:
             context.load_cert_chain(*identity)
         raw = socket.create_connection(("127.0.0.1", listener.tls_port), timeout=5)
