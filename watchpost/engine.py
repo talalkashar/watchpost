@@ -8,6 +8,7 @@ from datetime import timedelta
 from . import assets as assets_mod
 from . import correlate as correlate_mod
 from . import grouping
+from . import playbooks
 from . import rules as rules_mod
 from . import sources as sources_mod
 from . import stream
@@ -186,6 +187,7 @@ def _apply_finding(conn, rule, finding, synthetic, assets_idx):
             (alert_id, "assets", "severity_changed",
              f"{rule['severity']} -> {weighed['severity']} ({weighed['severity_note']})", now),
         )
+    playbooks.start(conn, conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone())
     return "created"
 
 
@@ -375,7 +377,7 @@ def _candidate_alerts(conn):
 def _incident_values(summary):
     return (summary["title"], summary["severity"], summary["first_seen"], summary["last_seen"],
             json.dumps(summary["entities"], sort_keys=True), json.dumps(summary["stages"]),
-            summary["alert_count"], summary["synthetic"])
+            summary["alert_count"], summary["synthetic"], json.dumps(summary["patterns"]))
 
 
 def correlate_alerts(conn, window_seconds=correlate_mod.DEFAULT_WINDOW_SECONDS):
@@ -393,17 +395,17 @@ def correlate_alerts(conn, window_seconds=correlate_mod.DEFAULT_WINDOW_SECONDS):
             if incident_id is None:
                 incident_id = conn.execute(
                     "INSERT INTO incidents(title, severity, first_seen, last_seen, entities, stages, alert_count,"
-                    " synthetic, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,'open',?,?)",
+                    " synthetic, patterns, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,'open',?,?)",
                     (*values, now, now)).lastrowid
                 result["incidents_created"] += 1
             else:
                 current = conn.execute(
-                    "SELECT title, severity, first_seen, last_seen, entities, stages, alert_count, synthetic"
-                    " FROM incidents WHERE id = ?", (incident_id,)).fetchone()
+                    "SELECT title, severity, first_seen, last_seen, entities, stages, alert_count, synthetic,"
+                    " patterns FROM incidents WHERE id = ?", (incident_id,)).fetchone()
                 if tuple(current) != values:
                     conn.execute(
                         "UPDATE incidents SET title = ?, severity = ?, first_seen = ?, last_seen = ?, entities = ?,"
-                        " stages = ?, alert_count = ?, synthetic = ?, updated_at = ? WHERE id = ?",
+                        " stages = ?, alert_count = ?, synthetic = ?, patterns = ?, updated_at = ? WHERE id = ?",
                         (*values, now, incident_id))
                     result["incidents_updated"] += 1
             new = group["alert_ids"] if group["incident_id"] is None else group["new_alert_ids"]

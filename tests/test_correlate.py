@@ -2,7 +2,7 @@ import json
 import unittest
 from datetime import timedelta
 
-from watchpost import correlate, engine
+from watchpost import correlate, engine, incidents, report
 from watchpost.db import connect, init_schema, iso, utcnow
 from watchpost.normalize import parse_payload
 
@@ -86,7 +86,12 @@ class CorrelateTests(unittest.TestCase):
                 {**alert(2, 5, ip="203.0.113.5", user="frank", severity="high"),
                  "tactics": ["Initial Access"], "synthetic": 1}]
         two = correlate.summarize(base)
-        self.assertEqual((two["severity"], two["escalated"]), ("high", False))
+        # Not escalated by tactic count. The severity is critical all the same: a password attack followed by
+        # a suspicious login from the same source completes the correlation rule attack_then_access.
+        self.assertEqual((two["severity"], two["escalated"]), ("critical", False))
+        self.assertEqual(two["patterns"], [{"id": "attack_then_access", "alert_ids": [1, 2]}])
+        reverse = correlate.summarize([{**base[0], "tactics": ["Initial Access"]}, {**base[1], "tactics": ["Credential Access"]}])
+        self.assertEqual((reverse["severity"], reverse["patterns"]), ("high", []))   # the other order is no rule
         self.assertEqual(two["stages"], ["Initial Access", "Credential Access"])
         self.assertEqual(two["title"], "Initial Access → Credential Access: 203.0.113.5, frank")
         three = correlate.summarize(base + [{**alert(3, 9, user="frank"), "tactics": ["Privilege Escalation"],
@@ -112,6 +117,100 @@ class CorrelateTests(unittest.TestCase):
         self.assertFalse(correlate.should_open([alert(1, 0)]))
         self.assertTrue(correlate.should_open([alert(1, 0, severity="critical")]))
         self.assertTrue(correlate.should_open([alert(1, 0), alert(2, 1)]))
+
+
+def staged(aid, hour, minute=0, tactics=(), ip=None, user=None, host=None, users=None, incident_id=None, severity="medium"):
+    """An alert at a time of day, hours apart from the others, raised by a rule with the given tactics."""
+    ts = f"2026-09-15T{hour:02d}:{minute:02d}:00.000Z" if hour < 24 else f"2026-09-16T{hour - 24:02d}:{minute:02d}:00.000Z"
+    return {"id": aid, "first_seen": ts, "last_seen": ts, "severity": severity, "incident_id": incident_id,
+            "tactics": list(tactics), "synthetic": 1,
+            "entities": {"src_ip": [ip] if ip else [], "user": users or ([user] if user else []), "host": [host] if host else []}}
+
+
+class PatternTests(unittest.TestCase):
+    """Correlation rules: named shapes over tactics that link alerts hours apart and raise the incident."""
+
+    def groups(self, *alerts):
+        return [g["alert_ids"] for g in correlate.correlate(list(alerts))]
+
+    def test_rules_are_well_formed(self):
+        tactics = {name for _, name in correlate.attack.TACTICS} | {"other"}
+        self.assertEqual(len(correlate.PATTERN_INFO), len(correlate.PATTERNS))
+        for pattern in correlate.PATTERNS:
+            self.assertRegex(pattern["id"], r"^[a-z_]+$")
+            self.assertIn(pattern["kind"], ("sequence", "together"))
+            self.assertIn(pattern["severity"], ("high", "critical"))
+            self.assertTrue(pattern["name"] and pattern["description"])
+            self.assertLessEqual(set(pattern["shared"]), {"src_ip", "user"}, "a host is a place, not an actor")
+            self.assertGreaterEqual(len(pattern["steps"]), 2)
+            for step in pattern["steps"]:
+                self.assertLessEqual(set(step), tactics, pattern["id"])
+
+    def test_a_sequence_links_alerts_hours_apart_from_one_source(self):
+        scan = staged(1, 9, tactics=["Reconnaissance"], ip="203.0.113.5", host="web01")
+        attack = staged(2, 13, tactics=["Credential Access"], ip="203.0.113.5", user="frank")
+        self.assertEqual(self.groups(scan, attack), [[1, 2]])                      # four hours: far past the plain window
+        self.assertEqual(correlate.match_patterns([scan, attack]), [{"id": "scan_then_attack", "alert_ids": [1, 2]}])
+        # The other order is not the rule, nor is another source, nor a gap of more than a day.
+        self.assertEqual(self.groups(staged(1, 9, tactics=["Credential Access"], ip="203.0.113.5"),
+                                     staged(2, 13, tactics=["Reconnaissance"], ip="203.0.113.5")), [[1], [2]])
+        self.assertEqual(self.groups(scan, staged(2, 13, tactics=["Credential Access"], ip="198.51.100.9")), [[1], [2]])
+        self.assertEqual(self.groups(scan, staged(2, 34, tactics=["Credential Access"], ip="203.0.113.5")), [[1], [2]])
+        self.assertEqual(self.groups(scan, staged(2, 33, tactics=["Credential Access"], ip="203.0.113.5")), [[1, 2]])
+
+    def test_a_shared_host_is_not_enough(self):
+        login = staged(1, 9, tactics=["Initial Access"], user="erin", host="web01")
+        escalation = staged(2, 12, tactics=["Privilege Escalation"], user="frank", host="web01")
+        self.assertEqual(self.groups(login, escalation), [[1], [2]])
+        self.assertEqual(correlate.match_patterns([login, escalation]), [])
+        same_account = staged(3, 12, tactics=["Privilege Escalation"], user="ERIN", host="db01")
+        self.assertEqual(self.groups(login, same_account), [[1, 3]])               # the account, whatever the host or case
+
+    def test_an_alert_naming_many_accounts_ties_none_of_them_to_the_next_stage(self):
+        spray = staged(1, 9, tactics=["Credential Access"], ip="198.51.100.23", users=["amy", "bob", "cal", "dee", "eve"])
+        login = staged(2, 12, tactics=["Initial Access"], ip="192.0.2.77", user="dee")
+        self.assertEqual(self.groups(spray, login), [[1], [2]])
+        guessing = staged(1, 9, tactics=["Credential Access"], ip="198.51.100.23", users=["dee", "eve"])
+        self.assertEqual(self.groups(guessing, login), [[1, 2]])                    # two accounts: specific enough
+        from_same_source = staged(2, 12, tactics=["Initial Access"], ip="198.51.100.23", user="zed")
+        self.assertEqual(self.groups(spray, from_same_source), [[1, 2]])            # the source still ties them
+
+    def test_alerts_without_tactics_never_complete_a_rule(self):
+        self.assertEqual(self.groups(staged(1, 9, ip="203.0.113.5"), staged(2, 13, ip="203.0.113.5")), [[1], [2]])
+        self.assertEqual(self.groups(staged(1, 9, tactics=["Reconnaissance"], ip="203.0.113.5"), staged(2, 13, ip="203.0.113.5")),
+                         [[1], [2]])
+
+    def test_logging_impaired_matches_in_either_order_and_needs_another_kind_of_alert(self):
+        off = staged(1, 12, tactics=["Defense Evasion"], user="svc-deploy")
+        before = staged(2, 9, tactics=["Persistence"], user="svc-deploy")
+        after = staged(3, 15, tactics=["Exfiltration"], user="svc-deploy")
+        for other in (before, after):
+            self.assertEqual(correlate.match_patterns([off, other])[0]["id"], "defenses_impaired")
+            self.assertEqual(len(self.groups(off, other)), 1)
+        again = staged(4, 14, tactics=["Defense Evasion"], user="svc-deploy")
+        self.assertEqual(correlate.match_patterns([off, again]), [])
+        self.assertEqual(self.groups(off, again), [[1], [4]])
+
+    def test_a_rule_raises_the_incident_to_its_own_severity(self):
+        login = staged(1, 9, tactics=["Initial Access"], user="erin", severity="medium")
+        leaving = staged(2, 15, tactics=["Exfiltration"], user="erin", severity="medium")
+        summary = correlate.summarize([login, leaving])
+        self.assertEqual((summary["severity"], summary["escalated"]), ("critical", False))
+        self.assertEqual(summary["patterns"], [{"id": "access_then_exfiltration", "alert_ids": [1, 2]}])
+        plain = correlate.summarize([login, staged(2, 15, tactics=["Initial Access"], user="erin")])
+        self.assertEqual((plain["severity"], plain["patterns"]), ("medium", []))
+        three = correlate.summarize([login, staged(2, 11, tactics=["Privilege Escalation"], user="erin"),
+                                     staged(3, 15, tactics=["Collection"], user="erin")])
+        self.assertEqual([p["id"] for p in three["patterns"]], ["access_then_escalation", "access_then_exfiltration"])
+        self.assertEqual(three["patterns"][1]["alert_ids"], [1, 2, 3])              # both ways into the last stage
+
+    def test_existing_incidents_are_respected(self):
+        scan = staged(1, 9, tactics=["Reconnaissance"], ip="203.0.113.5", incident_id=7)
+        attack = staged(2, 13, tactics=["Credential Access"], ip="203.0.113.5")
+        joined = correlate.correlate([scan, attack])
+        self.assertEqual([(g["incident_id"], g["alert_ids"], g["new_alert_ids"]) for g in joined], [(7, [1, 2], [2])])
+        other = staged(2, 13, tactics=["Credential Access"], ip="203.0.113.5", incident_id=8)
+        self.assertEqual([g["incident_id"] for g in correlate.correlate([scan, other])], [7, 8])   # never merged
 
 
 class EngineCorrelationTests(unittest.TestCase):
@@ -187,6 +286,29 @@ class EngineCorrelationTests(unittest.TestCase):
         incidents, _ = self.incidents()
         # The lone new alert (high, not critical) does not open an incident by itself.
         self.assertEqual([i["status"] for i in incidents], ["resolved"])
+
+    def test_a_scan_and_an_attack_hours_apart_become_one_incident_with_the_rule_named(self):
+        ip = "203.0.113.200"
+        self.start = utcnow() - timedelta(hours=8)
+        self.ingest([{"ts": self.at(i), "event_type": "fw_deny", "src_ip": ip, "dest_ip": "10.0.0.5", "dest_port": 1000 + i}
+                     for i in range(12)])                                           # a port sweep, eight hours ago
+        self.assertEqual(self.incidents(), ([], []))                                # one alert, not critical: no incident
+        self.start = utcnow() - timedelta(hours=2)
+        self.ingest([{"ts": self.at(i * 5), "event_type": "auth_failure", "user": f"u{i % 3}", "src_ip": ip}
+                     for i in range(12)])                                           # the same source guesses passwords
+        rows, links = self.incidents()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(json.loads(rows[0]["patterns"])[0]["id"], "scan_then_attack")
+        rules = {r[0] for r in self.conn.execute("SELECT rule_id FROM alerts WHERE id IN (SELECT alert_id FROM incident_alerts)")}
+        self.assertEqual(rules, {"firewall_port_sweep", "brute_force_ip"})
+        incident = incidents.get_incident(self.conn, rows[0]["id"])
+        self.assertEqual([(p["id"], p["name"], p["severity"], len(p["alert_ids"])) for p in incident["patterns"]],
+                         [("scan_then_attack", "Scan, then attack, from one source", "high", 2)])
+        self.assertIn(incident["severity"], ("high", "critical"))
+        self.assertEqual(engine.correlate_alerts(self.conn), {"incidents_created": 0, "incidents_updated": 0})   # idempotent
+        self.assertIn("Correlation rules matched: Scan, then attack, from one source.",
+                      report.build(self.conn, rows[0]["id"])["summary"])
+        self.assertIn("**Correlation rule:** Scan, then attack, from one source.", report.to_markdown(report.build(self.conn, rows[0]["id"])))
 
     def test_single_non_critical_alert_is_not_an_incident(self):
         self.ingest([{"ts": self.at(i), "event_type": "web_scan", "src_ip": "203.0.113.80"} for i in range(6)])

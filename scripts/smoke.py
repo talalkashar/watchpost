@@ -11,6 +11,7 @@ Exits non-zero on the first failed step. Never touches data/ or any external hos
 import json
 import os
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -22,6 +23,9 @@ from pathlib import Path
 from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from tests import certgen  # noqa: E402  (a throwaway certificate for the syslog-over-TLS step)
+
 ADMIN_PW, ANALYST_PW, VIEWER_PW = "smoke-admin-password", "smoke-analyst-password", "smoke-viewer-password"
 AUDIT_KEY = "smoke-audit-chain-key"
 STEP = 0
@@ -82,12 +86,17 @@ def free_port():
 
 def main():
     tmp = tempfile.TemporaryDirectory()
-    port, syslog_port = free_port(), free_port()
+    port, syslog_port, syslog_tls_port = free_port(), free_port(), free_port()
     base = f"http://127.0.0.1:{port}"
+    tls_key = certgen.Key()
+    tls_cert = certgen.write(tmp.name, "syslog.pem", certgen.certificate("localhost", tls_key, names=["localhost"]))
     env = {**os.environ, "SIEM_DB": os.path.join(tmp.name, "smoke.db"), "SIEM_HOST": "127.0.0.1",
            "SIEM_PORT": str(port), "SIEM_ADMIN_PASSWORD": ADMIN_PW, "SIEM_ANALYST_PASSWORD": ANALYST_PW,
            "SIEM_VIEWER_PASSWORD": VIEWER_PW, "SIEM_AUDIT_KEY": AUDIT_KEY,
-           "SIEM_SYSLOG": "1", "SIEM_SYSLOG_PORT": str(syslog_port)}
+           "SIEM_SYSLOG": "1", "SIEM_SYSLOG_PORT": str(syslog_port),
+           # Syslog over TLS next to the plaintext listener, which TLS would otherwise replace.
+           "SIEM_SYSLOG_TLS_CERT": tls_cert, "SIEM_SYSLOG_TLS_PORT": str(syslog_tls_port),
+           "SIEM_SYSLOG_TLS_KEY": certgen.write(tmp.name, "syslog.key", tls_key.pem()), "SIEM_SYSLOG_PLAINTEXT": "1"}
     log_path = os.path.join(tmp.name, "server.log")
     log_file = open(log_path, "w")
     proc = subprocess.Popen([sys.executable, "main.py"], cwd=ROOT, env=env, stdout=log_file, stderr=log_file)
@@ -322,7 +331,7 @@ def main():
         check(listed[asset["id"]]["criticality"] == "low", f"approved edit not applied: {listed[asset['id']]}")
         print(f"      change #{change['id']} approved by admin2; {res['alerts_rescored']} open alert(s) re-weighed")
 
-        step("live ingestion: syslog listener and file shipper")
+        step("live ingestion: syslog listener (UDP and TLS) and file shipper")
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
             udp.sendto(b"<11>1 2026-09-28T10:00:00Z smoke-host smokeapp 1 - - live syslog frame",
                        ("127.0.0.1", syslog_port))
@@ -332,6 +341,18 @@ def main():
                 break
             time.sleep(0.2)
         check(res["total"] == 1 and res["events"][0]["event_type"] == "syslog", f"syslog event: {res}")
+        sender = ssl.create_default_context(cafile=tls_cert)  # verifies the listener's certificate and name
+        sender.minimum_version = ssl.TLSVersion.TLSv1_2
+        with socket.create_connection(("127.0.0.1", syslog_tls_port), timeout=10) as tcp:
+            with sender.wrap_socket(tcp, server_hostname="localhost") as tls:
+                tls.sendall(b"<11>1 2026-09-28T10:00:01Z smoke-tls-host smokeapp 1 - - live syslog frame over TLS\n")
+                tls.unwrap()
+        for _ in range(50):
+            status, res = analyst.call("GET", "/api/events?source=syslog&host=smoke-tls-host")
+            if res["total"]:
+                break
+            time.sleep(0.2)
+        check(res["total"] == 1 and res["events"][0]["message"].endswith("over TLS"), f"TLS syslog event: {res}")
         shipped = Path(tmp.name) / "shipped.log"
         shipped.write_text("Sep 28 12:00:00 smoke-box sshd[1]: Accepted publickey for smokeuser "
                            "from 198.51.100.99 port 22 ssh2\n")
@@ -344,14 +365,15 @@ def main():
         status, res = analyst.call("GET", "/api/events?source=smoke-shipper")
         check(res["total"] == 1 and res["events"][0]["user"] == "smokeuser", f"shipped event: {res}")
         check(tok["token"] not in out.stderr, "shipper logged its token")
-        print("      syslog frame and shipped auth.log line both searchable")
+        print("      syslog frames (UDP and TLS) and shipped auth.log line all searchable")
 
         step("metrics, triage metrics and health are consistent")
         status, m = analyst.call("GET", "/api/metrics")
         check(m["alerts_resolved"] >= 2 and m["events_total"] > 0, f"metrics: {m}")
         status, h = admin.call("GET", "/api/health/details")
         check(h["status"] == "ok", f"health after flow: {[(c['name'], c['status'], c['message']) for c in h['checks']]}")
-        check(any(c["name"] == "syslog" and c["status"] == "ok" for c in h["checks"]), "syslog health missing")
+        check(any(c["name"] == "syslog" and c["status"] == "ok" and c["details"]["tls_port"] == syslog_tls_port
+                  for c in h["checks"]), "syslog health missing or without its TLS port")
         check(m["time_to_resolve_by_severity"] and m["false_positive_rate_by_rule"]
               and len(m["open_alert_aging"]["buckets"]) == 5 and m["omitted_metrics"], f"SOC metrics: {m}")
         status, tri = analyst.call("GET", "/api/metrics/triage?window=7d")
@@ -393,6 +415,31 @@ def main():
                 buf += chunk
         check(b"text/event-stream" in buf and b"event: hello" in buf and b"event: health" in buf, "stream frames")
         print(f"      {len(dash['attackers'])} attacker IPs, stream sent hello + health")
+
+        step("response playbook: every alert has steps, an analyst works them, nothing is sent without a webhook")
+        status, listed = analyst.call("GET", "/api/alerts?status=open,investigating&limit=200")
+        details = [analyst.call("GET", f"/api/alerts/{a['id']}")[1] for a in listed[:25]]
+        check(details and all(d["playbook"] and d["playbook"]["steps"][0]["status"] == "done" for d in details),
+              "an alert has no playbook, or its context step did not run")
+        chosen, action = next((d, s) for d in details for s in d["playbook"]["steps"]
+                              if s["kind"] == "action" and s["targets"])
+        steps_url = f"/api/alerts/{chosen['id']}/playbook/steps"
+        manual = next(s for s in chosen["playbook"]["steps"] if s["kind"] == "manual" and s["status"] == "pending")
+        status, playbook = analyst.call("POST", f"{steps_url}/{manual['key']}", {"status": "done", "note": "smoke"})
+        check(status == 200 and playbook["progress"]["closed"] == chosen["playbook"]["progress"]["closed"] + 1,
+              f"manual step: {status} {playbook}")
+        check(analyst.call("POST", f"{steps_url}/{action['key']}/request",
+                           {"target": "198.51.100.250", "reason": "not in the evidence"})[0] == 400,
+              "a response action accepted a target that is not in the alert's evidence")
+        status, playbook = analyst.call("POST", f"{steps_url}/{action['key']}/request",
+                                        {"target": action["targets"][0], "reason": "smoke check"})
+        requested = next(s for s in playbook["steps"] if s["key"] == action["key"])
+        check(status == 200 and requested["status"] == "skipped" and requested["note"].startswith("Not sent:"),
+              f"response action without a webhook: {status} {requested}")
+        status, catalogue = analyst.call("GET", "/api/playbooks")
+        check(catalogue["webhook"] == {"mode": "off", "pending": 0, "sent": 0, "failed": 0}, f"webhook: {catalogue['webhook']}")
+        print(f"      {len(catalogue['playbooks'])} playbooks; '{manual['title']}' done; {action['key']} for "
+              f"{action['targets'][0]} recorded, not sent")
 
         step("viewer account is read-only; login is rate limited")
         viewer = Session(base)
