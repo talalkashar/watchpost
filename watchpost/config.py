@@ -51,6 +51,12 @@ class Config:
     demo_loop_speed: float = 1.0
     # HMAC key for the hash-chained audit log. Unset: plain SHA-256, which detects edits but not a full rewrite.
     audit_key: str | None = None
+    # Response playbooks (playbooks.py): where notifications and response-action requests are posted. Unset:
+    # nothing leaves Watchpost. The secret signs each body. Synthetic alerts are sent only when asked for.
+    playbook_webhook_url: str | None = None
+    playbook_webhook_secret: str | None = None
+    playbook_webhook_cafile: str | None = None
+    playbook_webhook_synthetic: bool = False
 
     @classmethod
     def from_env(cls, **overrides):
@@ -85,6 +91,10 @@ class Config:
             demo_loop_minutes=int(os.environ.get("SIEM_DEMO_LOOP", "0")),
             demo_loop_speed=float(os.environ.get("SIEM_DEMO_LOOP_SPEED", "1")),
             audit_key=os.environ.get("SIEM_AUDIT_KEY") or None,
+            playbook_webhook_url=os.environ.get("SIEM_PLAYBOOK_WEBHOOK_URL") or None,
+            playbook_webhook_secret=os.environ.get("SIEM_PLAYBOOK_WEBHOOK_SECRET") or None,
+            playbook_webhook_cafile=os.environ.get("SIEM_PLAYBOOK_WEBHOOK_CAFILE") or None,
+            playbook_webhook_synthetic=os.environ.get("SIEM_PLAYBOOK_WEBHOOK_SYNTHETIC", "0") == "1",
         )
         values.update(overrides)
         return cls(**values)

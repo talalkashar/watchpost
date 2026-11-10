@@ -393,6 +393,7 @@ async function alertDetail(id) {
           el("p", {}, el("strong", {}, "Assets: "), assetChips(a.assets),
             a.base_severity && a.base_severity !== a.severity ? el("span", { class: "muted" }, ` Rule severity ${a.base_severity}; ${a.severity_note}.`) : null),
           actions),
+        playbookCard(a),
         el("div", { class: "card" }, el("h2", {}, `Evidence (${a.evidence.length} events)`),
           table(["Time", "Type", "User", "Source IP", "Host", "Message"],
             a.evidence.map((e) => ({ cells: [fmtTime(e.ts), e.event_type, entityLink("user", e.user), el("code", {}, entityLink("src_ip", e.src_ip)), entityLink("host", e.host), e.message ?? ""] })))),
@@ -412,6 +413,78 @@ async function alertDetail(id) {
         el("div", { class: "card" }, el("h2", {}, "Activity"),
           a.activity.map((x) => el("div", { class: "note" }, el("span", { class: "muted" }, `${fmtTime(x.created_at)} · ${x.actor} `), `${x.action.replace("_", " ")}${x.detail ? ` — ${x.detail}` : ""}`))))),
   );
+}
+
+// ---------- response playbook (an alert's steps: see watchpost/playbooks.py) ----------
+const STEP_STATUS = { pending: ["to do", "st-open"], requested: ["sending", "st-investigating"], done: ["done", "st-resolved"],
+  skipped: ["skipped", "sev-info"], failed: ["failed", "sev-critical"] };
+
+function playbookCard(a) {
+  const id = a.id, p = a.playbook, open = a.status !== "resolved";
+  const send = (path, body) => guarded(async () => { await api(`/api/alerts/${id}/playbook${path}`, { method: "POST", body }); alertDetail(id); });
+  if (!p) {
+    return el("div", { class: "card" }, el("h2", {}, "Response playbook"),
+      el("p", { class: "muted" }, "This alert was created before playbooks existed, so it has no steps yet."),
+      can("analyst") ? el("button", { onclick: () => send("", {}) }, "Start its playbook") : null);
+  }
+  const controls = (s) => {
+    if (!can("analyst") || s.kind === "auto") return null;
+    if (s.kind === "manual") {
+      return s.status === "pending"
+        ? el("div", { class: "row" },
+          el("button", { onclick: () => send(`/steps/${s.key}`, { status: "done" }) }, "Done"),
+          el("button", { class: "ghost", onclick: () => stepDialog(`Skip: ${s.title}`, "Why is this step skipped?", "Skip", true, (note) => send(`/steps/${s.key}`, { status: "skipped", note })) }, "Skip…"))
+        : el("div", { class: "row" }, el("button", { class: "ghost", onclick: () => send(`/steps/${s.key}`, { status: "pending" }) }, "Reopen"));
+    }
+    if (!open) return null;
+    if (!s.targets.length) return el("p", { class: "muted" }, "Nothing in this alert's evidence that this action applies to.");
+    return el("div", { class: "row" }, el("button", { class: "ghost", onclick: () => actionDialog(s, send) }, s.status === "pending" ? "Request…" : "Request again…"));
+  };
+  const step = (s) => el("li", { class: "note" },
+    el("div", { class: "row" }, pill(s.phase, "stage"), el("strong", {}, s.title), pill(...(STEP_STATUS[s.status] ?? [s.status, "sev-info"])),
+      s.kind === "auto" ? el("span", { class: "muted" }, "automatic") : null),
+    el("div", { class: "muted" }, s.detail),
+    s.note || s.target ? el("div", {}, s.target ? el("code", {}, s.target) : null, s.target && s.note ? " " : "", s.note ?? "",
+      el("span", { class: "muted" }, ` (${s.actor ?? "—"}, ${fmtTime(s.updated_at)})`)) : null,
+    controls(s));
+  return el("div", { class: "card" }, el("h2", {}, `Response playbook: ${p.name}`),
+    el("p", { class: "muted" }, `${p.description} ${p.progress.closed} of ${p.progress.total} steps closed${p.completed_at ? `, finished ${fmtTime(p.completed_at)}` : ""}.`),
+    el("ol", { class: "steps" }, p.steps.map(step)));
+}
+
+// A one-field dialog for a step: a note, required or not.
+function stepDialog(title, label, button, required, onSubmit) {
+  const form = el("form", {},
+    el("h2", {}, title),
+    el("label", {}, label, el("textarea", { name: "note", maxlength: 1000, required })),
+    el("div", { class: "row" }, el("button", { type: "submit" }, button),
+      el("button", { type: "button", class: "ghost", onclick: () => $("#modal").close() }, "Cancel")));
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    $("#modal").close();
+    onSubmit(new FormData(form).get("note"));
+  });
+  $("#modal-body").replaceChildren(form);
+  openModal();
+}
+
+// A response action: Watchpost does not carry it out, it posts the request to the operator's webhook.
+function actionDialog(s, send) {
+  const form = el("form", {},
+    el("h2", {}, s.title),
+    el("p", { class: "muted" }, "Watchpost does not carry this out itself. It posts the request to the configured webhook, where your own automation acts on it. Without a webhook, or on a synthetic alert, the request is recorded and not sent."),
+    el("label", {}, "Target (from this alert's evidence)", el("select", { name: "target", required: true }, s.targets.map((t) => el("option", { value: t }, t)))),
+    el("label", {}, "Reason (kept in the audit log)", el("textarea", { name: "reason", maxlength: 1000, required: true })),
+    el("div", { class: "row" }, el("button", { type: "submit" }, "Request"),
+      el("button", { type: "button", class: "ghost", onclick: () => $("#modal").close() }, "Cancel")));
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const f = new FormData(form);
+    $("#modal").close();
+    send(`/steps/${s.key}/request`, { target: f.get("target"), reason: f.get("reason") });
+  });
+  $("#modal-body").replaceChildren(form);
+  openModal();
 }
 
 // Report downloads (every role, viewers included). kind is "alerts" or "incidents"; plain GET links carry the session cookie.

@@ -161,6 +161,8 @@ def get_alert(conn, alert_id):
     alert["activity"] = [dict(r) for r in conn.execute(
         "SELECT * FROM alert_activity WHERE alert_id = ? ORDER BY id", (alert_id,))]
     alert["timeline"] = related_timeline(conn, alert)
+    from . import playbooks  # here, not at the top: playbooks imports this module
+    alert["playbook"] = playbooks.get(conn, alert_id)
     return alert
 
 

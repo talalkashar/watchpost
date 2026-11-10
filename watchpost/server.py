@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (__version__, assets, attack, auth, case_record, dashboard_views, ecs, engine, entities, geo, hunt, improve, incidents,
-               masking, portability, queries, report, search_rules, sigma, simulate, sources, storyline, stream,
+               masking, playbooks, portability, queries, report, search_rules, sigma, simulate, sources, storyline, stream,
                triage)
 from . import backtest as backtest_mod
 from .ratelimit import TokenBucketLimiter
@@ -54,6 +54,7 @@ class App:
             improve.seed_settings(conn)
             self.credentials_file = auth.bootstrap_users(conn, config, Path(config.db_path).parent)
             masking.key(conn)  # create the per-database pseudonym key now, not on a viewer's GET
+            playbooks.configure(conn, config)  # refuses to start on a webhook URL it would not deliver to
         finally:
             conn.close()
         self.login_limiter = self.request_limiter = self.backtest_limiter = self.change_backtest_limiter = None
@@ -473,6 +474,31 @@ def alert_status(req, alert_id):
 @route("POST", r"/api/alerts/(\d+)/assign", role="analyst")
 def alert_assign(req, alert_id):
     return queries.assign(req.conn, int(alert_id), req.user["username"], body_json(req).get("assignee"))
+
+
+# Response playbooks ---------------------------------------------------------------------
+@route("GET", "/api/playbooks")
+def playbook_catalogue(req):
+    return playbooks.catalogue(req.conn)
+
+
+@route("POST", r"/api/alerts/(\d+)/playbook", role="analyst")
+def playbook_start(req, alert_id):
+    req.status = 201
+    return playbooks.start_for(req.conn, int(alert_id), req.user["username"])
+
+
+@route("POST", r"/api/alerts/(\d+)/playbook/steps/([a-z_]{1,40})", role="analyst")
+def playbook_step(req, alert_id, step_key):
+    data = body_json(req)
+    return playbooks.set_step(req.conn, int(alert_id), step_key, req.user["username"], data.get("status"), data.get("note"))
+
+
+@route("POST", r"/api/alerts/(\d+)/playbook/steps/([a-z_]{1,40})/request", role="analyst")
+def playbook_action(req, alert_id, step_key):
+    data = body_json(req)
+    return playbooks.request_action(req.conn, int(alert_id), step_key, req.user["username"],
+                                    data.get("target"), data.get("reason"))
 
 
 # Incidents (correlated alerts) and ATT&CK coverage -------------------------------------

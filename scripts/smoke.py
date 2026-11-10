@@ -416,6 +416,31 @@ def main():
         check(b"text/event-stream" in buf and b"event: hello" in buf and b"event: health" in buf, "stream frames")
         print(f"      {len(dash['attackers'])} attacker IPs, stream sent hello + health")
 
+        step("response playbook: every alert has steps, an analyst works them, nothing is sent without a webhook")
+        status, listed = analyst.call("GET", "/api/alerts?status=open,investigating&limit=200")
+        details = [analyst.call("GET", f"/api/alerts/{a['id']}")[1] for a in listed[:25]]
+        check(details and all(d["playbook"] and d["playbook"]["steps"][0]["status"] == "done" for d in details),
+              "an alert has no playbook, or its context step did not run")
+        chosen, action = next((d, s) for d in details for s in d["playbook"]["steps"]
+                              if s["kind"] == "action" and s["targets"])
+        steps_url = f"/api/alerts/{chosen['id']}/playbook/steps"
+        manual = next(s for s in chosen["playbook"]["steps"] if s["kind"] == "manual" and s["status"] == "pending")
+        status, playbook = analyst.call("POST", f"{steps_url}/{manual['key']}", {"status": "done", "note": "smoke"})
+        check(status == 200 and playbook["progress"]["closed"] == chosen["playbook"]["progress"]["closed"] + 1,
+              f"manual step: {status} {playbook}")
+        check(analyst.call("POST", f"{steps_url}/{action['key']}/request",
+                           {"target": "198.51.100.250", "reason": "not in the evidence"})[0] == 400,
+              "a response action accepted a target that is not in the alert's evidence")
+        status, playbook = analyst.call("POST", f"{steps_url}/{action['key']}/request",
+                                        {"target": action["targets"][0], "reason": "smoke check"})
+        requested = next(s for s in playbook["steps"] if s["key"] == action["key"])
+        check(status == 200 and requested["status"] == "skipped" and requested["note"].startswith("Not sent:"),
+              f"response action without a webhook: {status} {requested}")
+        status, catalogue = analyst.call("GET", "/api/playbooks")
+        check(catalogue["webhook"] == {"mode": "off", "pending": 0, "sent": 0, "failed": 0}, f"webhook: {catalogue['webhook']}")
+        print(f"      {len(catalogue['playbooks'])} playbooks; '{manual['title']}' done; {action['key']} for "
+              f"{action['targets'][0]} recorded, not sent")
+
         step("viewer account is read-only; login is rate limited")
         viewer = Session(base)
         viewer.login("viewer", VIEWER_PW)

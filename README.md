@@ -22,6 +22,7 @@
 - **Detects** with fifteen built-in rules written as pure functions, each with a plain-English explanation and the evidence behind every alert.
 - **Maps to MITRE ATT&CK** and grades coverage by evidence: a technique is only "validated" when an enabled rule catches a labeled attack scenario.
 - **Correlates** alerts that share an IP, account or host into incidents with kill-chain stages, then exports case records and PDF reports.
+- **Responds** with a playbook for every alert: automatic context, steps an analyst checks off, and response actions (block an address, disable an account, isolate a host) that are sent as signed requests to a webhook you configure. Watchpost never carries out an action itself.
 - **Hunts** with a one-line query language (`field:value`, `NOT`, `last:7d`, plus `| stats`, `| top`, `| timechart`) compiled from a field whitelist with bound values, and turns saved searches into detections.
 - **Tunes safely.** Rule changes come from analyst feedback, are backtested against stored events first, and need approval from a second person. Rules export and import as versioned JSON, and a Sigma subset imports.
 - **Secures itself:** PBKDF2 passwords, lockout, server-side sessions, TOTP two-factor, CSRF protection, a tamper-evident audit log (hash chain), and data masking for viewers.
@@ -54,7 +55,7 @@ cd watchpost
 Passwords are generated on first start and written to `data/initial_credentials.txt` (mode 0600); set `SIEM_ADMIN_PASSWORD`, `SIEM_ANALYST_PASSWORD` and `SIEM_VIEWER_PASSWORD` to choose your own. Sign in as `admin`, then open **Admin → Load synthetic demo data**.
 
 ```bash
-./run_tests.sh    # 646 unit and integration tests + a 26-step end-to-end smoke check
+./run_tests.sh    # 659 unit and integration tests + a 27-step end-to-end smoke check
 ```
 
 CI runs the suite on Python 3.11 through 3.14.
