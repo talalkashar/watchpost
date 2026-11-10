@@ -382,6 +382,28 @@ CREATE TABLE IF NOT EXISTS dashboard_views (
     UNIQUE(owner, name COLLATE NOCASE)
 );
 
+-- Tiered retention (retention.py): one row per arrival day that left the events table. `tier` is warm, cold
+-- or deleted; a deleted row is the record that the day's file was disposed of.
+CREATE TABLE IF NOT EXISTS archives (
+    day TEXT PRIMARY KEY,
+    tier TEXT NOT NULL,
+    file TEXT NOT NULL,
+    events INTEGER NOT NULL,
+    synthetic_events INTEGER NOT NULL,
+    first_id INTEGER,
+    last_id INTEGER,
+    first_ts TEXT,
+    last_ts TEXT,
+    bytes INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    moved_at TEXT,
+    warm_until TEXT,
+    deleted_at TEXT,
+    verified_at TEXT,
+    problem TEXT
+);
+
 -- Response playbooks (playbooks.py). The steps' titles and instructions live in code; these rows hold state.
 CREATE TABLE IF NOT EXISTS playbook_runs (
     alert_id INTEGER PRIMARY KEY,

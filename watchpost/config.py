@@ -13,6 +13,12 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+def _days(name):
+    """A whole number of days from the environment, or None when the variable is unset or empty."""
+    value = os.environ.get(name, "").strip()
+    return int(value) if value else None
+
+
 @dataclass
 class Config:
     db_path: str
@@ -51,6 +57,14 @@ class Config:
     demo_loop_speed: float = 1.0
     # HMAC key for the hash-chained audit log. Unset: plain SHA-256, which detects edits but not a full rewrite.
     audit_key: str | None = None
+    # Tiered retention (retention.py). Off, and nothing is ever deleted, unless retention_hot_days is set.
+    # Days count from arrival: hot in the database, then warm files, cold after warm_days, deleted after total_days.
+    retention_hot_days: int | None = None
+    retention_warm_days: int | None = None
+    retention_total_days: int | None = None
+    archive_dir: str | None = None       # default: "archive" next to the database
+    cold_dir: str | None = None          # default: "cold" inside the archive directory
+    retention_interval_minutes: int = 60
     # Response playbooks (playbooks.py): where notifications and response-action requests are posted. Unset:
     # nothing leaves Watchpost. The secret signs each body. Synthetic alerts are sent only when asked for.
     playbook_webhook_url: str | None = None
@@ -91,6 +105,12 @@ class Config:
             demo_loop_minutes=int(os.environ.get("SIEM_DEMO_LOOP", "0")),
             demo_loop_speed=float(os.environ.get("SIEM_DEMO_LOOP_SPEED", "1")),
             audit_key=os.environ.get("SIEM_AUDIT_KEY") or None,
+            retention_hot_days=_days("SIEM_RETENTION_HOT_DAYS"),
+            retention_warm_days=_days("SIEM_RETENTION_WARM_DAYS"),
+            retention_total_days=_days("SIEM_RETENTION_TOTAL_DAYS"),
+            archive_dir=os.environ.get("SIEM_ARCHIVE_DIR") or None,
+            cold_dir=os.environ.get("SIEM_COLD_DIR") or None,
+            retention_interval_minutes=int(os.environ.get("SIEM_RETENTION_INTERVAL_MINUTES", "60")),
             playbook_webhook_url=os.environ.get("SIEM_PLAYBOOK_WEBHOOK_URL") or None,
             playbook_webhook_secret=os.environ.get("SIEM_PLAYBOOK_WEBHOOK_SECRET") or None,
             playbook_webhook_cafile=os.environ.get("SIEM_PLAYBOOK_WEBHOOK_CAFILE") or None,

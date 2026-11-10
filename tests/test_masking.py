@@ -249,6 +249,8 @@ class MaskingServerTests(ServerTestCase):
                 values = ids["rules"]
             elif group == "([^/]+)":
                 values = ids["entities"][prefix.rstrip("/").rsplit("/", 1)[-1]]
+            elif group == r"(\d{4}-\d{2}-\d{2})":
+                values = ["2026-01-01"]  # an archive day; those routes are not open to viewers
             else:
                 self.fail(f"no sample values for {group} in {pattern.pattern}")
             paths = [p.replace(group, quote(str(v), safe=""), 1) for p in paths for v in values]

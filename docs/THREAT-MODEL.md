@@ -41,6 +41,7 @@ What Watchpost protects, from whom, and what it does not cover. It is a portfoli
 | Unreviewed rule change | Changes come from analyst feedback, are backtested first, and need a second person's approval. The approval must carry the digest of the exact evidence it covers. |
 | Quiet tampering with history | Audit entries form a hash chain; `GET /api/audit/verify` walks it. |
 | Data exposure to viewers | Usernames and internal IP addresses become keyed pseudonyms in viewer responses. This is presentation-layer masking for a low-trust role, not anonymization. |
+| Events lost or altered by retention | Retention is off by default. A day's events are deleted only after their archive file has been written, read back and recorded, and never when they are evidence of an alert. Each file's SHA-256 is in the manifest and in the hash-chained audit log, and can be re-verified at any time. |
 | A response action aimed at the wrong thing | Watchpost carries out no response action. A request goes to a webhook the operator configures, needs an analyst and a reason, can only name a value from the alert's own evidence, is never sent for a synthetic alert, and is audited. |
 | A forged or misdirected webhook message | Bodies are signed with HMAC-SHA256 when `SIEM_PLAYBOOK_WEBHOOK_SECRET` is set. The URL must be HTTPS (or this machine), comes only from the environment, and redirects are not followed. Bodies hold an alert's summary, never its events. |
 | Secrets in logs | A smoke check confirms the server log contains no secrets. |

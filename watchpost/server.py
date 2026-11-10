@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (__version__, assets, attack, auth, case_record, dashboard_views, ecs, engine, entities, geo, hunt, improve, incidents,
-               masking, playbooks, portability, queries, report, search_rules, sigma, simulate, sources, storyline, stream,
+               masking, playbooks, portability, queries, report, retention, search_rules, sigma, simulate, sources, storyline, stream,
                triage)
 from . import backtest as backtest_mod
 from .ratelimit import TokenBucketLimiter
@@ -47,6 +47,7 @@ class Download:
 class App:
     def __init__(self, config: Config):
         self.config = config
+        self.retention_policy = retention.Policy.from_config(config)  # None when off; refuses contradictory settings
         conn = connect(config.db_path, config.audit_key)
         try:
             init_schema(conn)
@@ -474,6 +475,40 @@ def alert_status(req, alert_id):
 @route("POST", r"/api/alerts/(\d+)/assign", role="analyst")
 def alert_assign(req, alert_id):
     return queries.assign(req.conn, int(alert_id), req.user["username"], body_json(req).get("assignee"))
+
+
+# Tiered retention -------------------------------------------------------------------------
+@route("GET", "/api/retention")
+def retention_status(req):
+    return retention.status(req.conn, req.app.retention_policy)
+
+
+@route("POST", "/api/retention/run", role="admin")
+def retention_run(req):
+    summary = retention.run(req.conn, req.app.retention_policy)
+    audit(req.conn, req.user["username"], "retention_run", None,
+          {k: summary[k] for k in ("archived_days", "archived_events", "removed_from_hot", "moved_to_cold",
+                                   "deleted_archives")} | {"errors": len(summary["errors"])})
+    return summary
+
+
+@route("POST", "/api/retention/verify", role="admin")
+def retention_verify(req):
+    if req.app.retention_policy is None:
+        raise retention.RetentionError("retention is off (SIEM_RETENTION_HOT_DAYS is not set)", 409)
+    problems = retention.verify(req.conn, req.app.retention_policy)
+    audit(req.conn, req.user["username"], "retention_verified", None, {"problems": len(problems)})
+    return {"problems": problems}
+
+
+@route("GET", r"/api/retention/archives/(\d{4}-\d{2}-\d{2})/events", role="analyst")
+def retention_search(req, day):
+    return retention.search(req.conn, req.app.retention_policy, day, req.query)
+
+
+@route("POST", r"/api/retention/archives/(\d{4}-\d{2}-\d{2})/thaw", role="admin")
+def retention_thaw(req, day):
+    return retention.thaw(req.conn, req.app.retention_policy, day, req.user["username"])
 
 
 # Response playbooks ---------------------------------------------------------------------
