@@ -21,7 +21,7 @@
 - **Ingests** JSON, CSV, Linux `auth.log`, Windows Security events, nginx/Apache, firewall/VPN, and cloud audit logs, through file upload, an authenticated API, a syslog listener (plain or TLS), a file shipper, a read-only AWS CloudTrail collector or an experimental agentless Windows Event Forwarding collector. Everything is normalized into one schema.
 - **Detects** with fifteen built-in rules written as pure functions, each with a plain-English explanation and the evidence behind every alert.
 - **Maps to MITRE ATT&CK** and grades coverage by evidence: a technique is only "validated" when an enabled rule catches a labeled attack scenario.
-- **Correlates** alerts that share an IP, account or host into incidents with kill-chain stages, then exports case records and PDF reports.
+- **Correlates** alerts that share an IP, account or host into incidents with kill-chain stages, and recognizes named multi-stage shapes (a scan then an attack from one source, a suspicious login then data leaving) up to a day apart. Exports case records and PDF reports.
 - **Responds** with a playbook for every alert: automatic context, steps an analyst checks off, and response actions (block an address, disable an account, isolate a host) that are sent as signed requests to a webhook you configure. Watchpost never carries out an action itself.
 - **Retains** in tiers when asked to: recent events in the database, older ones in verified compressed files, the oldest in a cold directory, deleted at the end of a period you set. Off by default; nothing is deleted before its archive has been written and checked.
 - **Hunts** with a one-line query language (`field:value`, `NOT`, `last:7d`, plus `| stats`, `| top`, `| timechart`) compiled from a field whitelist with bound values, and turns saved searches into detections.
@@ -56,7 +56,7 @@ cd watchpost
 Passwords are generated on first start and written to `data/initial_credentials.txt` (mode 0600); set `SIEM_ADMIN_PASSWORD`, `SIEM_ANALYST_PASSWORD` and `SIEM_VIEWER_PASSWORD` to choose your own. Sign in as `admin`, then open **Admin → Load synthetic demo data**.
 
 ```bash
-./run_tests.sh    # 671 unit and integration tests + a 27-step end-to-end smoke check
+./run_tests.sh    # 680 unit and integration tests + a 27-step end-to-end smoke check
 ```
 
 CI runs the suite on Python 3.11 through 3.14.

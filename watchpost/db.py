@@ -473,6 +473,8 @@ ADDED_COLUMNS = [
     # 15.0: reviewed fields that replace a rule's built-in alert deduplication key.
     ("rules", "grouping", "TEXT NOT NULL DEFAULT '[]'"),
     ("rule_history", "grouping", "TEXT NOT NULL DEFAULT '[]'"),
+    # Correlation rules an incident's alerts complete (correlate.PATTERNS), as [{"id", "alert_ids"}].
+    ("incidents", "patterns", "TEXT NOT NULL DEFAULT '[]'"),
 ]
 
 

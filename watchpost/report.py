@@ -173,6 +173,8 @@ def _summary(m):
                      f"across {len(m['techniques_by_tactic'])} tactic(s).")
     if m.get("escalated"):
         parts.append(f"Escalated: the alerts span {len(m['stages'])} ATT&CK tactics.")
+    if m.get("patterns"):
+        parts.append("Correlation rules matched: " + "; ".join(p["name"] for p in m["patterns"]) + ".")
     if m.get("assets"):
         sensitive = [a for a in m["assets"] if a.get("data_tags")]
         critical = [a for a in m["assets"] if a.get("criticality") in ("high", "critical")]
@@ -207,7 +209,8 @@ def build(conn, incident_id):
     # The incident row is authoritative for status, severity (escalation included), span and kill chain.
     model.update(status=incident["status"], first_seen=incident["first_seen"], last_seen=incident["last_seen"],
                  synthetic=bool(incident["synthetic"]) or model["synthetic"], stages=list(incident["stages"]),
-                 escalated=incident["escalated"], assignee=incident.get("assignee"))
+                 escalated=incident["escalated"], assignee=incident.get("assignee"),
+                 patterns=[{k: p[k] for k in ("id", "name", "description", "alert_ids")} for p in incident["patterns"]])
     if incident["severity"] in SEVERITY_ORDER:
         model["severity"] = incident["severity"]
     for key, name in (("ips", "src_ip"), ("users", "user"), ("hosts", "host")):
@@ -262,6 +265,9 @@ def to_markdown(m):
     if m.get("stages"):
         out += ["**Kill-chain stages:** " + " -> ".join(md(s) for s in m["stages"])
                 + (" (escalated: 3 or more tactics)" if m.get("escalated") else ""), ""]
+    for pattern in m.get("patterns") or []:
+        alerts = ", ".join(f"#{i}" for i in pattern["alert_ids"])
+        out += [f"**Correlation rule:** {md(pattern['name'])}. {md(pattern['description'])} Alerts {alerts}.", ""]
     out += ["## Entities", ""]
     for key, label_ in (("ips", "IP addresses"), ("users", "Accounts"), ("hosts", "Hosts")):
         out.append(f"- **{label_}:** " + (", ".join(f"`{md(v)}`" for v in m["entities"][key]) or "none"))
@@ -332,6 +338,9 @@ def to_pdf_bytes(m):
     if m.get("stages"):
         doc.text("Kill-chain stages: " + " -> ".join(m["stages"])
                  + (" (escalated: 3 or more tactics)" if m.get("escalated") else ""), bold=True)
+    for pattern in m.get("patterns") or []:
+        doc.text(f"Correlation rule: {pattern['name']}. {pattern['description']} Alerts "
+                 + ", ".join(f"#{i}" for i in pattern["alert_ids"]) + ".")
     doc.heading("Entities")
     for key, name in (("ips", "IP addresses"), ("users", "Accounts"), ("hosts", "Hosts")):
         doc.text(f"{name}: " + (", ".join(m["entities"][key]) or "none"))

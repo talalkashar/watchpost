@@ -119,7 +119,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**.
 ### Tests
 
 ```bash
-./run_tests.sh      # 671 unit/integration tests + a 27-step end-to-end smoke check
+./run_tests.sh      # 680 unit/integration tests + a 27-step end-to-end smoke check
 ```
 
 ### Replit
@@ -271,6 +271,24 @@ The scenarios are synthetic, so "validated" means a rule detected the project's 
 ### Incidents (correlation)
 
 After each detection run, `watchpost/correlate.py` groups related alerts into incidents: alerts whose evidence shares a source IP, account, or host within 30 minutes. An incident needs two related alerts or one critical alert, lists its kill-chain stages (ATT&CK tactics in order), and is raised one severity level when it spans three or more tactics. Reruns change nothing; new alerts join an open incident.
+
+**Correlation rules.** On top of that grouping, `correlate.PATTERNS` names five shapes that matter more than their parts:
+
+| Rule | Stages, in order | Same across the stages | Severity at least |
+|---|---|---|---|
+| Scan, then attack, from one source | Reconnaissance or Discovery, then Credential Access or Initial Access | source address | high |
+| Password attack, then a suspicious login | Credential Access, then Initial Access | source address or account | critical |
+| Suspicious login, then privilege escalation | Initial Access, then Privilege Escalation or Persistence | account | high |
+| Suspicious login, then data leaving | Initial Access or Privilege Escalation, then Collection or Exfiltration | account | critical |
+| Logging impaired around other activity | Defense Evasion and any other tactic, in either order | account | critical |
+
+- **Written over tactics, not rule names.** An alert fits a stage when the rule that raised it maps to one of the stage's ATT&CK tactics. So the rules also apply to imported Sigma rules and promoted searches that carry techniques. An alert from a rule with no technique never fits.
+- **A longer window.** The stages may be up to 24 hours apart, because an intrusion rarely fits in 30 minutes. Alerts that complete a rule are put in one incident even when the 30-minute grouping would keep them apart.
+- **The same actor, never just the same host.** What must match across the stages is the source address or the account. A host is a place: unrelated things happen on one host all day, and linking on it over 24 hours glues separate scenarios of the demo dataset into one incident.
+- **Not through a crowd.** An alert that names more than three accounts (a password spray, say) does not tie any one of them to a later stage. The source address still does.
+- **What a match does.** The incident lists the rule and the alerts that complete it, on its page and in its report, and its severity is raised to at least the rule's. Nothing else changes: an incident still needs two alerts or one critical alert, and two existing incidents are still never merged.
+
+These are five hand-written shapes, not a correlation language. They cannot be edited from the interface, and they see only alerts, so a stage no rule detects is a stage they miss.
 
 Every rule except `log_source_silent` accepts `ignore_ips` and `ignore_users`. The engine merges overlapping findings into one open alert instead of creating duplicates, and a rescan never re-alerts on evidence already attached to an alert.
 
