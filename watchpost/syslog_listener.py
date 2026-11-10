@@ -170,6 +170,17 @@ def _is_loopback(host):
         return host == "localhost"
 
 
+def plain_address(peer):
+    """A peer's address as its owner would write it. A listener bound to `::` sees an IPv4 sender as an
+    IPv4-mapped IPv6 address (::ffff:192.0.2.5); this gives back 192.0.2.5, so the allow list and the
+    stored host name mean the same thing whichever way the listener is bound."""
+    try:
+        address = ipaddress.ip_address(peer)
+    except ValueError:
+        return peer
+    return str(getattr(address, "ipv4_mapped", None) or address)
+
+
 def parse_allow(value):
     """Comma-separated IPs or CIDR networks. Empty means any peer."""
     nets = []
@@ -236,7 +247,7 @@ def _read_frames(listener, rfile, peer):
 
 class _UDPHandler(socketserver.BaseRequestHandler):
     def handle(self):
-        self.server.listener.submit(self.request[0], self.client_address[0])
+        self.server.listener.submit(self.request[0], plain_address(self.client_address[0]))
 
 
 class _TCPHandler(socketserver.StreamRequestHandler):
@@ -244,7 +255,7 @@ class _TCPHandler(socketserver.StreamRequestHandler):
 
     def handle(self):
         listener = self.server.listener
-        peer = self.client_address[0]
+        peer = plain_address(self.client_address[0])
         if not listener.allowed(peer):
             listener.count("denied")
             return
@@ -267,7 +278,7 @@ class _TLSHandler(socketserver.BaseRequestHandler):
 
     def handle(self):
         listener = self.server.listener
-        peer = self.client_address[0]
+        peer = plain_address(self.client_address[0])
         if not listener.allowed(peer):
             listener.count("denied")
             return
@@ -435,7 +446,7 @@ class SyslogListener:
         if not self.allow:
             return True
         try:
-            address = ipaddress.ip_address(peer)
+            address = ipaddress.ip_address(plain_address(peer))
         except ValueError:
             return False
         return any(address in net for net in self.allow)

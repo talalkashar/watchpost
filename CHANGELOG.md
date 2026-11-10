@@ -26,6 +26,8 @@ All bundled data is synthetic. PR numbers refer to https://github.com/talalkasha
 
 - Syslog listener: when one of its ports could be bound and another could not, the listener reported `failing` but shutdown then blocked forever. A transport that did bind is now released, and shutdown returns.
 
+- Syslog listener: with `SIEM_SYSLOG_BIND=::`, an IPv4 sender arrives as an IPv4-mapped IPv6 address (`::ffff:192.0.2.5`), which never matched an IPv4 entry in `SIEM_SYSLOG_ALLOW`, so every IPv4 sender was refused. It failed safe, but it failed. The listener now reads such a peer as the IPv4 address it is, for the allow list and for the host name stored with the event.
+
 - Sigma import: unquoted values with a leading zero, such as the keyboard layout ID `00000429`, stay text instead of becoming the number 429, so `contains` matches the full identifier. Found by comparing the parser with PyYAML on all 3,164 SigmaHQ rules; every rule now parses identically. (#67)
 
 ## 5.0.0 (2026-10-08)

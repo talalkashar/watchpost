@@ -31,7 +31,7 @@ export SIEM_SYSLOG_PORT=5514      # UDP and TCP; ports below 1024 need root, so 
 | `SIEM_SYSLOG` | `0` | `1` starts the UDP and TCP listener from `main.py` |
 | `SIEM_SYSLOG_BIND` | `127.0.0.1` | Bind address. Use `::1` or `::` for IPv6 |
 | `SIEM_SYSLOG_PORT` | `5514` | Same port number for UDP and TCP |
-| `SIEM_SYSLOG_ALLOW` | empty (any sender) | Comma-separated IPs or CIDR networks allowed to send, e.g. `10.0.0.0/24,192.0.2.7`. Other senders are counted as `denied` and dropped. An invalid entry stops the listener from starting, so it fails closed |
+| `SIEM_SYSLOG_ALLOW` | empty (any sender) | Comma-separated IPs or CIDR networks allowed to send, e.g. `10.0.0.0/24,192.0.2.7`. Other senders are counted as `denied` and dropped. An IPv4 entry also matches an IPv4 sender when the listener is bound to `::`. An invalid entry stops the listener from starting, so it fails closed |
 | `SIEM_SYSLOG_TLS_CERT` / `SIEM_SYSLOG_TLS_KEY` | unset | PEM certificate (with any intermediates) and its private key, without a passphrase. Setting both starts the TLS listener. See [Syslog over TLS](#syslog-over-tls) |
 | `SIEM_SYSLOG_TLS_PORT` | `6514` | TCP port for syslog over TLS |
 | `SIEM_SYSLOG_TLS_CLIENT_CA` | unset | PEM CA bundle. When set, a sender must present a certificate signed by it |

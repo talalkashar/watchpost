@@ -57,7 +57,7 @@ cd watchpost
 Passwords are generated on first start and written to `data/initial_credentials.txt` (mode 0600); set `SIEM_ADMIN_PASSWORD`, `SIEM_ANALYST_PASSWORD` and `SIEM_VIEWER_PASSWORD` to choose your own. Sign in as `admin`, then open **Admin → Load synthetic demo data**.
 
 ```bash
-./run_tests.sh    # 695 unit and integration tests + a 27-step end-to-end smoke check
+./run_tests.sh    # 696 unit and integration tests + a 27-step end-to-end smoke check
 ```
 
 CI runs the suite on Python 3.11 through 3.14.
