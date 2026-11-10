@@ -60,7 +60,7 @@ A small follow-up round. Nothing here changes how the rules detect.
 | **Entity risk** | (added) | Every user, source IP, and host gets a risk score: each alert adds a severity weight (critical 40, high 20, medium 10, low 5, info 1) that halves every 24 hours, and alerts closed as false positive or benign add nothing. `GET /api/entities` and an entity page list the contributing alerts and their weights, so the score can be checked by hand. Asset criticality counts through severity: an alert on a critical or sensitive asset is raised before it is stored, and the breakdown shows the rule's base severity and the asset note next to the raised one. No ML; every point traces to an alert. The dashboard has a **Riskiest entities** panel. |
 | **SOC metrics** | (added) | Time to resolve by severity, false-positive rate by rule, and open-alert aging. Time to detect and dwell time are deliberately left out: the demo replays synthetic events with old timestamps, which would make both numbers meaningless. |
 
-Left for a contributor's pull requests ([issue #8](https://github.com/talalkashar/watchpost/issues/8)): encrypted syslog, more log sources, orchestration, hot/warm/cold retention, stronger correlation, and threat intelligence.
+Left for a contributor's pull requests ([issue #8](https://github.com/talalkashar/watchpost/issues/8)): more log sources, orchestration, hot/warm/cold retention, stronger correlation, and threat intelligence. Encrypted syslog, the first item on that list, has since been added: see [Syslog over TLS](LIVE_INGEST.md#syslog-over-tls).
 
 ## What's new in 2.0
 
@@ -119,7 +119,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**.
 ### Tests
 
 ```bash
-./run_tests.sh      # 599 unit/integration tests + a 26-step end-to-end smoke check
+./run_tests.sh      # 659 unit/integration tests + a 27-step end-to-end smoke check
 ```
 
 ### Replit
@@ -137,14 +137,22 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**.
 | `SIEM_SECURE_COOKIES` | `0` | Set `1` behind HTTPS |
 | `SIEM_SESSION_TTL` | `28800` | Session lifetime in seconds |
 | `SIEM_MAX_UPLOAD_BYTES` / `SIEM_MAX_BATCH_EVENTS` | 5 MB / 20000 | Ingestion limits |
-| `SIEM_SYSLOG` | `0` | `1` also starts the UDP/TCP syslog listener ([docs/LIVE_INGEST.md](LIVE_INGEST.md)) |
+| `SIEM_SYSLOG` | `0` | `1` also starts the syslog listener: UDP/TCP, or TLS when a certificate is set ([docs/LIVE_INGEST.md](LIVE_INGEST.md)) |
 | `SIEM_SYSLOG_BIND` / `SIEM_SYSLOG_PORT` | `127.0.0.1` / `5514` | Syslog listener address (same port for UDP and TCP) |
 | `SIEM_SYSLOG_ALLOW` | empty (any) | Comma-separated IPs/CIDRs allowed to send syslog |
+| `SIEM_SYSLOG_TLS_CERT` / `SIEM_SYSLOG_TLS_KEY` | unset | PEM certificate and key (no passphrase). Setting both starts syslog over TLS (RFC 5425) and turns the plaintext listeners off |
+| `SIEM_SYSLOG_TLS_PORT` | `6514` | TCP port for syslog over TLS |
+| `SIEM_SYSLOG_TLS_CLIENT_CA` | unset | PEM CA bundle. When set, a sender must present a certificate signed by it |
+| `SIEM_SYSLOG_PLAINTEXT` | `1` without TLS, `0` with it | `1` keeps the plaintext UDP/TCP listeners running next to TLS |
 | `SIEM_DEMO_LOOP` / `SIEM_DEMO_LOOP_SPEED` | `0` / `1` | Minutes between automatic replays of the synthetic attack storyline (0 = off) and its speed multiplier |
 | `SIEM_RATE_LIMIT` | `1` | `0` turns off per-IP rate limiting |
 | `SIEM_LOGIN_RATE_BURST` / `SIEM_LOGIN_RATE_PER_MIN` | `10` / `10` | Token bucket for `POST /api/auth/login`, per client IP |
 | `SIEM_RATE_BURST` / `SIEM_RATE_PER_MIN` | `300` / `1200` | Token bucket for every other request (API and static), per client IP |
 | `SIEM_TRUST_PROXY` | `0` | `1` behind a local reverse proxy: the client IP is the last `X-Forwarded-For` entry on loopback connections |
+| `SIEM_PLAYBOOK_WEBHOOK_URL` | unset (nothing is sent) | Where response playbooks post notifications and action requests: `https://`, or `http://` to this machine. See [Response playbooks](#response-playbooks) |
+| `SIEM_PLAYBOOK_WEBHOOK_SECRET` | unset (unsigned) | Signs each webhook body: `X-Watchpost-Signature: sha256=<HMAC-SHA256>` |
+| `SIEM_PLAYBOOK_WEBHOOK_CAFILE` | unset | CA bundle for a webhook with a private certificate |
+| `SIEM_PLAYBOOK_WEBHOOK_SYNTHETIC` | `0` | `1` also sends alerts from synthetic data. Leave it off unless the receiver is a test endpoint |
 | `SIEM_AUDIT_KEY` | unset (unkeyed) | HMAC key for the audit log hash chain; see [Tamper-evident audit log](#tamper-evident-audit-log) |
 
 ### Public deployment
@@ -175,6 +183,7 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | Module | Responsibility |
 |---|---|
 | `watchpost/normalize.py` | Parses JSON, JSONL, CSV, Linux `auth.log` (OpenSSH), and Windows Security events (4624/4625/4672/4688/4720/4740). Accepts common field aliases, including ECS-style nesting. Validates timestamps, IPs, severities, and lengths, strips control characters, and redacts secrets. Every rejected record gets a reason and a position. |
+| `watchpost/firewall.py` | Reads firewall appliance syslog lines (pfSense/OPNsense `filterlog`, FortiGate, Cisco ASA/FTD, Palo Alto `TRAFFIC`) into `fw_deny`, `fw_allow` and login events. Default log formats only; tested on synthetic lines. |
 | `watchpost/correlate.py`, `watchpost/incidents.py` | Pure alert-to-incident grouping; incident queries, status changes, and ATT&CK coverage. |
 | `watchpost/attack.py`, `watchpost/geo.py` | Static ATT&CK subset; synthetic geo table for demo IP ranges (never a real lookup). |
 | `watchpost/rules.py` | Fifteen built-in explainable rules as pure functions over event lists, each with a plain-English explanation. Also validates rule parameters. |
@@ -193,8 +202,11 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | `watchpost/detection_tests.py` | Detection-as-code validation and bundled malicious/benign sample checks for exported built-in rules. |
 | `watchpost/case_record.py` | Chronological incident case records combining evidence, membership, workflow transitions, assignments, and notes; renders JSON and Markdown. |
 | `watchpost/ecs.py` | Maps an event to Elastic Common Schema field names for export. |
-| `watchpost/syslog_listener.py` | Optional UDP/TCP syslog receiver (RFC 3164, RFC 5424, RFC 6587 framing). Runs each line through the auth.log parser, falls back to a generic `syslog` event with severity from PRI, and batches into the engine every 2 seconds. Reports itself as the `syslog` health component. |
+| `watchpost/syslog_listener.py` | Optional syslog receiver over UDP, TCP and TLS (RFC 3164, RFC 5424, RFC 6587 framing, RFC 5425 TLS with optional client certificates). Runs each line through the auth.log parser, falls back to a generic `syslog` event with severity from PRI, and batches into the engine every 2 seconds. Reports itself as the `syslog` health component. |
+| `watchpost/playbooks.py` | Response playbooks: the built-in step lists, one per kind of alert; the automatic context and notification steps; step state per alert; response-action requests with their guard rails; and the outbox and delivery thread for the webhook. |
 | `scripts/shipper.py` | Stdlib-only file tailer for Linux boxes: batches new lines to `/api/ingest/upload` with an ingest token, with backoff, rotation handling, and a position file. |
+| `scripts/cloudtrail_collector.py` | Stdlib-only AWS CloudTrail collector: reads `LookupEvents` with a read-only identity (one assumed role per account, any number of regions), signs requests with Signature Version 4, dedupes across its polling overlap, and posts the records to `/api/ingest` with an ingest token. |
+| `scripts/wef_collector.py` | Stdlib-only, experimental Windows Event Forwarding collector: an HTTPS endpoint with mutual TLS that Windows' built-in forwarder pushes events to (WS-Management, source-initiated subscription). Hands each host one subscription, acknowledges a batch only after `/api/ingest` accepted it, keeps one bookmark per host, and reads SLDC-compressed deliveries. Tested against a simulated sender, not against Windows. |
 | `watchpost/simulate.py` | Labeled synthetic scenarios and a CLI that sends only to loopback unless you explicitly allow otherwise. |
 | `watchpost/report.py` | Incident and alert reports: one model (summary, timeline, entities, alerts with evidence, ATT&CK techniques by tactic, notes, recommended actions) rendered as Markdown or PDF. |
 | `watchpost/pdfwriter.py` | Minimal hand-written PDF 1.4 writer (Helvetica, wrapping, tables, page breaks, xref). |
@@ -262,6 +274,51 @@ which labeled attacks will be missed and approval by a different admin requires 
 acknowledgement. Detection runs count findings skipped by an active window. Upcoming, active, expired and
 manually ended windows remain visible under Rules & review; ending one early is an audited admin action.
 
+### Response playbooks
+
+Every alert gets a playbook: an ordered list of steps for that kind of alert, from triage to the verdict. `watchpost/playbooks.py` holds seven of them (password attack, suspected account compromise, scanning, possible data theft, cloud account change, log source went quiet, and a general one for imported Sigma rules and promoted searches). Each built-in rule maps to one. The alert page shows the steps and their state.
+
+A step is one of three kinds:
+
+| Kind | Who does it | What happens |
+|---|---|---|
+| automatic | Watchpost, when the alert is created | **Gather context** counts earlier alerts for the same subject in the last 30 days and how they were resolved. **Notify the response channel** posts the alert's summary to the webhook |
+| manual | an analyst, outside Watchpost | The analyst marks it done, or skipped with a reason. It can be reopened |
+| action | your own automation | **Block the source address**, **Disable the account**, **Isolate the host**. The analyst picks a target and gives a reason; Watchpost posts the request to the webhook |
+
+**Watchpost never carries out a response action.** It holds no firewall, directory or endpoint credentials. A request is a signed JSON message to a URL you configure, and what happens there is yours to build and to answer for. On an action step, "done" means the request was delivered, not that the address is blocked.
+
+The guard rails:
+
+- **Off until configured.** Nothing leaves Watchpost unless `SIEM_PLAYBOOK_WEBHOOK_URL` is set. Without it, notify and action steps are recorded as "not sent". The URL must be `https://`, or `http://` to the same machine; the server refuses to start on any other value.
+- **Synthetic alerts stay home.** Alerts from synthetic data are never sent, unless `SIEM_PLAYBOOK_WEBHOOK_SYNTHETIC=1`. The demo dataset cannot trigger your automation by accident.
+- **Targets come from the evidence.** An action can only name an address, account or host that appears in the alert's own events. `block_ip` takes addresses outside the internal ranges only: an internal source that misbehaves is a host to isolate.
+- **A person decides.** Only the automatic context and notification run by themselves. Every response action needs an analyst, a reason, and an unresolved alert, and is written to the audit log as `playbook_action_requested` with the target and the reason.
+- **The summary, not the events.** A webhook body carries the alert's id, rule, title, severity, group, times and event count. It never carries the events.
+- **Reviewed switch.** The setting `playbook_automation` (default 1) turns the automatic steps off. Like the other security settings, a change needs a second admin.
+
+**Webhook messages.** Each is a `POST` with `Content-Type: application/json`, an `X-Watchpost-Delivery` id, and, when `SIEM_PLAYBOOK_WEBHOOK_SECRET` is set, `X-Watchpost-Signature: sha256=<HMAC-SHA256 of the body>`. Verify the signature before acting on a message.
+
+```json
+{"type": "response_action", "action": "block_ip", "target": "203.0.113.45",
+ "wanted": "block this address at the network edge",
+ "requested_by": "analyst", "reason": "Password guessing",
+ "alert": {"id": 12, "rule_id": "brute_force_ip", "title": "...", "severity": "high", "status": "open",
+           "group_key": "203.0.113.45", "first_seen": "...", "last_seen": "...", "event_count": 12, "synthetic": false},
+ "playbook": {"id": "credential_attack", "name": "Password attack"},
+ "created_at": "2026-11-10T21:21:26.000Z", "watchpost_version": "..."}
+```
+
+A notification has `"type": "alert"` and no action fields. Messages wait in the `playbook_outbox` table and are sent by a separate thread, so detection never waits on the network. A delivery that does not get a 2xx answer is retried after 5 s, 30 s, 2 min and 10 min, then marked failed; the step shows it. Redirects are not followed. `GET /api/playbooks` shows how many deliveries are pending, sent and failed.
+
+Limits:
+
+- The playbooks are built in. They cannot be edited from the interface, and they are short general guidance for a lab, not an incident response plan for your organization.
+- Watchpost does not learn whether your automation did what was asked. There is no callback.
+- Playbooks belong to alerts. An incident shows its alerts; it has no playbook of its own.
+- The delivery thread starts from `main.py`. A server started another way records requests and does not send them.
+- An alert created before this feature has no playbook until an analyst starts one from the alert page.
+
 ### Incident case timeline
 
 An incident detail page links to a chronological case export in JSON and Markdown. `GET /api/incidents/<id>/case.json`
@@ -287,7 +344,7 @@ investigation export, not a legal-hold or raw-log archive.
 | ingestion | server-side ingestion errors in 24 h, or > 25 % of records rejected (degraded) |
 | detection | last run failed (failing); batches ingested while detection was failing and not yet reprocessed, no enabled rules, or a run stuck > 5 min (degraded) |
 | dependencies | Python < 3.10, SQLite < 3.35, or DB directory not writable (failing); UI files missing (degraded) |
-| syslog (only when `SIEM_SYSLOG=1`) | port can't be bound, invalid allow list, or a listener thread stopped (failing); last batch failed to store or frames dropped in the last 10 min (degraded) |
+| syslog (only when `SIEM_SYSLOG=1`) | a port can't be bound, invalid allow list, unusable TLS certificate, key or client CA, or a listener thread stopped (failing); last batch failed to store or frames dropped in the last 10 min (degraded) |
 
 If detection fails, the events stay stored, the ingest response says `"detection": {"status": "failed", ...}`, and the UI shows a banner. A full **Run detection** processes the backlog and marks those batches `recovered`. Tests cover each of these paths.
 
@@ -716,10 +773,10 @@ time window; changing an alert grouping key does not change that incident logic.
 
 **Limitations:**
 - Single process with SQLite. Measured up to 250,000 events on one laptop (see [Performance](#performance)); larger volumes are untested, and this is not enterprise volume. No retention or rollup.
-- Live ingestion is basic: an optional syslog listener (unauthenticated, no TLS; loopback by default) and a single-file-per-flag shipper script. See [docs/LIVE_INGEST.md](LIVE_INGEST.md) for its limits.
+- Live ingestion is basic: an optional syslog listener (plaintext and loopback by default; TLS with optional client certificates when configured, without revocation checks or certificate reload) and a single-file-per-flag shipper script. See [docs/LIVE_INGEST.md](LIVE_INGEST.md) for its limits.
 - Timestamps without a zone are treated as UTC. BSD syslog lines carry no year, so you pass one or the current year is assumed.
 - Seeded accounts only (admin, analyst, and an optional viewer); there is no user-management UI or API. Accounts can be added with `watchpost.auth.create_user`.
-- No TLS in the app itself; `deploy/` puts Caddy or nginx in front for HTTPS. Rate limits live in memory and reset on restart.
+- No TLS for the web UI and API in the app itself; `deploy/` puts Caddy or nginx in front for HTTPS. Rate limits live in memory and reset on restart.
 - Rules cover authentication, web, firewall/VPN, cloud audit, and host scenarios with fixed thresholds. Geo for impossible travel comes from a synthetic table covering only documentation and private ranges.
 - There is no scheduled detection. Detection runs on ingest and on demand.
 
@@ -740,6 +797,8 @@ labs/siem/
 ├── scripts/test_detections.py validate a rule export and run labeled detection samples (stdlib only)
 ├── scripts/ui_check.js headless browser check: every view at 1440px and 390px, labels, keyboard triage
 ├── scripts/shipper.py  log file shipper for Linux boxes (stdlib only)
+├── scripts/cloudtrail_collector.py AWS CloudTrail collector for a read-only identity (stdlib only)
+├── scripts/wef_collector.py Windows Event Forwarding collector, agentless, experimental (stdlib only)
 ├── tests/              unittest suite
 ├── docs/API.md         API reference
 ├── docs/LIVE_INGEST.md syslog listener, rsyslog forwarding, and the file shipper

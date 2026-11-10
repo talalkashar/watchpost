@@ -16,6 +16,7 @@ What Watchpost protects, from whom, and what it does not cover. It is a portfoli
 | Browser to server | Untrusted until a session (or API token) is verified. State-changing requests also need a CSRF token. |
 | Log sources to the ingest API | Authenticated by session or ingest token. Event content is always untrusted. |
 | Syslog listener (UDP/TCP) | **Unauthenticated by design of the protocol.** Binds to loopback by default; an allowlist narrows who may send. |
+| Syslog over TLS (optional) | With a client CA, a sender proves a certificate from that CA before any frame is read. Without one, the stream is encrypted but any sender is accepted. Frame content is always untrusted. |
 | Server to SQLite | The process and its data directory are trusted. Anyone with file access to the database is out of scope. |
 
 ## Attackers considered
@@ -35,16 +36,20 @@ What Watchpost protects, from whom, and what it does not cover. It is a portfoli
 | Cross-site request forgery | CSRF token on state-changing routes. |
 | Role escalation | Roles are checked by the server, and the read-only viewer role is enforced on every route. |
 | Injection through hunting queries | One-line query language compiled from a field whitelist with bound values, never string-built SQL. |
+| Syslog read or injected on the network | Syslog over TLS (RFC 5425, TLS 1.2+). With a client CA, frames are read only from senders that hold a certificate it signed. TLS settings that cannot be loaded stop the listener; it never falls back to plaintext. |
 | Oversized or malformed input | Upload and batch limits (`SIEM_MAX_UPLOAD_BYTES`, `SIEM_MAX_BATCH_EVENTS`), validation in `normalize.py`, rejected frames counted but not stored. |
 | Unreviewed rule change | Changes come from analyst feedback, are backtested first, and need a second person's approval. The approval must carry the digest of the exact evidence it covers. |
 | Quiet tampering with history | Audit entries form a hash chain; `GET /api/audit/verify` walks it. |
 | Data exposure to viewers | Usernames and internal IP addresses become keyed pseudonyms in viewer responses. This is presentation-layer masking for a low-trust role, not anonymization. |
+| A response action aimed at the wrong thing | Watchpost carries out no response action. A request goes to a webhook the operator configures, needs an analyst and a reason, can only name a value from the alert's own evidence, is never sent for a synthetic alert, and is audited. |
+| A forged or misdirected webhook message | Bodies are signed with HMAC-SHA256 when `SIEM_PLAYBOOK_WEBHOOK_SECRET` is set. The URL must be HTTPS (or this machine), comes only from the environment, and redirects are not followed. Bodies hold an alert's summary, never its events. |
 | Secrets in logs | A smoke check confirms the server log contains no secrets. |
 
 ## Known gaps and non-goals
 
 - **The audit chain is only tamper-evident.** Without `SIEM_AUDIT_KEY` it uses plain SHA-256, so someone who can rewrite the database can recompute the whole chain. With the key set, they would also need the key. Neither stops a root user from deleting the database.
-- **Syslog has no authentication or encryption.** Frames from any permitted address are accepted. Exposing it beyond loopback without the allowlist and a firewall lets anyone inject events. Encrypted syslog is not built.
+- **Plain syslog has no authentication or encryption.** UDP and TCP frames from any permitted address are accepted. Exposing them beyond loopback without the allowlist and a firewall lets anyone inject events.
+- **Syslog over TLS has limits.** Every certificate the client CA has signed is admitted, and there is no revocation check. A certificate authenticates the connection, not the content: an admitted sender can still claim any host name inside its messages. UDP stays plaintext. Without a client CA, TLS only encrypts.
 - **Plain HTTP by default.** `SIEM_SECURE_COOKIES` defaults to `0`; the deploy kit runs behind a reverse proxy on loopback.
 - **Rate limits are in memory.** They reset on restart and are per process.
 - **Single process, SQLite.** No high availability, no horizontal scale, no per-tenant isolation.

@@ -4,7 +4,21 @@ All bundled data is synthetic. PR numbers refer to https://github.com/talalkasha
 
 ## Unreleased
 
+### Live ingestion
+
+- Syslog over TLS (RFC 5425), the first item of #8. With `SIEM_SYSLOG_TLS_CERT` and `SIEM_SYSLOG_TLS_KEY` the listener takes frames over TLS 1.2+ on TCP 6514, and with `SIEM_SYSLOG_TLS_CLIENT_CA` only from senders that present a certificate signed by that CA. TLS replaces the plaintext UDP/TCP listeners unless `SIEM_SYSLOG_PLAINTEXT=1`, and TLS settings that cannot be loaded stop the listener instead of falling back to plaintext. Standard library only; the tests generate their own throwaway certificates, so no key files are in the repository. The rsyslog setup in docs/LIVE_INGEST.md was run on Debian 12 and Ubuntu 22.04 and 24.04.
+
+- Firewalls over syslog, part of the second item of #8. Syslog lines from pfSense/OPNsense (`filterlog`), FortiGate, Cisco ASA/FTD and Palo Alto (`TRAFFIC`) become `fw_deny` and `fw_allow` events with source, destination and port, and firewall admin and VPN logins become `auth_failure` and `auth_success`. Lines in other formats stay generic `syslog` events. The parsers follow the published log formats and are tested on synthetic lines, not on the devices. New sample: `samples/firewall_syslog.log`.
+
+- Response playbooks, the third item of #8 (orchestration). Every alert gets an ordered list of steps for its kind of alert (`watchpost/playbooks.py`, seven built-in playbooks). Context is gathered automatically, analysts check off the manual steps on the alert page, and response actions (block an address, disable an account, isolate a host) are sent as signed requests to a webhook the operator configures with `SIEM_PLAYBOOK_WEBHOOK_URL`. Watchpost carries out no action itself: nothing is sent without a webhook, synthetic alerts are never sent, a target must come from the alert's evidence, and every request needs an analyst and a reason and is audited. New reviewed setting `playbook_automation`. See the reference, [Response playbooks](docs/REFERENCE.md#response-playbooks).
+
+- Agentless Windows collection, part of the second item of #8. `scripts/wef_collector.py` (standard library only) is a Windows Event Forwarding collector: Windows hosts push their event logs to it over HTTPS with their built-in forwarder, authenticated by certificates in both directions, and it posts them to the ingest API. It keeps a bookmark per host, acknowledges a batch only once Watchpost has stored it, and labels every record with the authenticated sender. **Experimental:** it follows Microsoft's protocol documents and is tested against a simulated sender; it has not been run against a Windows host. See [docs/LIVE_INGEST.md](docs/LIVE_INGEST.md#4-windows-event-forwarding-collector).
+
+- CloudTrail collection with a read-only account, part of the second item of #8. `scripts/cloudtrail_collector.py` (standard library only) reads CloudTrail `LookupEvents` across regions and, through one assumed read-only role per account, across accounts, and posts the events to the ingest API. It needs only `cloudtrail:LookupEvents`, which `SecurityAudit` and `ReadOnlyAccess` include. Request signing matches AWS's published Signature Version 4 examples; the collector is tested against a local stand-in for the AWS APIs, not against an AWS account.
+
 ### Fixed
+
+- Syslog listener: when one of its ports could be bound and another could not, the listener reported `failing` but shutdown then blocked forever. A transport that did bind is now released, and shutdown returns.
 
 - Sigma import: unquoted values with a leading zero, such as the keyboard layout ID `00000429`, stay text instead of becoming the number 429, so `contains` matches the full identifier. Found by comparing the parser with PyYAML on all 3,164 SigmaHQ rules; every rule now parses identically. (#67)
 
