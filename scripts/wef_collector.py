@@ -35,6 +35,7 @@ is never logged. Event contents are never logged.
 """
 
 import argparse
+import base64
 import fnmatch
 import hashlib
 import ipaddress
@@ -102,7 +103,8 @@ WINDOWS_FIELDS = frozenset({"TargetUserName", "IpAddress"})   # event data Watch
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._$-]{0,252}$")
 _SOURCE = re.compile(r"^[A-Za-z0-9_.:\-]{1,64}$")
 _FIELD = re.compile(r"[^A-Za-z0-9_.@-]")
-_NOT_XML = re.compile("[^\t\n\r\x20-퟿-�\U00010000-\U0010ffff]")
+# Characters XML 1.0 does not allow: control characters other than tab and line ends, lone surrogates, FFFE, FFFF.
+_NOT_XML = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
 _FRACTION = re.compile(r"(\.\d{6})\d+")
 _PEM = re.compile(r"-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----", re.S)
 
@@ -383,7 +385,8 @@ def events_of(message, sender, source):
 # --- certificates --------------------------------------------------------------------
 
 def thumbprint(der):
-    """A certificate's thumbprint as Windows defines it: the SHA-1 of the certificate, in hex."""
+    """A thumbprint as Windows defines it: the SHA-1 of the DER encoding, in hex. Windows names a CA by this
+    value in the policy and in the subscription. It identifies a public document; it protects nothing."""
     return hashlib.sha1(der, usedforsecurity=False).hexdigest()
 
 
@@ -401,7 +404,7 @@ def read_authorities(path):
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         try:
             context.load_verify_locations(cadata=block)
-            der = ssl.PEM_cert_to_DER_cert(block)
+            der = base64.b64decode("".join(block.splitlines()[1:-1]), validate=True)
         except (ssl.SSLError, ValueError) as exc:
             raise FatalError(f"--client-ca {path} holds a certificate that cannot be read: {exc}") from None
         listed = context.get_ca_certs()
