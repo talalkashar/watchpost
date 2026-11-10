@@ -1,6 +1,6 @@
 """Read-side incident queries, incident status changes, and ATT&CK coverage."""
 
-from . import assets, attack, improve, search_rules, sigma, simulate
+from . import assets, attack, correlate, improve, search_rules, sigma, simulate
 from .db import audit, now_iso, row_to_dict, transaction
 from .engine import load_rules
 from .normalize import SEVERITIES
@@ -12,7 +12,12 @@ _SEVERITY_ORDER = ("CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN
 
 
 def _incident(row):
-    return row_to_dict(row, ["entities", "stages"])
+    """An incident row with its JSON columns decoded and each matched correlation rule named."""
+    incident = row_to_dict(row, ["entities", "stages", "patterns"])
+    incident["patterns"] = [
+        {**match, **{k: correlate.PATTERN_INFO[match["id"]][k] for k in ("name", "description", "severity")}}
+        for match in incident.get("patterns") or [] if match.get("id") in correlate.PATTERN_INFO]
+    return incident
 
 
 def list_incidents(conn, params):

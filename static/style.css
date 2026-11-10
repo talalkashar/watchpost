@@ -170,6 +170,8 @@ pre { white-space: pre-wrap; word-break: break-word; background: var(--bg-2); pa
   font: 11.5px var(--mono); border: 1px solid var(--line); }
 .explain { background: var(--bg-2); border-left: 3px solid var(--accent); padding: 8px 12px; border-radius: 3px; }
 .note { border-bottom: 1px solid var(--line); padding: 6px 0; }
+ol.steps { list-style: none; margin: 0; padding: 0; }
+ol.steps .row { align-items: center; margin: 4px 0; }
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; }
 .kv dt { color: var(--muted); } .kv dd { margin: 0; overflow-wrap: anywhere; }
 .killchain { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0; }

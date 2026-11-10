@@ -9,10 +9,12 @@ Every file here is invented for testing. No real people, hosts, or traffic. The 
 | `vpn_events.csv` | CSV | `administrator` logs in at 02:30 UTC → off-hours privileged login alert; a row with a bad IP is rejected |
 | `nginx_access.log` | nginx/Apache combined access log | `203.0.113.80` probes 14 scanner paths and injection strings in under a minute → web scanner alert; one 502 becomes `web_error`; one non-log line is rejected |
 | `firewall.csv` | CSV (`action` column: allow/deny) | `198.51.100.140` is denied on 16 ports → port sweep alert; `10.0.3.15` uploads 1.8 GB out → large data transfer alert; a row with a non-numeric port is rejected |
+| `firewall_syslog.log` | Firewall appliance syslog (pfSense/OPNsense `filterlog`, Cisco ASA) | pfSense blocks `198.51.100.150` on 16 ports → port sweep alert; ASA denies, built connections, a rejected AAA login and an admin login; one non-syslog line is rejected |
+| `threat_intel.txt` | Threat intelligence feed (one address or network per line) | Not an event log: import it under **Admin > Threat intelligence** with "Synthetic" ticked. It lists five of the demo dataset's attacker addresses and two documentation networks, so the demo's events and alerts show what a feed does |
 | `cloudtrail.json` | CloudTrail-style JSON (`{"Records": [...]}`) | `ops-admin` has history, so its IAM change is quiet; never-seen `svc-deploy-tmp` creates a user and access key → new-principal alert, then reads 1.25 GB → large data transfer alert. One record has a bad timestamp |
 | `linux_host.log` | Linux syslog (sshd, openvpn, sudo, su, useradd, auditd, UFW) | `erin` logs in at HQ then over VPN from another continent → impossible travel; `frank` fails 3 times, logs in, and sudoes to root → privilege escalation alert (and correlated into one incident); `grace`'s normal sudo stays quiet; one non-syslog line is rejected |
 
-Upload them from the **Ingest** page. Tick "Mark as synthetic" and set Year = 2026 for `auth.log` and `linux_host.log`, since BSD syslog lines carry no year. Geo positions for the impossible-travel rule come from Watchpost's synthetic geo table (documentation and private ranges mapped to fictional cities), not a real lookup. You can also use the API:
+Upload them from the **Ingest** page. Tick "Mark as synthetic" and set Year = 2026 for `auth.log`, `linux_host.log` and `firewall_syslog.log`, since BSD syslog lines carry no year. Geo positions for the impossible-travel rule come from Watchpost's synthetic geo table (documentation and private ranges mapped to fictional cities), not a real lookup. You can also use the API:
 
 ```bash
 curl -X POST "http://127.0.0.1:8080/api/ingest/upload?format=authlog&source=bastion01&synthetic=1&year=2026" \

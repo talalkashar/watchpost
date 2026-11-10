@@ -381,6 +381,84 @@ CREATE TABLE IF NOT EXISTS dashboard_views (
     updated_at TEXT NOT NULL,
     UNIQUE(owner, name COLLATE NOCASE)
 );
+
+-- Threat intelligence (threat_intel.py): named lists of hostile addresses and networks.
+CREATE TABLE IF NOT EXISTS threat_feeds (
+    name TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    synthetic INTEGER NOT NULL DEFAULT 0,
+    indicators INTEGER NOT NULL,
+    refused INTEGER NOT NULL,
+    updated_at TEXT NOT NULL,
+    updated_by TEXT NOT NULL,
+    last_error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS threat_indicators (
+    feed TEXT NOT NULL,
+    value TEXT NOT NULL,
+    note TEXT,
+    PRIMARY KEY (feed, value)
+);
+
+-- Tiered retention (retention.py): one row per arrival day that left the events table. `tier` is warm, cold
+-- or deleted; a deleted row is the record that the day's file was disposed of.
+CREATE TABLE IF NOT EXISTS archives (
+    day TEXT PRIMARY KEY,
+    tier TEXT NOT NULL,
+    file TEXT NOT NULL,
+    events INTEGER NOT NULL,
+    synthetic_events INTEGER NOT NULL,
+    first_id INTEGER,
+    last_id INTEGER,
+    first_ts TEXT,
+    last_ts TEXT,
+    bytes INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    moved_at TEXT,
+    warm_until TEXT,
+    deleted_at TEXT,
+    verified_at TEXT,
+    problem TEXT
+);
+
+-- Response playbooks (playbooks.py). The steps' titles and instructions live in code; these rows hold state.
+CREATE TABLE IF NOT EXISTS playbook_runs (
+    alert_id INTEGER PRIMARY KEY,
+    playbook_id TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS playbook_steps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    alert_id INTEGER NOT NULL,
+    position INTEGER NOT NULL,
+    step_key TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    actor TEXT,
+    note TEXT,
+    target TEXT,
+    updated_at TEXT,
+    UNIQUE(alert_id, step_key)
+);
+
+-- Webhook deliveries waiting to be sent, and the record of those that were.
+CREATE TABLE IF NOT EXISTS playbook_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    alert_id INTEGER NOT NULL,
+    step_key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT NOT NULL,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    sent_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_playbook_outbox_due ON playbook_outbox(status, next_attempt_at);
 """
 
 # Columns added after 1.0. Existing databases gain them in place on startup.
@@ -414,6 +492,10 @@ ADDED_COLUMNS = [
     # 15.0: reviewed fields that replace a rule's built-in alert deduplication key.
     ("rules", "grouping", "TEXT NOT NULL DEFAULT '[]'"),
     ("rule_history", "grouping", "TEXT NOT NULL DEFAULT '[]'"),
+    # What threat intelligence lists the event's source or destination address ("feed: note"), or NULL.
+    ("events", "threat", "TEXT"),
+    # Correlation rules an incident's alerts complete (correlate.PATTERNS), as [{"id", "alert_ids"}].
+    ("incidents", "patterns", "TEXT NOT NULL DEFAULT '[]'"),
 ]
 
 
@@ -474,6 +556,8 @@ def init_schema(conn):
     # Sessions from before 8.0 get an id so they can be listed and revoked like new ones.
     conn.execute("UPDATE sessions SET sid = lower(hex(randomblob(8))) WHERE sid IS NULL")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_sid ON sessions(sid)")
+    # Tagged events are few; a partial index keeps "everything a feed touched" fast without costing the rest.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_threat ON events(threat) WHERE threat IS NOT NULL")
     # 4.0: hash-chained audit log. Rows written before the chain existed are never hashed here: the server
     # would be signing whatever the database file says, including rows someone rewrote before a restart.
     with transaction(conn):

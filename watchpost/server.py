@@ -13,8 +13,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (__version__, assets, attack, auth, case_record, dashboard_views, ecs, engine, entities, geo, hunt, improve, incidents,
-               masking, portability, queries, report, search_rules, sigma, simulate, sources, storyline, stream,
-               triage)
+               masking, playbooks, portability, queries, report, retention, search_rules, sigma, simulate, sources, storyline, stream,
+               threat_intel, triage)
 from . import backtest as backtest_mod
 from .ratelimit import TokenBucketLimiter
 from .config import Config
@@ -47,6 +47,8 @@ class Download:
 class App:
     def __init__(self, config: Config):
         self.config = config
+        self.retention_policy = retention.Policy.from_config(config)  # None when off; refuses contradictory settings
+        self.threat_feeds = threat_intel.feeds_from_config(config)    # presets and URLs to fetch; refuses plain http
         conn = connect(config.db_path, config.audit_key)
         try:
             init_schema(conn)
@@ -54,6 +56,7 @@ class App:
             improve.seed_settings(conn)
             self.credentials_file = auth.bootstrap_users(conn, config, Path(config.db_path).parent)
             masking.key(conn)  # create the per-database pseudonym key now, not on a viewer's GET
+            playbooks.configure(conn, config)  # refuses to start on a webhook URL it would not deliver to
         finally:
             conn.close()
         self.login_limiter = self.request_limiter = self.backtest_limiter = self.change_backtest_limiter = None
@@ -473,6 +476,97 @@ def alert_status(req, alert_id):
 @route("POST", r"/api/alerts/(\d+)/assign", role="analyst")
 def alert_assign(req, alert_id):
     return queries.assign(req.conn, int(alert_id), req.user["username"], body_json(req).get("assignee"))
+
+
+# Threat intelligence ----------------------------------------------------------------------
+@route("GET", "/api/threat-intel")
+def threat_overview(req):
+    """The feeds and what they tagged. With ?ip=, also what lists that one address."""
+    overview = threat_intel.overview(req.conn, req.app.threat_feeds)
+    if req.query.get("ip"):
+        overview["lookup"] = threat_intel.lookup(req.conn, req.query["ip"])
+    return overview
+
+
+@route("POST", r"/api/threat-intel/feeds/([a-z0-9_-]{1,32})", role="admin")
+def threat_feed_import(req, name):
+    data = body_json(req)
+    return threat_intel.replace_feed(req.conn, name, data.get("text"), req.user["username"],
+                                     synthetic=data.get("synthetic") is True)
+
+
+@route("POST", r"/api/threat-intel/feeds/([a-z0-9_-]{1,32})/delete", role="admin")
+def threat_feed_delete(req, name):
+    return threat_intel.delete_feed(req.conn, name, req.user["username"])
+
+
+@route("POST", "/api/threat-intel/refresh", role="admin")
+def threat_refresh(req):
+    if not req.app.threat_feeds:
+        raise threat_intel.ThreatIntelError("no feed URL is configured (SIEM_THREAT_FEEDS)", 409)
+    config = req.app.config
+    return threat_intel.refresh(req.conn, req.app.threat_feeds, req.user["username"], timeout=15,
+                                otx_api_key=config.otx_api_key, otx_days=config.otx_days,
+                                min_age_seconds=threat_intel.MIN_FETCH_SECONDS)
+
+
+# Tiered retention -------------------------------------------------------------------------
+@route("GET", "/api/retention")
+def retention_status(req):
+    return retention.status(req.conn, req.app.retention_policy)
+
+
+@route("POST", "/api/retention/run", role="admin")
+def retention_run(req):
+    summary = retention.run(req.conn, req.app.retention_policy)
+    audit(req.conn, req.user["username"], "retention_run", None,
+          {k: summary[k] for k in ("archived_days", "archived_events", "removed_from_hot", "moved_to_cold",
+                                   "deleted_archives")} | {"errors": len(summary["errors"])})
+    return summary
+
+
+@route("POST", "/api/retention/verify", role="admin")
+def retention_verify(req):
+    if req.app.retention_policy is None:
+        raise retention.RetentionError("retention is off (SIEM_RETENTION_HOT_DAYS is not set)", 409)
+    problems = retention.verify(req.conn, req.app.retention_policy)
+    audit(req.conn, req.user["username"], "retention_verified", None, {"problems": len(problems)})
+    return {"problems": problems}
+
+
+@route("GET", r"/api/retention/archives/(\d{4}-\d{2}-\d{2})/events", role="analyst")
+def retention_search(req, day):
+    return retention.search(req.conn, req.app.retention_policy, day, req.query)
+
+
+@route("POST", r"/api/retention/archives/(\d{4}-\d{2}-\d{2})/thaw", role="admin")
+def retention_thaw(req, day):
+    return retention.thaw(req.conn, req.app.retention_policy, day, req.user["username"])
+
+
+# Response playbooks ---------------------------------------------------------------------
+@route("GET", "/api/playbooks")
+def playbook_catalogue(req):
+    return playbooks.catalogue(req.conn)
+
+
+@route("POST", r"/api/alerts/(\d+)/playbook", role="analyst")
+def playbook_start(req, alert_id):
+    req.status = 201
+    return playbooks.start_for(req.conn, int(alert_id), req.user["username"])
+
+
+@route("POST", r"/api/alerts/(\d+)/playbook/steps/([a-z_]{1,40})", role="analyst")
+def playbook_step(req, alert_id, step_key):
+    data = body_json(req)
+    return playbooks.set_step(req.conn, int(alert_id), step_key, req.user["username"], data.get("status"), data.get("note"))
+
+
+@route("POST", r"/api/alerts/(\d+)/playbook/steps/([a-z_]{1,40})/request", role="analyst")
+def playbook_action(req, alert_id, step_key):
+    data = body_json(req)
+    return playbooks.request_action(req.conn, int(alert_id), step_key, req.user["username"],
+                                    data.get("target"), data.get("reason"))
 
 
 # Incidents (correlated alerts) and ATT&CK coverage -------------------------------------

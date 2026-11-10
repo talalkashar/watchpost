@@ -1,15 +1,18 @@
-# Live ingestion: point a Linux box at Watchpost
+# Live ingestion: point a Linux box, a firewall, AWS or Windows at Watchpost
 
-Watchpost can take real logs as they are written, in two ways:
+Watchpost can take real logs as they are written, over syslog (plain or TLS), from the file shipper, from AWS CloudTrail, or from Windows hosts that forward their event logs:
 
 | Path | Transport | Auth | Best for |
 |---|---|---|---|
 | **Syslog listener** (`SIEM_SYSLOG=1`) | UDP or TCP syslog, RFC 3164 and RFC 5424 | none (address allow list only) | the Watchpost host itself, or boxes on a private network or SSH tunnel |
+| **Syslog over TLS** (add `SIEM_SYSLOG_TLS_CERT` and `SIEM_SYSLOG_TLS_KEY`) | the same syslog inside TLS 1.2+, RFC 5425 | the listener's certificate; sender certificates with `SIEM_SYSLOG_TLS_CLIENT_CA` | other machines that already run rsyslog |
+| **CloudTrail collector** (`scripts/cloudtrail_collector.py`) | AWS API over HTTPS, then HTTPS `POST /api/ingest` | a read-only AWS identity, and an ingest-only API token | AWS accounts, read through an auditor identity |
+| **Windows Event Forwarding collector** (`scripts/wef_collector.py`, experimental) | HTTPS from Windows' built-in forwarder, then HTTPS `POST /api/ingest` | certificates both ways, and an ingest-only API token | Windows hosts, with no agent installed |
 | **File shipper** (`scripts/shipper.py`) | HTTPS `POST /api/ingest/upload` | ingest-only API token | any box, including over the internet behind HTTPS |
 
-Events from both paths are real, so they are stored with `synthetic=0`. They go through the same parsers as uploaded files: sshd and sudo lines become `auth_failure`, `auth_success`, `privilege_use`, and `privilege_escalation`; UFW/iptables lines become `fw_deny` and `fw_allow`; OpenVPN logins become `vpn_login`; nginx/Apache access lines become `web_request`, `web_scan`, and `web_error`. Detection runs on every batch.
+Events from all of these are real, so they are stored with `synthetic=0`. They go through the same parsers as uploaded files: sshd and sudo lines become `auth_failure`, `auth_success`, `privilege_use`, and `privilege_escalation`; UFW/iptables lines become `fw_deny` and `fw_allow`; OpenVPN logins become `vpn_login`; nginx/Apache access lines become `web_request`, `web_scan`, and `web_error`. Detection runs on every batch.
 
-Both paths use only the Python standard library. The instructions below were written for Debian 12 and Ubuntu 22.04/24.04.
+All of it uses only the Python standard library. The instructions below were written for Debian 12 and Ubuntu 22.04/24.04.
 
 ---
 
@@ -29,10 +32,14 @@ export SIEM_SYSLOG_PORT=5514      # UDP and TCP; ports below 1024 need root, so 
 | `SIEM_SYSLOG_BIND` | `127.0.0.1` | Bind address. Use `::1` or `::` for IPv6 |
 | `SIEM_SYSLOG_PORT` | `5514` | Same port number for UDP and TCP |
 | `SIEM_SYSLOG_ALLOW` | empty (any sender) | Comma-separated IPs or CIDR networks allowed to send, e.g. `10.0.0.0/24,192.0.2.7`. Other senders are counted as `denied` and dropped. An invalid entry stops the listener from starting, so it fails closed |
+| `SIEM_SYSLOG_TLS_CERT` / `SIEM_SYSLOG_TLS_KEY` | unset | PEM certificate (with any intermediates) and its private key, without a passphrase. Setting both starts the TLS listener. See [Syslog over TLS](#syslog-over-tls) |
+| `SIEM_SYSLOG_TLS_PORT` | `6514` | TCP port for syslog over TLS |
+| `SIEM_SYSLOG_TLS_CLIENT_CA` | unset | PEM CA bundle. When set, a sender must present a certificate signed by it |
+| `SIEM_SYSLOG_PLAINTEXT` | `1` without TLS, `0` with it | Whether the plaintext UDP and TCP listeners run. TLS replaces them unless this is `1` |
 
 What the listener does with each message:
 
-1. It reads the frame. UDP takes one message per datagram. TCP accepts newline-terminated messages and RFC 6587 octet-counted messages (`LEN SP MSG`). Frames longer than 16 KB are truncated.
+1. It reads the frame. UDP takes one message per datagram. TCP accepts newline-terminated messages and RFC 6587 octet-counted messages (`LEN SP MSG`). TLS carries the TCP framing. Frames longer than 16 KB are truncated.
 2. It parses PRI and the RFC 5424 or RFC 3164 header. A missing hostname falls back to the sender's IP, and a missing timestamp falls back to the receive time.
 3. It tries the auth.log parser first (sshd, sudo/su, useradd, auditd, UFW/iptables firewall, OpenVPN). A message that parser does not recognize is tried as an nginx/Apache combined access line, so `access_log syslog:server=127.0.0.1:5514 combined;` in nginx gives `web_request`/`web_scan`/`web_error` events with the host from the syslog header and the time from the access line. Lines neither parser recognizes become `event_type=syslog`. Their severity comes from PRI: emerg, alert, and crit map to `critical`, err to `high`, warning to `medium`, notice to `low`, and info and debug to `info`.
 4. Every 2 seconds, everything queued is handed to the engine as one batch. The batch source is `syslog` and the submitter is `syslog-listener`, so it shows up under **Ingest > Recent batches**.
@@ -41,9 +48,9 @@ The listener shows up as the `syslog` component on the Health page and in `GET /
 
 | Status | When |
 |---|---|
-| `ok` | listening; the details give ports, frames received, events ingested, rejected, denied, and dropped |
+| `ok` | listening; the details give ports, frames received, events ingested, rejected, denied, dropped, and TLS handshakes refused (`tls_failed`, with the latest reason in `last_tls_failure`) |
 | `degraded` | the last batch failed to store, or frames were dropped in the last 10 minutes because the 50,000-frame queue was full |
-| `failing` | the port could not be bound, `SIEM_SYSLOG_ALLOW` is invalid, or a listener thread stopped |
+| `failing` | a port could not be bound, `SIEM_SYSLOG_ALLOW` is invalid, the TLS certificate, key or client CA could not be loaded, or a listener thread stopped |
 
 A listener failure is logged to the Errors list. It never stops the web server.
 
@@ -98,9 +105,10 @@ logger --server 127.0.0.1 --port 5514 --tcp --rfc5424 -p auth.notice "hello watc
 
 ### Sending from another machine
 
-Syslog has no authentication or encryption. Pick one of these:
+Plain syslog has no authentication and no encryption. Pick one of these:
 
-- **SSH tunnel (recommended).** Keep Watchpost on loopback. On the log source, open a tunnel and point rsyslog at `127.0.0.1:5514` over TCP. UDP does not travel over SSH.
+- **TLS with client certificates (recommended).** The stream is encrypted, the sender checks the listener's certificate, and the listener reads frames only from senders that hold a certificate from your CA. See [Syslog over TLS](#syslog-over-tls).
+- **SSH tunnel.** Keep Watchpost on loopback. On the log source, open a tunnel and point rsyslog at `127.0.0.1:5514` over TCP. UDP does not travel over SSH.
   ```bash
   ssh -N -L 5514:127.0.0.1:5514 you@watchpost-host      # or run autossh from a systemd unit
   ```
@@ -109,7 +117,168 @@ Syslog has no authentication or encryption. Pick one of these:
   sudo ufw allow from 10.0.0.12 to any port 5514 proto tcp
   ```
   Watchpost logs a warning at startup if it listens beyond loopback without an allow list.
-- **Over the internet:** use the file shipper with HTTPS instead.
+- **Over the internet:** use the file shipper with HTTPS, or TLS with client certificates and the port open only to the senders' addresses.
+
+### Syslog over TLS
+
+With a certificate, the listener takes syslog over TLS ([RFC 5425](https://www.rfc-editor.org/rfc/rfc5425)) on TCP port 6514: the same messages and framing as plain TCP, inside TLS 1.2 or 1.3.
+
+| Setting | What it adds |
+|---|---|
+| `SIEM_SYSLOG_TLS_CERT` and `SIEM_SYSLOG_TLS_KEY` | Encryption, and proof of the listener's identity to a sender that checks its certificate |
+| `SIEM_SYSLOG_TLS_CLIENT_CA` | Sender authentication. The handshake fails unless the sender presents a certificate signed by this CA, so nothing is read from anyone else |
+
+Two rules to know before you set it up:
+
+- **TLS replaces plaintext.** Once a certificate is set, the plaintext UDP and TCP listeners no longer start: a host that asks for certificates should not also take unauthenticated frames on the next port. `SIEM_SYSLOG_PLAINTEXT=1` keeps them running, for example while you move senders over one at a time.
+- **TLS settings fail closed.** If the certificate, key or client CA cannot be loaded (a missing file, wrong permissions, a key with a passphrase, a key that does not match), the listener does not start at all. The `syslog` health component turns `failing` and names the reason. No plaintext listener starts in its place.
+
+#### 1. Create the certificates
+
+Any CA works. For a lab, a private CA made with `openssl` is enough. These commands were run with OpenSSL 3.0 (Debian 12, Ubuntu 22.04 and 24.04) and 3.5:
+
+```bash
+mkdir watchpost-tls && cd watchpost-tls
+
+# A CA used only for Watchpost syslog. Whoever holds ca.key can create senders: keep it off the servers.
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
+    -subj "/CN=Watchpost syslog CA" -addext "keyUsage=critical,keyCertSign,cRLSign" \
+    -keyout ca.key -out ca.pem
+
+# The listener's certificate. subjectAltName is the name senders check: the Watchpost host's DNS name.
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+    -subj "/CN=siem.example.internal" -keyout server.key -out server.csr
+printf '%s\n' "basicConstraints=critical,CA:FALSE" "subjectKeyIdentifier=hash" "authorityKeyIdentifier=keyid" \
+    "extendedKeyUsage=serverAuth" "subjectAltName=DNS:siem.example.internal" > server.ext
+openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 365 \
+    -extfile server.ext -out server.pem
+
+# One certificate per sender (here: web01).
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+    -subj "/CN=web01" -keyout web01.key -out web01.csr
+printf '%s\n' "basicConstraints=critical,CA:FALSE" "subjectKeyIdentifier=hash" "authorityKeyIdentifier=keyid" \
+    "extendedKeyUsage=clientAuth" > sender.ext
+openssl x509 -req -in web01.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 365 \
+    -extfile sender.ext -out web01.pem
+```
+
+`extendedKeyUsage` keeps the two roles apart: a sender's certificate cannot pass as the listener, and the listener's cannot pass as a sender. The keys have no passphrase, because neither Watchpost nor rsyslog can ask for one. File permissions are what protect them.
+
+#### 2. Configure Watchpost
+
+Put `server.pem`, `server.key` and `ca.pem` where the account that runs Watchpost can read them and other accounts cannot. With the [deploy kit](../deploy/README.md) that account is `watchpost`:
+
+```bash
+sudo install -d -m 0750 -g watchpost /etc/watchpost-tls
+sudo install -m 0640 -g watchpost server.pem server.key ca.pem /etc/watchpost-tls/
+```
+
+Then set these (in `/etc/watchpost.env` for the deploy kit) and restart Watchpost:
+
+```bash
+SIEM_SYSLOG=1
+SIEM_SYSLOG_BIND=0.0.0.0                                 # reachable from other machines
+SIEM_SYSLOG_TLS_CERT=/etc/watchpost-tls/server.pem
+SIEM_SYSLOG_TLS_KEY=/etc/watchpost-tls/server.key
+SIEM_SYSLOG_TLS_CLIENT_CA=/etc/watchpost-tls/ca.pem      # leave out to take any sender, encrypted only
+```
+
+Open TCP 6514 to the senders and to nobody else, for example `sudo ufw allow from 10.0.0.12 to any port 6514 proto tcp`. The Health page then shows the `syslog` component as `listening on 0.0.0.0 (tls 6514, client certificates required)`.
+
+#### 3. Configure rsyslog on the sender
+
+```bash
+sudo apt-get install -y rsyslog-gnutls                     # rsyslog's TLS driver
+sudo install -d /etc/rsyslog.d/watchpost-tls
+sudo install -m 0644 ca.pem web01.pem /etc/rsyslog.d/watchpost-tls/
+sudo install -m 0600 web01.key /etc/rsyslog.d/watchpost-tls/
+sudo chown syslog /etc/rsyslog.d/watchpost-tls/web01.key   # Ubuntu only: rsyslog runs as `syslog` there, as root on Debian
+```
+
+Keep the files under `/etc/rsyslog.d/`. Ubuntu 24.04 confines rsyslog with AppArmor, and that directory is one it may read. rsyslog loads only `*.conf` files from it, so the certificates are not mistaken for configuration.
+
+Create `/etc/rsyslog.d/60-watchpost.conf`:
+
+```
+# Forward authentication logs to Watchpost over TLS (RFC 5425), with a client certificate.
+auth,authpriv.*  action(
+    type="omfwd"
+    target="siem.example.internal" port="6514" protocol="tcp"
+    StreamDriver="gtls" StreamDriverMode="1"
+    StreamDriverAuthMode="x509/name" StreamDriverPermittedPeers="siem.example.internal"
+    StreamDriver.CAFile="/etc/rsyslog.d/watchpost-tls/ca.pem"
+    StreamDriver.CertFile="/etc/rsyslog.d/watchpost-tls/web01.pem"
+    StreamDriver.KeyFile="/etc/rsyslog.d/watchpost-tls/web01.key"
+    TCP_Framing="octet-counted"
+    template="RSYSLOG_SyslogProtocol23Format"
+    queue.type="LinkedList" queue.filename="watchpost_fwd"
+    queue.maxDiskSpace="100m" queue.saveOnShutdown="on"
+    action.resumeRetryCount="-1"
+)
+```
+
+`StreamDriverAuthMode="x509/name"` with `StreamDriverPermittedPeers` is what makes rsyslog check the listener's certificate and name before it sends anything. Leave out the `CertFile` and `KeyFile` lines when Watchpost has no client CA.
+
+```bash
+sudo rsyslogd -N1 && sudo systemctl restart rsyslog
+logger -p auth.warning "watchpost TLS test from $(hostname)"
+```
+
+This configuration was run against Watchpost with rsyslog 8.2112 (Ubuntu 22.04), 8.2302 (Debian 12) and 8.2312 (Ubuntu 24.04).
+
+#### Check it without rsyslog
+
+```bash
+printf '<86>1 %s web01 sshd 1 - - Accepted publickey for alice from 198.51.100.7 port 22 ssh2\n' "$(date -u +%FT%TZ)" |
+  openssl s_client -quiet -no_ign_eof -connect siem.example.internal:6514 \
+      -verify_return_error -verify_hostname siem.example.internal \
+      -CAfile ca.pem -cert web01.pem -key web01.key
+```
+
+An `auth_success` event for `alice` on host `web01` shows up under **Events** with `source=syslog`. Run it again without `-cert` and `-key`: nothing arrives, and `tls_failed` in the `syslog` health details goes up by one.
+
+#### When it does not work
+
+| Symptom | Cause |
+|---|---|
+| `tls_failed` rises in the `syslog` health details | `last_tls_failure` next to it gives the sender's address and the reason, such as `peer did not return a certificate` or `certificate has expired` |
+| rsyslog logs `peer name not authorized` | `StreamDriverPermittedPeers` does not match a name in the listener certificate's `subjectAltName` |
+| rsyslog logs `error reading file` | rsyslog cannot read its key. On Ubuntu it runs as `syslog`: see the `chown` above |
+| rsyslog logs `Connection refused` although the port is open | rsyslog uses only the first address the `target` name resolves to. If that is an IPv6 address and Watchpost is bound to `0.0.0.0`, set `target` to the IPv4 address. `StreamDriverPermittedPeers` still checks the certificate's name |
+
+#### What TLS covers here, and what it does not
+
+- TLS 1.2 is the minimum. Protocol versions and ciphers are the defaults of Python and OpenSSL. There is no setting for them.
+- The handshake completes before any frame is read. `SIEM_SYSLOG_ALLOW` is checked before the handshake.
+- Every certificate the client CA has signed is admitted. Use a CA that signs syslog senders and nothing else. There is no per-name list and no revocation check (CRL or OCSP). To cut off one sender, block its address with `SIEM_SYSLOG_ALLOW` or the firewall, or replace the CA.
+- A certificate authenticates the connection, not the content. An admitted sender can still put any host name in its syslog header, and Watchpost records that name.
+- Certificates are read at start. Restart Watchpost after renewing them. Nothing warns before one expires.
+- UDP stays plaintext. There is no DTLS.
+- A connection that ends without a TLS `close_notify` may have been cut in transit, so a last message that was still incomplete is dropped, not stored. The complete messages before it are kept.
+- A connection that stays silent for 5 minutes is closed, as for plain TCP. rsyslog notices and reconnects before its next message. The listener sends no TLS session tickets and no `close_notify` of its own when it closes a silent connection: with either, rsyslog 8.2302 took the closed connection for a live one and lost the first message after every pause.
+
+### Firewalls over syslog
+
+Point a firewall's remote syslog at the listener and its traffic lines become `fw_deny` and `fw_allow` events with source, destination and port. Those are the events the port sweep and large data transfer rules read. Admin and VPN logins on the firewall become `auth_failure` and `auth_success`.
+
+| Firewall | What is read | Becomes |
+|---|---|---|
+| Linux UFW / iptables | `[UFW BLOCK]`, `[UFW ALLOW]` and the same prefixes from iptables `LOG` rules | `fw_deny`, `fw_allow` |
+| pfSense / OPNsense | `filterlog` lines, IPv4 and IPv6 (`block`, `reject`, `pass`) | `fw_deny`, `fw_allow` |
+| FortiGate | `type="traffic"` lines (`action` deny, accept, close and the like), with `sentbyte` as the byte count; `type="event"` admin logins | `fw_deny`, `fw_allow`, `auth_failure`, `auth_success` |
+| Cisco ASA / FTD | Denies 106001, 106006, 106007, 106015, 106023, 710003; ACL hits 106100; built connections 302013 and 302015; AAA 113004 and 113005; logins 605004 and 605005 | `fw_deny`, `fw_allow`, `auth_failure`, `auth_success` |
+| Palo Alto | `TRAFFIC` logs in the default comma-separated format, with bytes sent as the byte count | `fw_deny`, `fw_allow` |
+
+Any other line from these devices is stored as a generic `syslog` event, so nothing is dropped. FortiGate lines carry their own device name and time (`devname`, `date`, `time`, `tz`), and those are used instead of the sender's address and the receive time.
+
+On the firewall, turn on remote syslog and give it the Watchpost address and port. Use TCP, or TLS on port 6514 where the device offers it (FortiGate "reliable" mode with encryption, Cisco ASA `logging host ... secure`, Palo Alto transport SSL). pfSense and OPNsense send UDP unless a syslog-ng package is added. A firewall is another machine, so the choices under [Sending from another machine](#sending-from-another-machine) apply.
+
+Limits:
+
+- The parsers follow the vendors' published log formats and are tested on synthetic lines. They have not been run against the devices themselves.
+- Only the default log formats are read. A custom log format on the device will not match, and its lines stay generic `syslog` events.
+- Cisco connection teardown lines (302014, 302016) are not read, so Cisco events carry no byte counts. Palo Alto `THREAT` logs are not read.
+- `samples/firewall_syslog.log` has pfSense and Cisco lines to try by upload. FortiGate and Palo Alto lines have no syslog program tag, so they are read from the listener only.
 
 ### Time zones
 
@@ -200,13 +369,214 @@ journalctl -u watchpost-shipper -f
 
 ---
 
+## 3. CloudTrail collector
+
+`scripts/cloudtrail_collector.py` is one file with no dependencies. It reads AWS CloudTrail with a read-only identity and posts the events to `POST /api/ingest` with an ingest token. They arrive as `cloud_api_call`, `cloud_iam_change` and `cloud_data_access` events, the ones the cloud rules read.
+
+It calls one AWS API, CloudTrail `LookupEvents`. It never changes anything in AWS.
+
+- **Read-only identity:** `cloudtrail:LookupEvents` is all it needs. The AWS managed policies `SecurityAudit` and `ReadOnlyAccess` both include it, so an auditor identity works as it is.
+- **Accounts and regions:** `LookupEvents` answers for one account and one region. Pass `--region` once per region and `--role-arn` once per account. The collector assumes each role (STS `AssumeRole`) with the identity it was started with. Without `--role-arn` it reads the identity's own account.
+- **Polling:** every 60 seconds it asks for the events since the last poll, minus 15 minutes, because CloudTrail can deliver an event that late. It remembers the event IDs it has sent, so the overlap is not sent twice.
+- **State file:** the time reached and those IDs, per account and region, written after every accepted batch. A restart resumes there. The first run reads the last 60 minutes (`--lookback`).
+- **Backoff:** network errors, throttling and 5xx answers retry with exponential backoff, from 1 s up to 60 s. A batch Watchpost refuses as invalid is logged and skipped.
+- **Secrets:** the AWS keys come from `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`, the Watchpost token from `$WATCHPOST_TOKEN` or `--token-file`. None of them is accepted on the command line or written to the log. Plain HTTP is refused for anything but loopback.
+
+### AWS side
+
+The smallest policy, for the identity itself or for a role it assumes in each account:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{"Effect": "Allow", "Action": "cloudtrail:LookupEvents", "Resource": "*"}]
+}
+```
+
+To read several accounts from one auditor identity, create a role with that policy in each account, let the auditor identity assume it in the role's trust policy, and allow the identity `sts:AssumeRole` on those roles:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{"Effect": "Allow", "Principal": {"AWS": "arn:aws:iam::999999999999:user/watchpost-auditor"}, "Action": "sts:AssumeRole"}]
+}
+```
+
+### Run it
+
+Create an ingest token as for the shipper (**Admin > API tokens**), then:
+
+```bash
+export AWS_ACCESS_KEY_ID=...  AWS_SECRET_ACCESS_KEY=...     # the read-only identity
+export WATCHPOST_TOKEN=wp_...
+python3 scripts/cloudtrail_collector.py --url https://siem.example.internal \
+    --region us-east-1 --region eu-west-1 \
+    --role-arn arn:aws:iam::111111111111:role/WatchpostReadOnly \
+    --role-arn arn:aws:iam::222222222222:role/WatchpostReadOnly \
+    --state /var/lib/watchpost-cloudtrail/state.json --once
+```
+
+Drop `--once` to keep polling, for example from a systemd unit like the shipper's, with the keys and the token in an `EnvironmentFile` that only root can read. The events show up under **Events** with `source=cloudtrail`, and the host column holds the AWS account ID.
+
+| Option | Meaning |
+|---|---|
+| `--url` | Watchpost base URL. Use `https://` for anything that is not loopback |
+| `--region` | Repeatable. Default: `$AWS_REGION` or `$AWS_DEFAULT_REGION` |
+| `--role-arn` | Repeatable, one read-only role per account. Default: the identity's own account |
+| `--state` | State file (default `./watchpost-cloudtrail-state.json`) |
+| `--lookback` | Minutes to read on the first run (default 60) |
+| `--interval` | Seconds between polls (default 60) |
+| `--once` / `--max-retries N` | Read once and exit, giving up after N retries |
+| `--source` | Source name for the events (default `cloudtrail`) |
+| `--token-env` / `--token-file` | Where the Watchpost token comes from (default env `WATCHPOST_TOKEN`) |
+| `--cafile` | CA bundle for a self-signed Watchpost HTTPS certificate |
+| `--endpoint-url` / `--sts-endpoint-url` | CloudTrail and STS endpoints, for VPC endpoints |
+
+## 4. Windows Event Forwarding collector
+
+> **Experimental, and not yet run against Windows.** `scripts/wef_collector.py` follows Microsoft's published protocol for event forwarding ([MS-WSMV], "source-initiated subscriptions") and is tested against a simulated Windows sender. Nobody has pointed a real Windows host at it yet. If you do, expect to correct something, and please report what you find.
+
+Windows can forward its own event logs with nothing installed on it. The feature is Windows Event Forwarding (WEF). One Group Policy setting names a collector. The host asks that collector which events it wants, then pushes them over HTTPS and proves who it is with the computer's certificate.
+
+`scripts/wef_collector.py` is that collector: one file with no dependencies. It answers the hosts, turns each event into a JSON record, and posts it to `POST /api/ingest` with an ingest token. Logons, failed logons, lockouts and the other Security events Watchpost has a type for arrive as `auth_failure`, `auth_success`, `account_lockout` and so on, the same as an uploaded Windows export.
+
+- **No agent:** the Windows host uses its built-in forwarder and the WinRM service. It needs a certificate, one policy setting and permission to read the Security log.
+- **Certificates both ways:** the host checks the collector's certificate, and the collector accepts only hosts with a certificate signed by `--client-ca`. TLS 1.2 or newer. `--allow-sender` narrows it to named hosts.
+- **Which events:** by default the eight Security event IDs Watchpost maps (4624, 4625, 4648, 4663, 4672, 4688, 4720, 4740). `--channel Security --channel System` forwards whole channels. `--query-file` takes an event query exported from Event Viewer.
+- **Acknowledged delivery:** a batch is acknowledged only after Watchpost has stored it. If Watchpost cannot be reached the collector answers 503, and Windows sends the batch again.
+- **Bookmarks:** Windows sends a bookmark with every batch. The collector saves it per host in the state file and hands it back when the host next asks for its subscription, so the host resumes where it stopped.
+- **Who sent it:** every record carries `wef_sender`, the name in the certificate the host authenticated with, next to `Computer`, the name inside the event. A host can lie about the second, not the first.
+- **Secrets:** the Watchpost token comes from `$WATCHPOST_TOKEN` or `--token-file`, never the command line. The token and the contents of events are never logged.
+
+### Certificates
+
+Windows names the CA by its thumbprint, so a small private CA is the simplest setup. With `openssl` (3.0 or newer):
+
+```bash
+mkdir watchpost-wef && cd watchpost-wef
+
+# A CA used only for event forwarding. Whoever holds ca.key can create senders: keep it off the servers.
+openssl req -x509 -newkey rsa:3072 -nodes -days 3650 -subj "/CN=Watchpost WEF CA" \
+    -addext "keyUsage=critical,keyCertSign,cRLSign" -keyout ca.key -out ca.crt
+
+# The collector's certificate. The name must be the DNS name the Windows hosts use to reach the collector.
+openssl req -newkey rsa:3072 -nodes -subj "/CN=wef.example.internal" -keyout wef.key -out wef.csr
+printf '%s\n' "basicConstraints=critical,CA:FALSE" "extendedKeyUsage=serverAuth" \
+    "subjectAltName=DNS:wef.example.internal" > wef.ext
+openssl x509 -req -in wef.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 365 -extfile wef.ext -out wef.crt
+
+# One certificate per Windows host (here: dc01). The name must be the host's own DNS name.
+openssl req -newkey rsa:3072 -nodes -subj "/CN=dc01.corp.example" -keyout dc01.key -out dc01.csr
+printf '%s\n' "basicConstraints=critical,CA:FALSE" "extendedKeyUsage=clientAuth" \
+    "subjectAltName=DNS:dc01.corp.example" > host.ext
+openssl x509 -req -in dc01.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 365 -extfile host.ext -out dc01.crt
+# Windows imports the certificate and its key as one .pfx file. openssl asks for a password to protect it.
+openssl pkcs12 -export -inkey dc01.key -in dc01.crt -certfile ca.crt -out dc01.pfx
+```
+
+A domain with its own certificate services can skip the last block: issue computer certificates with the *Client Authentication* purpose as usual, and give the collector the issuing CA's certificate as `--client-ca`.
+
+### Run the collector
+
+Create an ingest token as for the shipper (**Admin > API tokens**), then start the collector on a host the Windows machines can reach on TCP 5986:
+
+```bash
+export WATCHPOST_TOKEN=wp_...
+python3 scripts/wef_collector.py --url https://siem.example.internal \
+    --hostname wef.example.internal --cert wef.crt --key wef.key --client-ca ca.crt \
+    --state /var/lib/watchpost-wef/state.json
+```
+
+It prints the value for the Windows policy:
+
+```text
+wef: listening on 0.0.0.0 port 5986; subscription 5B3C...
+wef: Subscription Manager policy value: Server=https://wef.example.internal:5986/wsman/SubscriptionManager/WEC,Refresh=60,IssuerCA=2EC536CE06C53F09DE34AE32EF49AB24F476D9B3
+```
+
+`IssuerCA` is the thumbprint of the CA certificate. `Refresh` is how often, in seconds, a host asks whether its subscription changed.
+
+| Option | Meaning |
+|---|---|
+| `--url` | Watchpost base URL. Use `https://` for anything that is not loopback |
+| `--hostname` | DNS name the Windows hosts reach the collector by. It must be a name in `--cert` |
+| `--cert` / `--key` | The collector's certificate and key (PEM, key without a passphrase) |
+| `--client-ca` | CA certificate(s) that sign the Windows hosts' certificates (PEM) |
+| `--bind` / `--port` | Listen address and port (default `0.0.0.0`, `5986`) |
+| `--allow-sender NAME` | Repeatable. Accept only these certificate names; `*` and `?` match. Default: any host with a certificate from the CA |
+| `--channel NAME` | Repeatable. Forward every event of a channel, for example `Security` |
+| `--query-file` | Forward what an event query (a `<QueryList>`, as Event Viewer exports it) selects |
+| `--read-existing` | A host seen for the first time also sends the events it already holds |
+| `--compression` | Ask the hosts to compress what they send (SLDC). Off by default: decompressing in pure Python is slow |
+| `--heartbeat` | Seconds between "nothing to send" messages from an idle host (default 900) |
+| `--state` | State file holding one bookmark per host (default `./watchpost-wef-state.json`) |
+| `--source` | Source name for the events (default `wef`) |
+| `--token-env` / `--token-file` | Where the Watchpost token comes from (default env `WATCHPOST_TOKEN`) |
+| `--cafile` | CA bundle for a self-signed Watchpost HTTPS certificate |
+
+The collector is standard-library Python, so it should also run on a Windows server, started at boot by a scheduled task (`schtasks /create /tn WatchpostWEF /sc onstart /ru SYSTEM /tr "python C:\watchpost\wef_collector.py ..."`). That has not been tried either.
+
+### Windows side
+
+These steps follow Microsoft's guide, [Setting up a source-initiated subscription](https://learn.microsoft.com/en-us/windows/win32/wec/setting-up-a-source-initiated-subscription), for a host that authenticates with a certificate. Run the commands in an elevated PowerShell on each host, or push the same settings with Group Policy.
+
+1. **Trust the CA and install the host's certificate.** The CA certificate goes into the computer's trusted roots, the host's own certificate into the computer's personal store:
+
+   ```powershell
+   Import-Certificate -FilePath .\ca.crt -CertStoreLocation Cert:\LocalMachine\Root
+   Import-PfxCertificate -FilePath .\dc01.pfx -CertStoreLocation Cert:\LocalMachine\My -Password (Read-Host -AsSecureString)
+   ```
+
+2. **Let the forwarder use the key.** The forwarder runs as `NETWORK SERVICE`. In `certlm.msc`, open *Personal > Certificates*, right-click the host's certificate, choose *All Tasks > Manage Private Keys*, and give `NETWORK SERVICE` Read.
+3. **Let the forwarder read the Security log.** Add `NETWORK SERVICE` to the *Event Log Readers* group. Microsoft's guide does this in Computer Management; the usual command is `net localgroup "Event Log Readers" "NT AUTHORITY\NETWORK SERVICE" /add`. Restart the host, or the *Windows Remote Management* service, afterwards.
+4. **Make sure WinRM runs:** `winrm qc -q`.
+5. **Point the host at the collector.** In the Group Policy editor: *Computer Configuration > Administrative Templates > Windows Components > Event Forwarding > Configure target Subscription Manager*. Enable it, choose *Show*, and paste the `Server=...` value the collector printed. Then run `gpupdate /force`.
+
+### Check it
+
+- On the collector, the log shows `first request from dc01.corp.example` when the host asks for its subscription, and `stored N event(s) from dc01.corp.example` for each batch.
+- In Watchpost, the events appear under **Events** with `source=wef`.
+- On the Windows host, open Event Viewer at *Applications and Services Logs > Microsoft > Windows > Eventlog-ForwardingPlugin > Operational*. Event 104 says the forwarder reached the collector, and event 100 that the subscription was created. Event 105 means it cannot talk to the collector.
+- To test the certificate and the connection alone, Microsoft's guide gives: `winrm g winrm/config -r:https://wef.example.internal:5986 -a:certificate -certificate:"<thumbprint of the host's certificate>"`. This collector answers that request with HTTP 400, which still proves that TLS and the certificate were accepted; a certificate problem fails before any HTTP answer.
+
+When nothing arrives:
+
+| Collector log | Cause |
+|---|---|
+| nothing at all | The host never connected: check the policy value, DNS, and that TCP 5986 is open. Look for event 105 on the host |
+| `TLS handshake ... failed: PEER_DID_NOT_RETURN_A_CERTIFICATE` | The host found no certificate to present. `IssuerCA` is not the thumbprint of the CA that signed its certificate, the certificate is not in the computer's personal store, or `NETWORK SERVICE` cannot read its key |
+| `TLS handshake ... failed: CERTIFICATE_VERIFY_FAILED` | The host's certificate is not signed by `--client-ca`, or it has expired |
+| `403: sender ... is not allowed` | The certificate's name does not match `--allow-sender`, or the certificate has no usable name |
+| `first request from ...` and then no batches | The host has its subscription but nothing to send, or cannot read the log: check step 3, and that the events you expect are being audited at all |
+| `503: could not store ...` | Watchpost is down or the token was revoked. Windows keeps the batch and sends it again |
+
+### What arrives
+
+Each event becomes one record. `EventID`, `TimeCreated`, `Computer`, `TargetUserName` and `IpAddress` are the names Watchpost already reads from Windows exports. The rest is kept in the event's raw record:
+
+- `EventChannel`, `Provider`, `EventRecordID`, `Level` from the event's header, and `wef_sender`.
+- Every `<Data Name="...">` value of the event, up to 64 values of 512 characters each.
+- `message`: the first line of the text Windows renders for the event.
+- A value Watchpost would refuse the whole event for is kept under another name. An `IpAddress` of `-` or `LOCAL` becomes `win_IpAddress`, and a provider's own field called `level` or `time` becomes `win_level` or `win_time`.
+
+---
+
 ## Limits
 
-- Syslog is unauthenticated and unencrypted. There is no TLS syslog (RFC 5425). Use loopback, an SSH tunnel, or an allow list and firewall.
+- Plain UDP and TCP syslog are unauthenticated and unencrypted. Use loopback, an SSH tunnel, an allow list and firewall, or TLS. The limits of the TLS listener are listed under [What TLS covers here, and what it does not](#what-tls-covers-here-and-what-it-does-not).
+- Every TCP or TLS connection gets its own thread, and there is no connection limit. Keep the ports reachable only by your senders.
 - UDP syslog loses messages silently when the network or Watchpost drops them. Prefer TCP with an rsyslog queue.
 - If storing a syslog batch fails (for example, the disk is full), its frames are lost. They are counted as `lost_on_failure`, and the health component turns `degraded`. rsyslog does not know about the loss, because the listener has already accepted the frames.
 - The shipper can lose lines in these cases:
   - A file was rotated while the shipper was stopped, and the old file had unsent lines. On restart, the new file is read from the start, but the old file's tail is not.
   - A file was rotated twice between two polls.
   - A file was truncated and grew past the old offset between two polls.
+- The CloudTrail collector reads management events of the last 90 days, which is what `LookupEvents` returns. Data events (S3 object reads, Lambda invocations) go only to a trail's S3 bucket, and the collector does not read buckets.
+- The CloudTrail collector's request signing is checked against AWS's published Signature Version 4 examples, and the collector is tested against a local stand-in for the two AWS APIs. It has not been run against an AWS account.
+- The Windows Event Forwarding collector has not been run against Windows. It is tested against a simulated sender that follows Microsoft's protocol documents and published captures. One real message, a compressed heartbeat from a Windows 10 host published in the OpenWEC project's protocol notes, was used to check the decompression and the envelope parsing by hand; it is not in the test suite, which holds synthetic data only.
+- The Windows collector, in more detail:
+  - It offers one subscription to every host, and speaks HTTPS with certificates only. Kerberos, which domain members use by default, is not implemented.
+  - Each host connection gets a thread, up to 256 connections.
+  - The OpenWEC project reports that with certificate authentication a Windows host can start its subscription over after the collector restarts and skip the events logged while the collector was down. Whether this collector shows the same behaviour is unknown.
+  - Microsoft's guide asks that both sides can check certificate revocation. Certificates from a private `openssl` CA carry no revocation address; other projects use such certificates, but it is one more thing to look at if a host refuses to connect.
 - One process and SQLite, as with the rest of Watchpost: a lab and demo setup, not a fleet collector.
