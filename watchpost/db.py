@@ -382,6 +382,25 @@ CREATE TABLE IF NOT EXISTS dashboard_views (
     UNIQUE(owner, name COLLATE NOCASE)
 );
 
+-- Threat intelligence (threat_intel.py): named lists of hostile addresses and networks.
+CREATE TABLE IF NOT EXISTS threat_feeds (
+    name TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    synthetic INTEGER NOT NULL DEFAULT 0,
+    indicators INTEGER NOT NULL,
+    refused INTEGER NOT NULL,
+    updated_at TEXT NOT NULL,
+    updated_by TEXT NOT NULL,
+    last_error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS threat_indicators (
+    feed TEXT NOT NULL,
+    value TEXT NOT NULL,
+    note TEXT,
+    PRIMARY KEY (feed, value)
+);
+
 -- Tiered retention (retention.py): one row per arrival day that left the events table. `tier` is warm, cold
 -- or deleted; a deleted row is the record that the day's file was disposed of.
 CREATE TABLE IF NOT EXISTS archives (
@@ -473,6 +492,8 @@ ADDED_COLUMNS = [
     # 15.0: reviewed fields that replace a rule's built-in alert deduplication key.
     ("rules", "grouping", "TEXT NOT NULL DEFAULT '[]'"),
     ("rule_history", "grouping", "TEXT NOT NULL DEFAULT '[]'"),
+    # What threat intelligence lists the event's source or destination address ("feed: note"), or NULL.
+    ("events", "threat", "TEXT"),
     # Correlation rules an incident's alerts complete (correlate.PATTERNS), as [{"id", "alert_ids"}].
     ("incidents", "patterns", "TEXT NOT NULL DEFAULT '[]'"),
 ]
@@ -535,6 +556,8 @@ def init_schema(conn):
     # Sessions from before 8.0 get an id so they can be listed and revoked like new ones.
     conn.execute("UPDATE sessions SET sid = lower(hex(randomblob(8))) WHERE sid IS NULL")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_sid ON sessions(sid)")
+    # Tagged events are few; a partial index keeps "everything a feed touched" fast without costing the rest.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_threat ON events(threat) WHERE threat IS NOT NULL")
     # 4.0: hash-chained audit log. Rows written before the chain existed are never hashed here: the server
     # would be signing whatever the database file says, including rows someone rewrote before a restart.
     with transaction(conn):

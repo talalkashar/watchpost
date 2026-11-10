@@ -65,6 +65,13 @@ class Config:
     archive_dir: str | None = None       # default: "archive" next to the database
     cold_dir: str | None = None          # default: "cold" inside the archive directory
     retention_interval_minutes: int = 60
+    # Threat intelligence (threat_intel.py): preset names and name=url pairs, such as
+    # "spamhaus_drop,et_compromised,otx,mylist=https://...", fetched every threat_feed_minutes. Unset: nothing is
+    # fetched; an admin can still import a list by hand. The otx preset reads an OTX account's subscribed pulses.
+    threat_feeds: str | None = None
+    threat_feed_minutes: int = 360
+    otx_api_key: str | None = None
+    otx_days: int = 30
     # Response playbooks (playbooks.py): where notifications and response-action requests are posted. Unset:
     # nothing leaves Watchpost. The secret signs each body. Synthetic alerts are sent only when asked for.
     playbook_webhook_url: str | None = None
@@ -111,6 +118,10 @@ class Config:
             archive_dir=os.environ.get("SIEM_ARCHIVE_DIR") or None,
             cold_dir=os.environ.get("SIEM_COLD_DIR") or None,
             retention_interval_minutes=int(os.environ.get("SIEM_RETENTION_INTERVAL_MINUTES", "60")),
+            threat_feeds=os.environ.get("SIEM_THREAT_FEEDS") or None,
+            threat_feed_minutes=int(os.environ.get("SIEM_THREAT_FEED_MINUTES", "360")),
+            otx_api_key=os.environ.get("SIEM_OTX_API_KEY") or None,
+            otx_days=int(os.environ.get("SIEM_OTX_DAYS", "30")),
             playbook_webhook_url=os.environ.get("SIEM_PLAYBOOK_WEBHOOK_URL") or None,
             playbook_webhook_secret=os.environ.get("SIEM_PLAYBOOK_WEBHOOK_SECRET") or None,
             playbook_webhook_cafile=os.environ.get("SIEM_PLAYBOOK_WEBHOOK_CAFILE") or None,

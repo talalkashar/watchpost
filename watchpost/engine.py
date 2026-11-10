@@ -9,6 +9,7 @@ from . import assets as assets_mod
 from . import correlate as correlate_mod
 from . import grouping
 from . import playbooks
+from . import threat_intel
 from . import rules as rules_mod
 from . import sources as sources_mod
 from . import stream
@@ -16,10 +17,10 @@ from .db import audit, iso, now_iso, parse_iso, row_to_dict, transaction
 from .diagnostics import describe_exception, record_error
 
 EVENT_COLUMNS = ["ts", "source", "host", "event_type", "outcome", "severity",
-                 "user", "src_ip", "dest_ip", "dest_port", "bytes", "message", "raw"]
+                 "user", "src_ip", "dest_ip", "dest_port", "bytes", "message", "raw", "threat"]
 # Fields detection rules can read. source and ingested_at let a backtest replay log_source_silent's gaps.
 RULE_EVENT_FIELDS = ("id, ts, event_type, user, src_ip, host, dest_ip, dest_port, bytes, message, synthetic,"
-                     " source, ingested_at")
+                     " source, ingested_at, threat")
 
 # Detection runs are serialized so concurrent ingests cannot create duplicate alerts.
 _detection_lock = threading.Lock()
@@ -62,6 +63,7 @@ def store_batch(conn, events, rejections, source, fmt, submitted_by, synthetic=F
     """Persist a batch atomically and return its id. Detection is run separately."""
     batch_id = uuid.uuid4().hex
     now = now_iso()
+    threat_intel.tag(conn, events)  # sets each event's `threat`; whatever a sender put there is overwritten
     with transaction(conn):
         conn.executemany(
             f"INSERT INTO events(ingested_at, synthetic, batch_id, {', '.join(EVENT_COLUMNS)})"
@@ -112,11 +114,14 @@ def _existing_alert(conn, rule_id, group_key, first_seen, window):
 
 
 def _weigh(conn, rule, alert_id, assets_idx):
-    """Severity after asset weighting, from every evidence event now on the alert."""
+    """Severity after asset weighting and threat intelligence, from every evidence event now on the alert."""
     events = [dict(r) for r in conn.execute(
-        "SELECT e.host, e.src_ip, e.dest_ip FROM events e JOIN alert_events ae ON ae.event_id = e.id"
+        "SELECT e.host, e.src_ip, e.dest_ip, e.threat FROM events e JOIN alert_events ae ON ae.event_id = e.id"
         " WHERE ae.alert_id = ?", (alert_id,))]
     weighed = assets_mod.weigh(rule["severity"], assets_mod.match(assets_idx, events))
+    listed = sorted({e["threat"] for e in events if e["threat"]})
+    if listed:
+        weighed = threat_intel.raise_severity(weighed, listed)
     weighed["assets"] = json.dumps(weighed["assets"])
     return weighed
 

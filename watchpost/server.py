@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (__version__, assets, attack, auth, case_record, dashboard_views, ecs, engine, entities, geo, hunt, improve, incidents,
                masking, playbooks, portability, queries, report, retention, search_rules, sigma, simulate, sources, storyline, stream,
-               triage)
+               threat_intel, triage)
 from . import backtest as backtest_mod
 from .ratelimit import TokenBucketLimiter
 from .config import Config
@@ -48,6 +48,7 @@ class App:
     def __init__(self, config: Config):
         self.config = config
         self.retention_policy = retention.Policy.from_config(config)  # None when off; refuses contradictory settings
+        self.threat_feeds = threat_intel.feeds_from_config(config)    # presets and URLs to fetch; refuses plain http
         conn = connect(config.db_path, config.audit_key)
         try:
             init_schema(conn)
@@ -475,6 +476,38 @@ def alert_status(req, alert_id):
 @route("POST", r"/api/alerts/(\d+)/assign", role="analyst")
 def alert_assign(req, alert_id):
     return queries.assign(req.conn, int(alert_id), req.user["username"], body_json(req).get("assignee"))
+
+
+# Threat intelligence ----------------------------------------------------------------------
+@route("GET", "/api/threat-intel")
+def threat_overview(req):
+    """The feeds and what they tagged. With ?ip=, also what lists that one address."""
+    overview = threat_intel.overview(req.conn, req.app.threat_feeds)
+    if req.query.get("ip"):
+        overview["lookup"] = threat_intel.lookup(req.conn, req.query["ip"])
+    return overview
+
+
+@route("POST", r"/api/threat-intel/feeds/([a-z0-9_-]{1,32})", role="admin")
+def threat_feed_import(req, name):
+    data = body_json(req)
+    return threat_intel.replace_feed(req.conn, name, data.get("text"), req.user["username"],
+                                     synthetic=data.get("synthetic") is True)
+
+
+@route("POST", r"/api/threat-intel/feeds/([a-z0-9_-]{1,32})/delete", role="admin")
+def threat_feed_delete(req, name):
+    return threat_intel.delete_feed(req.conn, name, req.user["username"])
+
+
+@route("POST", "/api/threat-intel/refresh", role="admin")
+def threat_refresh(req):
+    if not req.app.threat_feeds:
+        raise threat_intel.ThreatIntelError("no feed URL is configured (SIEM_THREAT_FEEDS)", 409)
+    config = req.app.config
+    return threat_intel.refresh(req.conn, req.app.threat_feeds, req.user["username"], timeout=15,
+                                otx_api_key=config.otx_api_key, otx_days=config.otx_days,
+                                min_age_seconds=threat_intel.MIN_FETCH_SECONDS)
 
 
 # Tiered retention -------------------------------------------------------------------------

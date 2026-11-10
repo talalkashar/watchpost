@@ -44,7 +44,7 @@ DEFINITION_KEYS = {"name", "group_by", "threshold", "window_minutes", "severity"
 NOT_LOADED = ("outcome", "severity", "batch_id")
 TIME_FIELDS = ("last", "since", "until")
 GROUP_BY = [f for f in hunt.GROUPABLE if f not in NOT_LOADED and f != "synthetic"]
-SAMPLE_FIELDS = sigma.SAMPLE_FIELDS | {"source"}
+SAMPLE_FIELDS = sigma.SAMPLE_FIELDS | {"source", "threat"}  # threat: what threat_intel.tag() sets on stored events
 SAMPLE_BASE = "2024-01-01T00:00:00.000Z"  # sample events without a ts are one second apart from here
 
 _ASCII_FOLD = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)

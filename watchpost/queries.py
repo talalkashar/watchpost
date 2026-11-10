@@ -10,7 +10,7 @@ from .normalize import EVENT_TYPES, SEVERITIES, EventError, parse_timestamp
 ALERT_STATUSES = ("open", "investigating", "resolved")
 DISPOSITIONS = ("true_positive", "false_positive", "benign")
 EVENT_FIELDS = "id, ts, ingested_at, source, host, event_type, outcome, severity, user, src_ip, dest_ip, dest_port, " \
-               "bytes, message, synthetic, batch_id"
+               "bytes, message, synthetic, batch_id, threat"
 
 
 class QueryError(ValueError):

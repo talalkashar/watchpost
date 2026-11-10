@@ -119,7 +119,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**.
 ### Tests
 
 ```bash
-./run_tests.sh      # 680 unit/integration tests + a 27-step end-to-end smoke check
+./run_tests.sh      # 695 unit/integration tests + a 27-step end-to-end smoke check
 ```
 
 ### Replit
@@ -149,6 +149,9 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**.
 | `SIEM_LOGIN_RATE_BURST` / `SIEM_LOGIN_RATE_PER_MIN` | `10` / `10` | Token bucket for `POST /api/auth/login`, per client IP |
 | `SIEM_RATE_BURST` / `SIEM_RATE_PER_MIN` | `300` / `1200` | Token bucket for every other request (API and static), per client IP |
 | `SIEM_TRUST_PROXY` | `0` | `1` behind a local reverse proxy: the client IP is the last `X-Forwarded-For` entry on loopback connections |
+| `SIEM_THREAT_FEEDS` | unset (nothing is fetched) | Threat intelligence feeds to fetch: preset names and `name=https://...` pairs, comma-separated. See [Threat intelligence](#threat-intelligence) |
+| `SIEM_THREAT_FEED_MINUTES` | `360` | Minutes between fetches; at least 60 |
+| `SIEM_OTX_API_KEY` / `SIEM_OTX_DAYS` | unset / `30` | API key of an OTX account for the `otx` preset, and how many days of changed pulses to read |
 | `SIEM_RETENTION_HOT_DAYS` | unset (retention off, nothing deleted) | Days after arrival an event stays in the database. Setting it turns on [tiered retention](#tiered-retention-hot-warm-cold) |
 | `SIEM_RETENTION_WARM_DAYS` | unset (archives stay warm) | Days after arrival an archive file moves to cold storage |
 | `SIEM_RETENTION_TOTAL_DAYS` | unset (never deleted) | Days after arrival an archive file is deleted |
@@ -208,6 +211,7 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | `watchpost/case_record.py` | Chronological incident case records combining evidence, membership, workflow transitions, assignments, and notes; renders JSON and Markdown. |
 | `watchpost/ecs.py` | Maps an event to Elastic Common Schema field names for export. |
 | `watchpost/syslog_listener.py` | Optional syslog receiver over UDP, TCP and TLS (RFC 3164, RFC 5424, RFC 6587 framing, RFC 5425 TLS with optional client certificates). Runs each line through the auth.log parser, falls back to a generic `syslog` event with severity from PRI, and batches into the engine every 2 seconds. Reports itself as the `syslog` health component. |
+| `watchpost/threat_intel.py` | Threat intelligence feeds: lists of hostile addresses and networks, imported by an admin or fetched from presets (Spamhaus DROP, Emerging Threats, CINS, blocklist.de, IPsum, Feodo, Tor exits, OTX) and other URLs. Tags events on arrival and again when a feed changes, raises alerts that touch a listed address, and refuses internal or over-broad entries. |
 | `watchpost/retention.py` | Tiered retention, off by default: writes each arrival day older than the hot period to a gzip JSON-lines file, verifies it, then deletes the rows (never alert evidence); moves files to a cold directory and deletes them at the end of retention; keeps a manifest with SHA-256 hashes; searches a warm day. |
 | `watchpost/playbooks.py` | Response playbooks: the built-in step lists, one per kind of alert; the automatic context and notification steps; step state per alert; response-action requests with their guard rails; and the outbox and delivery thread for the webhook. |
 | `scripts/shipper.py` | Stdlib-only file tailer for Linux boxes: batches new lines to `/api/ingest/upload` with an ingest token, with backoff, rotation handling, and a position file. |
@@ -220,7 +224,7 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 
 ### Normalized event schema
 
-`id, ts (UTC ISO-8601), ingested_at, source, host, event_type, outcome, severity, user, src_ip, dest_ip, message, raw (redacted, truncated), synthetic, batch_id`
+`id, ts (UTC ISO-8601), ingested_at, source, host, event_type, outcome, severity, user, src_ip, dest_ip, message, raw (redacted, truncated), synthetic, batch_id, threat (set by Watchpost from the threat intelligence feeds, never by the sender)`
 
 `event_type` is one of `auth_failure, auth_success, account_lockout, user_created, privilege_use, process_start, network_connection, file_access, other`, plus (2.0) `web_request, web_scan, web_error, fw_deny, fw_allow, vpn_login, cloud_api_call, cloud_iam_change, cloud_data_access, privilege_escalation`, and `syslog` (a line received by the syslog listener that no parser recognized). Events also carry `dest_port` and `bytes` when the source has them.
 
@@ -297,6 +301,52 @@ finding from one rule between explicit start and expiry times (at most 30 days),
 which labeled attacks will be missed and approval by a different admin requires explicit detection-loss
 acknowledgement. Detection runs count findings skipped by an active window. Upcoming, active, expired and
 manually ended windows remain visible under Rules & review; ending one early is an audited admin action.
+
+### Threat intelligence
+
+A threat intelligence feed is a named list of IP addresses and networks someone has reason to call hostile. `watchpost/threat_intel.py` keeps the feeds and marks what touches them.
+
+**Where a feed comes from**
+
+- **Imported by an admin:** paste a list under **Admin > Threat intelligence**, or post it to `POST /api/threat-intel/feeds/{name}`. One address or network per line; a note may follow `#`, `;` or a comma.
+- **A preset:** a well-known open feed, turned on by name. `SIEM_THREAT_FEEDS=spamhaus_drop,et_compromised,ipsum` fetches those three.
+- **Any other URL:** `SIEM_THREAT_FEEDS=mylist=https://intel.example.internal/bad.txt`.
+
+Nothing is fetched unless `SIEM_THREAT_FEEDS` names it. URL feeds are fetched every `SIEM_THREAT_FEED_MINUTES` (default 360, minimum 60), and never more than once an hour whatever happens, including a restart or an admin pressing the button. Only HTTPS is accepted, redirects are not followed, and a download is capped at 8 MB.
+
+**The presets.** No feed's data is in this repository: it holds synthetic data only, and a list of hostile addresses is stale within days. Each preset was fetched once and read with the parser, and its publisher's terms were read, on 2026-11-10. The table says what those pages said then. Whether you may use a feed where you work is between you and its publisher, so read the terms.
+
+| Name | What it lists | Terms as read on 2026-11-10 |
+|---|---|---|
+| `spamhaus_drop` | Spamhaus DROP: networks hijacked or leased by spam and cybercrime operations. Data from The Spamhaus Project | Free to download and use, with credit to The Spamhaus Project; at most one automated download an hour. [Fair use policy](https://www.spamhaus.org/blocklists/drop-fair-use-policy/) |
+| `et_compromised` | Emerging Threats (Proofpoint): hosts seen attacking others | The file states no licence (the open ruleset it belongs to is BSD-licensed); at most one download an hour. [Download instructions](https://rules.emergingthreats.net/OPEN_download_instructions.html) |
+| `cins_army` | CINS Army (Sentinel IPS): up to 15,000 addresses with a very poor reputation | No formal licence; the publisher says to use it "in any way you see fit". [Publisher](https://cinsscore.com/#list) |
+| `blocklist_de` | blocklist.de: addresses that attacked its reporting servers in the last 48 hours | No formal licence; offered as is, at your own risk. [Publisher](https://www.blocklist.de/en/export.html) |
+| `ipsum` | IPsum level 3: addresses on three or more of some thirty public blocklists | The Unlicense; the lists it aggregates keep their own terms. [Repository](https://github.com/stamparm/ipsum) |
+| `feodo` | abuse.ch Feodo Tracker: botnet command-and-control servers. Almost empty at present, after takedowns | CC0. [Terms](https://abuse.ch/terms-of-use/) |
+| `tor_exits` | Tor exit relays. Context, not a verdict: a login through Tor is worth a look, not proof of anything | No licence stated for the file. [Tor Project](https://support.torproject.org/abuse/ban-tor/) |
+| `otx` | AlienVault (LevelBlue) OTX: the addresses in the pulses your OTX account subscribes to, changed in the last `SIEM_OTX_DAYS` days (default 30) | **Free for non-commercial use only.** Needs a free account and its API key in `SIEM_OTX_API_KEY`. [OTX terms](https://www.levelblue.com/legal/otx-eula-terms) |
+
+For OTX, create an account, subscribe to the pulses or authors you trust, and copy the API key from your OTX settings into `SIEM_OTX_API_KEY`. The collector reads `GET /api/v1/pulses/subscribed` with the key in the `X-OTX-API-KEY` header, follows the paging on the same host only, and keeps the `IPv4`, `IPv6` and `CIDR` indicators with the pulse's name as the note. It is tested against a stand-in for the OTX API, written from the official OTX Python SDK. It has not been run against OTX itself: that needs an account.
+
+**What a feed does**
+
+- **Tags events as they arrive.** If an event's source or destination address is listed, its `threat` field names the feed and the entry's note (`spamhaus_drop: SBL256894`). The tag shows wherever events do, is kept when the event is archived, and cannot be set by whoever sent the event.
+- **Tags the past too.** When a feed changes, stored events are tagged again, so an address listed today also marks what it did last week.
+- **Raises alerts.** An alert whose evidence carries a tag goes up one severity level, and its severity note says which feed.
+- **Is searchable.** The hunt `threat:*` finds every tagged event; `threat:spamhaus*` those of one feed.
+- **Becomes a detection if you want one.** Save the hunt `threat:*` and promote it to a rule (see [Saved searches as detections](#saved-searches-as-detections)). It then goes through the same review as any other rule, which is why no rule is built in for it.
+
+**What a feed may not do.** A line that names an internal address, or a network broader than a /16 (IPv4) or a /32 (IPv6), is refused, counted and reported; the rest of the feed is used. Otherwise one bad line could mark the whole office as hostile. With today's Spamhaus DROP, that refuses 9 of its 1,763 networks.
+
+Limits:
+
+- Addresses and networks only. No domains, URLs or file hashes.
+- A listed address is a reason to look, not a verdict. Open lists carry stale entries, shared hosting and cloud addresses that have changed hands.
+- A URL feed that cannot be fetched keeps its last good copy and shows the error. Entries have no expiry of their own: they leave when the feed drops them.
+- The fetcher starts from `main.py`, like the other background services.
+- With more than 200,000 distinct addresses in stored events, a changed feed tags only new events.
+- Spamhaus says its text file will be replaced by a JSON one at some point. The preset reads the text file.
 
 ### Tiered retention (hot, warm, cold)
 
@@ -641,7 +691,7 @@ Send `{"value": 0}` the same way to turn it off. A viewer with masking on gets `
 | `last:` | `last:15m`, `last:24h`, `last:7d` | Window up to now, at most 365 days |
 | `since:` / `until:` | `since:2026-10-01 until:2026-10-02T06:00Z` | ISO times, UTC unless an offset is given |
 
-Fields: `user`, `host`, `source`, `outcome`, `src_ip`, `dest_ip`, `ip` (source or destination), `batch_id`, `event_type`, `severity`, `dest_port`, `synthetic` (`0`/`1`), `message`. An unknown field is an error that lists these. Queries are capped at 500 characters and 20 terms, and results page and sort like event search (newest first, up to 1000 per page).
+Fields: `user`, `host`, `source`, `outcome`, `src_ip`, `dest_ip`, `ip` (source or destination), `batch_id`, `event_type`, `severity`, `dest_port`, `synthetic` (`0`/`1`), `message`, `threat` (what threat intelligence lists the event's address under; `threat:*` is every listed event). An unknown field is an error that lists these. Queries are capped at 500 characters and 20 terms, and results page and sort like event search (newest first, up to 1000 per page).
 
 ```
 user:alice event_type:auth_failure NOT src_ip:10.0.0.5 host:web* "invalid password" last:24h
