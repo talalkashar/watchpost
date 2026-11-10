@@ -101,6 +101,43 @@ class SyslogParsingTests(unittest.TestCase):
                                "SRC=198.51.100.3 DST=192.0.2.10 LEN=60 PROTO=TCP SPT=40001 DPT=443")
         self.assertEqual(allow["event_type"], "fw_allow")
 
+    def test_firewall_appliance_frames(self):
+        # FortiGate sends no syslog header: the device name and time come from its own fields.
+        deny = frame_to_event('<189>date=2026-09-28 time=12:00:01 devname="FG100" logid="0000000013" type="traffic" '
+                              'subtype="forward" tz="+0200" srcip=203.0.113.9 srcport=40000 dstip=192.0.2.10 '
+                              'dstport=22 action="deny" sentbyte=0 rcvdbyte=0', "192.0.2.254")
+        self.assertEqual((deny["event_type"], deny["host"], deny["ts"], deny["src_ip"], deny["dest_port"]),
+                         ("fw_deny", "FG100", "2026-09-28T10:00:01.000Z", "203.0.113.9", 22))
+        closed = frame_to_event('<189>date=2026-09-28 time=12:00:02 devname="FG100" logid="0000000013" '
+                                'type="traffic" srcip=10.0.3.15 dstip=198.51.100.99 dstport=443 action="close" '
+                                'user="carol" sentbyte=1800000000 rcvdbyte=4000', "192.0.2.254")
+        self.assertEqual((closed["event_type"], closed["user"], closed["bytes"], closed["ts"]),
+                         ("fw_allow", "carol", 1800000000, "2026-09-28T12:00:02.000Z"))
+        login = frame_to_event('<185>date=2026-09-28 time=12:00:03 devname="FG100" logid="0100032002" type="event" '
+                               'subtype="system" logdesc="Admin login failed" user="admin" srcip=203.0.113.9 '
+                               'action="login" status="failed"', "192.0.2.254")
+        self.assertEqual((login["event_type"], login["user"], login["src_ip"]), ("auth_failure", "admin", "203.0.113.9"))
+        # Palo Alto: the default comma-separated TRAFFIC log, with a quoted rule name that contains a comma.
+        allow = frame_to_event('<14>Sep 28 10:00:13 pa01 1,2026/09/28 10:00:13,007000001234,TRAFFIC,end,2049,'
+                               '2026/09/28 10:00:13,10.0.3.15,198.51.100.99,192.0.2.1,198.51.100.99,"allow, web",'
+                               'corp\\dave,,ssl,vsys1,trust,untrust,ethernet1/2,ethernet1/1,log-fwd,'
+                               '2026/09/28 10:00:13,4321,1,52000,443,61000,443,0x400053,tcp,allow,1250000900,'
+                               '1250000000,900,9000,2026/09/28 09:50:00,600,any')
+        self.assertEqual((allow["event_type"], allow["host"], allow["user"], allow["dest_port"], allow["bytes"]),
+                         ("fw_allow", "pa01", "corp\\dave", 443, 1250000000))
+        drop = frame_to_event("<14>Sep 28 10:00:12 pa01 1,2026/09/28 10:00:12,007000001234,TRAFFIC,drop,2049,"
+                              "2026/09/28 10:00:12,203.0.113.9,192.0.2.10,0.0.0.0,0.0.0.0,block-inbound,,,"
+                              "not-applicable,vsys1,untrust,trust,ethernet1/1,,log-fwd,2026/09/28 10:00:12,0,1,"
+                              "40003,8080,0,0,0x0,tcp,drop,74,74,0,1,2026/09/28 10:00:11,0,any")
+        self.assertEqual((drop["event_type"], drop["src_ip"], drop["dest_port"]), ("fw_deny", "203.0.113.9", 8080))
+        # Cisco ASA: the message ID is the syslog tag, with or without a header in front of it.
+        for frame, host in (('<164>Sep 28 10:00:04 asa01 %ASA-4-106023: Deny tcp src outside:203.0.113.9/40000 dst '
+                             'inside:192.0.2.10/3389 by access-group "outside_in" [0x0, 0x0]', "asa01"),
+                            ('<164>%ASA-4-106023: Deny tcp src outside:203.0.113.9/40000 dst inside:192.0.2.10/3389 '
+                             'by access-group "outside_in" [0x0, 0x0]', "192.0.2.254")):
+            asa = frame_to_event(frame, "192.0.2.254")
+            self.assertEqual((asa["event_type"], asa["host"], asa["dest_port"]), ("fw_deny", host, 3389))
+
     def test_tcp_framing_octet_counting_and_newlines(self):
         import io
         msg = b"<13>1 2026-09-28T10:00:00Z h a - - - one\nstill one"

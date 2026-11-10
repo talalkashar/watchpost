@@ -8,6 +8,8 @@ All bundled data is synthetic. PR numbers refer to https://github.com/talalkasha
 
 - Syslog over TLS (RFC 5425), the first item of #8. With `SIEM_SYSLOG_TLS_CERT` and `SIEM_SYSLOG_TLS_KEY` the listener takes frames over TLS 1.2+ on TCP 6514, and with `SIEM_SYSLOG_TLS_CLIENT_CA` only from senders that present a certificate signed by that CA. TLS replaces the plaintext UDP/TCP listeners unless `SIEM_SYSLOG_PLAINTEXT=1`, and TLS settings that cannot be loaded stop the listener instead of falling back to plaintext. Standard library only; the tests generate their own throwaway certificates, so no key files are in the repository. The rsyslog setup in docs/LIVE_INGEST.md was run on Debian 12 and Ubuntu 22.04 and 24.04.
 
+- Firewalls over syslog, part of the second item of #8. Syslog lines from pfSense/OPNsense (`filterlog`), FortiGate, Cisco ASA/FTD and Palo Alto (`TRAFFIC`) become `fw_deny` and `fw_allow` events with source, destination and port, and firewall admin and VPN logins become `auth_failure` and `auth_success`. Lines in other formats stay generic `syslog` events. The parsers follow the published log formats and are tested on synthetic lines, not on the devices. New sample: `samples/firewall_syslog.log`.
+
 ### Fixed
 
 - Syslog listener: when one of its ports could be bound and another could not, the listener reported `failing` but shutdown then blocked forever. A transport that did bind is now released, and shutdown returns.

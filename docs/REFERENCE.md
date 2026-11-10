@@ -119,7 +119,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**.
 ### Tests
 
 ```bash
-./run_tests.sh      # 618 unit/integration tests + a 26-step end-to-end smoke check
+./run_tests.sh      # 621 unit/integration tests + a 26-step end-to-end smoke check
 ```
 
 ### Replit
@@ -179,6 +179,7 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | Module | Responsibility |
 |---|---|
 | `watchpost/normalize.py` | Parses JSON, JSONL, CSV, Linux `auth.log` (OpenSSH), and Windows Security events (4624/4625/4672/4688/4720/4740). Accepts common field aliases, including ECS-style nesting. Validates timestamps, IPs, severities, and lengths, strips control characters, and redacts secrets. Every rejected record gets a reason and a position. |
+| `watchpost/firewall.py` | Reads firewall appliance syslog lines (pfSense/OPNsense `filterlog`, FortiGate, Cisco ASA/FTD, Palo Alto `TRAFFIC`) into `fw_deny`, `fw_allow` and login events. Default log formats only; tested on synthetic lines. |
 | `watchpost/correlate.py`, `watchpost/incidents.py` | Pure alert-to-incident grouping; incident queries, status changes, and ATT&CK coverage. |
 | `watchpost/attack.py`, `watchpost/geo.py` | Static ATT&CK subset; synthetic geo table for demo IP ranges (never a real lookup). |
 | `watchpost/rules.py` | Fifteen built-in explainable rules as pure functions over event lists, each with a plain-English explanation. Also validates rule parameters. |
