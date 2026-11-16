@@ -79,7 +79,7 @@ function bars(values, { w = 300, h = 100, cls = "accent", titles = [], label = "
 // Stacked bars with an optional overlay line (e.g. event volume on its own scale).
 // bins: [{...}], keys: stacking order bottom-up, each key maps to class f-<key>.
 function stackedBars(bins, keys, { w = 400, h = 150, overlay = null, labels = [], title = null, label = "stacked bars" } = {}) {
-  const pad = 22, top = 6, bottom = 16;
+  const pad = 30, top = 8, bottom = 18;
   const ih = h - top - bottom, iw = w - pad - 4;
   const totals = bins.map((b) => keys.reduce((sum, k) => sum + (b[k] || 0), 0));
   const max = scaleMax(totals);
@@ -125,20 +125,23 @@ function clip(text, chars) {
 }
 
 function hbars(rows, { w = 300, rowH = 22, labelW = 118, label = "ranking" } = {}) {
-  const fit = Math.floor(labelW / 6.7), fitSub = Math.floor(labelW / 5.2);
+  const fit = Math.floor(labelW / 7.2), fitSub = Math.floor(labelW / 6.4);
   const h = Math.max(rowH, rows.length * rowH);
   const max = scaleMax(rows.map((r) => r.value));
   const trackX = labelW + 6, trackW = Math.max(20, w - trackX - 40);
+  const barH = 8;
   let out = svgOpen(w, h, "hbars", label);
   rows.forEach((r, i) => {
     const y = i * rowH;
+    const mid = y + rowH / 2;
     const bw = (Math.max(0, r.value) / max) * trackW;
+    const labelY = r.sub ? y + rowH * 0.40 : mid + 4;
     out += `<g class="hrow"><title>${esc(r.title ?? `${r.label}: ${r.value}`)}</title>` +
-      `<text class="hl" x="0" y="${n2(y + (r.sub ? 9 : 14))}">${esc(clip(r.label, fit))}</text>` +
-      (r.sub ? `<text class="hs${r.subCls ? " " + esc(r.subCls) : ""}" x="0" y="${n2(y + 19)}">${esc(clip(r.sub, fitSub))}</text>` : "") +
-      `<rect class="track" x="${trackX}" y="${n2(y + 7)}" width="${n2(trackW)}" height="7"/>` +
-      `<rect class="f-${esc(r.cls || "accent")}" x="${trackX}" y="${n2(y + 7)}" width="${n2(Math.max(1.5, bw))}" height="7"/>` +
-      `<text class="hv" x="${n2(w)}" y="${n2(y + 14)}" text-anchor="end">${esc(r.value)}</text></g>`;
+      `<text class="hl" x="0" y="${n2(labelY)}">${esc(clip(r.label, fit))}</text>` +
+      (r.sub ? `<text class="hs${r.subCls ? " " + esc(r.subCls) : ""}" x="0" y="${n2(y + rowH * 0.84)}">${esc(clip(r.sub, fitSub))}</text>` : "") +
+      `<rect class="track" x="${trackX}" y="${n2(mid - barH / 2)}" width="${n2(trackW)}" height="${barH}"/>` +
+      `<rect class="f-${esc(r.cls || "accent")}" x="${trackX}" y="${n2(mid - barH / 2)}" width="${n2(Math.max(1.5, bw))}" height="${barH}"/>` +
+      `<text class="hv" x="${n2(w)}" y="${n2(mid + 4)}" text-anchor="end">${esc(r.value)}</text></g>`;
   });
   return out + "</svg>";
 }
@@ -146,34 +149,41 @@ function hbars(rows, { w = 300, rowH = 22, labelW = 118, label = "ranking" } = {
 // ATT&CK-style heat matrix. columns: [{name, short, cells: [{id, name, value, covered, rules}]}]
 // value -> heat class h0..h5 on a log-ish scale; uncovered cells are drawn hollow.
 function heatMatrix(columns, { w = 700, cellH = 22, headH = 30, maxRows = 8, label = "coverage matrix" } = {}) {
-  const cols = Math.max(1, columns.length);
-  const cw = w / cols;
-  const rows = Math.min(maxRows, Math.max(1, ...columns.map((c) => c.cells.length)));
+  const list = columns.length ? columns : [{ name: "", short: "", cells: [] }];
+  const any = list.some((c) => c.cells.length);
+  const weights = list.map((c) => (any && !c.cells.length ? 0.42 : 1));
+  const weightSum = weights.reduce((sum, n) => sum + n, 0);
+  const rows = Math.min(maxRows, Math.max(1, ...list.map((c) => c.cells.length || 1)));
   const h = headH + rows * (cellH + 3);
-  const max = scaleMax(columns.flatMap((c) => c.cells.map((x) => x.value || 0)));
+  const max = scaleMax(list.flatMap((c) => c.cells.map((x) => x.value || 0)));
   const level = (v) => (!v ? 0 : Math.min(5, 1 + Math.floor((Math.log(v + 1) / Math.log(max + 1)) * 4.999)));
   let out = svgOpen(w, h, "heat", label);
-  columns.forEach((c, ci) => {
-    const x = ci * cw;
+  let x = 0;
+  list.forEach((c, ci) => {
+    const cw = (w * weights[ci]) / weightSum;
+    const quiet = any && !c.cells.length;
     const hits = c.cells.reduce((s, x2) => s + (x2.value || 0), 0);
-    out += `<text class="th" x="${n2(x + 3)}" y="11">${esc(c.short || c.name)}<title>${esc(c.name)}</title></text>` +
-      `<text class="tc${hits ? " hot" : ""}" x="${n2(x + 3)}" y="23">${esc(c.cells.length)} tech · ${esc(hits)}</text>`;
-    for (let r = 0; r < rows; r++) {
-      const cell = c.cells[r];
-      const y = headH + r * (cellH + 3);
-      if (!cell) {
-        out += `<rect class="cell void" x="${n2(x + 1.5)}" y="${n2(y)}" width="${n2(cw - 3)}" height="${cellH}"/>`;
-        continue;
+    out += `<text class="th${quiet ? " quiet" : ""}" x="${n2(x + 3)}" y="12">${esc(c.short || c.name)}<title>${esc(c.name)}</title></text>` +
+      `<text class="tc${hits ? " hot" : ""}${quiet ? " quiet" : ""}" x="${n2(x + 3)}" y="25">${esc(c.cells.length)} tech · ${esc(hits)}</text>`;
+    if (!quiet) {
+      for (let r = 0; r < rows; r++) {
+        const cell = c.cells[r];
+        const y = headH + r * (cellH + 3);
+        if (!cell) {
+          out += `<rect class="cell void" x="${n2(x + 1.5)}" y="${n2(y)}" width="${n2(Math.max(1, cw - 3))}" height="${cellH}"/>`;
+          continue;
+        }
+        const lv = cell.covered === false ? "gap" : `h${level(cell.value || 0)}`;
+        const tip = `${cell.id} ${cell.name || ""}\n${c.name}\n${cell.value || 0} hits` + (cell.level ? `\nlevel: ${cell.level}` : "") +
+          (cell.rules && cell.rules.length ? `\nrules: ${cell.rules.join(", ")}` : "\nno rule covers this");
+        out += `<g class="cellg"><title>${esc(tip)}</title>` +
+          `<rect class="cell ${lv}" x="${n2(x + 1.5)}" y="${n2(y)}" width="${n2(Math.max(1, cw - 3))}" height="${cellH}"/>` +
+          `<text class="cid ${lv}" x="${n2(x + 4)}" y="${n2(y + cellH / 2 + 3.2)}">${esc(cell.id)}</text>` +
+          (cell.value ? `<text class="cv ${lv}" x="${n2(x + cw - 4)}" y="${n2(y + cellH / 2 + 3.2)}" text-anchor="end">${esc(cell.value)}</text>` : "") +
+          `</g>`;
       }
-      const lv = cell.covered === false ? "gap" : `h${level(cell.value || 0)}`;
-      const tip = `${cell.id} ${cell.name || ""}\n${c.name}\n${cell.value || 0} hits` + (cell.level ? `\nlevel: ${cell.level}` : "") +
-        (cell.rules && cell.rules.length ? `\nrules: ${cell.rules.join(", ")}` : "\nno rule covers this");
-      out += `<g class="cellg"><title>${esc(tip)}</title>` +
-        `<rect class="cell ${lv}" x="${n2(x + 1.5)}" y="${n2(y)}" width="${n2(cw - 3)}" height="${cellH}"/>` +
-        `<text class="cid ${lv}" x="${n2(x + 4)}" y="${n2(y + cellH / 2 + 3.2)}">${esc(cell.id)}</text>` +
-        (cell.value ? `<text class="cv ${lv}" x="${n2(x + cw - 4)}" y="${n2(y + cellH / 2 + 3.2)}" text-anchor="end">${esc(cell.value)}</text>` : "") +
-        `</g>`;
     }
+    x += cw;
   });
   return out + "</svg>";
 }
