@@ -142,7 +142,7 @@ body[data-view="incidents"] .page-head .muted {
 }
 @media (min-width: 761px) {
   body[data-view="incidents"] .board.big {
-    grid-template-columns: minmax(0, 1.7fr) minmax(200px, .72fr) minmax(200px, .72fr);
+    grid-template-columns: minmax(0, 2.2fr) minmax(168px, .52fr) minmax(168px, .52fr);
     gap: 14px;
     align-items: start;
   }
@@ -182,7 +182,7 @@ body[data-view="incidents"] .bcard:hover {
   border-left-color: currentColor;
 }
 body[data-view="incidents"] .bt {
-  font-size: 13.5px;
+  font-size: 14.5px;
   font-weight: 600;
   line-height: 1.35;
   color: #fff;
@@ -472,6 +472,23 @@ body[data-view="rules"] pre {
   max-height: 168px;
   overflow: auto;
 }
+body[data-view="rules"] .card[id^="rule-"] > p.muted {
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.55;
+  max-width: 82ch;
+}
+body[data-view="rules"] .card[id^="rule-"] h3 {
+  font-size: 11px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+body[data-view="rules"] .card[id^="rule-"] > .row:last-child {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid rgb(36 55 72 / .7);
+}
 body[data-view="rules"] td,
 body[data-view="health"] td,
 body[data-view="noise"] td,
@@ -496,16 +513,41 @@ body[data-view="coverage"] .legend [role="listitem"] {
   color: var(--ink-2);
   font-size: 13px;
 }
-body[data-view="coverage"] .cov-grid { gap: 10px; }
+body[data-view="coverage"] .cov-scroll { container-type: inline-size; }
+body[data-view="coverage"] .cov-grid {
+  gap: 10px;
+  grid-auto-columns: calc((100cqw - 70px) / 8);
+  align-items: start;
+}
 body[data-view="coverage"] .cov-cell {
   border-radius: 8px;
   padding: 8px 10px;
 }
-body[data-view="coverage"] .cov-col:not(:has(.cov-cell)) .cov-head { font-weight: 500; }
+body[data-view="coverage"] .cov-cell span { color: #fff; font-size: 12.5px; }
+body[data-view="coverage"] .cov-cell.lv-validated {
+  background: rgb(53 212 154 / .12);
+  border-color: rgb(53 212 154 / .7);
+}
+body[data-view="coverage"] .cov-cell.lv-mapped {
+  background: rgb(242 194 48 / .12);
+  border-color: rgb(242 194 48 / .65);
+}
+body[data-view="coverage"] .cov-cell.lv-disabled {
+  background: rgb(122 143 164 / .07);
+  border-color: rgb(122 143 164 / .45);
+}
+body[data-view="coverage"] .cov-cell.lv-gap { background: rgb(255 61 90 / .08); }
+body[data-view="coverage"] .cov-head { font-size: 12px; line-height: 1.3; }
+body[data-view="coverage"] .cov-col:not(:has(.cov-cell)) .cov-head {
+  font-weight: 500;
+  color: var(--muted);
+  border-bottom-style: dashed;
+}
 body[data-view="coverage"] .cov-col:not(:has(.cov-cell)) .cov-empty {
   border: 1px dashed rgb(36 55 72 / .85);
   border-radius: 8px;
   padding: 8px;
+  color: var(--muted);
 }
 body[data-view="coverage"] .page-head a {
   margin-left: auto;
@@ -598,6 +640,7 @@ dialog {
   body[data-view="incidents"] .bcol:not(:has(.bcard)) .bmore { margin-left: auto; }
   body[data-view="events"] form.card > .row,
   body[data-view="coverage"] .legend [role="listitem"] { grid-template-columns: 1fr; }
+  body[data-view="coverage"] .cov-grid { grid-auto-columns: calc(100cqw - 36px); }
   body[data-view="health"] .check { grid-template-columns: 1fr; }
   /* Keep short status pills intact; the base stylesheet lets every pill wrap at 760px. */
   body.authed:not([data-view="dashboard"]) td .pill:not(.technique):not(.asset):not(.tag):not(.stage),
@@ -619,4 +662,5 @@ dialog {
 }
 @media (min-width: 761px) and (max-width: 1100px) {
   body[data-view="events"] form.card > .row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  body[data-view="coverage"] .cov-grid { grid-auto-columns: calc((100cqw - 40px) / 5); }
 }
