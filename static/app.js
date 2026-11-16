@@ -25,6 +25,13 @@ function el(tag, attrs = {}, ...children) {
 }
 const $ = (sel) => document.querySelector(sel);
 const fmtTime = (ts) => (ts ? ts.replace("T", " ").replace(/\.\d+Z$/, "Z") : "—");
+// Clock over the date. A narrow time column then reads as a stamp instead of breaking in half.
+function stamp(ts) {
+  const s = fmtTime(ts);
+  const i = s.indexOf(" ");
+  if (i < 0) return s;
+  return el("time", { class: "stamp", datetime: ts }, el("b", {}, s.slice(i + 1)), el("small", {}, s.slice(0, i)));
+}
 const pill = (text, cls) => el("span", { class: `pill ${cls}` }, text);
 const sev = (s) => pill(s, `sev-${s}`);
 const status = (s) => pill(s, `st-${s}`);
@@ -343,14 +350,16 @@ async function alerts() {
     el("div", { class: "card" }, el("h2", {}, `Active incidents (${incidents.length})`),
       el("p", { class: "muted" }, "Alerts that share a source IP, account, or host within 30 minutes are grouped into one incident. Severity rises one level when an incident spans three or more ATT&CK tactics."),
       table(["Severity", "Incident", "Kill chain", "Alerts", "Status", "Last seen", ""],
-        incidents.map((i) => ({ id: i.id, cells: [sev(i.severity), i.title, i.stages.join(" → ") || "—", { num: i.alert_count },
-          status(i.status), fmtTime(i.last_seen), synth(i.synthetic)] })),
+        incidents.map((i) => ({ id: i.id, cells: [sev(i.severity), i.title,
+          i.stages.length ? el("span", { class: "stages" }, i.stages.map((t) => pill(t, "stage"))) : "—",
+          { num: i.alert_count }, status(i.status), stamp(i.last_seen), synth(i.synthetic)] })),
         (r) => go("incidents", r.id))),
     form, el("div", { class: "card", "data-kbd-list": "alerts" }, table(
     ["Severity", "Alert", "Rule", "Status", "Events", "Last seen", ""],
     list.map((a) => ({ id: a.id, cells: [sev(a.severity), a.title, el("code", {}, a.rule_id),
-      el("span", {}, status(a.status), a.disposition ? ` ${a.disposition.replace("_", " ")}` : "", a.sla_breach?.length ? " " : null, slaBadge(a.sla_breach)),
-      { num: a.event_count }, fmtTime(a.last_seen), synth(a.synthetic)] })),
+      el("span", { class: "cell-stack" }, status(a.status),
+        a.disposition ? el("span", { class: "disp" }, a.disposition.replace("_", " ")) : null, slaBadge(a.sla_breach)),
+      { num: a.event_count }, stamp(a.last_seen), synth(a.synthetic)] })),
     (r) => go("alerts", r.id))));
   restoreSelection(`[data-kbd-list] tr[data-id="${state.restore}"]`);
 }
@@ -396,11 +405,11 @@ async function alertDetail(id) {
           actions),
         el("div", { class: "card" }, el("h2", {}, `Evidence (${a.evidence.length} events)`),
           table(["Time", "Type", "User", "Source IP", "Host", "Message"],
-            a.evidence.map((e) => ({ cells: [fmtTime(e.ts), e.event_type, entityLink("user", e.user), el("code", {}, entityLink("src_ip", e.src_ip)), entityLink("host", e.host), e.message ?? ""] })))),
+            a.evidence.map((e) => ({ cells: [stamp(e.ts), e.event_type, entityLink("user", e.user), el("code", {}, entityLink("src_ip", e.src_ip)), entityLink("host", e.host), e.message ?? ""] })))),
         el("div", { class: "card" }, el("h2", {}, "Related timeline"),
           el("p", { class: "muted" }, "Every event involving these IPs or accounts from 30 minutes before to 30 minutes after. Highlighted rows are evidence."),
           table(["Time", "Type", "User", "Source IP", "Source", "Message"],
-            a.timeline.map((e) => ({ cls: e.is_evidence ? "evidence" : "", cells: [fmtTime(e.ts), e.event_type, entityLink("user", e.user), el("code", {}, entityLink("src_ip", e.src_ip)), e.source, e.message ?? ""] }))))),
+            a.timeline.map((e) => ({ cls: e.is_evidence ? "evidence" : "", cells: [stamp(e.ts), e.event_type, entityLink("user", e.user), el("code", {}, entityLink("src_ip", e.src_ip)), e.source, e.message ?? ""] }))))),
       el("div", {},
         el("div", { class: "card" }, el("h2", {}, "Details"), el("dl", { class: "kv" },
           ...[["Alert", `#${a.id}`], ["Group", a.group_key], ["First seen", fmtTime(a.first_seen)], ["Last seen", fmtTime(a.last_seen)],
@@ -448,11 +457,11 @@ async function incidentDetail(id) {
           actions),
         el("div", { class: "card" }, el("h2", {}, `Alert timeline (${i.alerts.length})`),
           table(["First seen", "Severity", "Alert", "Tactics", "Techniques", "Status"],
-            i.timeline.map((t) => ({ id: t.alert_id, cells: [fmtTime(t.ts), sev(t.severity), t.title, t.tactics.join(", "), t.techniques.join(", "), status(t.status)] })),
+            i.timeline.map((t) => ({ id: t.alert_id, cells: [stamp(t.ts), sev(t.severity), t.title, t.tactics.join(", "), t.techniques.join(", "), status(t.status)] })),
             (r) => go("alerts", r.id))),
         el("div", { class: "card" }, el("h2", {}, `Evidence (${i.events.length} events)`),
           table(["Time", "Type", "User", "Source IP", "Host", "Message"],
-            i.events.map((e) => ({ cells: [fmtTime(e.ts), e.event_type, entityLink("user", e.user), el("code", {}, entityLink("src_ip", e.src_ip)), entityLink("host", e.host), e.message ?? ""] }))))),
+            i.events.map((e) => ({ cells: [stamp(e.ts), e.event_type, entityLink("user", e.user), el("code", {}, entityLink("src_ip", e.src_ip)), entityLink("host", e.host), e.message ?? ""] }))))),
       el("div", {},
         el("div", { class: "card" }, el("h2", {}, "Details"), el("dl", { class: "kv" },
           ...[["Incident", `#${i.id}`], ["First seen", fmtTime(i.first_seen)], ["Last seen", fmtTime(i.last_seen)],
@@ -497,7 +506,7 @@ async function entityDetail(kind, value) {
         (r) => go("incidents", r.id))),
     el("div", { class: "card" }, el("h2", {}, `Recent events (latest ${e.recent_events.length} of ${e.event_count.toLocaleString()})`),
       table(["Time", "Severity", "Type", "User", "Source IP", "Host", "Source", "Message"],
-        e.recent_events.map((x) => ({ cells: [fmtTime(x.ts), sev(x.severity), x.event_type, entityLink("user", x.user), el("code", {}, entityLink("src_ip", x.src_ip)), entityLink("host", x.host), el("span", {}, x.source, " ", synth(x.synthetic)), x.message ?? ""] })),
+        e.recent_events.map((x) => ({ cells: [stamp(x.ts), sev(x.severity), x.event_type, entityLink("user", x.user), el("code", {}, entityLink("src_ip", x.src_ip)), entityLink("host", x.host), el("span", {}, x.source, " ", synth(x.synthetic)), x.message ?? ""] })),
         null, "event-log")),
   );
 }
@@ -566,7 +575,7 @@ async function events(offset = 0) {
     el("button", { class: "ghost", disabled: offset + 100 >= data.total, onclick: () => guarded(() => events(offset + 100)) }, "Older"));
   render(el("h1", {}, "Event search"), form, el("div", { class: "card" }, pager,
     table(["Time", "Severity", "Type", "User", "Source IP", "Host", "Source", "Message"],
-      data.events.map((e) => ({ id: e.id, cells: [fmtTime(e.ts), sev(e.severity), e.event_type, e.user ?? "—", el("code", {}, e.src_ip ?? "—"), e.host ?? "—", el("span", {}, e.source, " ", synth(e.synthetic)), e.message ?? ""] })),
+      data.events.map((e) => ({ id: e.id, cells: [stamp(e.ts), sev(e.severity), e.event_type, e.user ?? "—", el("code", {}, e.src_ip ?? "—"), e.host ?? "—", el("span", {}, e.source, " ", synth(e.synthetic)), e.message ?? ""] })),
       (r) => guarded(() => eventDialog(r.id)), "event-log")));
 }
 
@@ -666,7 +675,7 @@ async function huntView(query = "", offset = 0) {
   if (state.focusSearch) { state.focusSearch = false; queueMicrotask(() => input.focus()); }
   render(el("h1", {}, "Hunt"), form, el("div", { class: "card" }, parsed, pager,
     table(["Time", "Severity", "Type", "User", "Source IP", "Host", "Source", "Message"],
-      data.events.map((e) => ({ id: e.id, cells: [fmtTime(e.ts), sev(e.severity), e.event_type, e.user ?? "—", el("code", {}, e.src_ip ?? "—"), e.host ?? "—", el("span", {}, e.source, " ", synth(e.synthetic)), e.message ?? ""] })),
+      data.events.map((e) => ({ id: e.id, cells: [stamp(e.ts), sev(e.severity), e.event_type, e.user ?? "—", el("code", {}, e.src_ip ?? "—"), e.host ?? "—", el("span", {}, e.source, " ", synth(e.synthetic)), e.message ?? ""] })),
       (r) => guarded(() => eventDialog(r.id)), "event-log")), savedCard);
 }
 

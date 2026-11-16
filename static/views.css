@@ -91,6 +91,41 @@ body.authed:not([data-view="dashboard"]) td {
 body.authed:not([data-view="dashboard"]) td code,
 body.authed:not([data-view="dashboard"]) td .mono { font-size: 12.5px; }
 body.authed:not([data-view="dashboard"]) tr.clickable:hover { background: rgb(46 196 255 / .055); }
+/* Time columns: the clock is the scan target, the date sits under it. */
+body.authed:not([data-view="dashboard"]) .stamp {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  line-height: 1.2;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+body.authed:not([data-view="dashboard"]) .stamp b {
+  font-weight: 600;
+  color: var(--ink);
+  font-size: 12.5px;
+}
+body.authed:not([data-view="dashboard"]) .stamp small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+body.authed:not([data-view="dashboard"]) .stages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+body.authed:not([data-view="dashboard"]) .cell-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+body.authed:not([data-view="dashboard"]) .cell-stack .disp {
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.3;
+}
 
 /* ---------- badges: filled, still the same hue ---------- */
 body.authed:not([data-view="dashboard"]) .pill {
@@ -250,26 +285,42 @@ body[data-view="hunt"] form.card input[name="q"] {
 body[data-view="health"] td:nth-child(2),
 body[data-view="incidents"] .split td:first-child { white-space: nowrap; }
 
-/* Alert tables: fixed columns, titles wrap on spaces, pills stay whole. */
+/* Alert tables: fixed tracks for the short columns. The title takes whatever is left. */
 body[data-view="alerts"] #view > .card .table-wrap table {
   table-layout: fixed;
   width: 100%;
   min-width: 960px;
 }
-body[data-view="alerts"] #view > .card .table-wrap th:nth-child(1),
-body[data-view="alerts"] #view > .card .table-wrap td:nth-child(1) { width: 11%; }
-body[data-view="alerts"] #view > .card .table-wrap th:nth-child(2),
-body[data-view="alerts"] #view > .card .table-wrap td:nth-child(2) { width: 28%; }
-body[data-view="alerts"] #view > .card .table-wrap th:nth-child(3),
-body[data-view="alerts"] #view > .card .table-wrap td:nth-child(3) { width: 22%; }
-body[data-view="alerts"] #view > .card .table-wrap th:nth-child(4),
-body[data-view="alerts"] #view > .card .table-wrap td:nth-child(4) { width: 8%; }
-body[data-view="alerts"] #view > .card .table-wrap th:nth-child(5),
-body[data-view="alerts"] #view > .card .table-wrap td:nth-child(5) { width: 10%; }
-body[data-view="alerts"] #view > .card .table-wrap th:nth-child(6),
-body[data-view="alerts"] #view > .card .table-wrap td:nth-child(6) { width: 12%; }
-body[data-view="alerts"] #view > .card .table-wrap th:nth-child(7),
-body[data-view="alerts"] #view > .card .table-wrap td:nth-child(7) { width: 9%; }
+/* Active incidents: severity, title, kill chain, count, status, stamp, synthetic. */
+body[data-view="alerts"] #view > .card:first-of-type .table-wrap th:nth-child(1),
+body[data-view="alerts"] #view > .card:first-of-type .table-wrap td:nth-child(1) { width: 108px; }
+body[data-view="alerts"] #view > .card:first-of-type .table-wrap th:nth-child(3),
+body[data-view="alerts"] #view > .card:first-of-type .table-wrap td:nth-child(3) { width: 248px; }
+body[data-view="alerts"] #view > .card:first-of-type .table-wrap th:nth-child(4),
+body[data-view="alerts"] #view > .card:first-of-type .table-wrap td:nth-child(4) { width: 64px; }
+body[data-view="alerts"] #view > .card:first-of-type .table-wrap th:nth-child(5),
+body[data-view="alerts"] #view > .card:first-of-type .table-wrap td:nth-child(5) { width: 92px; }
+body[data-view="alerts"] #view > .card:first-of-type .table-wrap th:nth-child(6),
+body[data-view="alerts"] #view > .card:first-of-type .table-wrap td:nth-child(6) { width: 108px; }
+body[data-view="alerts"] #view > .card:first-of-type .table-wrap th:nth-child(7),
+body[data-view="alerts"] #view > .card:first-of-type .table-wrap td:nth-child(7) { width: 100px; }
+/* Alert list: severity, title, rule, status (plus the SLA badge), count, stamp, synthetic. */
+body[data-view="alerts"] #view > .card[data-kbd-list] .table-wrap th:nth-child(1),
+body[data-view="alerts"] #view > .card[data-kbd-list] .table-wrap td:nth-child(1) { width: 108px; }
+body[data-view="alerts"] #view > .card[data-kbd-list] .table-wrap th:nth-child(3),
+body[data-view="alerts"] #view > .card[data-kbd-list] .table-wrap td:nth-child(3) { width: 276px; }
+body[data-view="alerts"] #view > .card[data-kbd-list] .table-wrap th:nth-child(4),
+body[data-view="alerts"] #view > .card[data-kbd-list] .table-wrap td:nth-child(4) { width: 168px; }
+body[data-view="alerts"] #view > .card[data-kbd-list] .table-wrap th:nth-child(5),
+body[data-view="alerts"] #view > .card[data-kbd-list] .table-wrap td:nth-child(5) { width: 64px; }
+body[data-view="alerts"] #view > .card[data-kbd-list] .table-wrap th:nth-child(6),
+body[data-view="alerts"] #view > .card[data-kbd-list] .table-wrap td:nth-child(6) { width: 108px; }
+body[data-view="alerts"] #view > .card[data-kbd-list] .table-wrap th:nth-child(7),
+body[data-view="alerts"] #view > .card[data-kbd-list] .table-wrap td:nth-child(7) { width: 100px; }
+body[data-view="alerts"] #view > .card[data-kbd-list] td:nth-child(3) {
+  white-space: nowrap;
+}
+body[data-view="alerts"] #view > .card[data-kbd-list] td:nth-child(3) code { font-size: 12px; }
 body[data-view="alerts"] #view > .card .table-wrap td {
   overflow-wrap: break-word;
   vertical-align: top;
@@ -307,16 +358,19 @@ body[data-view="alerts"] #view > .card tbody tr:nth-child(even) { background: rg
   min-width: 980px;
 }
 .event-log th { vertical-align: bottom; }
-.event-log td { vertical-align: top; padding-top: 10px; padding-bottom: 10px; }
-.event-log th:nth-child(1), .event-log td:nth-child(1) { width: 96px; }
-.event-log th:nth-child(2), .event-log td:nth-child(2) { width: 92px; }
-.event-log th:nth-child(3), .event-log td:nth-child(3) { width: 146px; }
+.event-log td { vertical-align: middle; padding-top: 10px; padding-bottom: 10px; }
+.event-log th:nth-child(1), .event-log td:nth-child(1) { width: 100px; }
+.event-log th:nth-child(2), .event-log td:nth-child(2) { width: 84px; }
+.event-log th:nth-child(3), .event-log td:nth-child(3) { width: 148px; }
 .event-log th:nth-child(4), .event-log td:nth-child(4) { width: 128px; }
-.event-log th:nth-child(5), .event-log td:nth-child(5) { width: 120px; }
-.event-log th:nth-child(6), .event-log td:nth-child(6) { width: 52px; }
-.event-log th:nth-child(7), .event-log td:nth-child(7) { width: 196px; }
-.event-log td:nth-child(-n+7) { white-space: nowrap; }
-.event-log td:nth-child(1) { white-space: normal; }
+.event-log th:nth-child(5), .event-log td:nth-child(5) { width: 124px; }
+.event-log th:nth-child(6), .event-log td:nth-child(6) { width: 76px; }
+.event-log th:nth-child(7), .event-log td:nth-child(7) { width: 188px; }
+.event-log td:nth-child(-n+6) { white-space: nowrap; }
+/* Long type names and source names wrap onto the stamp's second line. The pill stays whole. */
+.event-log td:nth-child(3),
+.event-log td:nth-child(7) { white-space: normal; overflow-wrap: anywhere; }
+.event-log td:nth-child(7) .pill { white-space: nowrap; overflow-wrap: normal; }
 .event-log td:nth-child(8) { overflow-wrap: break-word; color: var(--ink); line-height: 1.45; }
 .event-log td:nth-child(1),
 body[data-view="alerts"] #view > .card .table-wrap td:nth-child(6) {
@@ -333,7 +387,7 @@ body[data-view="alerts"] #view > .card .table-wrap td:nth-child(6) {
   color: var(--ink-2);
 }
 .event-log td:nth-child(4) { color: #fff; font-weight: 600; }
-.event-log td:nth-child(7) .pill.synthetic { display: block; width: fit-content; margin-top: 4px; }
+.event-log td:nth-child(7) .pill.synthetic { margin-left: 6px; vertical-align: 1px; }
 .event-log tbody tr:nth-child(even),
 body[data-view="events"] tbody tr:nth-child(even) { background: rgb(255 255 255 / .02); }
 body[data-view="alerts"] tr:has(.sev-critical) td:first-child,
@@ -369,7 +423,7 @@ body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) td:nth-ch
 body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) th:nth-child(1),
 body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth-child(1),
 body[data-view="alerts"] .split > div:first-child > .card:nth-child(3) th:nth-child(1),
-body[data-view="alerts"] .split > div:first-child > .card:nth-child(3) td:nth-child(1) { width: 100px; }
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(3) td:nth-child(1) { width: 112px; }
 body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) th:nth-child(2),
 body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) td:nth-child(2),
 body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) th:nth-child(2),
@@ -385,7 +439,7 @@ body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth
 body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) th:nth-child(5),
 body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) td:nth-child(5),
 body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) th:nth-child(5),
-body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth-child(5) { width: 52px; }
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth-child(5) { width: 78px; }
 body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) td:nth-child(2),
 body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) td:nth-child(3),
 body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) td:nth-child(4),
@@ -418,7 +472,7 @@ body[data-view="incidents"] .split td:nth-child(1) {
   color: var(--ink-2);
 }
 body[data-view="incidents"] .split > div:first-child > .card:nth-child(2) th:nth-child(1),
-body[data-view="incidents"] .split > div:first-child > .card:nth-child(2) td:nth-child(1) { width: 100px; }
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(2) td:nth-child(1) { width: 112px; }
 body[data-view="incidents"] .split > div:first-child > .card:nth-child(2) th:nth-child(2),
 body[data-view="incidents"] .split > div:first-child > .card:nth-child(2) td:nth-child(2) { width: 96px; white-space: nowrap; }
 body[data-view="incidents"] .split > div:first-child > .card:nth-child(2) th:nth-child(4),
