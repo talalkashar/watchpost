@@ -271,7 +271,7 @@ dialog::backdrop { background: rgb(0 0 0 / .6); }
 .ms-row span { overflow: hidden; text-overflow: ellipsis; color: var(--ink-2); }
 .map-legend { position: absolute; right: 10px; bottom: 8px; display: flex; gap: 10px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
 
-/* live feed: time and severity span both lines; the event type sits above the route and message */
+/* live feed: time and severity span the row; the type line carries the synthetic mark; the message sits under the address */
 #p-feed .pb { padding: 0; display: flex; flex-direction: column; }
 .feed-head, .fr { display: grid; grid-template-columns: 68px 46px minmax(0, 1fr); column-gap: 8px; padding: 0 12px; }
 .feed-head { align-items: center; font: 600 10.5px var(--sans); letter-spacing: .12em; color: var(--muted); height: 26px; border-bottom: 1px solid var(--line); flex: none; }
@@ -280,14 +280,17 @@ dialog::backdrop { background: rgb(0 0 0 / .6); }
   border-bottom: 1px solid rgb(26 40 54 / .55); color: var(--ink-2); box-shadow: inset 2px 0 0 currentColor; }
 .fr .ft { grid-column: 1; grid-row: 1 / span 2; align-self: center; color: var(--muted); }
 .fr .sevtag { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
-.fr .fy, .fr .fd { grid-column: 3; min-width: 0; overflow: hidden; white-space: nowrap; }
-.fr .fy { color: var(--ink); font-weight: 600; text-overflow: ellipsis; }
-.fr .fd { display: flex; align-items: baseline; gap: 6px; color: var(--ink-2); }
-.fr .route { display: contents; }
+.fr .fy, .fr .fd { grid-column: 3; min-width: 0; overflow: hidden; }
+.fr .fy { display: flex; align-items: baseline; gap: 8px; color: var(--ink); font-weight: 600; white-space: nowrap; }
+.fr .fn { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fr .fy .syn { margin-left: auto; }
+.fr .fd { display: flex; flex-direction: column; align-items: stretch; gap: 1px; color: var(--ink-2); white-space: normal; }
+.fr .route { display: flex; gap: 6px; min-width: 0; align-items: baseline; }
 .fr .fd code { color: #fff; font-size: 12px; flex: none; white-space: nowrap; }
 .fr .arrow { color: var(--muted); flex: none; }
-.fr .fu { color: var(--accent); flex: none; white-space: nowrap; max-width: 42%; overflow: hidden; text-overflow: ellipsis; }
-.fr .fm { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+.fr .fu { color: var(--accent); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fr .fm { color: var(--muted); white-space: normal; overflow: hidden; overflow-wrap: break-word;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
 .fr.sev-info, .fr.sev-low { box-shadow: inset 2px 0 0 rgb(95 123 148 / .5); }
 .fr.sev-high { background: rgb(255 138 48 / .05); }
 .fr.sev-critical { background: rgb(255 61 90 / .09); }

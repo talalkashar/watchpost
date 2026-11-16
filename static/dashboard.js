@@ -627,15 +627,15 @@ const Dash = {
     return el("div", { class: `fr sev-${s}${fresh ? " new" : ""}`, title: e.message || "" },
       el("span", { class: "ft" }, clock(e.ts)),
       sevTag(s),
-      el("span", { class: "fy" }, e.event_type),
-      el("span", { class: "fd" }, route, msg ? el("span", { class: "fm" }, msg) : null, e.synthetic ? el("span", { class: "syn" }, "SYN") : null));
+      el("span", { class: "fy" }, el("span", { class: "fn" }, e.event_type), e.synthetic ? el("span", { class: "syn" }, "SYN") : null),
+      el("span", { class: "fd" }, route, msg ? el("span", { class: "fm" }, msg) : null));
   },
   alertRow(a) {
     const feed = $("#feed");
     if (!feed) return;
     const row = el("a", { class: `fr alert-row sev-${sevOf(a.severity)} new`, href: `#alerts/${a.id}` },
       el("span", { class: "ft" }, clock(a.last_seen)), sevTag(a.severity),
-      el("span", { class: "fy" }, a.title),
+      el("span", { class: "fy" }, el("span", { class: "fn" }, a.title)),
       el("span", { class: "fd" }, el("span", { class: "fm" }, a.rule_id)));
     feed.prepend(row);
     const p = $("#p-feed");
