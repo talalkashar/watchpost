@@ -352,6 +352,91 @@ body[data-view="incidents"] tr.evidence td:first-child {
   background: rgb(46 196 255 / .06);
 }
 
+/* Detail tables stay inside the card. Evidence messages wrap; they do not scroll away. */
+body[data-view="alerts"] .split .table-wrap table,
+body[data-view="incidents"] .split .table-wrap table {
+  table-layout: fixed;
+  width: 100%;
+}
+body[data-view="alerts"] .split td,
+body[data-view="incidents"] .split td {
+  overflow-wrap: break-word;
+  vertical-align: top;
+}
+/* Evidence: time, type, user, ip, host, message. Message takes whatever is left. */
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) th:nth-child(1),
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) td:nth-child(1),
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) th:nth-child(1),
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth-child(1),
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(3) th:nth-child(1),
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(3) td:nth-child(1) { width: 100px; }
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) th:nth-child(2),
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) td:nth-child(2),
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) th:nth-child(2),
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth-child(2) { width: 136px; }
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) th:nth-child(3),
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) td:nth-child(3),
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) th:nth-child(3),
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth-child(3) { width: 88px; }
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) th:nth-child(4),
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) td:nth-child(4),
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) th:nth-child(4),
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth-child(4) { width: 116px; }
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) th:nth-child(5),
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) td:nth-child(5),
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) th:nth-child(5),
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth-child(5) { width: 52px; }
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) td:nth-child(2),
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) td:nth-child(3),
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) td:nth-child(4),
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth-child(2),
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth-child(3),
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth-child(4) { white-space: nowrap; }
+body[data-view="alerts"] .split td:nth-child(6),
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth-child(6) {
+  color: var(--ink);
+  line-height: 1.45;
+}
+/* Related timeline: source name sits in the fifth column and can wrap. */
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(3) th:nth-child(2),
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(3) td:nth-child(2) { width: 124px; }
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(3) th:nth-child(3),
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(3) td:nth-child(3) { width: 96px; }
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(3) th:nth-child(4),
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(3) td:nth-child(4) { width: 116px; }
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(3) th:nth-child(5),
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(3) td:nth-child(5) { width: 64px; }
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(3) td:nth-child(3),
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(3) td:nth-child(4) { white-space: nowrap; }
+body[data-view="alerts"] .split td:nth-child(1),
+body[data-view="incidents"] .split td:nth-child(1) {
+  white-space: normal;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(2) th:nth-child(1),
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(2) td:nth-child(1) { width: 100px; }
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(2) th:nth-child(2),
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(2) td:nth-child(2) { width: 96px; white-space: nowrap; }
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(2) th:nth-child(4),
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(2) td:nth-child(4) { width: 100px; }
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(2) th:nth-child(5),
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(2) td:nth-child(5) { width: 104px; }
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(2) th:nth-child(6),
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(2) td:nth-child(6) { width: 104px; white-space: nowrap; }
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(2) td:nth-child(3) {
+  color: #fff;
+  font-weight: 600;
+}
+body[data-view="incidents"] .split tr:has(.sev-critical) td:first-child { box-shadow: inset 3px 0 0 var(--crit); }
+body[data-view="incidents"] .split tr:has(.sev-high) td:first-child { box-shadow: inset 3px 0 0 var(--high); }
+body[data-view="incidents"] .split tr:has(.sev-medium) td:first-child { box-shadow: inset 3px 0 0 var(--med); }
+body[data-view="incidents"] .split tr:has(.sev-low) td:first-child { box-shadow: inset 3px 0 0 var(--low); }
+body[data-view="incidents"] .split td:first-child { padding-left: 12px; }
+
 /* ---------- detail ---------- */
 body[data-view="alerts"] .kv,
 body[data-view="incidents"] .kv,
@@ -405,10 +490,14 @@ body[data-view="overview"] #view > h2 {
   color: var(--muted);
 }
 body[data-view="overview"] .bars {
-  height: 188px;
+  /* 164px plot matches the bar heights drawn in app.js, so the guides land on quarters. */
+  height: 173px;
   gap: 3px;
   padding: 8px 2px 0;
   border-bottom: 1px solid rgb(36 55 72 / .8);
+  background-image: repeating-linear-gradient(to top, rgb(36 55 72 / .7) 0 1px, transparent 1px 25%);
+  background-origin: content-box;
+  background-clip: content-box;
 }
 body[data-view="overview"] .bars .b span { border-radius: 3px 3px 0 0; }
 body[data-view="overview"] .bars .all {
@@ -494,12 +583,16 @@ body[data-view="health"] td,
 body[data-view="noise"] td,
 body[data-view="coverage"] td { vertical-align: top; }
 body[data-view="health"] .check {
-  grid-template-columns: minmax(140px, 200px) minmax(0, 1fr);
+  grid-template-columns: minmax(148px, 210px) minmax(0, 1fr);
   gap: 6px 20px;
-  padding: 14px 0;
+  padding: 14px 0 14px 14px;
   align-items: start;
 }
+body[data-view="health"] .check:has(.st-ok) { box-shadow: inset 3px 0 0 var(--ok); }
+body[data-view="health"] .check:has(.st-degraded) { box-shadow: inset 3px 0 0 var(--warn); }
+body[data-view="health"] .check:has(.st-failing) { box-shadow: inset 3px 0 0 var(--bad); }
 body[data-view="health"] .check strong { color: #fff; font-size: 14px; }
+body[data-view="health"] .check > div:last-child { color: var(--ink); font-size: 14px; line-height: 1.45; }
 body[data-view="coverage"] .legend {
   display: grid;
   gap: 8px;
@@ -559,6 +652,29 @@ body[data-view="coverage"] .page-head a {
 body[data-view="coverage"] .page-head a:hover { text-decoration: none; background: rgb(46 196 255 / .08); }
 body[data-view="ingest"] pre { font-size: 12.5px; line-height: 1.55; }
 body[data-view="ingest"] .grid { align-items: stretch; }
+body[data-view="ingest"] .grid > form.card:first-child > .row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(158px, .95fr) minmax(0, 1fr);
+  gap: 10px 12px;
+  align-items: end;
+}
+body[data-view="ingest"] .grid > form.card:nth-child(2) > .row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px 12px;
+  align-items: end;
+}
+body[data-view="ingest"] .grid > form.card > .row > * { min-width: 0; }
+body[data-view="ingest"] .grid > form.card input:not([type="checkbox"]),
+body[data-view="ingest"] .grid > form.card select { width: 100%; }
+body[data-view="ingest"] form.card ul {
+  margin: 14px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 8px;
+}
+body[data-view="ingest"] form.card li { line-height: 1.45; color: var(--ink-2); }
+body[data-view="ingest"] form.card li code { color: #fff; font-size: 12px; }
 
 /* ---------- sign-in ---------- */
 body:not(.authed) {
@@ -639,7 +755,9 @@ dialog {
   }
   body[data-view="incidents"] .bcol:not(:has(.bcard)) .bmore { margin-left: auto; }
   body[data-view="events"] form.card > .row,
-  body[data-view="coverage"] .legend [role="listitem"] { grid-template-columns: 1fr; }
+  body[data-view="coverage"] .legend [role="listitem"],
+  body[data-view="ingest"] .grid > form.card:first-child > .row,
+  body[data-view="ingest"] .grid > form.card:nth-child(2) > .row { grid-template-columns: 1fr; }
   body[data-view="coverage"] .cov-grid { grid-auto-columns: calc(100cqw - 36px); }
   body[data-view="health"] .check { grid-template-columns: 1fr; }
   /* Keep short status pills intact; the base stylesheet lets every pill wrap at 760px. */
@@ -659,6 +777,9 @@ dialog {
     width: auto;
     white-space: normal;
   }
+  /* Detail columns keep their tracks and scroll inside the card. */
+  body[data-view="alerts"] .split .table-wrap table,
+  body[data-view="incidents"] .split .table-wrap table { min-width: 700px; }
 }
 @media (min-width: 761px) and (max-width: 1100px) {
   body[data-view="events"] form.card > .row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
