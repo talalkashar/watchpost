@@ -512,6 +512,13 @@ const Dash = {
     const ranked = [...cities.values()].sort((a, b) => SEV_RANK[b.sev] - SEV_RANK[a.sev] || b.events - a.events);
     const esc = WPCharts.esc;
     const [hx, hy] = WPMap.project(hq.lon, hq.lat, w, h);
+    const sideEl = $("#map-side");
+    let coverRight = 0;
+    if (sideEl) {
+      const svgRect = svg.getBoundingClientRect();
+      const sideRect = sideEl.getBoundingClientRect();
+      if (svgRect.width > 0 && sideRect.width > 0) coverRight = (sideRect.right - svgRect.left) / (svgRect.width / w) + 8;
+    }
     const placed = [{ x: hx, y: hy }];
     const crowded = (x, y) => placed.some((p) => Math.hypot(p.x - x, p.y - y) < 52);
     let arcs = "", marks = "";
@@ -520,7 +527,7 @@ const Dash = {
       const [x, y] = WPMap.project(c.lon, c.lat, w, h);
       const r = 2.6 + Math.min(5, Math.log2(1 + c.events) * 0.8);
       let label = "";
-      if (i < 7 && !crowded(x, y)) {
+      if (i < 7 && x > coverRight && !crowded(x, y)) {
         const end = x > w - 72;
         const lx = end ? x - r - 4 : x + r + 4;
         const ly = y > 18 ? y - r - 3 : y + r + 12;
@@ -532,10 +539,13 @@ const Dash = {
         `<circle class="core" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${r.toFixed(1)}"/>` +
         label + `</g>`;
     });
-    const hqEnd = hx > w - 72;
+    const hqClear = hx + 28 < coverRight;
+    const hqEnd = !hqClear && hx > w - 72;
+    const hqx = hqClear ? coverRight : (hqEnd ? hx - 12 : hx + 12);
+    const hqy = hqClear ? Math.min(h - 8, Math.max(14, hy + 3)) : (hy > 18 ? hy - 8 : hy + 16);
     marks += `<g class="hq"><title>${esc(`${hq.city} (synthetic geo)`)}</title><circle class="ring" cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="9"/>` +
       `<circle class="core" cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="3.6"/>` +
-      `<text class="ml" x="${(hqEnd ? hx - 12 : hx + 12).toFixed(1)}" y="${(hy > 18 ? hy - 8 : hy + 16).toFixed(1)}" text-anchor="${hqEnd ? "end" : "start"}">HQ</text></g>`;
+      `<text class="ml" x="${hqx.toFixed(1)}" y="${hqy.toFixed(1)}" text-anchor="${hqEnd ? "end" : "start"}">HQ</text></g>`;
     setSvgChildren(svg.querySelector("g.arcs"), arcs);
     setSvgChildren(svg.querySelector("g.marks"), marks);
     $("#map-count").textContent = `${ranked.length} source locations · ${unknown.length} unknown`;
@@ -659,11 +669,12 @@ const Dash = {
     const rows = this.data.attackers.slice(0, 6).map((a) => {
       const loc = Geo.get(a.ip);
       return { label: a.ip, value: a.events, cls: sevOf(a.max_severity),
-        sub: loc === undefined ? "…" : loc === null ? "unknown · no geo entry" : `${loc.city}${loc.internal ? "" : " · synthetic geo"}`,
-        subCls: loc === null ? "unknown" : "", title: `${a.ip}: ${a.events} evidence events in ${a.alerts} alerts (${a.open_alerts} open)` };
+        sub: loc === undefined ? "…" : loc === null ? "no geo entry" : (loc.internal ? loc.city : `${loc.city} · syn`),
+        subCls: loc === null ? "unknown" : "",
+        title: `${a.ip}: ${a.events} evidence events in ${a.alerts} alerts (${a.open_alerts} open)${loc && loc.city ? ` · ${loc.city}${loc.internal ? "" : " (synthetic geo)"}` : ""}` };
     });
     if (!rows.length) { box.replaceChildren(el("p", { class: "empty-note" }, "No attacker IPs in alert evidence yet.")); return; }
-    mountSvg(box, WPCharts.hbars(rows, { w: this.width("#atk-chart"), rowH: 28, labelW: 148, label: `top attacker IPs by evidence events: ${rows.map((r) => `${r.label} ${r.value}`).join(", ")}` }));
+    mountSvg(box, WPCharts.hbars(rows, { w: this.width("#atk-chart"), rowH: 26, labelW: 140, label: `top attacker IPs by evidence events: ${rows.map((r) => `${r.label} ${r.value}`).join(", ")}` }));
   },
   renderRules() {
     const box = $("#rules-chart");
@@ -718,7 +729,7 @@ const Dash = {
       meta.textContent = `${validated}/${cov.list.length} techniques validated on synthetic scenarios · ${hot} observed · `;
       meta.append(el("a", { href: "#coverage" }, "details"));
       mountSvg(box, WPCharts.heatMatrix(columns.length ? columns : [{ name: "None", short: "—", cells: [] }], {
-        w, cellH: 24, maxRows: Math.max(3, Math.min(6, tallest || 3)),
+        w, cellH: 22, maxRows: Math.max(3, Math.min(4, tallest || 3)),
         label: `ATT&CK coverage heat matrix: ${validated} of ${cov.list.length} techniques validated, ${hot} seen in alerts. The Coverage view lists every technique as text.`,
       }));
       box.parentElement.querySelector(".cov-quiet")?.remove();
