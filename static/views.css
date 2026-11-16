@@ -897,6 +897,49 @@ dialog {
   box-shadow: 0 24px 80px rgb(0 0 0 / .55);
 }
 
+/* ---------- sessions (account and admin) ---------- */
+.sessions { max-width: 100%; }
+.sessions table { table-layout: fixed; width: 100%; min-width: 560px; }
+.sessions td { vertical-align: middle; }
+.sessions th:nth-child(1),
+.sessions td:nth-child(1),
+.sessions th:nth-child(2),
+.sessions td:nth-child(2),
+.sessions th:nth-child(3),
+.sessions td:nth-child(3) { width: 124px; }
+.sessions-users th:nth-child(1),
+.sessions-users td:nth-child(1) { width: 140px; color: #fff; font-weight: 600; }
+.sessions-users th:nth-child(2),
+.sessions-users td:nth-child(2),
+.sessions-users th:nth-child(3),
+.sessions-users td:nth-child(3),
+.sessions-users th:nth-child(4),
+.sessions-users td:nth-child(4) { width: 124px; font-weight: 400; color: var(--ink); }
+.sessions td:last-child { width: auto; text-align: right; }
+.session-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-height: 32px;
+}
+.sessions tr.is-current td:first-child { box-shadow: inset 3px 0 0 var(--ok); }
+.sessions tr.is-current { background: rgb(53 212 154 / .05); }
+body[data-view="account"] .sessions button.danger,
+body[data-view="admin"] .sessions button.danger {
+  background: transparent;
+  color: var(--bad);
+  border-color: rgb(255 61 90 / .55);
+}
+body[data-view="account"] .sessions button.danger:hover,
+body[data-view="admin"] .sessions button.danger:hover,
+body[data-view="account"] .sessions button.danger:focus-visible,
+body[data-view="admin"] .sessions button.danger:focus-visible {
+  background: #d0243f;
+  border-color: #d0243f;
+  color: #fff;
+}
+
 /* ---------- narrow ---------- */
 @media (max-width: 1200px) {
   body[data-view="noise"] .nr {

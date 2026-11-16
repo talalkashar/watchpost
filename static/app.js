@@ -1711,10 +1711,12 @@ function sessionsTable(rows, base, redraw, showUser = false) {
     toast("Session revoked");
     redraw();
   });
-  return table([...(showUser ? ["User"] : []), "Started", "Last seen", "Expires", ""], rows.map((r) => ({ cells: [
-    ...(showUser ? [r.username] : []), fmtTime(r.created_at), fmtTime(r.last_seen_at), fmtTime(r.expires_at),
-    el("span", { class: "row" }, r.current ? pill("this browser", "st-ok") : null,
-      can("analyst") ? el("button", { class: "danger", "aria-label": `Revoke session started ${fmtTime(r.created_at)}${showUser ? ` for ${r.username}` : ""}`, onclick: () => revoke(r) }, "Revoke") : null)] })));
+  return table([...(showUser ? ["User"] : []), "Started", "Last seen", "Expires", el("span", { class: "sr-only" }, "Actions")],
+    rows.map((r) => ({ cls: r.current ? "is-current" : "", cells: [
+      ...(showUser ? [r.username] : []), stamp(r.created_at), stamp(r.last_seen_at), stamp(r.expires_at),
+      el("span", { class: "session-actions" }, r.current ? pill("this browser", "st-ok") : null,
+        can("analyst") ? el("button", { class: "danger", "aria-label": `Revoke session started ${fmtTime(r.created_at)}${showUser ? ` for ${r.username}` : ""}`, onclick: () => revoke(r) }, "Revoke") : null)] })),
+    null, showUser ? "sessions sessions-users" : "sessions");
 }
 
 async function account() {
