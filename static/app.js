@@ -70,13 +70,13 @@ async function api(path, { method = "GET", body, raw, contentType, allow = [] } 
 }
 
 // Clickable rows are focusable and open with Enter or Space, so the mouse is never required.
-function table(headers, rows, onClick) {
+function table(headers, rows, onClick, wrapClass) {
   const onKey = (r) => (ev) => {
     if (ev.target !== ev.currentTarget || (ev.key !== "Enter" && ev.key !== " ")) return;
     ev.preventDefault();
     onClick(r);
   };
-  return el("div", { class: "table-wrap" },
+  return el("div", { class: wrapClass ? `table-wrap ${wrapClass}` : "table-wrap" },
     el("table", {},
       el("thead", {}, el("tr", {}, headers.map((h) => el("th", { scope: "col" }, h)))),
       el("tbody", {}, rows.length ? rows.map((r) =>
@@ -497,7 +497,8 @@ async function entityDetail(kind, value) {
         (r) => go("incidents", r.id))),
     el("div", { class: "card" }, el("h2", {}, `Recent events (latest ${e.recent_events.length} of ${e.event_count.toLocaleString()})`),
       table(["Time", "Severity", "Type", "User", "Source IP", "Host", "Source", "Message"],
-        e.recent_events.map((x) => ({ cells: [fmtTime(x.ts), sev(x.severity), x.event_type, entityLink("user", x.user), el("code", {}, entityLink("src_ip", x.src_ip)), entityLink("host", x.host), el("span", {}, x.source, " ", synth(x.synthetic)), x.message ?? ""] })))),
+        e.recent_events.map((x) => ({ cells: [fmtTime(x.ts), sev(x.severity), x.event_type, entityLink("user", x.user), el("code", {}, entityLink("src_ip", x.src_ip)), entityLink("host", x.host), el("span", {}, x.source, " ", synth(x.synthetic)), x.message ?? ""] })),
+        null, "event-log")),
   );
 }
 
@@ -566,7 +567,7 @@ async function events(offset = 0) {
   render(el("h1", {}, "Event search"), form, el("div", { class: "card" }, pager,
     table(["Time", "Severity", "Type", "User", "Source IP", "Host", "Source", "Message"],
       data.events.map((e) => ({ id: e.id, cells: [fmtTime(e.ts), sev(e.severity), e.event_type, e.user ?? "—", el("code", {}, e.src_ip ?? "—"), e.host ?? "—", el("span", {}, e.source, " ", synth(e.synthetic)), e.message ?? ""] })),
-      (r) => guarded(() => eventDialog(r.id)))));
+      (r) => guarded(() => eventDialog(r.id)), "event-log")));
 }
 
 async function eventDialog(id) {
@@ -666,7 +667,7 @@ async function huntView(query = "", offset = 0) {
   render(el("h1", {}, "Hunt"), form, el("div", { class: "card" }, parsed, pager,
     table(["Time", "Severity", "Type", "User", "Source IP", "Host", "Source", "Message"],
       data.events.map((e) => ({ id: e.id, cells: [fmtTime(e.ts), sev(e.severity), e.event_type, e.user ?? "—", el("code", {}, e.src_ip ?? "—"), e.host ?? "—", el("span", {}, e.source, " ", synth(e.synthetic)), e.message ?? ""] })),
-      (r) => guarded(() => eventDialog(r.id)))), savedCard);
+      (r) => guarded(() => eventDialog(r.id)), "event-log")), savedCard);
 }
 
 // Pipeline results (| stats, | top, | timechart). Value cells pivot: they add field:value to the filter
