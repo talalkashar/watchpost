@@ -249,9 +249,9 @@ async function overview() {
     el("div", { class: "b", title: `${fmtTime(h.hour)} — ${h.events} events, ${h.failures} failed logins` },
       el("span", { class: "fail", style: { height: `${(h.failures / max) * 110}px` } }),
       el("span", { class: "all", style: { height: `${((h.events - h.failures) / max) * 110}px` } }))));
-  const hbars = (rows, key) => {
+  const hbars = (rows, key, stacked = false) => {
     const top = Math.max(1, ...rows.map((r) => r.count));
-    return rows.length ? rows.map((r) => el("div", { class: "hbar" }, el("span", { class: "mono" }, r[key]),
+    return rows.length ? rows.map((r) => el("div", { class: stacked ? "hbar named" : "hbar" }, el("span", { class: "mono" }, r[key]),
       el("div", { class: "track" }, el("div", { class: "fill", style: { width: `${(r.count / top) * 100}%` } })),
       el("span", { class: "num" }, r.count))) : el("p", { class: "muted" }, "No data yet.");
   };
@@ -279,7 +279,7 @@ async function overview() {
     el("div", { class: "grid" },
       el("div", { class: "card" }, el("h2", {}, "Open alerts by severity"),
         hbars(["critical", "high", "medium", "low"].map((s) => ({ severity: s, count: (m.alerts_by_severity.find((x) => x.severity === s) || {}).count || 0 })), "severity")),
-      el("div", { class: "card" }, el("h2", {}, "Alerts by rule (all time)"), hbars(m.alerts_by_rule, "rule_id")),
+      el("div", { class: "card" }, el("h2", {}, "Alerts by rule (all time)"), hbars(m.alerts_by_rule, "rule_id", true)),
       el("div", { class: "card" }, el("h2", {}, "Top failed-login sources"), hbars(m.top_failure_ips, "src_ip")),
       el("div", { class: "card" }, el("h2", {}, "Most targeted accounts"), hbars(m.top_failure_users, "user")),
       el("div", { class: "card" }, el("h2", {}, "Analyst verdicts"), hbars(m.dispositions, "disposition")),

@@ -182,6 +182,12 @@ tr.evidence td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .hbar > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hbar .track { background: var(--bg-2); border-radius: 2px; height: 8px; }
 .hbar .fill { background: var(--accent); border-radius: 2px; height: 8px; }
+/* Rule ids are longer than the label column. The id uses the card width; the bar sits under it. */
+.hbar.named { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "name name" "bar count"; gap: 2px 8px; align-items: center; margin: 0 0 8px; }
+.hbar.named > span:first-child { grid-area: name; overflow: visible; text-overflow: unset; white-space: normal; overflow-wrap: break-word; color: var(--ink); font-size: 13px; line-height: 1.35; }
+.hbar.named .num { grid-area: count; color: var(--ink); font: 600 13px var(--mono); }
+.hbar.named .track, .hbar.named .fill { height: 3px; }
+.hbar.named .track { grid-area: bar; }
 
 .check { display: grid; grid-template-columns: 120px 1fr; gap: 8px 16px; padding: 12px 0; border-bottom: 1px solid var(--line); }
 .check:last-child { border-bottom: 0; }
