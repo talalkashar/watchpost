@@ -434,11 +434,11 @@ body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth
 body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) th:nth-child(3),
 body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) td:nth-child(3),
 body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) th:nth-child(3),
-body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth-child(3) { width: 88px; }
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth-child(3) { width: 124px; }
 body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) th:nth-child(4),
 body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) td:nth-child(4),
 body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) th:nth-child(4),
-body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth-child(4) { width: 116px; }
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth-child(4) { width: 132px; }
 body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) th:nth-child(5),
 body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) td:nth-child(5),
 body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) th:nth-child(5),
@@ -449,6 +449,26 @@ body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) td:nth-ch
 body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth-child(2),
 body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth-child(3),
 body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth-child(4) { white-space: nowrap; }
+/* User and source IP stay inside their own cells. A long name ellipsizes instead of painting into the next column. */
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) td:nth-child(3),
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) td:nth-child(4),
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth-child(3),
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth-child(4) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) td:nth-child(3) a,
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) td:nth-child(4) a,
+body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) td:nth-child(4) code,
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth-child(3) a,
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth-child(4) a,
+body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth-child(4) code {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 body[data-view="alerts"] .split td:nth-child(6),
 body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) td:nth-child(6) {
   color: var(--ink);
@@ -1003,6 +1023,78 @@ body[data-view="admin"] .sessions button.danger:focus-visible {
   /* Detail columns keep their tracks and scroll inside the card. */
   body[data-view="alerts"] .split .table-wrap table,
   body[data-view="incidents"] .split .table-wrap table { min-width: 700px; }
+  /* Evidence can use the card width when the card is wider than those tracks. */
+  body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) .table-wrap table,
+  body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) .table-wrap table { min-width: 0; }
+}
+/* A phone is narrower than the six evidence tracks, so the source IP sits past the edge.
+   Stack each event. The account and the address stay on screen, and a long name ellipsizes. */
+@media (max-width: 640px) {
+  body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) .table-wrap,
+  body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) .table-wrap { overflow: visible; }
+  body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) .table-wrap table,
+  body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) .table-wrap table,
+  body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) .table-wrap thead,
+  body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) .table-wrap thead,
+  body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) .table-wrap tbody,
+  body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) .table-wrap tbody {
+    display: block;
+    width: 100%;
+    min-width: 0;
+  }
+  body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) .table-wrap tr,
+  body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) .table-wrap tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+    grid-template-areas: "c1 c3" "c2 c4" "c5 c5" "c6 c6";
+    gap: 2px 14px;
+    align-items: baseline;
+    padding: 8px 0 10px;
+    border-bottom: 1px solid rgb(255 255 255 / .072);
+  }
+  body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) .table-wrap th,
+  body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) .table-wrap td,
+  body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) .table-wrap th,
+  body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) .table-wrap td {
+    display: block;
+    width: auto;
+    min-width: 0;
+    max-width: 100%;
+    padding: 0;
+    border: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) .table-wrap th:nth-child(1),
+  body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) .table-wrap td:nth-child(1),
+  body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) .table-wrap th:nth-child(1),
+  body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) .table-wrap td:nth-child(1) { grid-area: c1; }
+  body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) .table-wrap th:nth-child(2),
+  body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) .table-wrap td:nth-child(2),
+  body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) .table-wrap th:nth-child(2),
+  body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) .table-wrap td:nth-child(2) { grid-area: c2; }
+  body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) .table-wrap th:nth-child(3),
+  body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) .table-wrap td:nth-child(3),
+  body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) .table-wrap th:nth-child(3),
+  body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) .table-wrap td:nth-child(3) { grid-area: c3; }
+  body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) .table-wrap th:nth-child(4),
+  body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) .table-wrap td:nth-child(4),
+  body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) .table-wrap th:nth-child(4),
+  body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) .table-wrap td:nth-child(4) { grid-area: c4; }
+  body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) .table-wrap th:nth-child(5),
+  body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) .table-wrap td:nth-child(5),
+  body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) .table-wrap th:nth-child(5),
+  body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) .table-wrap td:nth-child(5) { grid-area: c5; }
+  body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) .table-wrap th:nth-child(6),
+  body[data-view="alerts"] .split > div:first-child > .card:nth-child(2) .table-wrap td:nth-child(6),
+  body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) .table-wrap th:nth-child(6),
+  body[data-view="incidents"] .split > div:first-child > .card:nth-child(3) .table-wrap td:nth-child(6) {
+    grid-area: c6;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+  }
 }
 @media (min-width: 761px) and (max-width: 1100px) {
   body[data-view="events"] form.card > .row { grid-template-columns: repeat(2, minmax(0, 1fr)); }

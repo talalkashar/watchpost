@@ -148,6 +148,9 @@ function hbars(rows, { w = 300, rowH = 22, labelW = 118, label = "ranking" } = {
 
 // ATT&CK-style heat matrix. columns: [{name, short, cells: [{id, name, value, covered, rules}]}]
 // value -> heat class h0..h5 on a log-ish scale; uncovered cells are drawn hollow.
+// Each tactic column stays wide enough for its label. The svg grows and the panel scrolls
+// instead of letting the headers paint on top of each other.
+let heatSeq = 0;
 function heatMatrix(columns, { w = 700, cellH = 22, headH = 30, maxRows = 8, label = "coverage matrix" } = {}) {
   const list = columns.length ? columns : [{ name: "", short: "", cells: [] }];
   const any = list.some((c) => c.cells.length);
@@ -157,34 +160,50 @@ function heatMatrix(columns, { w = 700, cellH = 22, headH = 30, maxRows = 8, lab
   const h = headH + rows * (cellH + 3);
   const max = scaleMax(list.flatMap((c) => c.cells.map((x) => x.value || 0)));
   const level = (v) => (!v ? 0 : Math.min(5, 1 + Math.floor((Math.log(v + 1) / Math.log(max + 1)) * 4.999)));
-  let out = svgOpen(w, h, "heat", label);
+  const widths = list.map((c, i) => {
+    const share = (w * weights[i]) / weightSum;
+    const floor = any && !c.cells.length ? 72 : 108;
+    return Math.max(share, floor);
+  });
+  const svgW = Math.max(w, widths.reduce((sum, n) => sum + n, 0));
+  const seq = ++heatSeq;
+  let out = svgOpen(svgW, h, "heat", label) + "<defs>";
   let x = 0;
+  const clips = [];
   list.forEach((c, ci) => {
-    const cw = (w * weights[ci]) / weightSum;
+    const cw = widths[ci];
+    const id = `heatc-${seq}-${ci}`;
+    out += `<clipPath id="${id}"><rect x="${n2(x)}" y="0" width="${n2(cw)}" height="${n2(h)}"/></clipPath>`;
+    clips.push({ c, ci, cw, x, id });
+    x += cw;
+  });
+  out += "</defs>";
+  for (const { c, cw, x: colX, id } of clips) {
     const quiet = any && !c.cells.length;
     const hits = c.cells.reduce((s, x2) => s + (x2.value || 0), 0);
-    out += `<text class="th${quiet ? " quiet" : ""}" x="${n2(x + 3)}" y="12">${esc(c.short || c.name)}<title>${esc(c.name)}</title></text>` +
-      `<text class="tc${hits ? " hot" : ""}${quiet ? " quiet" : ""}" x="${n2(x + 3)}" y="25">${esc(c.cells.length)} tech · ${esc(hits)}</text>`;
+    out += `<g clip-path="url(#${id})">` +
+      `<text class="th${quiet ? " quiet" : ""}" x="${n2(colX + 3)}" y="12">${esc(c.short || c.name)}<title>${esc(c.name)}</title></text>` +
+      `<text class="tc${hits ? " hot" : ""}${quiet ? " quiet" : ""}" x="${n2(colX + 3)}" y="25">${esc(c.cells.length)} tech · ${esc(hits)}</text>`;
     if (!quiet) {
       for (let r = 0; r < rows; r++) {
         const cell = c.cells[r];
         const y = headH + r * (cellH + 3);
         if (!cell) {
-          out += `<rect class="cell void" x="${n2(x + 1.5)}" y="${n2(y)}" width="${n2(Math.max(1, cw - 3))}" height="${cellH}"/>`;
+          out += `<rect class="cell void" x="${n2(colX + 1.5)}" y="${n2(y)}" width="${n2(Math.max(1, cw - 3))}" height="${cellH}"/>`;
           continue;
         }
         const lv = (cell.covered === false ? "gap" : `h${level(cell.value || 0)}`) + (cell.crit ? " crit" : "");
         const tip = `${cell.id} ${cell.name || ""}\n${c.name}\n${cell.value || 0} hits` + (cell.level ? `\nlevel: ${cell.level}` : "") +
           (cell.rules && cell.rules.length ? `\nrules: ${cell.rules.join(", ")}` : "\nno rule covers this");
         out += `<g class="cellg"><title>${esc(tip)}</title>` +
-          `<rect class="cell ${lv}" x="${n2(x + 1.5)}" y="${n2(y)}" width="${n2(Math.max(1, cw - 3))}" height="${cellH}"/>` +
-          `<text class="cid ${lv}" x="${n2(x + 4)}" y="${n2(y + cellH / 2 + 3.2)}">${esc(cell.id)}</text>` +
-          (cell.value ? `<text class="cv ${lv}" x="${n2(x + cw - 4)}" y="${n2(y + cellH / 2 + 3.2)}" text-anchor="end">${esc(cell.value)}</text>` : "") +
+          `<rect class="cell ${lv}" x="${n2(colX + 1.5)}" y="${n2(y)}" width="${n2(Math.max(1, cw - 3))}" height="${cellH}"/>` +
+          `<text class="cid ${lv}" x="${n2(colX + 4)}" y="${n2(y + cellH / 2 + 3.2)}">${esc(cell.id)}</text>` +
+          (cell.value ? `<text class="cv ${lv}" x="${n2(colX + cw - 4)}" y="${n2(y + cellH / 2 + 3.2)}" text-anchor="end">${esc(cell.value)}</text>` : "") +
           `</g>`;
       }
     }
-    x += cw;
-  });
+    out += "</g>";
+  }
   return out + "</svg>";
 }
 

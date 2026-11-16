@@ -225,7 +225,7 @@ dialog::backdrop { background: rgb(0 0 0 / .72); backdrop-filter: blur(2px); }
 #p-attackers { grid-column: 8 / 15; grid-row: 2; height: 200px; }
 #p-attack { grid-column: 1 / 25; grid-row: 3; }
 #p-attack .pb { display: flex; flex-direction: column; }
-#p-attack .chartbox { height: auto; flex: none; }
+#p-attack .chartbox { height: auto; flex: none; overflow-x: auto; overflow-y: hidden; }
 #p-board { grid-column: 1 / 17; grid-row: 4 / 7; min-height: 250px; }
 #p-rules { grid-column: 17 / 25; grid-row: 4; overflow: visible; }
 #p-health { grid-column: 17 / 25; grid-row: 5; overflow: visible; }
