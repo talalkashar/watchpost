@@ -247,12 +247,13 @@ async function overview() {
   const max = Math.max(1, ...hist.map((h) => h.events));
   const bars = el("div", { class: "bars", role: "img", "aria-label": `Events per hour over 24 hours: ${hist.reduce((n, h) => n + h.events, 0)} events, ${hist.reduce((n, h) => n + h.failures, 0)} failed logins, busiest hour ${Math.max(0, ...hist.map((h) => h.events))} events` }, hist.map((h) =>
     el("div", { class: "b", title: `${fmtTime(h.hour)} — ${h.events} events, ${h.failures} failed logins` },
-      el("span", { class: "fail", style: { height: `${(h.failures / max) * 110}px` } }),
-      el("span", { class: "all", style: { height: `${((h.events - h.failures) / max) * 110}px` } }))));
+      el("span", { class: "fail", style: { height: `${(h.failures / max) * 164}px` } }),
+      el("span", { class: "all", style: { height: `${((h.events - h.failures) / max) * 164}px` } }))));
   const hbars = (rows, key) => {
     const top = Math.max(1, ...rows.map((r) => r.count));
-    return rows.length ? rows.map((r) => el("div", { class: "hbar" }, el("span", { class: "mono" }, r[key]),
-      el("div", { class: "track" }, el("div", { class: "fill", style: { width: `${(r.count / top) * 100}%` } })),
+    const tone = key === "severity" ? (name) => ` sev-${name}` : () => "";
+    return rows.length ? rows.map((r) => el("div", { class: "hbar" }, el("span", { class: `mono${tone(r[key])}` }, r[key]),
+      el("div", { class: "track" }, el("div", { class: `fill${tone(r[key])}`, style: { width: `${(r.count / top) * 100}%` } })),
       el("span", { class: "num" }, r.count))) : el("p", { class: "muted" }, "No data yet.");
   };
   const empty = m.events_total === 0 ? el("div", { class: "card" },
