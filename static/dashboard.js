@@ -681,7 +681,16 @@ const Dash = {
     if (!box) return;
     const rows = this.data.top_rules.map((r) => ({ label: r.name || r.rule_id, sub: `${r.rule_id} · ${r.open} open`, value: r.alerts, cls: sevOf(r.severity) }));
     if (!rows.length) { box.replaceChildren(el("p", { class: "empty-note" }, "No rule has fired yet.")); return; }
-    mountSvg(box, WPCharts.hbars(rows.slice(0, 7), { w: this.width("#rules-chart"), rowH: 28, labelW: 160, label: `alerts by rule: ${rows.slice(0, 7).map((r) => `${r.label} ${r.value}`).join(", ")}` }));
+    // The rules column is a third of the board. A side label cannot hold these names, so the
+    // name sits on its own line and the bar uses the full width under it.
+    const shown = rows.slice(0, 7);
+    const max = Math.max(1, ...shown.map((r) => r.value));
+    box.replaceChildren(el("div", { class: "rules", role: "group", "aria-label": `alerts by rule: ${shown.map((r) => `${r.label} ${r.value}`).join(", ")}` },
+      ...shown.map((r) => el("div", { class: `rrow sev-${r.cls || "info"}`, title: r.title || `${r.label}: ${r.value}` },
+        el("div", { class: "rname" }, el("span", {}, r.label), el("b", {}, r.value)),
+        r.sub ? el("div", { class: "rsub" }, r.sub) : null,
+        el("div", { class: "rtrack", "aria-hidden": "true" },
+          el("i", { style: { width: `${Math.max(4, Math.round((r.value / max) * 100))}%` } }))))));
   },
   renderEntities() {
     const box = $("#ent-list");
