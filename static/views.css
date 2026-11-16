@@ -953,7 +953,9 @@ body[data-view="admin"] .sessions button.danger:focus-visible {
   body[data-view="noise"] .nr > .pill { justify-self: start; }
 }
 @media (max-width: 760px) {
-  body.authed:not([data-view="dashboard"]) main { padding: 14px 12px 36px; }
+  body.authed:not([data-view="dashboard"]) main { padding: 14px 12px 10px; }
+  body.authed:not([data-view="dashboard"]) .card { padding: 14px 16px 16px; }
+  body[data-view="hunt"] form.card input[name="q"] { min-height: 44px; font-size: 16px; }
   body[data-view="noise"] .nr {
     grid-template-areas:
       "name name name"
@@ -983,6 +985,7 @@ body[data-view="admin"] .sessions button.danger:focus-visible {
   body[data-view="ingest"] .grid > form.card:nth-child(2) > .row { grid-template-columns: 1fr; }
   body[data-view="coverage"] .cov-grid { grid-auto-columns: calc(100cqw - 36px); }
   body[data-view="health"] .check { grid-template-columns: 1fr; }
+  body[data-view="health"] .check:has(details) { padding-block: 2px; }
   /* Keep short status pills intact; the base stylesheet lets every pill wrap at 760px. */
   body.authed:not([data-view="dashboard"]) td .pill:not(.technique):not(.asset):not(.tag):not(.stage),
   body[data-view="incidents"] .sevtag,
@@ -1003,6 +1006,9 @@ body[data-view="admin"] .sessions button.danger:focus-visible {
   /* Detail columns keep their tracks and scroll inside the card. */
   body[data-view="alerts"] .split .table-wrap table,
   body[data-view="incidents"] .split .table-wrap table { min-width: 700px; }
+}
+@media (max-width: 360px) {
+  body[data-view="rules"] .card[id^="rule-"] { padding-inline: 6px; }
 }
 @media (min-width: 761px) and (max-width: 1100px) {
   body[data-view="events"] form.card > .row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
