@@ -329,21 +329,26 @@ dialog::backdrop { background: rgb(0 0 0 / .6); }
 .pending b { color: var(--warn); font: 600 11px var(--mono); letter-spacing: .14em; text-transform: uppercase; }
 
 /* incident board */
-.board { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; height: 100%; }
-.bcol { background: rgb(6 10 15 / .5); border: 1px solid var(--line); border-radius: 3px; padding: 6px; display: flex; flex-direction: column; gap: 5px; min-width: 0; }
-.bh { display: flex; justify-content: space-between; font: 600 9.5px var(--sans); letter-spacing: .14em; color: var(--muted); padding: 0 2px 3px; border-bottom: 1px solid var(--line); }
-.bh b { font: 600 11px var(--mono); color: var(--ink); }
+.board { display: flex; gap: 8px; height: 100%; align-items: stretch; }
+.bcol { background: rgb(6 10 15 / .45); border: 1px solid var(--line); border-radius: 6px; padding: 8px; display: flex; flex-direction: column; gap: 6px; min-width: 0; flex: 1 1 0; }
+/* Empty columns stay as status rails and give their width to columns that hold cards. */
+.board:has(.bcard) .bcol:not(:has(.bcard)) { flex: 0 0 168px; }
+.bh { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font: 600 11px var(--sans); letter-spacing: .08em; color: var(--muted); padding: 0 2px 6px; border-bottom: 1px solid var(--line); }
+.bh span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bh b { font: 600 12px var(--mono); color: var(--ink); letter-spacing: 0; flex: none; }
 .bc-open .bh span { color: var(--high); } .bc-investigating .bh span { color: var(--accent); } .bc-resolved .bh span { color: var(--ok); }
 .bcard { display: block; text-decoration: none; background: var(--panel-2); border: 1px solid var(--line-2); border-left: 3px solid currentColor;
-  border-radius: 3px; padding: 5px 7px; min-width: 0; }
+  border-radius: 6px; padding: 8px 10px; min-width: 0; }
 .bcard:hover { text-decoration: none; border-color: var(--accent); border-left-color: currentColor; background: var(--raise); }
-.bt { color: var(--ink); font-size: 11.5px; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.bm { display: flex; gap: 6px; align-items: center; font: 10px var(--mono); color: var(--ink-2); margin-top: 3px; white-space: nowrap; overflow: hidden; }
-.btags { display: flex; gap: 3px; flex-wrap: wrap; margin-top: 4px; }
-.tag { font: 9px var(--mono); padding: 0 4px; border: 1px solid var(--line-2); border-radius: 2px; color: var(--ink-2); }
-.bmore { font-size: 10.5px; text-align: center; }
+.bt { color: var(--ink); font-size: 13px; font-weight: 600; line-height: 1.35;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.bm { display: flex; gap: 8px; align-items: center; font: 12px var(--mono); color: var(--ink-2); margin-top: 4px; white-space: nowrap; overflow: hidden; }
+.bm > span:not(.sevtag):not(.syn) { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.btags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
+.tag { font: 11px var(--mono); padding: 1px 5px; border: 1px solid var(--line-2); border-radius: 3px; color: var(--ink-2); }
+.bmore { font-size: 12px; text-align: center; padding: 4px 0; }
 .board.big { height: auto; }
-.board.big .bcol { min-height: 300px; }
+.board.big .bcol { min-height: 280px; }
 
 /* health panel */
 .hrow2 { display: grid; grid-template-columns: 14px 86px minmax(0, 1fr) auto; gap: 6px; align-items: center; font-size: 11px; padding: 3px 0;
@@ -425,7 +430,10 @@ kbd { font: 600 10.5px var(--mono); padding: 0 5px; border: 1px solid var(--line
   .strip { position: static; flex-wrap: wrap; } .strip-end { margin-left: 0; }
   .soc { display: flex; flex-direction: column; }
   #p-map { height: 240px; } .map-side { display: none; }
-  .board { grid-template-columns: 1fr; }
+  .board { flex-direction: column; height: auto; }
+  .board .bcol,
+  .board:has(.bcard) .bcol:not(:has(.bcard)) { flex: 0 0 auto; }
+  .board.big .bcol { min-height: 0; }
 }
 
 /* ATT&CK technique and kill-chain stage chips (alert, rule, and incident detail views) */
