@@ -284,7 +284,7 @@ const Live = {
   renderSpark() {
     const vals = this.epm.slice(-30).map((m) => m.count);
     const summary = vals.length ? `: latest ${vals[vals.length - 1]}, peak ${Math.max(...vals)}` : ": no data yet";
-    mountSvg($("#k-epm-spark"), WPCharts.sparkline(vals, { w: 84, h: 22, cls: "accent", label: `events per minute, last 30 minutes${summary}` }));
+    mountSvg($("#k-epm-spark"), WPCharts.sparkline(vals, { w: 112, h: 28, cls: "accent", label: `events per minute, last 30 minutes${summary}` }));
   },
   renderStrip() {
     const d = this.summary;
@@ -335,7 +335,7 @@ const Dash = {
     this.mapSize = null;
     this.feedCount = 0;
     const pause = el("button", { class: "mini ghost", id: "feed-pause", onclick: () => this.togglePause() }, "Pause");
-    render(el("div", { class: "card", id: "dashboard-view-bar" }, el("p", { class: "muted" }, "Loading saved dashboard views…")),
+    render(el("div", { class: "view-bar", id: "dashboard-view-bar" }, el("p", { class: "muted" }, "Loading saved dashboard views…")),
       el("div", { class: "soc", id: "soc" },
       panel("p-map", "Attack map", [chip("SYNTHETIC GEO", "synthetic"), el("span", { class: "muted", id: "map-count" })],
         el("div", { class: "mapwrap", id: "map" }),
@@ -343,7 +343,7 @@ const Dash = {
         el("div", { class: "map-legend" }, ...["critical", "high", "medium", "low"].map((s) => el("span", {}, el("i", { class: `dot sev-${s}` }), s)),
           el("span", {}, el("i", { class: "dot hq" }), "HQ target"))),
       panel("p-feed", "Live event stream", [el("span", { class: "muted", id: "feed-rate" }), pause],
-        el("div", { class: "feed-head" }, el("span", {}, "TIME"), el("span", {}, "SEV"), el("span", {}, "TYPE"), el("span", {}, "SOURCE → TARGET")),
+        el("div", { class: "feed-head" }, el("span", {}, "TIME"), el("span", {}, "SEV"), el("span", {}, "EVENT")),
         el("div", { class: "feed", id: "feed", onmouseenter: () => this.hover(true), onmouseleave: () => this.hover(false) })),
       panel("p-timeline", "Alerts over time", [el("span", { class: "muted", id: "tl-bucket" })], el("div", { class: "chartbox", id: "tl-chart" }),
         el("div", { class: "legend" }, ...["critical", "high", "medium", "low"].map((s) => el("span", {}, el("i", { class: `dot sev-${s}` }), s)),
@@ -419,9 +419,16 @@ const Dash = {
       this.applyView(); this.renderViewBar();
     };
     picker.value = this.currentView ? String(this.currentView.id) : "";
-    const controls = [el("label", {}, "Saved view", picker), el("button", { type: "button", onclick: apply }, "Apply")];
+    const controls = [el("label", { class: "view-pick" }, "Saved view", picker), el("button", { type: "button", class: "ghost", onclick: apply }, "Apply")];
+    let save = null;
     if (can("analyst")) {
-      const form = el("form", { class: "row" },
+      if (this.currentView?.owner === state.user.username) controls.push(
+        el("button", { type: "button", class: "danger", onclick: () => confirm(`Delete dashboard view "${this.currentView.name}"?`) && guarded(async () => {
+          await api(`/api/dashboard/views/${this.currentView.id}/delete`, { method: "POST" });
+          this.currentView = null; this.severities = DASH_FILTERS.all; this.layout = DASH_LAYOUTS.full;
+          await this.loadViews(); this.applyView();
+        }) }, "Delete mine"));
+      const form = el("form", { class: "view-save-form" },
         el("label", {}, "Name", el("input", { name: "name", required: true, maxlength: 80 })),
         el("label", {}, "Severity", el("select", { name: "filter" },
           el("option", { value: "all" }, "All severities"), el("option", { value: "elevated" }, "Critical + high"), el("option", { value: "critical" }, "Critical only"))),
@@ -435,15 +442,10 @@ const Dash = {
         this.severities = this.currentView.filters.severities; this.layout = this.currentView.layout;
         await this.loadViews(); this.applyView(); toast(`Saved dashboard view "${this.currentView.name}"`);
       }); });
-      controls.push(form);
-      if (this.currentView?.owner === state.user.username) controls.push(
-        el("button", { type: "button", class: "danger", onclick: () => confirm(`Delete dashboard view "${this.currentView.name}"?`) && guarded(async () => {
-          await api(`/api/dashboard/views/${this.currentView.id}/delete`, { method: "POST" });
-          this.currentView = null; this.severities = DASH_FILTERS.all; this.layout = DASH_LAYOUTS.full;
-          await this.loadViews(); this.applyView();
-        }) }, "Delete mine"));
+      save = el("details", { class: "view-save" }, el("summary", {}, "Save a view"), form);
     }
-    bar.replaceChildren(el("h2", {}, this.currentView ? this.currentView.name : "Dashboard view"), el("div", { class: "row" }, ...controls));
+    bar.replaceChildren(el("span", { class: "view-name" }, this.currentView ? this.currentView.name : "Default layout"),
+      el("div", { class: "view-controls" }, ...controls), ...(save ? [save] : []));
   },
   applyView() {
     const soc = $("#soc");
@@ -473,7 +475,7 @@ const Dash = {
     if (this.mapSize !== size) {
       // Fit the 360x140-degree projection inside the box, centered.
       const mw = Math.min(w, h * (360 / 140)), mh = mw * (140 / 360);
-      mountSvg(box, WPMap.baseMap(mw, mh));
+      mountSvg(box, WPMap.baseMap(mw, mh, { step: 1.8 }));
       this.mapSize = size;
       this.mapDims = [mw, mh];
     }
@@ -509,19 +511,31 @@ const Dash = {
     }
     const ranked = [...cities.values()].sort((a, b) => SEV_RANK[b.sev] - SEV_RANK[a.sev] || b.events - a.events);
     const esc = WPCharts.esc;
+    const [hx, hy] = WPMap.project(hq.lon, hq.lat, w, h);
+    const placed = [{ x: hx, y: hy }];
+    const crowded = (x, y) => placed.some((p) => Math.hypot(p.x - x, p.y - y) < 52);
     let arcs = "", marks = "";
     ranked.forEach((c, i) => {
       arcs += `<path class="arc s-${c.sev}" pathLength="100" d="${WPMap.arcPath([c.lon, c.lat], [hq.lon, hq.lat], w, h)}"/>`;
       const [x, y] = WPMap.project(c.lon, c.lat, w, h);
       const r = 2.6 + Math.min(5, Math.log2(1 + c.events) * 0.8);
+      let label = "";
+      if (i < 7 && !crowded(x, y)) {
+        const end = x > w - 72;
+        const lx = end ? x - r - 4 : x + r + 4;
+        const ly = y > 18 ? y - r - 3 : y + r + 12;
+        label = `<text class="ml" x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="${end ? "end" : "start"}">${esc(c.city)}</text>`;
+        placed.push({ x, y });
+      }
       marks += `<g class="mk sev-${c.sev}"><title>${esc(`${c.city} (synthetic geo)\n${c.ips.join(", ")}\n${c.events} events`)}</title>` +
         `<circle class="halo" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${(r * 2.2).toFixed(1)}"/>` +
         `<circle class="core" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${r.toFixed(1)}"/>` +
-        (i < 7 ? `<text class="ml" x="${(x + r + 3).toFixed(1)}" y="${(y + 3).toFixed(1)}">${esc(c.city)}</text>` : "") + `</g>`;
+        label + `</g>`;
     });
-    const [hx, hy] = WPMap.project(hq.lon, hq.lat, w, h);
+    const hqEnd = hx > w - 72;
     marks += `<g class="hq"><title>${esc(`${hq.city} (synthetic geo)`)}</title><circle class="ring" cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="9"/>` +
-      `<circle class="core" cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="3.6"/><text class="ml" x="${(hx + 8).toFixed(1)}" y="${(hy + 12).toFixed(1)}">HQ</text></g>`;
+      `<circle class="core" cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="3.6"/>` +
+      `<text class="ml" x="${(hqEnd ? hx - 12 : hx + 12).toFixed(1)}" y="${(hy > 18 ? hy - 8 : hy + 16).toFixed(1)}" text-anchor="${hqEnd ? "end" : "start"}">HQ</text></g>`;
     setSvgChildren(svg.querySelector("g.arcs"), arcs);
     setSvgChildren(svg.querySelector("g.marks"), marks);
     $("#map-count").textContent = `${ranked.length} source locations · ${unknown.length} unknown`;
@@ -595,22 +609,24 @@ const Dash = {
   feedRow(e, fresh) {
     const s = sevOf(e.severity);
     const target = e.user || e.host || e.dest_ip || "";
+    const msg = e.message ? e.message.replace(/^\[SYNTHETIC\]\s*/, "") : "";
+    const route = (e.src_ip || target) ? el("span", { class: "route" },
+      e.src_ip ? el("code", {}, e.src_ip) : null,
+      e.src_ip && target ? el("span", { class: "arrow" }, "→") : null,
+      target ? el("span", { class: "fu" }, target) : null) : null;
     return el("div", { class: `fr sev-${s}${fresh ? " new" : ""}`, title: e.message || "" },
       el("span", { class: "ft" }, clock(e.ts)),
       sevTag(s),
       el("span", { class: "fy" }, e.event_type),
-      el("span", { class: "fd" },
-        e.src_ip ? el("code", {}, e.src_ip) : null, target ? el("span", { class: "arrow" }, " → ") : null,
-        target ? el("span", { class: "fu" }, target) : null,
-        e.message ? el("span", { class: "fm" }, ` ${e.message.replace(/^\[SYNTHETIC\]\s*/, "")}`) : null,
-        e.synthetic ? el("span", { class: "syn" }, "SYN") : null));
+      el("span", { class: "fd" }, route, msg ? el("span", { class: "fm" }, msg) : null, e.synthetic ? el("span", { class: "syn" }, "SYN") : null));
   },
   alertRow(a) {
     const feed = $("#feed");
     if (!feed) return;
     const row = el("a", { class: `fr alert-row sev-${sevOf(a.severity)} new`, href: `#alerts/${a.id}` },
-      el("span", { class: "ft" }, clock(a.last_seen)), sevTag(a.severity), el("span", { class: "fy" }, "▲ ALERT"),
-      el("span", { class: "fd" }, el("b", {}, a.title), el("span", { class: "fm" }, ` ${a.rule_id}`)));
+      el("span", { class: "ft" }, clock(a.last_seen)), sevTag(a.severity),
+      el("span", { class: "fy" }, a.title),
+      el("span", { class: "fd" }, el("span", { class: "fm" }, a.rule_id)));
     feed.prepend(row);
     const p = $("#p-feed");
     if (p) { p.classList.remove("flash"); void p.offsetWidth; p.classList.add("flash"); }
@@ -647,14 +663,14 @@ const Dash = {
         subCls: loc === null ? "unknown" : "", title: `${a.ip}: ${a.events} evidence events in ${a.alerts} alerts (${a.open_alerts} open)` };
     });
     if (!rows.length) { box.replaceChildren(el("p", { class: "empty-note" }, "No attacker IPs in alert evidence yet.")); return; }
-    mountSvg(box, WPCharts.hbars(rows, { w: this.width("#atk-chart"), rowH: 25, labelW: 136, label: `top attacker IPs by evidence events: ${rows.map((r) => `${r.label} ${r.value}`).join(", ")}` }));
+    mountSvg(box, WPCharts.hbars(rows, { w: this.width("#atk-chart"), rowH: 28, labelW: 148, label: `top attacker IPs by evidence events: ${rows.map((r) => `${r.label} ${r.value}`).join(", ")}` }));
   },
   renderRules() {
     const box = $("#rules-chart");
     if (!box) return;
     const rows = this.data.top_rules.map((r) => ({ label: r.name || r.rule_id, sub: `${r.rule_id} · ${r.open} open`, value: r.alerts, cls: sevOf(r.severity) }));
     if (!rows.length) { box.replaceChildren(el("p", { class: "empty-note" }, "No rule has fired yet.")); return; }
-    mountSvg(box, WPCharts.hbars(rows.slice(0, 7), { w: this.width("#rules-chart"), rowH: 25, labelW: 150, label: `alerts by rule: ${rows.slice(0, 7).map((r) => `${r.label} ${r.value}`).join(", ")}` }));
+    mountSvg(box, WPCharts.hbars(rows.slice(0, 7), { w: this.width("#rules-chart"), rowH: 28, labelW: 160, label: `alerts by rule: ${rows.slice(0, 7).map((r) => `${r.label} ${r.value}`).join(", ")}` }));
   },
   renderEntities() {
     const box = $("#ent-list");
@@ -689,14 +705,24 @@ const Dash = {
       for (const col of byTactic.values()) col.cells.sort((a, b) => b.value - a.value || a.id.localeCompare(b.id));
     }
     let columns = [...byTactic.values()];
-    if (w < 900 && cov.state === "ok") columns = columns.filter((c) => c.cells.length);
+    let quiet = [];
+    if (cov.state === "ok") {
+      quiet = columns.filter((c) => !c.cells.length);
+      columns = columns.filter((c) => c.cells.length);
+    }
     const meta = $("#attack-meta");
     if (cov.state === "ok") {
       const validated = cov.list.filter((t) => t.covered ?? t.rules.length > 0).length;
       const hot = cov.list.filter((t) => t.hits > 0).length;
+      const tallest = columns.reduce((n, c) => Math.max(n, c.cells.length), 0);
       meta.textContent = `${validated}/${cov.list.length} techniques validated on synthetic scenarios · ${hot} observed · `;
       meta.append(el("a", { href: "#coverage" }, "details"));
-      mountSvg(box, WPCharts.heatMatrix(columns, { w, cellH: 21, maxRows: Math.max(3, Math.min(7, ...[Math.max(...columns.map((c) => c.cells.length))])), label: `ATT&CK coverage heat matrix: ${validated} of ${cov.list.length} techniques validated, ${hot} seen in alerts. The Coverage view lists every technique as text.` }));
+      mountSvg(box, WPCharts.heatMatrix(columns.length ? columns : [{ name: "None", short: "—", cells: [] }], {
+        w, cellH: 24, maxRows: Math.max(3, Math.min(6, tallest || 3)),
+        label: `ATT&CK coverage heat matrix: ${validated} of ${cov.list.length} techniques validated, ${hot} seen in alerts. The Coverage view lists every technique as text.`,
+      }));
+      box.parentElement.querySelector(".cov-quiet")?.remove();
+      if (quiet.length) box.parentElement.append(el("p", { class: "cov-quiet" }, `No mapped techniques: ${quiet.map((c) => c.short || c.name).join(", ")}.`));
       return;
     }
     meta.textContent = cov.state === "pending" ? "" : cov.state === "error" ? cov.error : "loading…";
