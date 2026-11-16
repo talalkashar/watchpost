@@ -749,6 +749,7 @@ body[data-view="health"] .check:has(.st-degraded) { box-shadow: inset 3px 0 0 va
 body[data-view="health"] .check:has(.st-failing) { box-shadow: inset 3px 0 0 var(--bad); }
 body[data-view="health"] .check strong { color: #fff; font-size: 14px; }
 body[data-view="health"] .check > div:last-child { color: var(--ink); font-size: 14px; line-height: 1.45; }
+body[data-view="health"] #source-health table { min-width: 1000px; }
 body[data-view="coverage"] .legend {
   display: grid;
   gap: 8px;
