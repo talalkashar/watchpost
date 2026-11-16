@@ -1471,19 +1471,23 @@ async function coverageView() {
     cells.forEach((b, id) => b.setAttribute("aria-pressed", String(id === t.id)));
     detail.replaceChildren(coverageDetail(t, cov.level_meaning));
   };
-  const columns = cov.tactics.map((tac) => {
+  const quiet = [];
+  const columns = [];
+  for (const tac of cov.tactics) {
     const list = cov.techniques.filter((t) => t.tactic === tac.name);
-    return el("div", { class: "cov-col", role: "group", "aria-label": `${tac.name}: ${list.length} technique(s)` },
+    // A tactic with nothing in the catalog is a blank column. Name it once under the grid.
+    if (!list.length) { quiet.push(tac.name); continue; }
+    columns.push(el("div", { class: "cov-col", role: "group", "aria-label": `${tac.name}: ${list.length} technique(s)` },
       el("div", { class: "cov-head" }, tac.name),
-      list.length ? list.map((t) => {
+      ...list.map((t) => {
         const b = el("button", { type: "button", class: `cov-cell lv-${t.level}`, "aria-pressed": "false",
           "aria-label": `${t.id} ${t.name}: ${LEVEL_WORD[t.level]}, ${t.hits} alert(s)`, onclick: () => show(t) },
           el("b", {}, t.id), el("span", {}, t.name.split(": ").pop()),
           el("small", {}, LEVEL_WORD[t.level], t.hits ? ` · ${t.hits} alerts` : ""));
         cells.set(t.id, b);
         return b;
-      }) : el("p", { class: "cov-empty muted" }, "No catalog technique"));
-  });
+      })));
+  }
   const order = { gap: 0, disabled: 1, mapped: 2 };
   const gaps = cov.techniques.filter((t) => t.level !== "validated").sort((a, b) => order[a.level] - order[b.level] || a.id.localeCompare(b.id));
   render(
@@ -1495,6 +1499,7 @@ async function coverageView() {
       el("div", { class: "legend", role: "list", "aria-label": "Levels" }, cov.levels.map((l) =>
         el("span", { role: "listitem" }, levelPill(l), " ", cov.level_meaning[l])))),
     el("div", { class: "card" }, el("h2", {}, "Tactics × techniques"),
+      quiet.length ? el("p", { class: "cov-quiet" }, `No catalog techniques: ${quiet.join(", ")}.`) : null,
       el("div", { class: "cov-scroll" }, el("div", { class: "cov-grid" }, columns))),
     detail,
     el("div", { class: "card" }, el("h2", {}, `Gaps: not validated (${gaps.length})`),
