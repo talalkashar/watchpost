@@ -714,12 +714,16 @@ const Dash = {
     const cov = this.coverage;
     const w = this.width("#attack-chart", 900);
     const byTactic = new Map(TACTICS.map(([name, short]) => [tacticKey(name), { name, short, cells: [] }]));
+    // Rules behind critical alerts: a technique they map to and that was observed is drawn red.
+    const critRules = new Set([...(this.data?.alerts || []), ...(this.data?.top_rules || [])]
+      .filter((a) => sevOf(a.severity) === "critical").map((a) => a.rule_id));
     if (cov.state === "ok") {
       for (const t of cov.list) {
         for (const tac of t.tactics.length ? t.tactics : ["Unmapped"]) {
           const key = tacticKey(tac);
           if (!byTactic.has(key)) byTactic.set(key, { name: tac, short: tac, cells: [] });
-          byTactic.get(key).cells.push({ id: t.id, name: t.name, value: t.hits, covered: t.covered ?? t.rules.length > 0, level: t.level, rules: t.rules });
+          byTactic.get(key).cells.push({ id: t.id, name: t.name, value: t.hits, covered: t.covered ?? t.rules.length > 0, level: t.level, rules: t.rules,
+            crit: t.hits > 0 && t.rules.some((id) => critRules.has(id)) });
         }
       }
       for (const col of byTactic.values()) col.cells.sort((a, b) => b.value - a.value || a.id.localeCompare(b.id));
