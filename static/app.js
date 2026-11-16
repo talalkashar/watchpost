@@ -1426,14 +1426,38 @@ async function historyDialog(rule) {
 // ---------- noise lab ----------
 const VERDICT_CLASS = { quiet: "st-ok", noisy: "st-degraded", blind: "st-failing", disabled: "st-rejected", untested: "st-rejected" };
 
+// A rule id may break after an underscore when the column is narrow. The characters stay the id.
+function ruleId(id) {
+  const parts = String(id).split("_");
+  const children = [];
+  parts.forEach((part, i) => {
+    if (i) children.push("_", el("wbr"));
+    children.push(part);
+  });
+  return el("code", { class: "nr-id" }, children);
+}
+
+function tokenList(list) {
+  if (!list.length) return el("span", { class: "muted" }, "none");
+  return el("span", { class: "tokens" }, list.map((n) => el("code", {}, n)));
+}
+
+function noiseStat(cls, label, value) {
+  return el("div", { class: `nr-stat ${cls}` }, el("span", {}, label), el("b", {}, value));
+}
+
 async function noiseLab() {
   const lab = await api("/api/noise-lab");
-  const names = (list) => (list.length ? list.join(", ") : "none");
-  const rows = lab.rules.map((r) => ({ cells: [
-    el("span", {}, r.name, el("div", { class: "muted" }, el("code", {}, r.rule_id))),
-    pct(r.recall), pct(r.precision), names(r.lookalikes_tested),
-    names(r.lookalikes_fired.concat(r.other_benign_fired)),
-    { num: r.suppressed }, pill(r.verdict, VERDICT_CLASS[r.verdict] || "st-rejected"), r.summary] }));
+  const rules = lab.rules.map((r) => el("article", { class: "nr" },
+    el("h3", {}, r.name),
+    ruleId(r.rule_id),
+    el("div", { class: "nr-field nr-tested" }, el("span", {}, "Look-alikes tested"), tokenList(r.lookalikes_tested)),
+    el("div", { class: "nr-field nr-fired" }, el("span", {}, "Benign scenarios that fired"), tokenList(r.lookalikes_fired.concat(r.other_benign_fired))),
+    noiseStat("nr-recall", "Recall", pct(r.recall)),
+    noiseStat("nr-precision", "Precision", pct(r.precision)),
+    noiseStat("nr-excepted", "Excepted", String(r.suppressed)),
+    pill(r.verdict, VERDICT_CLASS[r.verdict] || "st-rejected"),
+    el("p", { class: "nr-read" }, r.summary)));
   const lookalikes = lab.scenarios.filter((s) => s.lookalike_of);
   render(
     el("h1", {}, "Noise lab"),
@@ -1442,7 +1466,7 @@ async function noiseLab() {
       el("p", {}, `Every rule runs against every labeled synthetic scenario, each in isolation: the attacks it should catch and ${lab.summary.lookalikes} benign look-alikes written to resemble them. ${lab.summary.noisy} of ${lab.summary.rules} rules fire on benign activity. That is shown here, not tuned away: a rule is only changed when there is a principled fix that keeps its attack detected.`),
       el("p", { class: "muted" }, "Recall is attacks caught out of attacks labeled. Precision is true detections out of everything the rule fired on, counted on these scenarios only: it says nothing about real traffic. Results use the current rule parameters and approved tuning exceptions (seed ", lab.seed, "). data_exfil_volume uses flat thresholds, so the nightly backup fires here until a tuning exception for the backup server is approved; only then is that one principal compared with its own history.")),
     el("div", { class: "card" }, el("h2", {}, "Rules against their look-alikes"),
-      table(["Rule", "Recall", "Precision", "Look-alikes tested", "Benign scenarios that fired", "Excepted", "Verdict", "Reading"], rows)),
+      el("div", { class: "noise-rules" }, rules)),
     el("div", { class: "card" }, el("h2", {}, "The benign look-alikes"),
       table(["Scenario", "Written for", "What happens"], lookalikes.map((s) => ({ cells: [
         el("span", {}, el("code", {}, s.name), " ", synth(true)), el("code", {}, s.lookalike_of), s.description] })))),
