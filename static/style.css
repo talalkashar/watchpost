@@ -346,18 +346,34 @@ dialog::backdrop { background: rgb(0 0 0 / .72); backdrop-filter: blur(2px); }
 .heat .tc { fill: var(--muted); font: 11px var(--mono); }
 .heat .tc.hot { fill: var(--ink); }
 .heat .cell { stroke-width: 1; rx: 4px; }
-/* A white-opacity scale by hit count; red only for techniques observed in critical alerts. */
+/* Validated cells use a white-opacity scale by hit count, and turn red when a critical alert observed them.
+   Mapped, disabled, and gap keep their own colors so a mapped technique does not look like a gap. */
 .heat .cell.void { fill: rgb(255 255 255 / .012); stroke: rgb(255 255 255 / .04); stroke-dasharray: 2 2; }
 .heat .cell.gap { fill: transparent; stroke: rgb(255 255 255 / .2); stroke-dasharray: 3 2; }
+.heat .cell.mapped { fill: rgb(212 162 86 / .28); stroke: rgb(212 162 86 / .75); }
+.heat .cell.disabled { fill: rgb(160 160 160 / .12); stroke: rgb(160 160 160 / .55); }
 .heat .cell.h0 { fill: rgb(255 255 255 / .035); stroke: rgb(255 255 255 / .08); }
 .heat .cell.h1 { fill: rgb(255 255 255 / .09); stroke: rgb(255 255 255 / .14); } .heat .cell.h2 { fill: rgb(255 255 255 / .15); stroke: rgb(255 255 255 / .2); }
 .heat .cell.h3 { fill: rgb(255 255 255 / .22); stroke: rgb(255 255 255 / .28); } .heat .cell.h4 { fill: rgb(255 255 255 / .3); stroke: rgb(255 255 255 / .38); }
 .heat .cell.h5 { fill: rgb(255 255 255 / .62); stroke: rgb(255 255 255 / .75); }
-.heat .cell.crit { fill: rgb(var(--crit-rgb) / .3); stroke: rgb(var(--crit-rgb) / .7); }
-.heat .cid { fill: var(--ink-2); font: 11px var(--mono); } .heat .cid.h0 { fill: var(--ink); } .heat .cid.gap { fill: var(--muted); }
+.heat .cell.h0.crit, .heat .cell.h1.crit, .heat .cell.h2.crit,
+.heat .cell.h3.crit, .heat .cell.h4.crit, .heat .cell.h5.crit { fill: rgb(var(--crit-rgb) / .3); stroke: rgb(var(--crit-rgb) / .7); }
+.heat .cell.mapped.crit, .heat .cell.disabled.crit, .heat .cell.gap.crit { stroke: rgb(var(--crit-rgb) / .85); }
+.heat .cid { fill: var(--ink-2); font: 11px var(--mono); } .heat .cid.h0 { fill: var(--ink); } .heat .cid.gap, .heat .cid.disabled { fill: var(--muted); }
+.heat .cid.mapped { fill: #f3d48a; }
 .heat .cid.h1, .heat .cid.h2, .heat .cid.h3, .heat .cid.h4, .heat .cid.crit { fill: #fff; }
 .heat .cv { fill: #fff; font: 600 11px var(--mono); }
+.heat .cv.mapped, .heat .cv.disabled { fill: var(--ink); }
 .heat .cid.h5:not(.crit), .heat .cv.h5:not(.crit) { fill: #0a0a0a; }
+.heat .more { fill: var(--muted); font: 11px var(--mono); }
+.heat-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 6px; color: var(--muted); font: 11px var(--sans); }
+.heat-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.heat-legend .swatch { width: 12px; height: 8px; border-radius: 2px; box-sizing: border-box; }
+.heat-legend .swatch.heat { background: rgb(255 255 255 / .45); border: 1px solid rgb(255 255 255 / .5); }
+.heat-legend .swatch.mapped { background: rgb(212 162 86 / .45); border: 1px solid rgb(212 162 86 / .8); }
+.heat-legend .swatch.disabled { background: rgb(160 160 160 / .25); border: 1px solid rgb(160 160 160 / .7); }
+.heat-legend .swatch.gap { background: transparent; border: 1px dashed rgb(255 255 255 / .35); }
+.heat-legend .swatch.crit { background: rgb(var(--crit-rgb) / .3); border: 1px solid rgb(var(--crit-rgb) / .7); }
 .cov-quiet { margin: 6px 2px 2px; color: var(--muted); font-size: 12px; line-height: 1.4; }
 .card > .cov-quiet { margin: 0 2px 12px; }
 .heat .cellg:hover .cell { stroke: var(--accent); }

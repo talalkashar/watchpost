@@ -349,7 +349,7 @@ const Dash = {
         el("div", { class: "legend" }, ...["critical", "high", "medium", "low"].map((s) => el("span", {}, el("i", { class: `dot sev-${s}` }), s)),
           el("span", {}, el("i", { class: "dot volume" }), "event volume"))),
       panel("p-attackers", "Top attacker IPs", [el("span", { class: "muted" }, "by evidence events")], el("div", { class: "chartbox", id: "atk-chart" })),
-      panel("p-attack", "MITRE ATT&CK coverage", [el("span", { class: "muted", id: "attack-meta" }), el("a", { href: "/api/attack/navigator.json", download: "watchpost-navigator-layer.json", title: "MITRE ATT&CK Navigator layer (JSON) colored by evidence level; scores come from synthetic demo data" }, "Export Navigator layer")], el("div", { class: "chartbox", id: "attack-chart", tabindex: "0", role: "region", "aria-label": "ATT&CK technique matrix" })),
+      panel("p-attack", "MITRE ATT&CK coverage", [el("span", { class: "muted", id: "attack-meta" }), el("a", { href: "/api/attack/navigator.json", download: "watchpost-navigator-layer.json", title: "MITRE ATT&CK Navigator layer (JSON) colored by evidence level; scores come from synthetic demo data" }, "Export Navigator layer")], el("div", { class: "chartbox", id: "attack-chart", tabindex: "0", role: "region", "aria-label": "ATT&CK technique matrix" }), el("div", { class: "heat-legend", id: "attack-legend" })),
       panel("p-board", "Incident board", [el("span", { id: "board-meta" })], el("div", { class: "board", id: "board" })),
       panel("p-rules", "Top rules", [el("span", { class: "muted" }, "alerts all time")], el("div", { class: "chartbox", id: "rules-chart" })),
       panel("p-health", "Health", [el("a", { href: "#health", class: "muted" }, "details →")], el("div", { id: "health-body" })),
@@ -728,29 +728,31 @@ const Dash = {
             crit: t.hits > 0 && t.rules.some((id) => critRules.has(id)) });
         }
       }
-      for (const col of byTactic.values()) col.cells.sort((a, b) => b.value - a.value || a.id.localeCompare(b.id));
+      for (const col of byTactic.values()) col.cells.sort((a, b) => a.id.localeCompare(b.id));
     }
-    let columns = [...byTactic.values()];
-    let quiet = [];
-    if (cov.state === "ok") {
-      quiet = columns.filter((c) => !c.cells.length);
-      columns = columns.filter((c) => c.cells.length);
-    }
+    // Empty tactics stay in the row so a gap in the kill chain is visible, not dropped.
+    const columns = [...byTactic.values()];
     const meta = $("#attack-meta");
+    const legend = $("#attack-legend");
     if (cov.state === "ok") {
-      const validated = cov.list.filter((t) => t.covered ?? t.rules.length > 0).length;
+      const validated = cov.list.filter((t) => (t.level ? t.level === "validated" : (t.covered ?? t.rules.length > 0))).length;
+      const mapped = cov.list.filter((t) => t.level === "mapped").length;
       const hot = cov.list.filter((t) => t.hits > 0).length;
       const tallest = columns.reduce((n, c) => Math.max(n, c.cells.length), 0);
-      meta.textContent = `${validated}/${cov.list.length} techniques validated on synthetic scenarios · ${hot} observed · `;
+      const levelNote = cov.list.some((t) => t.level) ? ` · ${mapped} mapped only` : "";
+      meta.textContent = `${validated}/${cov.list.length} techniques validated on synthetic scenarios${levelNote} · ${hot} observed · `;
       meta.append(el("a", { href: "#coverage" }, "details"));
       mountSvg(box, WPCharts.heatMatrix(columns.length ? columns : [{ name: "None", short: "—", cells: [] }], {
-        w: Math.max(w, columns.length * 110), cellH: 22, maxRows: Math.max(3, Math.min(4, tallest || 3)),
-        label: `ATT&CK coverage heat matrix: ${validated} of ${cov.list.length} techniques validated, ${hot} seen in alerts. The Coverage view lists every technique as text.`,
+        w: Math.max(w, columns.length * 86), cellH: 22, maxRows: Math.max(tallest, 1),
+        label: `ATT&CK coverage: ${validated} of ${cov.list.length} techniques validated on synthetic scenarios, ${mapped} mapped only, ${hot} seen in alerts. Empty tactics have no catalog technique. Colors match the Coverage view.`,
       }));
+      if (legend) legend.replaceChildren(
+        ...[["heat", "Validated (heat = alert count)"], ["mapped", "Mapped only"], ["disabled", "Disabled"], ["gap", "Gap"], ["crit", "On a critical alert"]]
+          .map(([cls, text]) => el("span", {}, el("i", { class: `swatch ${cls}`, "aria-hidden": "true" }), text)));
       box.parentElement.querySelector(".cov-quiet")?.remove();
-      if (quiet.length) box.parentElement.append(el("p", { class: "cov-quiet" }, `No mapped techniques: ${quiet.map((c) => c.short || c.name).join(", ")}.`));
       return;
     }
+    if (legend) legend.replaceChildren();
     meta.textContent = cov.state === "pending" ? "" : cov.state === "error" ? cov.error : "loading…";
     const ghost = svgNode(WPCharts.heatMatrix(columns, { w, cellH: 21, maxRows: 3, label: "ATT&CK matrix (pending)" }));
     box.replaceChildren(el("div", { class: "pending-wrap" }, ghost,

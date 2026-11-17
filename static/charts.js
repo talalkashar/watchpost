@@ -146,24 +146,41 @@ function hbars(rows, { w = 300, rowH = 22, labelW = 118, label = "ranking" } = {
   return out + "</svg>";
 }
 
-// ATT&CK-style heat matrix. columns: [{name, short, cells: [{id, name, value, covered, rules}]}]
-// value -> heat class h0..h5 on a log-ish scale; uncovered cells are drawn hollow.
+// ATT&CK-style heat matrix. columns: [{name, short, cells: [{id, name, value, covered, level, rules}]}]
+// A validated technique (or a cell with no level, when covered is not false) uses heat class h0..h5
+// from its hit count. mapped, disabled, and gap keep their own classes so a mapped technique is not
+// drawn as a gap. Cells past maxRows are named in a "+N" caption instead of disappearing.
+const LEVEL_TIP = {
+  validated: "validated on a labeled synthetic scenario",
+  mapped: "mapped only; no labeled scenario proves detection",
+  disabled: "only disabled rules map here",
+  gap: "no rule maps here",
+};
+function cellClass(cell, heat) {
+  const crit = cell.crit ? " crit" : "";
+  if (cell.level === "mapped" || cell.level === "disabled" || cell.level === "gap") return cell.level + crit;
+  if (cell.level === "validated" || cell.covered !== false) return `h${heat}` + crit;
+  return "gap" + crit;
+}
 function heatMatrix(columns, { w = 700, cellH = 22, headH = 30, maxRows = 8, label = "coverage matrix" } = {}) {
   const list = columns.length ? columns : [{ name: "", short: "", cells: [] }];
   const any = list.some((c) => c.cells.length);
   const weights = list.map((c) => (any && !c.cells.length ? 0.42 : 1));
   const weightSum = weights.reduce((sum, n) => sum + n, 0);
   const rows = Math.min(maxRows, Math.max(1, ...list.map((c) => c.cells.length || 1)));
-  const h = headH + rows * (cellH + 3);
+  const overflow = list.some((c) => c.cells.length > rows);
+  const h = headH + rows * (cellH + 3) + (overflow ? 12 : 0);
   const max = scaleMax(list.flatMap((c) => c.cells.map((x) => x.value || 0)));
-  const level = (v) => (!v ? 0 : Math.min(5, 1 + Math.floor((Math.log(v + 1) / Math.log(max + 1)) * 4.999)));
+  const heatOf = (v) => (!v ? 0 : Math.min(5, 1 + Math.floor((Math.log(v + 1) / Math.log(max + 1)) * 4.999)));
   let out = svgOpen(w, h, "heat", label);
   let x = 0;
   list.forEach((c, ci) => {
     const cw = (w * weights[ci]) / weightSum;
     const quiet = any && !c.cells.length;
     const hits = c.cells.reduce((s, x2) => s + (x2.value || 0), 0);
-    out += `<text class="th${quiet ? " quiet" : ""}" x="${n2(x + 3)}" y="12">${esc(c.short || c.name)}<title>${esc(c.name)}</title></text>` +
+    const hidden = c.cells.slice(rows);
+    const headTip = hidden.length ? `${c.name}\nnot shown: ${hidden.map((cell) => cell.id).join(", ")}` : c.name;
+    out += `<text class="th${quiet ? " quiet" : ""}" x="${n2(x + 3)}" y="12">${esc(c.short || c.name)}<title>${esc(headTip)}</title></text>` +
       `<text class="tc${hits ? " hot" : ""}${quiet ? " quiet" : ""}" x="${n2(x + 3)}" y="25">${esc(c.cells.length)} tech · ${esc(hits)}</text>`;
     if (!quiet) {
       for (let r = 0; r < rows; r++) {
@@ -173,14 +190,19 @@ function heatMatrix(columns, { w = 700, cellH = 22, headH = 30, maxRows = 8, lab
           out += `<rect class="cell void" x="${n2(x + 1.5)}" y="${n2(y)}" width="${n2(Math.max(1, cw - 3))}" height="${cellH}"/>`;
           continue;
         }
-        const lv = (cell.covered === false ? "gap" : `h${level(cell.value || 0)}`) + (cell.crit ? " crit" : "");
-        const tip = `${cell.id} ${cell.name || ""}\n${c.name}\n${cell.value || 0} hits` + (cell.level ? `\nlevel: ${cell.level}` : "") +
+        const lv = cellClass(cell, heatOf(cell.value || 0));
+        const tip = `${cell.id} ${cell.name || ""}\n${c.name}\n${cell.value || 0} hits` +
+          (LEVEL_TIP[cell.level] ? `\n${LEVEL_TIP[cell.level]}` : "") +
           (cell.rules && cell.rules.length ? `\nrules: ${cell.rules.join(", ")}` : "\nno rule covers this");
         out += `<g class="cellg"><title>${esc(tip)}</title>` +
           `<rect class="cell ${lv}" x="${n2(x + 1.5)}" y="${n2(y)}" width="${n2(Math.max(1, cw - 3))}" height="${cellH}"/>` +
           `<text class="cid ${lv}" x="${n2(x + 4)}" y="${n2(y + cellH / 2 + 3.2)}">${esc(cell.id)}</text>` +
           (cell.value ? `<text class="cv ${lv}" x="${n2(x + cw - 4)}" y="${n2(y + cellH / 2 + 3.2)}" text-anchor="end">${esc(cell.value)}</text>` : "") +
           `</g>`;
+      }
+      if (hidden.length) {
+        out += `<text class="more" x="${n2(x + 3)}" y="${n2(headH + rows * (cellH + 3) + 10)}">+${hidden.length}` +
+          `<title>${esc(hidden.map((cell) => cell.id).join(", "))}</title></text>`;
       }
     }
     x += cw;

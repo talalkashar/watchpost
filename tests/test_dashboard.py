@@ -1,6 +1,8 @@
 import json
 import re
+import shutil
 import socket
+import subprocess
 import time
 import unittest
 from datetime import timedelta
@@ -318,6 +320,98 @@ class StaticAssetTests(unittest.TestCase):
         self.assertIn("script-src 'self'", csp)
         self.assertNotIn("unsafe-inline", csp)
         self.assertNotIn("unsafe-eval", csp)
+
+
+class HeatMatrixLevelTests(unittest.TestCase):
+    """The dashboard matrix must color by evidence level. Node runs the chart function; CI images have it."""
+
+    def setUp(self):
+        self.node = shutil.which("node")
+        if self.node is None:
+            self.skipTest("node is not installed")
+
+    def svg(self, columns, **opts):
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const sandbox = {};
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(process.argv[1], "utf8"), sandbox);
+const input = JSON.parse(fs.readFileSync(0, "utf8"));
+process.stdout.write(sandbox.WPCharts.heatMatrix(input.columns, input.opts));
+"""
+        payload = json.dumps({"columns": columns, "opts": opts})
+        out = subprocess.run(
+            [self.node, "-e", script, str(STATIC / "charts.js")],
+            input=payload, capture_output=True, text=True, check=False)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return out.stdout
+
+    def cell_class(self, svg, technique_id):
+        match = re.search(
+            rf'class="cell ([^"]+)"[^>]*/>\s*<text class="cid [^"]*"[^>]*>{re.escape(technique_id)}</text>',
+            svg)
+        self.assertIsNotNone(match, svg)
+        return match.group(1)
+
+    def test_mapped_is_not_painted_as_a_gap(self):
+        svg = self.svg([{"name": "Initial Access", "short": "Init", "cells": [
+            {"id": "T1190", "name": "Exploit Public-Facing Application", "value": 4,
+             "covered": False, "level": "mapped", "rules": ["web_scanner"]},
+            {"id": "T1078", "name": "Valid Accounts", "value": 9,
+             "covered": True, "level": "validated", "crit": True, "rules": ["success_after_failures"]},
+        ]}])
+        self.assertEqual(self.cell_class(svg, "T1190"), "mapped")
+        self.assertNotIn('class="cell gap"', svg)
+        self.assertIn("mapped only; no labeled scenario proves detection", svg)
+        self.assertEqual(self.cell_class(svg, "T1078"), "h5 crit")
+
+    def test_disabled_and_unleveled_gap_keep_their_classes(self):
+        svg = self.svg([
+            {"name": "Persistence", "short": "Persist", "cells": [
+                {"id": "T1136.003", "value": 0, "covered": False, "level": "disabled", "rules": ["old_rule"]}]},
+            {"name": "Impact", "short": "Impact", "cells": [
+                {"id": "T1486", "value": 2, "covered": False, "rules": []}]},
+        ])
+        self.assertEqual(self.cell_class(svg, "T1136.003"), "disabled")
+        self.assertEqual(self.cell_class(svg, "T1486"), "gap")
+
+    def test_rows_past_max_are_named_instead_of_dropped(self):
+        cells = [{"id": f"T100{i}", "value": 0, "covered": True, "level": "validated"} for i in range(5)]
+        clipped = self.svg([{"name": "Initial Access", "short": "Init", "cells": cells}], maxRows=4)
+        self.assertIn(">T1003</text>", clipped)
+        self.assertNotIn(">T1004</text>", clipped)
+        self.assertIn('class="more"', clipped)
+        self.assertIn(">T1004</title>", clipped)
+        full = self.svg([{"name": "Initial Access", "short": "Init", "cells": cells}], maxRows=5)
+        self.assertIn(">T1004</text>", full)
+        self.assertNotIn('class="more"', full)
+
+    def test_empty_tactic_stays_on_the_kill_chain(self):
+        svg = self.svg([
+            {"name": "Reconnaissance", "short": "Recon", "cells": [
+                {"id": "T1595.002", "value": 1, "covered": True, "level": "validated"}]},
+            {"name": "Resource Development", "short": "Res Dev", "cells": []},
+        ])
+        self.assertIn('class="th quiet"', svg)
+        self.assertIn(">Res Dev<", svg)
+        self.assertIn(">0 tech", svg)
+
+    def test_dashboard_asks_for_every_row_and_a_legend(self):
+        src = (STATIC / "dashboard.js").read_text()
+        start = src.index("renderMatrix()")
+        chunk = src[start:src.index("// --- incident board")]
+        self.assertNotIn("Math.min(4", chunk)
+        self.assertIn("maxRows: Math.max(tallest, 1)", chunk)
+        self.assertNotIn("columns.filter", chunk)
+        self.assertIn("Empty tactics stay", chunk)
+        self.assertIn("Mapped only", chunk)
+        self.assertIn('id: "attack-legend"', src)
+        css = (STATIC / "style.css").read_text()
+        self.assertIn(".heat .cell.mapped", css)
+        self.assertIn(".heat .cell.disabled", css)
+        self.assertIn(".heat .cell.h5.crit", css)
+        self.assertNotRegex(css, r"\.heat \.cell\.crit \{[^}]*fill:")
 
 
 if __name__ == "__main__":
