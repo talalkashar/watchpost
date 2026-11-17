@@ -71,6 +71,30 @@ function stamp(ts) {
 }
 const pill = (text, cls) => el("span", { class: `pill ${cls}` }, text);
 const sev = (s) => pill(s, `sev-${s}`);
+// Same order as watchpost.normalize.SEVERITIES. Asset weight only moves up.
+const SEVERITY_RANK = { info: 0, low: 1, medium: 2, high: 3, critical: 4 };
+
+// Title-row pair when asset weight lifts the rule severity. Null when the
+// alert was not raised (same level, missing base, unknown label, or a drop).
+function raisedSeverity(alert) {
+  const base = alert && alert.base_severity;
+  const raised = alert && alert.severity;
+  if (!base || !raised) return null;
+  const baseRank = SEVERITY_RANK[base];
+  const raisedRank = SEVERITY_RANK[raised];
+  if (baseRank === undefined || raisedRank === undefined || raisedRank <= baseRank) return null;
+  return { base, raised };
+}
+
+function alertHeaderSevs(alert) {
+  const lifted = raisedSeverity(alert);
+  if (!lifted) return sev(alert.severity);
+  return el("span", { class: "sev-raise", title: alert.severity_note || null },
+    el("span", { class: "sr-only" }, "Rule severity "),
+    sev(lifted.base),
+    el("span", { class: "sev-raise-label" }, "raised to"),
+    sev(lifted.raised));
+}
 const status = (s) => pill(s, `st-${s}`);
 const synth = (flag) => (flag ? pill("synthetic", "synthetic") : null);
 const pct = (v) => (v === null || v === undefined ? "—" : `${Math.round(v * 100)}%`);
@@ -441,7 +465,7 @@ async function alertDetail(id) {
     el("div", { class: "split" },
       el("div", {},
         el("div", { class: "card" },
-          el("div", { class: "row" }, sev(a.severity), status(a.status), synth(a.synthetic)),
+          el("div", { class: "row alert-head" }, alertHeaderSevs(a), status(a.status), synth(a.synthetic)),
           el("h1", { style: { marginTop: "8px" } }, a.title),
           el("div", { class: "explain" }, el("strong", {}, "Why this fired: "), a.explanation),
           el("p", { class: "muted" }, `Rule: ${a.rule?.name ?? a.rule_id} (v${a.rule_version}). ${a.rule?.description ?? ""}`),

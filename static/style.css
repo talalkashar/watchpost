@@ -181,6 +181,9 @@ tr.evidence td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 
 .pill { display: inline-block; padding: 0 8px; border-radius: 999px; font: 600 10.5px/17px var(--sans); letter-spacing: .04em;
   border: 1px solid color-mix(in srgb, currentColor 45%, transparent); white-space: nowrap; text-transform: uppercase; }
+.alert-head { align-items: center; }
+.sev-raise { display: inline-flex; align-items: center; gap: 6px; }
+.sev-raise-label { color: var(--muted); font-size: 12px; letter-spacing: .01em; text-transform: none; }
 .sev-critical { color: var(--crit); } .sev-high { color: var(--high); } .sev-medium { color: var(--med); }
 .sev-low { color: var(--low); } .sev-info { color: var(--info); }
 .st-ok { color: var(--ok); } .st-degraded { color: var(--warn); } .st-failing { color: var(--bad); }
