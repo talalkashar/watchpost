@@ -477,6 +477,42 @@ function reportLinks(kind, id) {
     el("a", { class: "button", href: `/api/${kind}/${id}/report.md`, download: "" }, "Report (Markdown)"));
 }
 
+// Full Enterprise kill chain for one incident. `tactics` is [name, short] in kill-chain order
+// (dashboard.js TACTICS). Fired stages come from the incident; technique ids come from the
+// grouped rule metadata. A stage the catalog does not name is appended, not dropped.
+function incidentKillChain(tactics, incident) {
+  const names = tactics.map((pair) => pair[0]);
+  const seen = new Set(names);
+  for (const name of incident.stages || []) {
+    if (name && !seen.has(name)) {
+      seen.add(name);
+      names.push(name);
+    }
+  }
+  const byTactic = new Map();
+  for (const group of incident.techniques_by_tactic || []) {
+    const ids = [];
+    for (const t of group.techniques || []) {
+      const id = typeof t === "string" ? t : t && t.id;
+      if (id && !ids.includes(id)) ids.push(id);
+    }
+    byTactic.set(group.tactic, ids);
+  }
+  const fired = new Set(incident.stages || []);
+  return names.map((name) => ({ name, fired: fired.has(name), techniques: byTactic.get(name) || [] }));
+}
+
+function killChainList(incident) {
+  const stages = incidentKillChain(TACTICS, incident);
+  return el("div", { class: "killchain-wrap" },
+    el("ol", { class: "killchain", "aria-label": "ATT&CK kill chain. Filled stages fired in this incident. Dim stages were not observed." },
+      stages.map((s) => el("li", { class: s.fired ? "kc fired" : "kc quiet" },
+        el("span", { class: "kc-name" }, s.name),
+        el("span", { class: "sr-only" }, s.fired ? ", observed. " : ", not observed. "),
+        el("span", { class: "kc-ids" }, s.techniques.length ? s.techniques.join(" ") : "—")))),
+    el("p", { class: "muted kc-note" }, "Filled stages fired in this incident. Dim stages were not observed."));
+}
+
 // ---------- incidents ----------
 async function incidentDetail(id) {
   const i = await api(`/api/incidents/${id}`);
@@ -499,7 +535,7 @@ async function incidentDetail(id) {
         el("div", { class: "card" },
           el("div", { class: "row" }, sev(i.severity), status(i.status), synth(i.synthetic), i.escalated ? pill("escalated: 3+ tactics", "sev-critical") : null),
           el("h1", { style: { marginTop: "8px" } }, `Incident #${i.id}: ${i.title}`),
-          el("div", { class: "row" }, i.stages.map((t, n) => el("span", {}, n ? "→ " : "", pill(t, "stage")))),
+          killChainList(i),
           actions),
         el("div", { class: "card" }, el("h2", {}, `Alert timeline (${i.alerts.length})`),
           table(["First seen", "Severity", "Alert", "Tactics", "Techniques", "Status"],

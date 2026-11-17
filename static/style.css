@@ -209,8 +209,16 @@ pre { white-space: pre-wrap; word-break: break-word; background: var(--bg-2); pa
 .note { border-bottom: 1px solid var(--line); padding: 6px 0; }
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; }
 .kv dt { color: var(--muted); } .kv dd { margin: 0; overflow-wrap: anywhere; }
-.killchain { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0; }
-.kc { font: 500 11px var(--sans); padding: 2px 8px; border: 1px solid var(--line-2); color: var(--ink-2); border-radius: 999px; }
+/* Incident kill chain: every Enterprise tactic, fired stages filled, the rest dim. */
+.killchain-wrap { margin: 12px 0 4px; }
+.killchain { display: grid; grid-template-columns: repeat(auto-fill, minmax(108px, 1fr)); gap: 6px; margin: 0; padding: 0; list-style: none; }
+.kc { display: flex; flex-direction: column; gap: 3px; min-height: 52px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--muted); }
+.kc.fired { background: var(--raise); border-color: var(--line-3); color: var(--ink); }
+.kc.quiet { color: var(--muted); }
+.kc-name { font-size: 11px; font-weight: 600; line-height: 1.25; }
+.kc-ids { font: 500 11px/1.3 var(--mono); color: var(--ink-2); overflow-wrap: anywhere; }
+.kc.quiet .kc-ids { color: var(--muted); }
+.kc-note { margin: 8px 0 0; font-size: 12px; }
 
 dialog { border: 1px solid var(--line-2); border-radius: 12px; box-shadow: 0 30px 80px rgb(0 0 0 / .6); background: var(--panel); color: var(--ink);
   max-width: min(720px, 94vw); width: 100%; }
