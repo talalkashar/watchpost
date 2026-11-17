@@ -59,6 +59,61 @@ function parseMaybeJson(v) {
 }
 const asList = (v) => { const p = parseMaybeJson(v); return Array.isArray(p) ? p : p ? [p] : []; };
 const fmtN = (v) => (v === null || v === undefined ? "—" : Number(v).toLocaleString());
+// First paint of the status strip. Open alerts, critical, and stored events come from
+// /api/dashboard; until that returns they are skeletons, not em dashes. Incidents use the
+// same skeleton until /api/incidents returns. A later failure keeps the last number.
+function stripDashboardTiles(summary) {
+  if (!summary) {
+    return {
+      open: { loading: true },
+      critical: { loading: true, hot: false },
+      stored: { loading: true },
+    };
+  }
+  return {
+    open: { loading: false, text: fmtN(summary.alerts_open + summary.alerts_investigating) },
+    critical: { loading: false, text: fmtN(summary.alerts_critical_open), hot: summary.alerts_critical_open > 0 },
+    stored: { loading: false, text: fmtN(summary.events_total) },
+  };
+}
+function stripIncidentTile(incidents) {
+  const state = incidents && incidents.state;
+  if (state === "ok") {
+    const open = incidents.list.filter((i) => boardColumn(i.status) !== "resolved").length;
+    return { loading: false, text: fmtN(open), dim: false, title: "" };
+  }
+  if (state === "pending") {
+    return {
+      loading: false,
+      text: "pending",
+      dim: true,
+      title: "Incidents arrive with the correlation engine (/api/incidents)",
+    };
+  }
+  if (state === "error") return { keep: true, dim: true };
+  return { loading: true, dim: false, title: "" };
+}
+function applyStripTile(node, tile) {
+  if (!node || !tile) return;
+  if (tile.keep) {
+    node.classList.toggle("dim", !!tile.dim);
+    return;
+  }
+  node.classList.toggle("skel", tile.loading === true);
+  node.classList.toggle("dim", !!tile.dim);
+  if (Object.prototype.hasOwnProperty.call(tile, "title")) node.title = tile.title;
+  if (tile.loading) {
+    node.setAttribute("aria-busy", "true");
+    if (!node.querySelector(".skel-bar")) {
+      node.replaceChildren(
+        el("span", { class: "skel-bar", "aria-hidden": "true" }),
+        el("span", { class: "sr-only" }, "Loading"));
+    }
+    return;
+  }
+  node.removeAttribute("aria-busy");
+  node.textContent = tile.text;
+}
 const sevOf = (s) => (SEV_RANK[s] !== undefined ? s : "info");
 const maxSev = (a, b) => (SEV_RANK[sevOf(a)] >= SEV_RANK[sevOf(b)] ? sevOf(a) : sevOf(b));
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
@@ -426,17 +481,12 @@ const Live = {
   renderStrip() {
     const d = this.summary;
     document.title = consoleTitle(!!state.user, d ? d.alerts_critical_open : undefined);
-    if (d) {
-      $("#k-open").textContent = fmtN(d.alerts_open + d.alerts_investigating);
-      $("#k-crit").textContent = fmtN(d.alerts_critical_open);
-      $("#k-crit").parentElement.classList.toggle("hot", d.alerts_critical_open > 0);
-      $("#k-events").textContent = fmtN(d.events_total);
-    }
-    const inc = this.incidents;
-    const kInc = $("#k-inc");
-    if (inc.state === "ok") { kInc.textContent = fmtN(inc.list.filter((i) => boardColumn(i.status) !== "resolved").length); kInc.title = ""; }
-    else if (inc.state === "pending") { kInc.textContent = "pending"; kInc.title = "Incidents arrive with the correlation engine (/api/incidents)"; }
-    kInc.classList.toggle("dim", inc.state !== "ok");
+    const tiles = stripDashboardTiles(d);
+    applyStripTile($("#k-open"), tiles.open);
+    applyStripTile($("#k-crit"), tiles.critical);
+    $("#k-crit").parentElement.classList.toggle("hot", !!tiles.critical.hot);
+    applyStripTile($("#k-events"), tiles.stored);
+    applyStripTile($("#k-inc"), stripIncidentTile(this.incidents));
     $("#k-epm").textContent = fmtN(this.rollingEpm());
     this.renderSpark();
     const checks = Object.entries(this.health);
