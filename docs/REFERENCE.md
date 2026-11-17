@@ -242,11 +242,11 @@ A rule mapping to a technique is a claim, not proof. The **Coverage** view (and 
 | Level | Meaning |
 |---|---|
 | **validated** | An enabled rule maps to it and detects a labeled malicious scenario that exercises it. |
-| **mapped** | An enabled rule maps to it, but no labeled scenario proves detection. Not counted as covered. |
+| **mapped** | An enabled rule maps to it, but no labeled scenario proves detection. Not counted as covered. The technique detail and the not-validated list give the one-line reason. |
 | **disabled** | Only disabled rules map to it. |
 | **gap** | No rule maps to it. |
 
-Each malicious scenario in `watchpost/simulate.py` lists the techniques its events actually show (`SCENARIO_TECHNIQUES`), which is narrower than the rules' own mappings. With the default rules, 17 of 20 techniques are validated. T1595.001 (`firewall_port_sweep`: one outside source sweeping one host's ports is not scanning IP blocks), T1190 (`web_scanner`: the scan probes and sends injection strings but never exploits anything) and T1048 (`data_exfil_volume`: the scenario reads cloud storage but shows no exfiltration channel) are only mapped. Each technique lists its rules with their noise-lab verdict, the proving scenarios, and live alert counts; the Navigator layer is colored by the same levels.
+Each malicious scenario in `watchpost/simulate.py` lists the techniques its events actually show (`SCENARIO_TECHNIQUES`), which is narrower than the rules' own mappings. With the default rules, 17 of 20 techniques are validated. T1595.001 (`firewall_port_sweep`: one outside source sweeping one host's ports is not scanning IP blocks), T1190 (`web_scanner`: the scan probes and sends injection strings but never exploits anything) and T1048 (`data_exfil_volume`: the scenario reads cloud storage but shows no exfiltration channel) are only mapped. Each technique lists its rules with their noise-lab verdict, the proving scenarios, and live alert counts. A mapped technique also carries `why`: one sentence naming the rule and what the labeled scenario actually shows (for example T1190 is probed but never exploited). The Navigator layer comment includes that sentence, and the layer is colored by the same levels.
 
 The scenarios are synthetic, so "validated" means a rule detected the project's own labeled data, not that it would catch the technique in real traffic. The catalog holds only techniques a Watchpost rule maps to, so the counts are not a measure against all of ATT&CK.
 

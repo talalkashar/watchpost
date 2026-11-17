@@ -1563,6 +1563,7 @@ function coverageDetail(t, meaning) {
   return el("div", {},
     el("h2", {}, `${t.id} ${t.name}`),
     el("p", {}, levelPill(t.level), " ", meaning[t.level]),
+    t.level === "mapped" && t.why ? el("p", { class: "cov-why" }, t.why) : null,
     el("p", { class: "muted" }, `Tactic: ${t.tactic}. ${t.hits} live alert(s) from the rules mapped here.`),
     el("h3", {}, "Proving scenarios"),
     t.scenarios.length
@@ -1622,6 +1623,7 @@ async function coverageView() {
     el("div", { class: "card" }, el("h2", {}, `Gaps: not validated (${gaps.length})`),
       gaps.length ? el("ul", { class: "cov-gaps" }, gaps.map((t) => el("li", {}, levelPill(t.level), " ",
         el("button", { type: "button", class: "ghost mini", onclick: () => { show(t); detail.scrollIntoView({ block: "nearest" }); } }, `${t.id} ${t.name}`),
+        t.level === "mapped" && t.why ? el("span", { class: "cov-why" }, t.why) : null,
         " ", el("span", { class: "muted" }, t.rules.length ? `Rules: ${t.rules.map((r) => r.id + (r.enabled ? "" : " (disabled)")).join(", ")}` : "No rule"))))
         : el("p", { class: "muted" }, "Every catalog technique is validated on the labeled scenarios.")),
   );

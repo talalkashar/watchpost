@@ -572,6 +572,8 @@ legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
 .cov-empty { font-size: 11px; margin: 4px 0; }
 .cov-gaps { margin: 0; padding-left: 18px; } .cov-gaps li { margin-bottom: 8px; font-size: 13px; line-height: 1.4; }
 .cov-gaps button { white-space: normal; text-align: left; font-size: 13px; }
+.cov-why { margin: 8px 0; padding: 8px 10px; border-left: 3px solid var(--warn); background: var(--panel-2); }
+.cov-gaps .cov-why { display: inline; margin: 0 0 0 6px; padding: 0; border: 0; background: none; color: var(--ink-2); }
 
 /* Rule backtest (review evidence and the proposal preview) */
 .backtest { min-width: 16em; }
