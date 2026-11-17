@@ -23,6 +23,15 @@ SEVERITY_ORDER = ["info", "low", "medium", "high", "critical"]
 ESCALATION_TACTICS = 3
 
 
+def rule_summary(window_seconds=DEFAULT_WINDOW_SECONDS):
+    """One sentence for the incident page, beside the source IP, account, and host lists."""
+    minutes = window_seconds // 60
+    return (
+        "Alerts that share a source IP, account, or host within "
+        f"{minutes} minutes are grouped into this incident."
+    )
+
+
 def _epoch(ts):
     return parse_iso(ts).timestamp()
 

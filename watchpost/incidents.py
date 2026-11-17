@@ -2,7 +2,7 @@
 
 import json
 
-from . import assets, attack, improve, search_rules, sigma, simulate
+from . import assets, attack, correlate, improve, search_rules, sigma, simulate
 from .db import audit, now_iso, row_to_dict, transaction
 from .engine import load_rules
 from .normalize import SEVERITIES
@@ -119,6 +119,7 @@ def get_incident(conn, incident_id):
         for tactic in incident["stages"]
     ]
     incident["escalated"] = len(incident["stages"]) >= 3
+    incident["correlation_rule"] = correlate.rule_summary()
     # Assets behind the incident: by host name and by the addresses its evidence reached.
     incident["assets"] = assets.for_entities(
         conn, incident["entities"].get("host"),

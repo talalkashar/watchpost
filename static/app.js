@@ -538,6 +538,13 @@ function killChainList(incident) {
     el("p", { class: "muted kc-note" }, "Filled stages fired in this incident. Dim stages were not observed."));
 }
 
+// Plain correlation rule (correlate.rule_summary). The server sentence wins; the fallback matches
+// the default 30-minute window so the entity list is never unlabeled.
+function correlationRule(incident) {
+  const text = incident && typeof incident.correlation_rule === "string" ? incident.correlation_rule.trim() : "";
+  return text || "Alerts that share a source IP, account, or host within 30 minutes are grouped into this incident.";
+}
+
 // ---------- incidents ----------
 async function incidentDetail(id) {
   const i = await api(`/api/incidents/${id}`);
@@ -570,11 +577,15 @@ async function incidentDetail(id) {
           table(["Time", "Type", "User", "Source IP", "Host", "Message"],
             i.events.map((e) => ({ cells: [stamp(e.ts), e.event_type, entityLink("user", e.user), el("code", {}, entityLink("src_ip", e.src_ip)), entityLink("host", e.host), e.message ?? ""] }))))),
       el("div", {},
-        el("div", { class: "card" }, el("h2", {}, "Details"), el("dl", { class: "kv" },
-          ...[["Incident", `#${i.id}`], ["First seen", fmtTime(i.first_seen)], ["Last seen", fmtTime(i.last_seen)],
-            ["Source IPs", entityLinks("src_ip", i.entities.src_ip)], ["Accounts", entityLinks("user", i.entities.user)],
-            ["Hosts", entityLinks("host", i.entities.host)], ["Assignee", i.assignee ?? "—"], ["Resolved", fmtTime(i.resolved_at)]]
-            .flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]))),
+        el("div", { class: "card" }, el("h2", {}, "Details"),
+          el("dl", { class: "kv" },
+            ...[["Incident", `#${i.id}`], ["First seen", fmtTime(i.first_seen)], ["Last seen", fmtTime(i.last_seen)]]
+              .flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)])),
+          el("p", { class: "muted entity-rule", id: "correlation-rule" }, correlationRule(i)),
+          el("dl", { class: "kv" },
+            ...[["Source IPs", entityLinks("src_ip", i.entities.src_ip)], ["Accounts", entityLinks("user", i.entities.user)],
+              ["Hosts", entityLinks("host", i.entities.host)], ["Assignee", i.assignee ?? "—"], ["Resolved", fmtTime(i.resolved_at)]]
+              .flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]))),
         el("div", { class: "card" }, el("h2", {}, "Assets involved"),
           el("p", { class: "muted" }, "Inventoried systems reached by this incident. Alerts touching high or critical assets, or systems that process sensitive data, carry a raised severity."),
           assetChips(i.assets)),

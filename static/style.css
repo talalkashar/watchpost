@@ -231,6 +231,7 @@ pre { white-space: pre-wrap; word-break: break-word; background: var(--bg-2); pa
 .note { border-bottom: 1px solid var(--line); padding: 6px 0; }
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; }
 .kv dt { color: var(--muted); } .kv dd { margin: 0; overflow-wrap: anywhere; }
+.entity-rule { margin: 10px 0 8px; font-size: 13px; line-height: 1.45; }
 /* Incident kill chain: every Enterprise tactic, fired stages filled, the rest dim. */
 .killchain-wrap { margin: 12px 0 4px; }
 .killchain { display: grid; grid-template-columns: repeat(auto-fill, minmax(108px, 1fr)); gap: 6px; margin: 0; padding: 0; list-style: none; }
