@@ -1,5 +1,7 @@
 """Read-side incident queries, incident status changes, and ATT&CK coverage."""
 
+import json
+
 from . import assets, attack, improve, search_rules, sigma, simulate
 from .db import audit, now_iso, row_to_dict, transaction
 from .engine import load_rules
@@ -13,6 +15,41 @@ _SEVERITY_ORDER = ("CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN
 
 def _incident(row):
     return row_to_dict(row, ["entities", "stages"])
+
+
+def _technique_objects(raw):
+    """Technique dicts stored on a rule. Missing or non-list JSON contributes nothing."""
+    if not raw:
+        return []
+    parsed = json.loads(raw) if isinstance(raw, str) else raw
+    if not isinstance(parsed, list):
+        return []
+    return [t for t in parsed if isinstance(t, dict) and t.get("id")]
+
+
+def top_techniques(conn, incident_ids):
+    """Earliest kill-chain technique on each incident, matching the matrix column order.
+
+    Ties inside a tactic break on technique id. An incident with no mapped technique is absent.
+    """
+    if not incident_ids:
+        return {}
+    placeholders = ",".join("?" * len(incident_ids))
+    rows = conn.execute(
+        "SELECT ia.incident_id, r.techniques FROM incident_alerts ia"
+        " JOIN alerts a ON a.id = ia.alert_id"
+        " LEFT JOIN rules r ON r.id = a.rule_id"
+        f" WHERE ia.incident_id IN ({placeholders})", incident_ids)
+    best = {}
+    for row in rows:
+        for technique in _technique_objects(row["techniques"]):
+            candidate = {"id": technique["id"], "name": technique.get("name") or "",
+                         "tactic": technique.get("tactic") or ""}
+            key = (attack.tactic_rank(candidate["tactic"]), candidate["id"])
+            current = best.get(row["incident_id"])
+            if current is None or key < current[0]:
+                best[row["incident_id"]] = (key, candidate)
+    return {incident_id: pair[1] for incident_id, pair in best.items()}
 
 
 def list_incidents(conn, params):
@@ -32,7 +69,11 @@ def list_incidents(conn, params):
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     rows = conn.execute(f"SELECT * FROM incidents{clause} ORDER BY status = 'resolved', {_SEVERITY_ORDER},"
                         f" last_seen DESC LIMIT ?", args + [limit])
-    return [_incident(r) for r in rows]
+    items = [_incident(r) for r in rows]
+    tops = top_techniques(conn, [item["id"] for item in items])
+    for item in items:
+        item["top_technique"] = tops.get(item["id"])
+    return items
 
 
 def get_incident(conn, incident_id):

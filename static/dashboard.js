@@ -90,6 +90,7 @@ function normIncidents(payload) {
       status: String(i.status || "open"), first_seen: i.first_seen, last_seen: i.last_seen || i.updated_at,
       alert_count: i.alert_count ?? i.alerts_count ?? (alerts.length || asList(i.alert_ids).length),
       tactics: asList(i.kill_chain ?? i.stages ?? i.kill_chain_stages ?? i.tactics).map((t) => (typeof t === "string" ? t : t.name || t.tactic)).filter(Boolean),
+      top_technique: techniqueRef(i.top_technique),
       entities: parseMaybeJson(i.entities ?? i.entity_summary) || {}, synthetic: i.synthetic,
     };
   });
@@ -106,6 +107,31 @@ function normCoverage(payload) {
   }));
 }
 const tacticKey = (name) => String(name).toLowerCase().replace(/[^a-z]/g, "");
+
+function techniqueRef(value) {
+  if (!value) return null;
+  if (typeof value === "string") return value ? { id: value, name: "", tactic: "" } : null;
+  const id = value.id || value.technique_id;
+  if (!id) return null;
+  return { id: String(id), name: value.name || "", tactic: value.tactic || "" };
+}
+
+// Tactic tags (at most four) plus the earliest kill-chain technique, the same order as the matrix.
+function boardTags(tactics, technique) {
+  const tags = [];
+  const tech = techniqueRef(technique);
+  if (tech) tags.push({ kind: "tech", id: tech.id, name: tech.name, tactic: tech.tactic });
+  for (const name of (Array.isArray(tactics) ? tactics : []).slice(0, 4)) {
+    if (name) tags.push({ kind: "tactic", text: String(name) });
+  }
+  return tags;
+}
+
+function techniqueTagTitle(tag) {
+  const name = tag.name ? ` ${tag.name}` : "";
+  const tactic = tag.tactic ? ` (${tag.tactic})` : "";
+  return `${tag.id}${name}${tactic}`;
+}
 function boardColumn(status) {
   const s = String(status).toLowerCase();
   if (["resolved", "closed", "false_positive", "benign"].includes(s)) return "resolved";
@@ -798,7 +824,7 @@ function incidentBoard(inc, alerts, perColumn) {
   if (inc.state === "ok") {
     for (const i of inc.list) cols[boardColumn(i.status)].push({
       href: `#incidents/${i.id}`, sev: i.severity, title: i.title, time: i.last_seen, synthetic: i.synthetic,
-      meta: `${i.alert_count || 0} alerts`, tags: i.tactics.slice(0, 4),
+      meta: `${i.alert_count || 0} alerts`, tags: boardTags(i.tactics, i.top_technique),
     });
   } else {
     for (const a of alerts || []) cols[boardColumn(a.status)].push({
@@ -814,7 +840,9 @@ function incidentBoard(inc, alerts, perColumn) {
       ...items.slice(0, perColumn).map((c) => el("a", { class: `bcard sev-${sevOf(c.sev)}`, href: c.href },
         el("div", { class: "bt" }, c.title),
         el("div", { class: "bm" }, sevTag(c.sev), el("span", {}, c.meta), el("span", { class: "muted" }, ago(c.time)), c.synthetic ? el("span", { class: "syn" }, "SYN") : null),
-        c.tags.length ? el("div", { class: "btags" }, ...c.tags.map((t) => el("span", { class: "tag" }, t))) : null)),
+        c.tags.length ? el("div", { class: "btags" }, ...c.tags.map((t) => (t.kind === "tech"
+          ? el("span", { class: "tag tech", title: techniqueTagTitle(t) }, t.id)
+          : el("span", { class: "tag" }, t.text)))) : null)),
       items.length > perColumn ? el("div", { class: "muted bmore" }, `+${items.length - perColumn} more`) : null,
       !items.length ? el("div", { class: "muted bmore" }, "—") : null);
   });

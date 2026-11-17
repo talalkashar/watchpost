@@ -409,6 +409,7 @@ dialog::backdrop { background: rgb(0 0 0 / .72); backdrop-filter: blur(2px); }
 .bm > span:not(.sevtag):not(.syn) { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .btags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
 .tag { font: 11px var(--mono); padding: 1px 5px; border: 1px solid var(--line-2); border-radius: 3px; color: var(--ink-2); }
+.tag.tech { color: #f3d48a; border-color: rgb(243 212 138 / .55); }
 .bmore { font-size: 12px; text-align: center; padding: 4px 0; }
 .board.big { height: auto; }
 .board.big .bcol { min-height: 280px; }

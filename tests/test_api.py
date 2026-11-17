@@ -263,6 +263,9 @@ class IncidentApiTests(ServerTestCase):
         self.assertEqual(incident["status"], "open")
         self.assertEqual(incident["stages"], ["Reconnaissance", "Initial Access", "Persistence",
                                               "Privilege Escalation"])
+        # Earliest kill-chain technique on the card: recon scanning, not the later privilege-escalation id.
+        self.assertEqual(incident["top_technique"], {
+            "id": "T1595.002", "name": "Active Scanning: Vulnerability Scanning", "tactic": "Reconnaissance"})
 
         status, detail, _ = analyst.get(f"/api/incidents/{incident['id']}")
         self.assertEqual(status, 200)
