@@ -1565,6 +1565,41 @@ function noiseStat(cls, label, value) {
   return el("div", { class: `nr-stat ${cls}` }, el("span", {}, label), el("b", {}, value));
 }
 
+// Three counts and a pass/fail word. Null when the payload has no strip, so the page still renders.
+function noiseStripFacts(strip) {
+  if (!strip || typeof strip.scenarios !== "number" || typeof strip.detected_attacks !== "number"
+      || typeof strip.false_positives !== "number") return null;
+  const pass = strip.verdict === "pass";
+  const detected = Number.isInteger(strip.attacks) && strip.attacks > 0
+    ? `${strip.detected_attacks} of ${strip.attacks}`
+    : String(strip.detected_attacks);
+  return {
+    verdict: pass ? "pass" : "fail",
+    scenarios: String(strip.scenarios),
+    detected,
+    falsePositives: String(strip.false_positives),
+    missed: Array.isArray(strip.missed) ? strip.missed : [],
+    fired: Array.isArray(strip.false_positive_scenarios) ? strip.false_positive_scenarios : [],
+  };
+}
+
+function noiseStripStat(label, value, title) {
+  return el("div", { class: "lab-fig", title: title || null }, el("b", {}, value), el("span", {}, label));
+}
+
+function noiseStrip(strip) {
+  const facts = noiseStripFacts(strip);
+  if (!facts) return null;
+  const pass = facts.verdict === "pass";
+  return el("div", { id: "noise-strip", class: `lab-strip ${pass ? "lab-pass" : "lab-fail"}`, role: "status" },
+    pill(facts.verdict, pass ? "st-ok" : "st-failing"),
+    noiseStripStat("Scenarios", facts.scenarios, "Labeled synthetic scenarios in this run"),
+    noiseStripStat("Detected attacks", facts.detected,
+      facts.missed.length ? `Missed: ${facts.missed.join(", ")}` : "Every labeled attack was detected"),
+    noiseStripStat("False positives", facts.falsePositives,
+      facts.fired.length ? facts.fired.join(", ") : "No benign scenario fired"));
+}
+
 async function noiseLab() {
   const lab = await api("/api/noise-lab");
   const rules = lab.rules.map((r) => el("article", { class: "nr" },
@@ -1580,13 +1615,14 @@ async function noiseLab() {
   const lookalikes = lab.scenarios.filter((s) => s.lookalike_of);
   render(
     el("h1", {}, "Noise lab"),
+    noiseStrip(lab.strip),
     el("div", { class: "card" },
       el("h2", {}, "Where the rules get noisy"),
       el("p", {}, `Every rule runs against every labeled synthetic scenario, each in isolation: the attacks it should catch and ${lab.summary.lookalikes} benign look-alikes written to resemble them. ${lab.summary.noisy} of ${lab.summary.rules} rules fire on benign activity. That is shown here, not tuned away: a rule is only changed when there is a principled fix that keeps its attack detected.`),
       el("p", { class: "muted" }, "Recall is attacks caught out of attacks labeled. Precision is true detections out of everything the rule fired on, counted on these scenarios only: it says nothing about real traffic. Results use the current rule parameters and approved tuning exceptions (seed ", lab.seed, "). data_exfil_volume uses flat thresholds, so the nightly backup fires here until a tuning exception for the backup server is approved; only then is that one principal compared with its own history.")),
     el("div", { class: "card" }, el("h2", {}, "Rules against their look-alikes"),
       el("div", { class: "noise-rules" }, rules)),
-    el("div", { class: "card" }, el("h2", {}, "The benign look-alikes"),
+    el("div", { class: "card", id: "noise-scenarios" }, el("h2", {}, "The benign look-alikes"),
       table(["Scenario", "Written for", "What happens"], lookalikes.map((s) => ({ cells: [
         el("span", {}, el("code", {}, s.name), " ", synth(true)), el("code", {}, s.lookalike_of), s.description] })))),
   );

@@ -237,7 +237,7 @@ Asset fields: `id`, `name`, `kind` (`server`, `workstation`, `network`, `cloud`,
 | `POST /api/rules/{id}/suppression-windows` | analyst | `{starts_at, expires_at, reason}` proposes a reviewed, rule-wide pause of at most 30 days; approval must acknowledge labeled detection loss |
 | `GET /api/rule-suppression-windows` | viewer | Approved rule-wide windows, including `upcoming`, `active`, `expired`, and `ended` history |
 | `POST /api/rule-suppression-windows/{id}/end` | admin | Ends an active or upcoming rule-wide window early; the approved interval remains in history |
-| `GET /api/noise-lab` | viewer | Each rule against the labeled scenarios and its benign look-alikes: recall, precision, tp/fn/fp, look-alikes tested and fired, and a `verdict` (`quiet`, `noisy`, `blind`, `untested`, `disabled`) |
+| `GET /api/noise-lab` | viewer | Each rule against the labeled scenarios and its benign look-alikes: recall, precision, tp/fn/fp, look-alikes tested and fired, and a `verdict` (`quiet`, `noisy`, `blind`, `untested`, `disabled`). `strip` is the pass/fail line above that list: `scenarios`, `detected_attacks` out of `attacks`, `false_positives` (distinct benign scenarios an enabled rule fired on), `missed`, `false_positive_scenarios`, and `verdict` (`pass` only when every labeled attack is detected and no benign scenario fired) |
 | `GET /api/settings` | viewer | Security settings with allowed ranges |
 | `POST /api/settings/{key}/proposals` | admin | `{value, reason}` |
 | `GET /api/changes?status=pending` | viewer | Change requests |

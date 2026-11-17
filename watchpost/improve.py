@@ -925,6 +925,50 @@ def _verdict(rule, r, other):
                      f"({', '.join(r['lookalikes'])}).{excepted}")
 
 
+def lab_strip(rows, scenarios):
+    """Pass/fail counts for the noise lab, read before the scenario list.
+
+    A labeled attack counts as detected only when every rule it expects is enabled and lists
+    that scenario in `detected`. A false positive is one benign scenario that any enabled rule
+    fired on (two rules on the same scenario count once). Names that are not in `scenarios`,
+    such as a rule's own labeled sample, are ignored. The verdict is pass only when every
+    attack is detected and no benign scenario fired.
+    """
+    by_id = {r["rule_id"]: r for r in rows}
+    detected, missed = [], []
+    for scenario in scenarios:
+        if not scenario["malicious"]:
+            continue
+        name = scenario["name"]
+        expected = scenario.get("expected_rules") or []
+        caught = True
+        if not expected:
+            caught = False
+        for rule_id in expected:
+            row = by_id.get(rule_id)
+            if row is None or not row["enabled"] or name not in row["detected"]:
+                caught = False
+                break
+        (detected if caught else missed).append(name)
+    fired = []
+    for scenario in scenarios:
+        if scenario["malicious"]:
+            continue
+        name = scenario["name"]
+        if any(row["enabled"] and name in (row["lookalikes_fired"] + row["other_benign_fired"]) for row in rows):
+            fired.append(name)
+    attacks = len(detected) + len(missed)
+    return {
+        "verdict": "pass" if attacks and not missed and not fired else "fail",
+        "scenarios": len(scenarios),
+        "attacks": attacks,
+        "detected_attacks": len(detected),
+        "false_positives": len(fired),
+        "missed": missed,
+        "false_positive_scenarios": fired,
+    }
+
+
 def noise_lab(conn):
     """Each rule against the benign look-alikes, with the current params and active exceptions."""
     results = evaluate(current_params(conn, include_disabled=True), suppressions=active_suppressions(conn))
@@ -956,12 +1000,14 @@ def noise_lab(conn):
             "other_benign_fired": other, "suppressed": r["suppressed"], "verdict": verdict, "summary": summary,
             **({"sample": sample} if family else {}),
         })
+    scenarios = [{"name": n, "malicious": s["malicious"], "description": s["description"],
+                  "lookalike_of": s.get("lookalike_of"), "expected_rules": list(s["expected"])}
+                 for n, s in simulate.SCENARIOS.items()]
     return {
         "seed": results["seed"],
         "rules": rows,
-        "scenarios": [{"name": n, "malicious": s["malicious"], "description": s["description"],
-                       "lookalike_of": s.get("lookalike_of"), "expected_rules": list(s["expected"])}
-                      for n, s in simulate.SCENARIOS.items()],
+        "scenarios": scenarios,
+        "strip": lab_strip(rows, scenarios),
         "summary": {"rules": len(rows), "noisy": sum(r["verdict"] == "noisy" for r in rows),
                     "lookalikes": sum("lookalike_of" in s for s in simulate.SCENARIOS.values())},
     }

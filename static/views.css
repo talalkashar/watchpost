@@ -723,19 +723,46 @@ body[data-view="noise"] .nr-read {
   font-size: 13.5px;
   line-height: 1.45;
 }
-body[data-view="noise"] #view > .card:nth-child(4) table {
+body[data-view="noise"] .lab-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 28px;
+  margin: 0 0 14px;
+  padding: 12px 16px 12px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+body[data-view="noise"] .lab-pass { box-shadow: inset 3px 0 0 var(--ok); }
+body[data-view="noise"] .lab-fail { box-shadow: inset 3px 0 0 var(--bad); }
+body[data-view="noise"] .lab-fig { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+body[data-view="noise"] .lab-fig b {
+  color: #fff;
+  font: 600 22px var(--sans);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -.02em;
+}
+body[data-view="noise"] .lab-fig span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: var(--track);
+  text-transform: uppercase;
+}
+body[data-view="noise"] #noise-scenarios table {
   table-layout: fixed;
   width: 100%;
   min-width: 720px;
 }
-body[data-view="noise"] #view > .card:nth-child(4) th:nth-child(1),
-body[data-view="noise"] #view > .card:nth-child(4) td:nth-child(1) { width: 232px; }
-body[data-view="noise"] #view > .card:nth-child(4) th:nth-child(2),
-body[data-view="noise"] #view > .card:nth-child(4) td:nth-child(2) { width: 292px; }
-body[data-view="noise"] #view > .card:nth-child(4) td:nth-child(1) code,
-body[data-view="noise"] #view > .card:nth-child(4) td:nth-child(2) code { white-space: nowrap; }
-body[data-view="noise"] #view > .card:nth-child(4) td:first-child { color: #fff; font-weight: 600; }
-body[data-view="noise"] #view > .card:nth-child(4) td:nth-child(3) {
+body[data-view="noise"] #noise-scenarios th:nth-child(1),
+body[data-view="noise"] #noise-scenarios td:nth-child(1) { width: 232px; }
+body[data-view="noise"] #noise-scenarios th:nth-child(2),
+body[data-view="noise"] #noise-scenarios td:nth-child(2) { width: 292px; }
+body[data-view="noise"] #noise-scenarios td:nth-child(1) code,
+body[data-view="noise"] #noise-scenarios td:nth-child(2) code { white-space: nowrap; }
+body[data-view="noise"] #noise-scenarios td:first-child { color: #fff; font-weight: 600; }
+body[data-view="noise"] #noise-scenarios td:nth-child(3) {
   color: var(--ink);
   line-height: 1.5;
 }
