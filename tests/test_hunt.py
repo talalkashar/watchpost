@@ -282,6 +282,61 @@ class HuntApiTests(ServerTestCase):
         self.assertEqual(self.client("analyst").post("/api/hunt/saved", {"name": "after", "query": "user:a"})[0], 201)
 
 
+# (label, query, hits on the full synthetic demo). Dated on the previous weekday, so last:7d matches.
+HUNT_EXAMPLES = [
+    ("Brute force", "event_type:auth_failure user:admin src_ip:203.0.113.45 synthetic:1 last:7d", 40),
+    ("Impossible travel", "user:erin source:demo:impossible_travel synthetic:1 last:7d", 2),
+    ("Large transfer", 'event_type:cloud_data_access user:svc-deploy-tmp "customer-exports" synthetic:1 last:7d', 40),
+]
+
+
+class HuntExampleTests(unittest.TestCase):
+    """The hunt page's example links must return the labeled demo scenario they name."""
+
+    def setUp(self):
+        self.now = datetime.now(timezone.utc)
+        self.conn = connect(":memory:")
+        init_schema(self.conn)
+        from watchpost.simulate import build
+        rows = []
+        for events in build(seed=7, now=self.now).values():
+            for event in events:
+                rows.append((event["ts"], event["ts"], event["source"], event.get("host"), event["event_type"],
+                             "info", event.get("user"), event.get("src_ip"), event.get("dest_ip"),
+                             event.get("message"), 1))
+        self.conn.executemany(
+            "INSERT INTO events(ts, ingested_at, source, host, event_type, severity, user, src_ip, dest_ip,"
+            " message, synthetic) VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_each_example_hits_only_its_synthetic_scenario(self):
+        for label, query, count in HUNT_EXAMPLES:
+            with self.subTest(label=label):
+                page = hunt.run(self.conn, {"q": query, "limit": "100"}, now=self.now)
+                self.assertEqual(page["total"], count)
+                self.assertTrue(page["events"])
+                self.assertTrue(all(event["synthetic"] for event in page["events"]))
+                self.assertTrue(all("[SYNTHETIC]" in (event["message"] or "") for event in page["events"]))
+                self.assertTrue(all(str(event["source"]).startswith("demo:") for event in page["events"]))
+        travel = hunt.run(self.conn, {"q": HUNT_EXAMPLES[1][1], "limit": "10"}, now=self.now)["events"]
+        self.assertEqual({event["event_type"] for event in travel}, {"auth_success", "vpn_login"})
+        self.assertEqual({event["user"] for event in travel}, {"erin"})
+
+    def test_examples_are_links_on_the_hunt_page(self):
+        static = Path(__file__).resolve().parent.parent / "static"
+        app = (static / "app.js").read_text()
+        css = (static / "style.css").read_text()
+        self.assertIn('id: "hunt-examples"', app)
+        self.assertIn("HUNT_EXAMPLES.map(([label, q])", app)
+        self.assertIn("href: huntHref(q)", app)
+        self.assertIn("a.hunt-example", css)
+        for label, query, _count in HUNT_EXAMPLES:
+            self.assertIn(f'["{label}",', app)
+            self.assertIn(query, app)
+
+
 class HuntUiTests(unittest.TestCase):
     """No JS runtime in CI: check the hunt state is an encoded hash and pivots are wired."""
 

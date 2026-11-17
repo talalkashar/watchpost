@@ -154,6 +154,12 @@ button.ghost:hover { filter: none; background: rgb(255 255 255 / .05); border-co
 a.button { display: inline-block; text-decoration: none; border-radius: 6px; padding: 6px 12px;
   border: 1px solid var(--line-2); background: transparent; color: var(--ink); font-weight: 500; }
 a.button:hover { background: rgb(255 255 255 / .05); border-color: var(--line-3); }
+#hunt-examples { margin-top: 10px; }
+#hunt-examples .row { align-items: stretch; }
+a.hunt-example { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; max-width: 100%;
+  height: auto; white-space: normal; text-align: left; font-weight: 600; }
+a.hunt-example code { color: var(--muted); font-weight: 400; white-space: normal; }
+a.hunt-example.active { border-color: var(--ink); }
 button.danger { background: #c4343a; border-color: #c4343a; color: #fff; }  /* white on this red is 5.4:1 */
 button.mini { padding: 1px 8px; font-size: 10.5px; letter-spacing: .06em; }
 button:disabled { opacity: .45; cursor: default; }

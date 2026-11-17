@@ -693,6 +693,13 @@ const HUNT_SYNTAX = [
   ["| timechart span=5m|15m|1h|6h|1d [count] [by f]", "last:24h | timechart span=1h by user", "Events per time bucket (at most 500 buckets); by keeps the top 5 plus other"],
 ];
 const HUNT_FIELDS = "user host source outcome src_ip dest_ip ip batch_id event_type severity dest_port synthetic message last since until";
+// Each query matches one labeled scenario in the synthetic demo. That dataset is dated on the previous
+// weekday, so last:7d still covers it. Clicking a link puts the query in the hash and runs it.
+const HUNT_EXAMPLES = [
+  ["Brute force", "event_type:auth_failure user:admin src_ip:203.0.113.45 synthetic:1 last:7d"],
+  ["Impossible travel", "user:erin source:demo:impossible_travel synthetic:1 last:7d"],
+  ["Large transfer", 'event_type:cloud_data_access user:svc-deploy-tmp "customer-exports" synthetic:1 last:7d'],
+];
 const huntHref = (q) => `#hunt/${encodeURIComponent(q)}`;
 const huntValue = (v) => (/^[^\s"\\]+$/.test(v) && !v.endsWith("*") ? v : `"${v.replace(/[\\"]/g, "\\$&")}"`);
 const huntLink = (field, value, label, onclick) => el("a", { href: huntHref(`${field}:${huntValue(String(value))} last:7d`),
@@ -715,6 +722,12 @@ async function huntView(query = "", offset = 0) {
       el("label", { style: { flex: "1 1 220px", minWidth: "0" } }, "Query", input),
       el("button", { type: "submit" }, "Hunt"),
       can("analyst") ? el("button", { type: "button", class: "ghost", onclick: () => saveHuntDialog(input.value.trim()) }, "Save search") : null),
+    el("div", { id: "hunt-examples" },
+      el("p", { class: "muted" }, "Example queries on the synthetic demo"),
+      el("div", { class: "row" }, HUNT_EXAMPLES.map(([label, q]) => el("a", {
+        class: `button ghost hunt-example${query === q ? " active" : ""}`, href: huntHref(q),
+        title: `Run this query on the synthetic demo: ${q}`,
+      }, el("span", {}, label), el("code", {}, q))))),
     el("details", { style: { marginTop: "10px" } }, el("summary", { class: "muted" }, "Syntax"),
       el("p", { class: "muted" }, "Terms are ANDed; there is no OR. Fields: ", el("code", {}, HUNT_FIELDS), ". ip matches source or destination."),
       el("p", { class: "muted" }, "One ", el("code", {}, "|"), " stage may follow the filter to aggregate it (a | inside quotes is part of the value). ",
