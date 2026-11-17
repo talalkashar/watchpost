@@ -96,6 +96,14 @@ function consoleTitle(signedIn, criticalOpen) {
   if (typeof criticalOpen !== "number" || !Number.isInteger(criticalOpen) || criticalOpen < 0) return PUBLIC_TITLE;
   return `Watchpost · ${criticalOpen} critical`;
 }
+// How often the feed polls after the event stream fails. The feed sentence uses this same interval.
+const STREAM_POLL_MS = 3000;
+function feedPollNote(mode) {
+  if (mode !== "poll") return "";
+  const seconds = STREAM_POLL_MS / 1000;
+  if (!Number.isInteger(seconds) || seconds <= 0) return "";
+  return `polling every ${seconds}s`;
+}
 const chip = (text, cls = "") => el("span", { class: `chip ${cls}` }, text);
 const SEV_SHORT = { critical: "CRIT", high: "HIGH", medium: "MED", low: "LOW", info: "INFO" };
 const sevTag = (s) => el("span", { class: `sevtag sev-${sevOf(s)}` }, SEV_SHORT[sevOf(s)]);
@@ -285,7 +293,7 @@ const Live = {
       } catch { /* api() already handles 401 */ }
     };
     poll();
-    this.timers.poll = setInterval(poll, 3000);
+    this.timers.poll = setInterval(poll, STREAM_POLL_MS);
     this.timers.retry = setTimeout(() => { this.stopPolling(); this.connect(); }, 30000);
   },
   stopPolling() {
@@ -295,10 +303,19 @@ const Live = {
   setMode(mode) {
     this.mode = mode;
     const pill = $("#k-live");
-    if (!pill) return;
-    pill.dataset.mode = mode;
-    $("#k-live-text").textContent = { live: "LIVE · SSE", poll: "POLLING 3s", reconnecting: "RECONNECTING", off: "OFFLINE" }[mode] || mode;
-    if (Dash.mounted) Dash.renderHealth();
+    if (pill) {
+      pill.dataset.mode = mode;
+      $("#k-live-text").textContent = { live: "LIVE · SSE", poll: "POLLING 3s", reconnecting: "RECONNECTING", off: "OFFLINE" }[mode] || mode;
+      if (Dash.mounted) Dash.renderHealth();
+    }
+    this.paintFeedPoll();
+  },
+  paintFeedPoll() {
+    const note = $("#feed-poll");
+    if (!note) return;
+    const text = feedPollNote(this.mode);
+    note.textContent = text;
+    note.hidden = !text;
   },
 
   onEvents(events, count) {
@@ -442,7 +459,7 @@ const Dash = {
         el("div", { class: "map-side", id: "map-side" }),
         el("div", { class: "map-legend" }, ...["critical", "high", "medium", "low"].map((s) => el("span", {}, el("i", { class: `dot sev-${s}` }), s)),
           el("span", {}, el("i", { class: "dot hq" }), "HQ target"))),
-      panel("p-feed", "Live event stream", [el("span", { class: "muted", id: "feed-rate" }), pause],
+      panel("p-feed", "Live event stream", [el("span", { class: "muted", id: "feed-poll", hidden: true }), el("span", { class: "muted", id: "feed-rate" }), pause],
         el("div", { class: "feed-head" }, el("span", {}, "TIME"), el("span", {}, "SEV"), el("span", {}, "EVENT")),
         el("div", { class: "feed", id: "feed", onmouseenter: () => this.hover(true), onmouseleave: () => this.hover(false) })),
       panel("p-timeline", "Alerts over time", [el("span", { class: "muted", id: "tl-bucket" })], el("div", { class: "chartbox", id: "tl-chart" }),
@@ -455,6 +472,7 @@ const Dash = {
       panel("p-health", "Health", [el("a", { href: "#health", class: "muted" }, "details →")], el("div", { id: "health-body" })),
       panel("p-entities", "Riskiest entities", [el("span", { class: "muted" }, "alert weight, decayed by age")], el("div", { id: "ent-list" })),
     ));
+    Live.paintFeedPoll();
     this.timers.drip = setInterval(() => this.drip(), 110);
     this.timers.details = setInterval(() => this.loadHealthDetails(), 30000);
     const soc = $("#soc");
