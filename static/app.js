@@ -7,6 +7,43 @@ const state = { user: null, csrf: null, view: "dashboard", alertId: null, keys: 
 const ROLE_RANK = { viewer: 1, analyst: 2, admin: 3 };
 const can = (role) => state.user && ROLE_RANK[state.user.role] >= ROLE_RANK[role];
 
+// The document is the scroll surface. Hash routes and in-page targets keep their destinations.
+history.scrollRestoration = "manual";
+window.addEventListener("load", () => {
+  const target = document.getElementById(location.hash.slice(1));
+  if (target) target.scrollIntoView(); else window.scrollTo(0, 0);
+});
+
+const Motion = {
+  reduced: window.matchMedia("(prefers-reduced-motion: reduce)"),
+  observer: null,
+  intro(node) {
+    if (!this.reduced.matches) node.classList.add("load-intro");
+  },
+  reveal(root) {
+    this.observer?.disconnect();
+    if (this.reduced.matches || !window.IntersectionObserver) return;
+    this.observer = new IntersectionObserver((entries, observer) => {
+      let stagger = 0;
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        entry.target.style.setProperty("--reveal-delay", `${(stagger++ % 3) * 75}ms`);
+        entry.target.classList.remove("reveal-pending");
+        observer.unobserve(entry.target);
+      }
+    }, { threshold: 0.05 });
+    const sections = root.querySelectorAll(":scope > .card, :scope > .grid > .card, :scope > .kpis > .kpi, :scope > .soc > .panel");
+    for (const section of sections) {
+      section.classList.add("scroll-reveal", "reveal-pending");
+      this.observer.observe(section);
+    }
+  },
+};
+Motion.reduced.addEventListener("change", () => {
+  Motion.observer?.disconnect();
+  document.querySelectorAll(".reveal-pending").forEach((node) => node.classList.remove("reveal-pending"));
+});
+
 // ---------- helpers ----------
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
@@ -96,6 +133,10 @@ function table(headers, rows, onClick, wrapClass) {
 function render(...nodes) {
   const view = $("#view");
   view.replaceChildren(...nodes.flat().filter((n) => n !== null && n !== undefined && n !== false));
+  Motion.reveal(view);
+  const intro = view.querySelector(".view-bar, .page-head, h1");
+  if (intro) Motion.intro(intro);
+  if (location.hash === "#main") $("#main").scrollIntoView();
 }
 
 async function guarded(fn) {
@@ -119,12 +160,14 @@ function showLogin() {
   Live.stop();
   document.body.classList.remove("authed");
   $("#login-view").hidden = false;
+  Motion.intro($("#login-view"));
   mfaStep(null);
   $("#rail").hidden = true; $("#strip").hidden = true; $("#who").hidden = true;
   render();
 }
 
 async function boot() {
+  $("#login-view").hidden = true;
   $("#login-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const f = new FormData(ev.target);
@@ -150,7 +193,10 @@ async function boot() {
     back.focus({ preventScroll: true });
   });
   document.addEventListener("keydown", onShortcut);
-  window.addEventListener("hashchange", () => route());
+  window.addEventListener("hashchange", () => {
+    const target = document.getElementById(location.hash.slice(1));
+    if (target) target.scrollIntoView(); else route();
+  });
   try { onLogin(await api("/api/auth/me")); } catch { showLogin(); }
 }
 
@@ -210,7 +256,7 @@ function setMenu(open) {
 
 function route() {
   if (!state.user) return;
-  const [view, id, ...rest] = (location.hash.slice(1) || "dashboard").split("/");
+  const [view, id, ...rest] = ((location.hash === "#main" ? "" : location.hash.slice(1)) || "dashboard").split("/");
   state.view = view;
   document.body.dataset.view = view;
   state.keys = null;  // per-view shortcut keys; the view that owns them sets them again

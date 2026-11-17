@@ -349,7 +349,7 @@ const Dash = {
         el("div", { class: "legend" }, ...["critical", "high", "medium", "low"].map((s) => el("span", {}, el("i", { class: `dot sev-${s}` }), s)),
           el("span", {}, el("i", { class: "dot volume" }), "event volume"))),
       panel("p-attackers", "Top attacker IPs", [el("span", { class: "muted" }, "by evidence events")], el("div", { class: "chartbox", id: "atk-chart" })),
-      panel("p-attack", "MITRE ATT&CK coverage", [el("span", { class: "muted", id: "attack-meta" }), el("a", { href: "/api/attack/navigator.json", download: "watchpost-navigator-layer.json", title: "MITRE ATT&CK Navigator layer (JSON) colored by evidence level; scores come from synthetic demo data" }, "Export Navigator layer")], el("div", { class: "chartbox", id: "attack-chart" })),
+      panel("p-attack", "MITRE ATT&CK coverage", [el("span", { class: "muted", id: "attack-meta" }), el("a", { href: "/api/attack/navigator.json", download: "watchpost-navigator-layer.json", title: "MITRE ATT&CK Navigator layer (JSON) colored by evidence level; scores come from synthetic demo data" }, "Export Navigator layer")], el("div", { class: "chartbox", id: "attack-chart", tabindex: "0", role: "region", "aria-label": "ATT&CK technique matrix" })),
       panel("p-board", "Incident board", [el("span", { id: "board-meta" })], el("div", { class: "board", id: "board" })),
       panel("p-rules", "Top rules", [el("span", { class: "muted" }, "alerts all time")], el("div", { class: "chartbox", id: "rules-chart" })),
       panel("p-health", "Health", [el("a", { href: "#health", class: "muted" }, "details →")], el("div", { id: "health-body" })),
@@ -584,7 +584,8 @@ const Dash = {
   fillFeed(events) {
     const feed = $("#feed");
     if (!feed) return;
-    feed.replaceChildren(...events.slice(0, FEED_MAX).map((e) => this.feedRow(e, false)));
+    feed.replaceChildren(...(events.length ? events.slice(0, FEED_MAX).map((e) => this.feedRow(e, false))
+      : [el("p", { class: "empty-note" }, "No events received yet.")]));
     this.feedCount = events.length || 1;
   },
   enqueue(events) {
@@ -608,6 +609,7 @@ const Dash = {
     if (this.paused || !this.queue.length) return;
     const feed = $("#feed");
     if (!feed) return;
+    feed.querySelector(".empty-note")?.remove();
     const take = Math.min(this.queue.length, Math.max(1, Math.ceil(this.queue.length / 10)));
     for (const e of this.queue.splice(0, take)) {
       feed.prepend(this.feedRow(e, true));
@@ -742,7 +744,7 @@ const Dash = {
       meta.textContent = `${validated}/${cov.list.length} techniques validated on synthetic scenarios · ${hot} observed · `;
       meta.append(el("a", { href: "#coverage" }, "details"));
       mountSvg(box, WPCharts.heatMatrix(columns.length ? columns : [{ name: "None", short: "—", cells: [] }], {
-        w, cellH: 22, maxRows: Math.max(3, Math.min(4, tallest || 3)),
+        w: Math.max(w, columns.length * 110), cellH: 22, maxRows: Math.max(3, Math.min(4, tallest || 3)),
         label: `ATT&CK coverage heat matrix: ${validated} of ${cov.list.length} techniques validated, ${hot} seen in alerts. The Coverage view lists every technique as text.`,
       }));
       box.parentElement.querySelector(".cov-quiet")?.remove();

@@ -1,4 +1,4 @@
-// Headless UI check: every view at desktop (1440px) and phone (390px) width, plus keyboard triage.
+// Headless UI check: every view at 320px, 390px and 1440px, plus keyboard triage.
 // Needs playwright-core and a Chromium (headless shell) outside this repo; no node deps are added here.
 //
 //   NODE_PATH=/path/to/node_modules CHROME=/path/to/chrome-headless-shell node scripts/ui_check.js
@@ -7,7 +7,7 @@
 // synthetic demo data as admin, runs the checks, and stops that server by PID. Exit code 1 on any failure.
 // What it asserts per view: no horizontal page scroll, every visible input/select/textarea/button and
 // link has an accessible name (a small in-page audit, not axe), landmarks and aria-current are present,
-// tap targets are at least 40px tall at 390px, and no JS errors. It is not a screen-reader audit.
+// tap targets are at least 44px tall on phones, and no JS errors. It is not a screen-reader audit.
 "use strict";
 const { chromium } = require("playwright-core");
 const { spawn } = require("child_process");
@@ -49,7 +49,7 @@ function audit(minTap) {
   const visible = (n) => {
     const r = n.getBoundingClientRect();
     const st = getComputedStyle(n);
-    return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && !n.closest("[hidden]") && !n.closest("svg");
+    return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && n.checkVisibility() && !n.closest("[hidden]") && !n.closest("svg");
   };
   const name = (n) => {
     const by = n.getAttribute("aria-labelledby");
@@ -64,13 +64,14 @@ function audit(minTap) {
   };
   const problems = [];
   const scope = document.querySelector("dialog[open]") || document;
-  for (const n of scope.querySelectorAll("input:not([type=hidden]), select, textarea, button, a[href]")) {
+  for (const n of scope.querySelectorAll("input:not([type=hidden]), select, textarea, button, a[href], summary")) {
     if (!visible(n)) continue;
     const desc = `${n.tagName.toLowerCase()}${n.name ? `[name=${n.name}]` : ""}${n.className ? `.${String(n.className).split(" ")[0]}` : ""}`;
     if (!name(n)) problems.push(`unlabeled ${desc}`);
     // Inline text links are exempt from the target size (WCAG 2.5.8); link-styled buttons are not.
-    if (minTap && (n.tagName !== "A" || n.classList.contains("button")) && n.type !== "checkbox" && n.type !== "radio") {
-      const h = n.getBoundingClientRect().height;
+    if (minTap && (n.tagName !== "A" || n.matches(".button, .ph a, .bmore, .page-head a"))) {
+      const target = ["checkbox", "radio"].includes(n.type) ? n.closest("label") || n : n;
+      const h = target.getBoundingClientRect().height;
       if (h < minTap - 0.5) problems.push(`small tap target ${desc} "${name(n).slice(0, 30)}" ${Math.round(h)}px`);
     }
   }
@@ -88,7 +89,7 @@ function audit(minTap) {
 }
 
 async function login(browser, user, pw, width) {
-  const ctx = await browser.newContext({ viewport: { width, height: 900 } });
+  const ctx = await browser.newContext({ viewport: { width, height: width === 320 ? 568 : width === 390 ? 844 : 900 } });
   const page = await ctx.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
@@ -111,7 +112,7 @@ async function show(page, hash) {
 }
 
 async function auditView(page, label, width) {
-  const problems = await page.evaluate(audit, width <= 400 ? 40 : 0);
+  const problems = await page.evaluate(audit, width <= 400 ? 44 : 0);
   check(!problems.length, `${width}px ${label}${problems.length ? `: ${problems.join("; ")}` : ""}`);
 }
 
@@ -122,9 +123,9 @@ async function main() {
   try {
     await waitReady();
 
-    // Login form (logged out), both widths.
-    for (const width of [1440, 390]) {
-      const ctx = await browser.newContext({ viewport: { width, height: 900 } });
+    // Login form (logged out), phones first.
+    for (const width of [320, 390, 1440]) {
+      const ctx = await browser.newContext({ viewport: { width, height: width === 320 ? 568 : width === 390 ? 844 : 900 } });
       const p = await ctx.newPage();
       await p.goto(BASE);
       await p.waitForSelector("#login-view:not([hidden])");
@@ -152,11 +153,11 @@ async function main() {
       "hunt", "hunt/user%3Aalice%20last%3A7d", "overview", "ingest", "rules", "noise", "coverage", "health", "admin", "account",
       "entity/user/alice"].filter(Boolean);
 
-    for (const width of [1440, 390]) {
+    for (const width of [320, 390, 1440]) {
       console.log(`\n== ${width}px, admin ==`);
       const { ctx, page, errors } = await login(browser, "admin", ADMIN_PW, width);
       if (width <= 400) {
-        check(await page.isHidden("#nav"), "390px nav folded behind the Menu button");
+        check(await page.isHidden("#nav"), `${width}px nav folded behind the Menu button`);
         await page.click("#nav-toggle");
         check(await page.isVisible("#nav") && (await page.getAttribute("#nav-toggle", "aria-expanded")) === "true", "Menu opens the nav (aria-expanded=true)");
         await page.click("#nav button[data-view=alerts]");
@@ -237,6 +238,58 @@ async function main() {
       await auditView(page, "rules with an expanded backtest", width);
       check(!errors.length, `${width}px no JS errors${errors.length ? `: ${errors.join(" | ")}` : ""}`);
       await ctx.close();
+    }
+
+    // Motion follows the document scroll and preserves layout, navigation and fallbacks.
+    console.log("\n== scroll motion and reload ==");
+    {
+      const { ctx, page } = await login(browser, "admin", ADMIN_PW, 320);
+      await show(page, "dashboard");
+      await page.waitForTimeout(1000);
+      check(await page.locator("#p-health").evaluate((n) => getComputedStyle(n).opacity === "0"), "below-fold panel waits for scrolling");
+      const motion = await page.locator("#p-health").evaluate(async (node) => {
+        const before = { top: node.offsetTop, height: node.offsetHeight };
+        let shifts = 0;
+        const observer = new PerformanceObserver((list) => { for (const entry of list.getEntries()) if (!entry.hadRecentInput) shifts += entry.value; });
+        observer.observe({ type: "layout-shift" });
+        node.scrollIntoView({ block: "center" });
+        const samples = [];
+        const start = performance.now();
+        await new Promise((resolve) => {
+          const frame = () => { samples.push(Number(getComputedStyle(node).opacity));
+            if (performance.now() - start < 1100) requestAnimationFrame(frame); else resolve(); };
+          requestAnimationFrame(frame);
+        });
+        observer.disconnect();
+        return { animated: samples.some((v) => v > 0 && v < 1), visible: Number(getComputedStyle(node).opacity) === 1,
+          stable: node.offsetTop === before.top && node.offsetHeight === before.height, shifts };
+      });
+      check(motion.animated && motion.visible, "scrolling reveals the panel and leaves it readable");
+      check(motion.stable && motion.shifts === 0, `reveal preserves layout (CLS ${motion.shifts})`);
+      await page.evaluate(() => { history.replaceState(null, "", location.pathname); scrollTo(0, 600); });
+      await page.reload();
+      await page.waitForSelector("#soc");
+      await page.waitForTimeout(1000);
+      check(await page.evaluate(() => scrollY === 0 && history.scrollRestoration === "manual"), "reload returns to the document top");
+      await page.evaluate(() => { location.hash = "main"; });
+      await page.waitForTimeout(100);
+      check(await page.evaluate(() => scrollY > 0 && document.body.dataset.view === "dashboard"), "in-page hash jumps without replacing the view");
+      await page.reload();
+      await page.waitForSelector("#soc");
+      await page.waitForTimeout(1000);
+      check(await page.evaluate(() => Math.abs(document.querySelector("#main").getBoundingClientRect().top) < 1), "reload preserves the hash destination");
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      check(await page.locator(".reveal-pending").evaluateAll((nodes) => nodes.every((n) => getComputedStyle(n).opacity === "1" && getComputedStyle(n).transform === "none")), "enabling reduced motion makes pending content visible immediately");
+      await show(page, "overview");
+      check(await page.locator(".reveal-pending").count() === 0
+        && await page.locator("h1").evaluate((n) => getComputedStyle(n).animationName === "none"), "reduced motion disables reveals and intros on new views");
+      await ctx.close();
+      const noScript = await browser.newContext({ javaScriptEnabled: false, viewport: { width: 320, height: 568 } });
+      const plain = await noScript.newPage();
+      await plain.goto(BASE);
+      check(await plain.locator("#login-form").isVisible()
+        && await plain.locator(".credit").last().isVisible(), "sign-in content and footer remain visible without JavaScript");
+      await noScript.close();
     }
 
     // Keyboard triage as admin.
