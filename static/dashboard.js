@@ -76,6 +76,19 @@ function panel(id, title, meta, ...body) {
     el("header", { class: "ph" }, el("h2", {}, title), el("div", { class: "pm", id: `${id}-meta` }, ...(meta || []))),
     el("div", { class: "pb", id: `${id}-body` }, ...body));
 }
+
+// A store with zero events is one explanation, not a note in every panel.
+// Only an admin gets the control that loads the labeled synthetic dataset.
+function emptyDashboard(eventsTotal, isAdmin) {
+  if (typeof eventsTotal !== "number" || eventsTotal !== 0) return null;
+  const load = isAdmin === true;
+  return {
+    title: "No events yet",
+    body: "Nothing is stored yet, so the attack map, alerts, and incidents have nothing to draw. Load the labeled synthetic dataset to fill this console. Every event in that dataset is marked synthetic.",
+    load,
+    hint: load ? "" : "An admin loads the synthetic demo.",
+  };
+}
 const chip = (text, cls = "") => el("span", { class: `chip ${cls}` }, text);
 const SEV_SHORT = { critical: "CRIT", high: "HIGH", medium: "MED", low: "LOW", info: "INFO" };
 const sevTag = (s) => el("span", { class: `sevtag sev-${sevOf(s)}` }, SEV_SHORT[sevOf(s)]);
@@ -286,7 +299,11 @@ const Live = {
     if (this.summary) this.summary.events_total += count;
     for (const e of events) this.lastEventId = Math.max(this.lastEventId, e.id || 0);
     this.renderStrip();
-    if (Dash.mounted) Dash.enqueue(events);
+    if (Dash.mounted) {
+      // The first stored event replaces the empty-store card with the panels.
+      if ($("#soc")?.hidden && this.summary && this.summary.events_total > 0) Dash.update(this.summary);
+      Dash.enqueue(events);
+    }
     if (events.some((e) => e.synthetic)) $("#k-synth").hidden = false;
   },
   onAlert(a) {
@@ -410,6 +427,7 @@ const Dash = {
     this.feedCount = 0;
     const pause = el("button", { class: "mini ghost", id: "feed-pause", onclick: () => this.togglePause() }, "Pause");
     render(el("div", { class: "view-bar", id: "dashboard-view-bar" }, el("p", { class: "muted" }, "Loading saved dashboard views…")),
+      el("div", { id: "dash-empty", hidden: true }),
       el("div", { class: "soc", id: "soc" },
       panel("p-map", "Attack map", [chip("SYNTHETIC GEO", "synthetic"), el("span", { class: "muted", id: "map-count" })],
         el("div", { class: "mapwrap", id: "map" }),
@@ -457,14 +475,62 @@ const Dash = {
   },
   async update(d) {
     this.data = d;
+    if (this.renderEmpty()) return;
     if (!this.feedCount) this.fillFeed(d.recent_events);
     const ips = [...d.attackers.map((a) => a.ip), ...d.recent_events.map((e) => e.src_ip), ...d.recent_events.map((e) => e.dest_ip), "10.0.0.10"].filter(Boolean);
     this.redraw();
     if (await Geo.resolve(ips)) this.renderMarks();
     this.renderAttackers();
   },
+  // Returns true when the store is empty: one card, and the panel grid stays hidden.
+  renderEmpty() {
+    const box = $("#dash-empty");
+    const soc = $("#soc");
+    if (!box || !soc || !this.data) return false;
+    const copy = emptyDashboard(this.data.events_total, can("admin"));
+    if (!copy) {
+      if (soc.hidden || !box.hidden) {
+        box.hidden = true;
+        box.replaceChildren();
+        delete box.dataset.mode;
+        soc.hidden = false;
+      }
+      return false;
+    }
+    soc.hidden = true;
+    const mode = copy.load ? "load" : "wait";
+    if (box.hidden || box.dataset.mode !== mode) {
+      box.dataset.mode = mode;
+      box.hidden = false;
+      box.replaceChildren(el("div", { class: "card dash-empty", role: "status" },
+        el("h2", {}, copy.title),
+        el("p", {}, copy.body),
+        copy.load
+          ? el("button", { type: "button", id: "dash-load-demo", onclick: () => guarded(() => this.loadDemo()) }, "Load synthetic demo data")
+          : el("p", { class: "muted" }, copy.hint)));
+    }
+    return true;
+  },
+  async loadDemo() {
+    const button = $("#dash-load-demo");
+    if (button) button.disabled = true;
+    try {
+      let loaded;
+      try { loaded = await api("/api/demo/load", { method: "POST", body: {} }); }
+      catch (e) {
+        if (e.status !== 409 || !confirm(`${e.message}. Load another copy?`)) throw e;
+        loaded = await api("/api/demo/load", { method: "POST", body: { force: true } });
+      }
+      toast(`Synthetic demo loaded (${Object.keys(loaded).length} scenarios).`);
+      await Live.refreshSummary();
+      await Live.refreshIncidents();
+      this.loadCoverage();
+    } finally {
+      if (button && button.isConnected) button.disabled = false;
+    }
+  },
   redraw() {
-    if (!this.mounted || !this.data) return;
+    if (!this.mounted || !this.data || emptyDashboard(this.data.events_total, false)) return;
     this.renderMap(); this.renderTimeline(); this.renderAttackers(); this.renderRules(); this.renderEntities(); this.renderMatrix(); this.renderBoard(); this.renderHealth();
     this.applyView();
   },
