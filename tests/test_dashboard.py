@@ -504,5 +504,85 @@ process.stdout.write(JSON.stringify(out));
         self.assertIn(".ms-row .ms-city", css)
 
 
+class CoverageChipTests(unittest.TestCase):
+    """Layouts that hide the matrix still state validated, mapped, disabled, and gap counts."""
+
+    def setUp(self):
+        self.node = shutil.which("node")
+        if self.node is None:
+            self.skipTest("node is not installed")
+        self.source = (STATIC / "dashboard.js").read_text()
+
+    def call(self, names, expression, payload):
+        script = "\n".join(function_body(self.source, name) for name in names) + f"""
+const input = JSON.parse(require("fs").readFileSync(0, "utf8"));
+process.stdout.write(JSON.stringify({expression}));
+"""
+        out = subprocess.run(
+            [self.node, "-e", script], input=json.dumps(payload),
+            capture_output=True, text=True, check=False)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_counts_keep_mapped_and_disabled_out_of_the_gap(self):
+        counts = self.call(
+            ["coverageLevel", "coverageCounts"],
+            "coverageCounts(input)",
+            [
+                {"id": "T1078", "level": "validated", "covered": True},
+                {"id": "T1190", "level": "mapped", "covered": False, "hits": 4},
+                {"id": "T1110", "level": "disabled", "rules": ["off"]},
+                {"id": "T1003", "level": "gap"},
+                {"id": "T1059", "covered": True},
+                {"id": "T1021", "rules": []},
+            ])
+        self.assertEqual(counts, {"validated": 2, "mapped": 1, "disabled": 1, "gap": 2})
+
+    def test_chip_is_one_line_of_evidence_counts(self):
+        text = self.call(
+            ["coverageChipText"],
+            "coverageChipText(input)",
+            {"validated": 18, "mapped": 6, "disabled": 2, "gap": 4})
+        self.assertEqual(text, "18 validated · 6 mapped · 2 disabled · 4 gap")
+        self.assertNotIn("\n", text)
+
+    def test_triage_and_telemetry_hide_the_matrix_and_full_does_not(self):
+        triage = ["p-board", "p-timeline", "p-feed", "p-entities"]
+        telemetry = ["p-map", "p-feed", "p-attackers", "p-health"]
+        self.assertTrue(self.call(["layoutHidesMatrix"], "layoutHidesMatrix(input)", triage))
+        self.assertTrue(self.call(["layoutHidesMatrix"], "layoutHidesMatrix(input)", telemetry))
+        self.assertFalse(self.call(["layoutHidesMatrix"], "layoutHidesMatrix(input)", ["p-attack", "p-board"]))
+        self.assertTrue(self.call(["layoutHidesMatrix"], "layoutHidesMatrix(input)", None))
+
+    def test_label_waits_and_then_uses_the_counts(self):
+        names = ["coverageLevel", "coverageCounts", "coverageChipText", "coverageChipLabel"]
+        self.assertEqual(self.call(names, "coverageChipLabel(input)", {"state": "loading"}), "coverage loading")
+        self.assertEqual(self.call(names, "coverageChipLabel(input)", {"state": "error", "error": "down"}), "coverage unavailable")
+        label = self.call(names, "coverageChipLabel(input)", {
+            "state": "ok",
+            "list": [{"level": "validated"}, {"level": "mapped"}, {"level": "gap"}],
+        })
+        self.assertEqual(label, "1 validated · 1 mapped · 0 disabled · 1 gap")
+
+    def test_view_bar_mounts_the_chip_only_when_the_matrix_is_hidden(self):
+        start = self.source.index("renderViewBar()")
+        chunk = self.source[start:self.source.index("\n  applyView()")]
+        self.assertIn("layoutHidesMatrix(this.layout)", chunk)
+        self.assertIn('id: "coverage-chip"', chunk)
+        self.assertIn('href: "#coverage"', chunk)
+        self.assertIn("coverageChipLabel(this.coverage)", chunk)
+        matrix = self.source[self.source.index("renderMatrix()"):self.source.index("// --- incident board")]
+        self.assertIn("coverageChipLabel(this.coverage)", matrix)
+        css = (STATIC / "style.css").read_text()
+        self.assertIn("a.chip.coverage-chip", css)
+
+
+def function_body(source, name):
+    match = re.search(rf"^(?:async )?function {name}\(.*?^\}}$", source, re.S | re.M)
+    if not match:
+        raise AssertionError(f"function {name} not found")
+    return match.group(0)
+
+
 if __name__ == "__main__":
     unittest.main()

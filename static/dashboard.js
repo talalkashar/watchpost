@@ -116,6 +116,32 @@ function techniqueRef(value) {
   return { id: String(id), name: value.name || "", tactic: value.tactic || "" };
 }
 
+// Evidence counts for the one-line chip shown when a layout hides the matrix.
+// A payload with no level still treats a covered technique as validated, matching the matrix.
+function coverageLevel(technique) {
+  const level = technique && technique.level;
+  if (level === "validated" || level === "mapped" || level === "disabled" || level === "gap") return level;
+  const rules = technique && technique.rules;
+  const proven = technique && (technique.covered ?? (Array.isArray(rules) && rules.length > 0));
+  return proven ? "validated" : "gap";
+}
+function coverageCounts(list) {
+  const counts = { validated: 0, mapped: 0, disabled: 0, gap: 0 };
+  for (const technique of list || []) counts[coverageLevel(technique)] += 1;
+  return counts;
+}
+function coverageChipText(counts) {
+  return `${counts.validated} validated · ${counts.mapped} mapped · ${counts.disabled} disabled · ${counts.gap} gap`;
+}
+function layoutHidesMatrix(layout) {
+  return !(layout || []).includes("p-attack");
+}
+function coverageChipLabel(coverage) {
+  if (!coverage || coverage.state === "loading") return "coverage loading";
+  if (coverage.state !== "ok") return coverage.state === "error" ? "coverage unavailable" : "coverage pending";
+  return coverageChipText(coverageCounts(coverage.list));
+}
+
 // Tactic tags (at most four) plus the earliest kill-chain technique, the same order as the matrix.
 function boardTags(tactics, technique) {
   const tags = [];
@@ -492,8 +518,14 @@ const Dash = {
       }); });
       save = el("details", { class: "view-save" }, el("summary", {}, "Save a view"), form);
     }
-    bar.replaceChildren(el("span", { class: "view-name" }, this.currentView ? this.currentView.name : "Default layout"),
-      el("div", { class: "view-controls" }, ...controls), ...(save ? [save] : []));
+    const lead = [el("span", { class: "view-name" }, this.currentView ? this.currentView.name : "Default layout")];
+    if (layoutHidesMatrix(this.layout)) {
+      lead.push(el("a", {
+        class: "chip coverage-chip", id: "coverage-chip", href: "#coverage",
+        title: "Synthetic ATT&CK catalog. Only validated counts as covered. This layout hides the matrix.",
+      }, coverageChipLabel(this.coverage)));
+    }
+    bar.replaceChildren(...lead, el("div", { class: "view-controls" }, ...controls), ...(save ? [save] : []));
   },
   applyView() {
     const soc = $("#soc");
@@ -757,6 +789,8 @@ const Dash = {
     this.renderMatrix();
   },
   renderMatrix() {
+    const chipNode = $("#coverage-chip");
+    if (chipNode) chipNode.textContent = coverageChipLabel(this.coverage);
     const box = $("#attack-chart");
     if (!box) return;
     const cov = this.coverage;

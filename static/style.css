@@ -97,6 +97,8 @@ nav button.active { background: rgb(255 255 255 / .07); color: var(--ink);
   border: 1px solid var(--line-2); color: var(--ink-2); white-space: nowrap; }
 .chip.synthetic { color: var(--synthetic); border-color: rgb(255 255 255 / .248); background: rgb(255 255 255 / .044); }
 .chip.pendingchip { color: var(--warn); border-color: rgb(212 162 86 / .28); background: rgb(212 162 86 / .048); }
+a.chip.coverage-chip { font-size: 12px; letter-spacing: 0.02em; color: var(--ink); text-decoration: none; }
+a.chip.coverage-chip:hover { border-color: var(--ink-2); }
 
 /* ---------- main + classic views ---------- */
 main { padding: 16px 20px; min-width: 0; }
