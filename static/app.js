@@ -948,16 +948,27 @@ function ingestSummary(r) {
     r.rejections?.length ? el("ul", {}, r.rejections.slice(0, 10).map((x) => el("li", {}, `Record ${x.index}: ${x.reason}`))) : null);
 }
 
+// Noise-lab word for a built-in rule. Imported Sigma rules and promoted searches are proved by
+// their own labeled sample, so they stay unmarked here. Unknown words are dropped.
+function ruleLabMark(rule, labRules) {
+  if (!rule || rule.sigma || rule.search || !Array.isArray(labRules)) return null;
+  const row = labRules.find((r) => r && r.rule_id === rule.id);
+  const verdict = row && row.verdict;
+  if (!["quiet", "noisy", "blind", "disabled", "untested"].includes(verdict)) return null;
+  return { verdict, summary: typeof row.summary === "string" ? row.summary : "" };
+}
+
 // ---------- rules ----------
 async function rules(focus) {
-  const [list, changes, settings, evals, exceptions, suppressionWindows] = await Promise.all([api("/api/rules"), api("/api/changes"), api("/api/settings"), api("/api/evaluations"), api("/api/suppressions"), api("/api/rule-suppression-windows")]);
+  const [list, changes, settings, evals, exceptions, suppressionWindows, lab] = await Promise.all([api("/api/rules"), api("/api/changes"), api("/api/settings"), api("/api/evaluations"), api("/api/suppressions"), api("/api/rule-suppression-windows"), api("/api/noise-lab")]);
   const pending = changes.filter((c) => c.status === "pending");
   const ruleCards = list.map((r) => {
     const p = r.performance || {};
     const ev = r.evaluation;
     return el("div", { class: "card", id: `rule-${r.id}`, tabindex: "-1" },
-      el("div", { class: "row", style: { justifyContent: "space-between" } },
-        el("h2", {}, r.name), el("span", {}, sev(r.severity), " ", r.enabled ? pill("enabled", "st-ok") : pill("disabled", "st-rejected"))),
+      el("div", { class: "row rule-head", style: { justifyContent: "space-between" } },
+        el("div", { class: "row rule-name" }, el("h2", {}, r.name), ruleLabPill(ruleLabMark(r, lab.rules))),
+        el("span", {}, sev(r.severity), " ", r.enabled ? pill("enabled", "st-ok") : pill("disabled", "st-rejected"))),
       el("p", { class: "muted" }, r.description),
       el("p", {}, el("strong", {}, "MITRE ATT&CK: "), techniques(r.techniques)),
       el("p", {}, el("strong", {}, "Alert grouping: "), r.grouping.length ? r.grouping.join(" + ") : "rule default",
@@ -1544,6 +1555,15 @@ async function historyDialog(rule) {
 
 // ---------- noise lab ----------
 const VERDICT_CLASS = { quiet: "st-ok", noisy: "st-degraded", blind: "st-failing", disabled: "st-rejected", untested: "st-rejected" };
+
+function ruleLabPill(mark) {
+  if (!mark) return null;
+  return el("span", {
+    class: `pill rule-lab ${VERDICT_CLASS[mark.verdict] || "st-rejected"}`,
+    title: mark.summary || null,
+    "aria-label": `Noise lab ${mark.verdict}`,
+  }, mark.verdict);
+}
 
 // A rule id may break after an underscore when the column is narrow. The characters stay the id.
 function ruleId(id) {
