@@ -181,6 +181,7 @@ function openModal() {
 // ---------- auth ----------
 function showLogin() {
   state.user = null; state.csrf = null;
+  document.title = consoleTitle(false);
   Live.stop();
   document.body.classList.remove("authed");
   $("#login-view").hidden = false;

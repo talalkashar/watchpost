@@ -89,6 +89,13 @@ function emptyDashboard(eventsTotal, isAdmin) {
     hint: load ? "" : "An admin loads the synthetic demo.",
   };
 }
+// The public <title> stays the search title. Once signed in, the tab names the open critical count.
+const PUBLIC_TITLE = "Watchpost: an open-source SIEM and SOC console in Python";
+function consoleTitle(signedIn, criticalOpen) {
+  if (signedIn !== true) return PUBLIC_TITLE;
+  if (typeof criticalOpen !== "number" || !Number.isInteger(criticalOpen) || criticalOpen < 0) return PUBLIC_TITLE;
+  return `Watchpost · ${criticalOpen} critical`;
+}
 const chip = (text, cls = "") => el("span", { class: `chip ${cls}` }, text);
 const SEV_SHORT = { critical: "CRIT", high: "HIGH", medium: "MED", low: "LOW", info: "INFO" };
 const sevTag = (s) => el("span", { class: `sevtag sev-${sevOf(s)}` }, SEV_SHORT[sevOf(s)]);
@@ -379,6 +386,7 @@ const Live = {
   },
   renderStrip() {
     const d = this.summary;
+    document.title = consoleTitle(!!state.user, d ? d.alerts_critical_open : undefined);
     if (d) {
       $("#k-open").textContent = fmtN(d.alerts_open + d.alerts_investigating);
       $("#k-crit").textContent = fmtN(d.alerts_critical_open);
