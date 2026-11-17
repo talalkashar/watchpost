@@ -170,6 +170,28 @@ function coverageChipLabel(coverage) {
   return coverageChipText(coverageCounts(coverage.list));
 }
 
+// The heat matrix is an SVG image, so its cells are not text. One row per cell, including
+// cells the chart clips behind "+N", names the technique, the tactic, and the evidence level.
+function matrixTextRows(columns) {
+  const rows = [];
+  for (const column of columns || []) {
+    const tactic = (column && (column.name || column.short)) || "Unmapped";
+    for (const cell of (column && column.cells) || []) {
+      if (!cell || cell.id === undefined || cell.id === null || String(cell.id) === "") continue;
+      rows.push({ id: String(cell.id), tactic: String(tactic), level: coverageLevel(cell) });
+    }
+  }
+  return rows;
+}
+function matrixTextLine(row) {
+  return `${row.id}, ${row.tactic}, ${row.level}`;
+}
+function mountMatrixText(box, columns) {
+  if (!box) return;
+  const items = matrixTextRows(columns).map((row) => el("li", {}, matrixTextLine(row)));
+  box.append(el("ul", { class: "sr-only", id: "attack-text" }, ...items));
+}
+
 // Tactic tags (at most four) plus the earliest kill-chain technique, the same order as the matrix.
 function boardTags(tactics, technique) {
   const tags = [];
@@ -918,6 +940,7 @@ const Dash = {
         w: Math.max(w, columns.length * 86), cellH: 22, maxRows: Math.max(tallest, 1),
         label: `ATT&CK coverage: ${validated} of ${cov.list.length} techniques validated on synthetic scenarios, ${mapped} mapped only, ${hot} seen in alerts. Empty tactics have no catalog technique. Colors match the Coverage view.`,
       }));
+      mountMatrixText(box, columns);
       if (legend) legend.replaceChildren(
         ...[["heat", "Validated (heat = alert count)"], ["mapped", "Mapped only"], ["disabled", "Disabled"], ["gap", "Gap"], ["crit", "On a critical alert"]]
           .map(([cls, text]) => el("span", {}, el("i", { class: `swatch ${cls}`, "aria-hidden": "true" }), text)));
