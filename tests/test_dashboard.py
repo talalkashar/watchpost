@@ -414,5 +414,95 @@ process.stdout.write(sandbox.WPCharts.heatMatrix(input.columns, input.opts));
         self.assertNotRegex(css, r"\.heat \.cell\.crit \{[^}]*fill:")
 
 
+class MapSideTests(unittest.TestCase):
+    """The attack-map side list names the fictional city on each busiest arc and counts unknown source IPs."""
+
+    def setUp(self):
+        self.node = shutil.which("node")
+        if self.node is None:
+            self.skipTest("node is not installed")
+        self.source = (STATIC / "dashboard.js").read_text()
+
+    def summary(self, sources, locations):
+        prelude = []
+        for name in ("SEV_RANK", "sevOf", "maxSev"):
+            match = re.search(rf"^const {name} = .*$", self.source, re.M)
+            self.assertIsNotNone(match, name)
+            prelude.append(match.group(0))
+        body = re.search(r"^function mapSide\(.*?^\}$", self.source, re.S | re.M)
+        self.assertIsNotNone(body, "function mapSide not found")
+        script = "\n".join(prelude) + "\n" + body.group(0) + """
+const input = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const table = new Map(Object.entries(input.locations));
+const out = mapSide(input.sources, (ip) => table.has(ip) ? table.get(ip) : undefined);
+process.stdout.write(JSON.stringify(out));
+"""
+        out = subprocess.run(
+            [self.node, "-e", script],
+            input=json.dumps({"sources": sources, "locations": locations}),
+            capture_output=True, text=True, check=False)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_busiest_arc_is_named_by_fictional_city(self):
+        ironvale = {"city": "Ironvale", "internal": False, "synthetic": True}
+        kestrel = {"city": "Kestrel Bay", "internal": False, "synthetic": True}
+        out = self.summary([
+            {"ip": "203.0.113.10", "events": 10, "sev": "medium"},
+            {"ip": "203.0.113.20", "events": 4, "sev": "low"},
+            {"ip": "198.51.100.8", "events": 9, "sev": "critical"},
+            {"ip": "10.0.0.5", "events": 40, "sev": "critical"},
+        ], {
+            "203.0.113.10": ironvale,
+            "203.0.113.20": ironvale,
+            "198.51.100.8": kestrel,
+            "10.0.0.5": {"city": "Riverton HQ", "internal": True, "synthetic": True},
+        })
+        self.assertEqual(out["locations"], 2)
+        self.assertEqual([(a["city"], a["events"], a["ips"]) for a in out["arcs"]],
+                         [("Ironvale", 14, 2), ("Kestrel Bay", 9, 1)])
+        self.assertEqual(out["arcs"][1]["sev"], "critical")
+        self.assertEqual(out["unknown"], 0)
+
+    def test_unknown_source_ips_are_counted_not_plotted_as_arcs(self):
+        out = self.summary([
+            {"ip": "203.0.113.10", "events": 2, "sev": "low"},
+            {"ip": "8.8.8.8", "events": 50, "sev": "critical"},
+            {"ip": "1.1.1.1", "events": 3, "sev": "high"},
+            {"ip": "198.51.100.4", "events": 1, "sev": "info"},
+        ], {
+            "203.0.113.10": {"city": "Ironvale", "internal": False},
+            "8.8.8.8": None,
+            "1.1.1.1": None,
+        })
+        self.assertEqual([a["city"] for a in out["arcs"]], ["Ironvale"])
+        self.assertEqual(out["unknown"], 2)
+        self.assertEqual(out["locations"], 1)
+
+    def test_ties_break_by_severity_then_city_and_the_list_stops_at_five(self):
+        cities = ["Northhaven", "Saltmere", "Kestrel Bay", "Duskport", "Ironvale", "Emberfield"]
+        sources = [{"ip": f"192.0.2.{i}", "events": 5, "sev": "high" if i == 5 else "low"} for i in range(6)]
+        locations = {s["ip"]: {"city": cities[i], "internal": False} for i, s in enumerate(sources)}
+        out = self.summary(sources, locations)
+        self.assertEqual(out["locations"], 6)
+        self.assertEqual([a["city"] for a in out["arcs"]],
+                         ["Emberfield", "Duskport", "Ironvale", "Kestrel Bay", "Northhaven"])
+        self.assertEqual(out["arcs"][0]["sev"], "high")
+
+    def test_side_list_renders_cities_and_the_unknown_count(self):
+        start = self.source.index("renderMarks()")
+        chunk = self.source[start:self.source.index("pulse(e)")]
+        self.assertIn("mapSide(this.sources()", chunk)
+        self.assertIn("Busiest arcs", chunk)
+        self.assertIn("No geo entry", chunk)
+        self.assertIn("ms-city", chunk)
+        self.assertIn("no geo entry", chunk)
+        self.assertNotIn("Top sources", chunk)
+        self.assertNotIn("unknown.slice", chunk)
+        css = (STATIC / "style.css").read_text()
+        self.assertIn("grid-template-columns: 12px minmax(0, 1fr) auto", css)
+        self.assertIn(".ms-row .ms-city", css)
+
+
 if __name__ == "__main__":
     unittest.main()

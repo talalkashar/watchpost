@@ -290,9 +290,9 @@ dialog::backdrop { background: rgb(0 0 0 / .72); backdrop-filter: blur(2px); }
   backdrop-filter: blur(8px); border-radius: 8px; padding: 8px 10px; font-size: 12px; display: flex; flex-direction: column; gap: 2px; pointer-events: none; }
 .ms-h { font: 500 10px var(--sans); letter-spacing: var(--track); white-space: nowrap; text-transform: uppercase; color: var(--muted); margin-top: 4px; }
 .ms-h:first-child { margin-top: 0; }
-.ms-row { display: grid; grid-template-columns: 12px 96px 1fr; align-items: center; white-space: nowrap; overflow: hidden; }
-.ms-row code { font-size: 10.5px; color: var(--ink); }
-.ms-row span { overflow: hidden; text-overflow: ellipsis; color: var(--ink-2); }
+.ms-row { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; }
+.ms-row .ms-city { overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
+.ms-row .ms-n { font-variant-numeric: tabular-nums; color: var(--ink-2); font-weight: 600; }
 .map-legend { position: absolute; right: 10px; bottom: 8px; display: flex; gap: 10px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 
 /* live feed: time and severity span the row; the type line carries the synthetic mark; the message sits under the address */

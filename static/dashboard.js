@@ -140,6 +140,28 @@ function boardColumn(status) {
 }
 
 // ---------- synthetic geo cache ----------
+// Side list for the attack map. Each arc is one fictional city aimed at HQ, busiest first.
+// `unknown` counts source IPs the synthetic geo table does not know.
+// A locate() of undefined is still in flight and is neither an arc nor unknown.
+function mapSide(sources, locate) {
+  const cities = new Map();
+  let unknown = 0;
+  for (const s of sources || []) {
+    const loc = locate(s.ip);
+    if (loc === undefined) continue;
+    if (loc === null) { unknown += 1; continue; }
+    if (loc.internal || !loc.city) continue;
+    const row = cities.get(loc.city) || { city: loc.city, events: 0, sev: "info", ips: 0 };
+    row.events += Number(s.events) || 0;
+    row.ips += 1;
+    row.sev = maxSev(row.sev, s.sev);
+    cities.set(loc.city, row);
+  }
+  const ranked = [...cities.values()].sort((a, b) =>
+    b.events - a.events || SEV_RANK[b.sev] - SEV_RANK[a.sev] || a.city.localeCompare(b.city));
+  return { arcs: ranked.slice(0, 5), locations: ranked.length, unknown };
+}
+
 const Geo = {
   cache: new Map(),  // ip -> location | null (null = no table entry: "unknown")
   get(ip) { return this.cache.get(ip); },
@@ -525,12 +547,9 @@ const Dash = {
     const [w, h] = this.mapDims;
     const hq = this.hq();
     const cities = new Map();
-    const unknown = [], internal = [];
     for (const s of this.sources()) {
       const loc = Geo.get(s.ip);
-      if (loc === undefined) continue;
-      if (loc === null) { unknown.push(s); continue; }
-      if (loc.internal) { internal.push(s); continue; }
+      if (!loc || loc.internal) continue;
       const c = cities.get(loc.city) || { ...loc, ips: [], events: 0, sev: "info" };
       c.ips.push(s.ip); c.events += s.events; c.sev = maxSev(c.sev, s.sev);
       cities.set(loc.city, c);
@@ -574,19 +593,20 @@ const Dash = {
       `<text class="ml" x="${hqx.toFixed(1)}" y="${hqy.toFixed(1)}" text-anchor="${hqEnd ? "end" : "start"}">HQ</text></g>`;
     setSvgChildren(svg.querySelector("g.arcs"), arcs);
     setSvgChildren(svg.querySelector("g.marks"), marks);
-    $("#map-count").textContent = `${ranked.length} source locations · ${unknown.length} unknown`;
-
+    const summary = mapSide(this.sources(), (ip) => Geo.get(ip));
+    const count = $("#map-count");
+    if (count) count.textContent = `${summary.locations} ${summary.locations === 1 ? "arc" : "arcs"} · ${summary.unknown} no geo entry`;
     const side = $("#map-side");
-    const row = (s, where, cls) => el("div", { class: "ms-row" }, el("i", { class: `dot sev-${s.sev}` }), el("code", {}, s.ip), el("span", { class: cls || "" }, where));
-    const top = this.sources().filter((s) => Geo.get(s.ip) && !Geo.get(s.ip).internal)
-      .sort((a, b) => SEV_RANK[b.sev] - SEV_RANK[a.sev] || b.events - a.events).slice(0, 5);
-    side.replaceChildren(...[
-      el("div", { class: "ms-h" }, "Top sources"),
-      ...(top.length ? top.map((s) => row(s, Geo.get(s.ip).city)) : [el("div", { class: "muted" }, "No external sources yet")]),
-      el("div", { class: "ms-h" }, `Unknown · no geo entry · ${unknown.length}`),
-      ...(unknown.length ? unknown.slice(0, 4).map((s) => row(s, "unknown", "muted")) : [el("div", { class: "muted" }, "none")]),
-      unknown.length > 4 ? el("div", { class: "muted" }, `+${unknown.length - 4} more`) : null,
-      internal.length ? el("div", { class: "ms-h" }, `Internal sources · ${internal.length}`) : null].filter(Boolean));
+    if (!side) return;
+    const arcRow = (a) => el("div", { class: "ms-row", title: `${a.city} → HQ · ${a.events} events from ${a.ips} source ${a.ips === 1 ? "IP" : "IPs"} · synthetic geo` },
+      el("i", { class: `dot sev-${a.sev}` }),
+      el("span", { class: "ms-city" }, a.city),
+      el("b", { class: "ms-n" }, String(a.events)));
+    side.replaceChildren(
+      el("div", { class: "ms-h" }, "Busiest arcs"),
+      ...(summary.arcs.length ? summary.arcs.map(arcRow) : [el("div", { class: "muted" }, "No external arcs yet")]),
+      el("div", { class: "ms-h" }, "No geo entry"),
+      el("div", { class: "muted" }, summary.unknown ? `${summary.unknown} source ${summary.unknown === 1 ? "IP" : "IPs"}` : "none"));
   },
   pulse(e) {
     const svg = $("#map svg");
