@@ -162,6 +162,22 @@ def list_evaluations(conn, limit=20):
     return rows, total - len(rows)
 
 
+def list_rule_history(conn, rule_id, limit=50):
+    """One rule's versions, newest version first, and how many the limit left out.
+
+    The second value is 0 when that rule's history fits, including an unknown
+    rule. A later changed_at on a lower version is the one left out. Another
+    rule's rows are not counted. Callers that return the bare array send
+    that count as X-Watchpost-Omitted.
+    """
+    total = conn.execute(
+        "SELECT COUNT(*) FROM rule_history WHERE rule_id = ?", (rule_id,)).fetchone()[0]
+    rows = [row_to_dict(r, ["params", "grouping"]) for r in conn.execute(
+        "SELECT * FROM rule_history WHERE rule_id = ? ORDER BY version DESC LIMIT ?",
+        (rule_id, limit))]
+    return rows, total - len(rows)
+
+
 # --- Analyst feedback -> rule performance ---------------------------------------------
 
 def rule_performance(conn):
