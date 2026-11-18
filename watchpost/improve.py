@@ -903,22 +903,35 @@ def revoke_suppression(conn, suppression_id, actor):
     return _suppression_row(stored, now_iso())
 
 
-def list_rule_suppression_windows(conn):
-    """Every approved rule-wide window, including upcoming, expired and ended history."""
+def _window_row(row, now):
+    """One approved rule-wide window. `active` is true only while the window is in force."""
+    item = dict(row)
+    if item["ended_at"] is not None:
+        state = "ended"
+    elif item["starts_at"] > now:
+        state = "upcoming"
+    elif item["expires_at"] <= now:
+        state = "expired"
+    else:
+        state = "active"
+    item["state"] = state
+    item["active"] = state == "active"
+    return item
+
+
+def list_rule_suppression_windows(conn, limit=100):
+    """Approved rule-wide windows, newest id first, and how many the limit left out.
+
+    The second value is 0 when the list fits. A later created_at on a lower
+    id is the one left out. Each row keeps `upcoming`, `active`, `expired`,
+    or `ended`, and `active` is true only for `active`. Callers that return
+    the bare array send that count as X-Watchpost-Omitted.
+    """
     now = now_iso()
-    result = []
-    for row in conn.execute("SELECT * FROM rule_suppression_windows ORDER BY id DESC"):
-        item = dict(row)
-        if item["ended_at"] is not None:
-            state = "ended"
-        elif item["starts_at"] > now:
-            state = "upcoming"
-        elif item["expires_at"] <= now:
-            state = "expired"
-        else:
-            state = "active"
-        result.append({**item, "state": state, "active": state == "active"})
-    return result
+    total = conn.execute("SELECT COUNT(*) FROM rule_suppression_windows").fetchone()[0]
+    rows = [_window_row(r, now) for r in conn.execute(
+        "SELECT * FROM rule_suppression_windows ORDER BY id DESC LIMIT ?", (limit,))]
+    return rows, total - len(rows)
 
 
 def end_rule_suppression_window(conn, window_id, actor):
@@ -936,7 +949,9 @@ def end_rule_suppression_window(conn, window_id, actor):
                      (ended, actor, window_id))
         audit(conn, actor, "rule_suppression_window_ended", row["rule_id"],
               {"id": window_id, "change_request": row["change_request_id"]})
-    return next(w for w in list_rule_suppression_windows(conn) if w["id"] == window_id)
+    # The ended row may sit past the list cap. Read it back on its own.
+    stored = conn.execute("SELECT * FROM rule_suppression_windows WHERE id = ?", (window_id,)).fetchone()
+    return _window_row(stored, now_iso())
 
 
 def _verdict(rule, r, other):

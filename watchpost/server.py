@@ -38,6 +38,8 @@ BATCH_LIMIT = 50
 CHANGES_LIMIT = 100
 # Approved tuning exceptions, newest by id. `active` stays on each row.
 SUPPRESSIONS_LIMIT = 100
+# Approved rule-wide windows, newest by id. Each row keeps upcoming, active, expired, or ended.
+WINDOWS_LIMIT = 100
 # Evaluation history, newest by id.
 EVALUATIONS_LIMIT = 20
 OMITTED_HEADER = "X-Watchpost-Omitted"
@@ -886,7 +888,9 @@ def rule_suppression_propose(req, rule_id):
 
 @route("GET", "/api/rule-suppression-windows")
 def rule_suppression_windows(req):
-    return improve.list_rule_suppression_windows(req.conn)
+    rows, omitted = improve.list_rule_suppression_windows(req.conn, WINDOWS_LIMIT)
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", r"/api/rule-suppression-windows/(\d+)/end", role="admin")
