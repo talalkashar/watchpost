@@ -39,6 +39,10 @@ RECENT_LIMIT = 60
 # Metrics failure lists are this many groups, most failures first.
 # top_failure_ips_omitted and top_failure_users_omitted are how many groups were past that cap.
 TOP_FAILURE_LIMIT = 5
+# Metrics alerts_by_rule is this many rule ids, most alerts first, then rule_id.
+# alerts_by_rule_omitted is how many rule ids on alerts were past that cap.
+# A rule with no alerts is not a row and is not omitted.
+ALERTS_BY_RULE_LIMIT = 100
 _ATTACKER_FROM = (
     " FROM alerts a JOIN alert_events ae ON ae.alert_id = a.id"
     " JOIN events e ON e.id = ae.event_id WHERE e.src_ip IS NOT NULL")
@@ -513,6 +517,11 @@ def metrics(conn, hours=24):
                       " AND src_ip IS NOT NULL") - len(top_ips)
     users_omitted = one("SELECT COUNT(DISTINCT lower(user)) FROM events WHERE event_type = 'auth_failure'"
                         " AND user IS NOT NULL") - len(top_users)
+    # Equal counts keep the lower rule_id. A rule with no alerts is not a row.
+    alerts_by_rule = by(
+        "SELECT rule_id, COUNT(*) AS count FROM alerts GROUP BY rule_id"
+        f" ORDER BY count DESC, rule_id LIMIT {ALERTS_BY_RULE_LIMIT}")
+    alerts_by_rule_omitted = one("SELECT COUNT(DISTINCT rule_id) FROM alerts") - len(alerts_by_rule)
     return {
         "window_hours": hours,
         "window_scope": {
@@ -529,7 +538,8 @@ def metrics(conn, hours=24):
         "alerts_resolved": one("SELECT COUNT(*) FROM alerts WHERE status = 'resolved'"),
         "alerts_by_severity": by("SELECT severity, COUNT(*) AS count FROM alerts WHERE status != 'resolved'"
                                  " GROUP BY severity"),
-        "alerts_by_rule": by("SELECT rule_id, COUNT(*) AS count FROM alerts GROUP BY rule_id ORDER BY count DESC"),
+        "alerts_by_rule": alerts_by_rule,
+        "alerts_by_rule_omitted": alerts_by_rule_omitted,
         "dispositions": by("SELECT disposition, COUNT(*) AS count FROM alerts WHERE disposition IS NOT NULL"
                            " GROUP BY disposition"),
         "mean_time_to_resolve_minutes": round(mttr, 1) if mttr is not None else None,
