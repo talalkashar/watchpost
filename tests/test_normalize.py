@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from watchpost.db import connect, init_schema
 from watchpost.diagnostics import record_error, redact
+from watchpost.ecs import to_ecs
 from watchpost.normalize import (EventError, MAX_LEN, normalize_authlog_line, normalize_record,
                                  normalize_weblog_line, parse_payload)
 
@@ -385,6 +386,155 @@ class RedactionTests(unittest.TestCase):
         self.assertNotIn(secret, event["raw"])
         self.assertLessEqual(len(event["raw"]), MAX_LEN["raw"])
         self.assertIn("[REDACTED]", event["raw"])
+
+
+class CoverageTests(unittest.TestCase):
+    def test_windows_shapes_and_status(self):
+        nested = normalize_record({
+            "Event": {"System": {
+                "EventID": {"#text": "4625"},
+                "TimeCreated": {"SystemTime": "2026-09-15T10:00:00.0000000Z"},
+                "Computer": "dc01", "Channel": "Security"},
+                "EventData": {"Data": [
+                    {"Name": "TargetUserName", "#text": "bob"},
+                    {"Name": "IpAddress", "#text": "10.0.0.8"}]}}}, "win", NOW)
+        self.assertEqual((nested["event_type"], nested["user"], nested["src_ip"], nested["host"], nested["source"]),
+                         ("auth_failure", "bob", "10.0.0.8", "dc01", "Security"))
+        self.assertEqual(nested["ts"], "2026-09-15T10:00:00.000Z")
+        self.assertNotIn("EventID", nested)
+        beat = normalize_record({
+            "@timestamp": "2026-09-15T10:00:00Z",
+            "winlog": {"event_id": 4625, "computer_name": "dc02", "channel": "Security",
+                       "event_data": {"TargetUserName": "carol", "IpAddress": "10.0.0.9"}}}, "win", NOW)
+        self.assertEqual((beat["event_type"], beat["user"], beat["host"], beat["src_ip"]),
+                         ("auth_failure", "carol", "dc02", "10.0.0.9"))
+        self.assertEqual(normalize_record({"ts": "2026-09-15T10:00:00Z", "EventID": {"#text": 4625},
+                                           "TargetUserName": "bob"}, "win", NOW)["event_type"], "auth_failure")
+        self.assertEqual(normalize_record({"ts": "2026-09-15T10:00:00Z", "EventID": 4771}, "win", NOW)["event_type"],
+                         "auth_failure")
+        ok = normalize_record({"ts": "2026-09-15T10:00:00Z", "EventID": 4776, "Status": "0x0"}, "win", NOW)
+        bad = normalize_record({"ts": "2026-09-15T10:00:00Z", "EventID": 4776, "Status": "0xC000006A"}, "win", NOW)
+        guessed = normalize_record({"ts": "2026-09-15T10:00:00Z", "EventID": 4776}, "win", NOW)
+        self.assertEqual((ok["event_type"], bad["event_type"], guessed["event_type"]),
+                         ("auth_success", "auth_failure", "other"))
+        deny = normalize_record({"ts": "2026-09-15T10:00:00Z", "EventID": 5157, "SourceAddress": "198.51.100.10",
+                                 "DestAddress": "10.0.0.5", "DestPort": 3389}, "win", NOW)
+        allow = normalize_record({"ts": "2026-09-15T10:00:00Z", "EventID": 5156}, "win", NOW)
+        self.assertEqual((deny["event_type"], deny["src_ip"], deny["dest_ip"], deny["dest_port"]),
+                         ("fw_deny", "198.51.100.10", "10.0.0.5", 3389))
+        self.assertEqual(allow["event_type"], "fw_allow")
+
+    def test_user_domain_is_split_and_the_stored_name_stays(self):
+        corp = to_ecs({"user": "CORP\\bob", "event_type": "auth_success"})
+        self.assertEqual(corp["user"], {"name": "CORP\\bob", "domain": "CORP"})
+        upn = to_ecs({"user": "bob@corp", "event_type": "auth_success"})
+        self.assertEqual(upn["user"]["name"], "bob@corp")
+        self.assertEqual(upn["user"]["domain"], "corp")
+        self.assertEqual(to_ecs({"user": "alice", "event_type": "auth_success"})["user"], {"name": "alice"})
+
+    def test_authlog_fallbacks(self):
+        cases = [
+            ("Sep 15 10:00:01 web01 sshd[1]: Failed none for alice from 203.0.113.5 port 22 ssh2",
+             ("auth_failure", "alice", "203.0.113.5", "failure")),
+            ("Sep 15 10:00:01 web01 sshd[1]: Connection closed by authenticating user root 203.0.113.5 port 22 [preauth]",
+             ("auth_failure", "root", "203.0.113.5", "failure")),
+            ("Sep 15 10:00:01 web01 sshd[1]: Connection closed by 203.0.113.9 port 22 [preauth]",
+             ("auth_failure", None, "203.0.113.9", "failure")),
+            ("Sep 15 10:00:01 web01 sshd[1]: error: maximum authentication attempts exceeded for invalid user admin from 203.0.113.8 port 22 ssh2 [preauth]",
+             ("auth_failure", "admin", "203.0.113.8", "failure")),
+            ("Sep 15 10:00:01 web01 sshd[1]: Disconnected from user alice 10.0.0.5 port 22",
+             ("other", None, None, None)),
+            ("Sep 15 10:00:01 web01 sshd[1]: pam_unix(sudo:auth): authentication failure; logname=alice uid=1000 euid=0 tty=/dev/pts/0 ruser=alice rhost=  user=alice",
+             ("auth_failure", "alice", None, "failure")),
+            ("Sep 15 10:00:01 web01 sshd[1]: pam_faillock(sshd:auth): Consecutive login failures for user alice account temporarily locked",
+             ("account_lockout", "alice", None, None)),
+            ("Sep 15 10:00:01 web01 sudo: frank is not in the sudoers file. This incident will be reported.",
+             ("privilege_escalation", "frank", None, "failure")),
+            ("Sep 15 10:00:01 web01 sudo: frank : user NOT in sudoers ; TTY=pts/0 ; PWD=/home/frank ; USER=root ; COMMAND=/bin/bash",
+             ("privilege_escalation", "frank", None, "failure")),
+            ("Sep 15 10:00:01 web01 sshd[1]: Failed password for root from gateway.example port 22 ssh2",
+             ("auth_failure", "root", None, "failure")),
+            ("Sep 15 10:00:01 web01 sshd[1]: Failed password for root from 2001:db8::10 port 22 ssh2",
+             ("auth_failure", "root", "2001:db8::10", "failure")),
+            ("<34>Sep 15 10:00:01 web01 sshd[123]: Failed password for root from 203.0.113.5 port 22 ssh2",
+             ("auth_failure", "root", "203.0.113.5", "failure")),
+            ("<34>1 2026-09-15T10:00:01.000Z web01 sshd 123 - - Failed password for root from 203.0.113.5 port 22 ssh2",
+             ("auth_failure", "root", "203.0.113.5", "failure")),
+        ]
+        for line, expected in cases:
+            with self.subTest(line=line):
+                event = normalize_authlog_line(line, "authlog", now=NOW)
+                self.assertEqual((event["event_type"], event["user"], event["src_ip"], event["outcome"]), expected)
+
+    def test_firewall_syslog_formats(self):
+        iptables = normalize_authlog_line(
+            "Sep 15 10:00:00 fw01 kernel: IPTABLES DROPPED: IN=eth0 OUT= MAC= SRC=198.51.100.10 DST=10.0.0.5 "
+            "LEN=40 PROTO=TCP SPT=40000 DPT=22", "fw", now=NOW)
+        self.assertEqual((iptables["event_type"], iptables["src_ip"], iptables["dest_ip"], iptables["dest_port"]),
+                         ("fw_deny", "198.51.100.10", "10.0.0.5", 22))
+        asa = normalize_authlog_line(
+            "Sep 15 10:00:00 asa01 %ASA-4-106023: Deny tcp src outside:198.51.100.10/40000 "
+            "dst inside:10.0.0.10/3389 by access-group \"outside_in\"", "fw", now=NOW)
+        self.assertEqual((asa["event_type"], asa["src_ip"], asa["dest_ip"], asa["dest_port"], asa["host"]),
+                         ("fw_deny", "198.51.100.10", "10.0.0.10", 3389, "asa01"))
+        acl = normalize_authlog_line(
+            "Sep 15 10:00:00 asa01 %ASA-6-106100: access-list outside_in permitted tcp "
+            "outside/198.51.100.10(40000) -> inside/10.0.0.10(443)", "fw", now=NOW)
+        self.assertEqual((acl["event_type"], acl["dest_port"]), ("fw_allow", 443))
+        forti = normalize_authlog_line(
+            "Sep 15 10:00:00 fw01 date=2026-09-15 time=10:00:00 devname=\"fw01\" devid=FG100 type=traffic "
+            "subtype=forward level=warning vd=root srcip=198.51.100.10 srcport=40000 srcintf=wan "
+            "dstip=10.0.0.5 dstport=3389 dstintf=lan action=deny policyid=1 proto=6 sentbyte=60", "fw", now=NOW)
+        self.assertEqual((forti["event_type"], forti["src_ip"], forti["dest_ip"], forti["dest_port"], forti["bytes"]),
+                         ("fw_deny", "198.51.100.10", "10.0.0.5", 3389, 60))
+        pfsense = normalize_authlog_line(
+            "Sep 15 10:00:00 fw01 filterlog[123]: 5,,,1000000103,em0,match,block,in,4,0x0,,64,12345,0,DF,6,tcp,52,"
+            "198.51.100.10,10.0.0.5,40000,22,0,S,1024,,", "fw", now=NOW)
+        self.assertEqual((pfsense["event_type"], pfsense["src_ip"], pfsense["dest_ip"], pfsense["dest_port"]),
+                         ("fw_deny", "198.51.100.10", "10.0.0.5", 22))
+
+    def test_weblog_vhost_iis_and_apache(self):
+        vhost = normalize_weblog_line(
+            'example.com:8443 203.0.113.80 - - [15/Sep/2026:10:00:00 +0000] "GET /app HTTP/1.1" 200 162 "-" "Mozilla/5.0"',
+            "nginx", now=NOW)
+        self.assertEqual((vhost["host"], vhost["src_ip"], vhost["event_type"], vhost["bytes"]),
+                         ("example.com", "203.0.113.80", "web_request", 162))
+        empty = normalize_weblog_line(
+            '203.0.113.80 - - [15/Sep/2026:10:00:00 +0000] "-" 400 0 "-" "-"', "nginx", now=NOW)
+        self.assertEqual((empty["event_type"], empty["outcome"], empty["src_ip"]),
+                         ("web_request", "failure", "203.0.113.80"))
+        encoded = normalize_weblog_line(
+            '203.0.113.80 - - [15/Sep/2026:10:00:00 +0000] "GET /%252e%252e%252fetc%252fpasswd HTTP/1.1" 404 0 "-" "x"',
+            "nginx", now=NOW)
+        self.assertEqual(encoded["event_type"], "web_scan")
+        scan = normalize_weblog_line(
+            '203.0.113.80 - - [15/Sep/2026:10:00:00 +0000] "GET /wp-config.php HTTP/1.1" 404 0 "-" "x"',
+            "nginx", now=NOW)
+        self.assertEqual(scan["event_type"], "web_scan")
+        apache = ('[Tue Sep 15 10:00:00 2026] [authz_core:error] [pid 123] [client 203.0.113.9:51234] '
+                  'AH01630: client denied by server configuration: /var/www/html/.env')
+        event = normalize_weblog_line(apache, "apache", now=NOW)
+        self.assertEqual((event["event_type"], event["src_ip"], event["ts"]),
+                         ("web_scan", "203.0.113.9", "2026-09-15T10:00:00.000Z"))
+        events, rejections = parse_payload(apache + "\n", "auto", "apache", now=NOW)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(rejections, [])
+        iis = (
+            "#Software: Microsoft Internet Information Services 10.0\n"
+            "#Fields: date time s-ip cs-method cs-uri-stem cs-uri-query s-port cs-username c-ip "
+            "cs(User-Agent) cs(Referer) sc-status sc-substatus sc-win32-status time-taken\n"
+            "2026-09-15 10:00:00 10.0.0.5 GET /wp-config.php - 443 alice 203.0.113.80 Mozilla/5.0 - 404 0 0 15\n"
+        )
+        events, rejections = parse_payload(iis, "auto", "iis", now=NOW)
+        self.assertEqual([item["reason"] for item in rejections], ["log header directive", "log header directive"])
+        self.assertEqual(len(events), 1)
+        row = events[0]
+        self.assertEqual((row["event_type"], row["src_ip"], row["dest_ip"], row["dest_port"], row["user"]),
+                         ("web_scan", "203.0.113.80", "10.0.0.5", 443, "alice"))
+        self.assertEqual(row["ts"], "2026-09-15T10:00:00.000Z")
+        self.assertIsNone(row["host"])
+        with self.assertRaisesRegex(EventError, "no #Fields"):
+            normalize_weblog_line("2026-09-15 10:00:00 10.0.0.5 GET /only", "iis", now=NOW)
 
 
 if __name__ == "__main__":

@@ -66,6 +66,19 @@ EVENT_TYPE_CATEGORIES = {
 }
 
 
+def _user_domain(name):
+    """DOMAIN\\name or name@domain. The stored spelling of user.name is not rewritten."""
+    if not isinstance(name, str):
+        return None
+    if "\\" in name:
+        domain, rest = name.split("\\", 1)
+        return domain if domain and rest else None
+    if "@" in name:
+        rest, domain = name.rsplit("@", 1)
+        return domain if rest and domain else None
+    return None
+
+
 def _put(doc, dotted, value):
     *parents, leaf = dotted.split(".")
     for key in parents:
@@ -81,6 +94,10 @@ def to_ecs(event):
         value = event.get(field)
         if value is not None:
             _put(doc, target, str(value) if field == "id" else value)  # event.id is a keyword in ECS
+    # Windows accounts often arrive as DOMAIN\name or a UPN. user.name stays the stored text.
+    domain = _user_domain(event.get("user"))
+    if domain:
+        _put(doc, "user.domain", domain)
     category = EVENT_TYPE_CATEGORIES.get(event.get("event_type"))
     if category:
         _put(doc, "event.category", list(category[0]))
