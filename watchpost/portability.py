@@ -11,8 +11,11 @@ gate and two-person review as a proposal made by hand.
 from . import __version__
 from . import improve
 from . import rules as rules_mod
-from .db import audit, now_iso
+from .db import audit, now_iso, transaction
 from .engine import load_rules
+
+# A validated param key the stored row does not have yet. Distinct from any real value, including None.
+_MISSING = object()
 
 FORMAT, FORMAT_VERSION = "watchpost-rules", 1
 NOTE = ("Rule tuning only (params, enabled, grouping). Detection logic is Python code in watchpost/rules.py and is not "
@@ -24,12 +27,93 @@ DOCUMENT_KEYS = {"format", "format_version", "watchpost_version", "exported_at",
 RULE_KEYS = {"id", "name", "version", "enabled", "severity", "params", "grouping", "techniques", "description"}
 
 
+def _technique_ids(techniques):
+    """Technique ids from catalog dicts or plain strings. One bad entry must not fail the export."""
+    if not isinstance(techniques, list):
+        return []
+    ids = []
+    for item in techniques:
+        if isinstance(item, str):
+            ids.append(item)
+        elif isinstance(item, dict) and isinstance(item.get("id"), str):
+            ids.append(item["id"])
+    return ids
+
+
+def _export_params(rule):
+    """Validated params, or the stored value when it no longer validates. One row must not fail the export."""
+    try:
+        return rules_mod.validate_params(rule["id"], rule["params"])
+    except rules_mod.RuleConfigError:
+        return rule["params"]
+
+
+def _copy_tuning(value):
+    """A plan must not share list objects with the document the caller still holds."""
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, dict):
+        return {key: list(item) if isinstance(item, list) else item for key, item in value.items()}
+    return value
+
+
+def _tuning_payload(entry, rule):
+    """Only tuning that differs. An export always carries params, enabled and grouping.
+
+    Passing `enabled: true` through for an already-enabled Sigma or search rule re-runs the sample
+    gate, so a round trip (and a grouping-only change) is refused even though nothing was turned on.
+    """
+    payload = {}
+    if "params" in entry:
+        incoming, stored = entry["params"], rule["params"]
+        if not isinstance(incoming, dict):
+            if incoming != stored:
+                raise improve.ChangeError("params must be an object")
+        elif not isinstance(stored, dict):
+            raise improve.ChangeError("stored params are not an object and cannot be merged")
+        elif {**stored, **incoming} != stored:
+            payload["params"] = incoming
+    if "enabled" in entry:
+        enabled = entry["enabled"]
+        # 1 == True, but only a real boolean is a tuning value. A non-boolean is refused, not ignored.
+        if not isinstance(enabled, bool) or enabled != bool(rule["enabled"]):
+            payload["enabled"] = enabled
+    if "grouping" in entry and entry["grouping"] != rule["grouping"]:
+        payload["grouping"] = entry["grouping"]
+    return payload
+
+
+def _changed_params(rule_id, rule, merged):
+    """Param keys whose validated value differs. A stored row that no longer validates is a repair."""
+    try:
+        today = rules_mod.validate_params(rule_id, rule["params"])
+    except rules_mod.RuleConfigError:
+        today = {}
+    changed = {}
+    for key, value in (merged or {}).items():
+        if today.get(key, _MISSING) != value:
+            changed[key] = list(value) if isinstance(value, list) else value
+    return changed
+
+
+def _refused_reasons(plan):
+    """One reason per refused row. Colliding ids (and every id-less row) keep the earlier reasons."""
+    refused, seen = {}, {}
+    for item in plan:
+        if item["outcome"] != "refused":
+            continue
+        base = str(item["id"])
+        seen[base] = seen.get(base, 0) + 1
+        key = base if seen[base] == 1 else f"{base}#{seen[base]}"
+        refused[key] = item["reason"]
+    return refused
+
+
 def export_rules(conn):
     """Every rule's tuning and description, sorted by id. Callers serialize with sorted keys."""
     rules = [{"id": r["id"], "name": r["name"], "version": r["version"], "enabled": bool(r["enabled"]),
-              "severity": r["severity"], "params": rules_mod.validate_params(r["id"], r["params"]),
-              "grouping": r["grouping"],
-              "techniques": [t["id"] for t in r["techniques"]], "description": r["description"]}
+              "severity": r["severity"], "params": _export_params(r), "grouping": r["grouping"],
+              "techniques": _technique_ids(r["techniques"]), "description": r["description"]}
              for r in load_rules(conn, enabled_only=False)]
     return {"format": FORMAT, "format_version": FORMAT_VERSION, "watchpost_version": __version__,
             "exported_at": now_iso(), "note": NOTE, "rules": sorted(rules, key=lambda r: r["id"])}
@@ -64,8 +148,9 @@ def plan_import(conn, doc):
     plan, seen = [], set()
     for n, entry in enumerate(entries):
         rule_id = entry.get("id") if isinstance(entry, dict) else None
-        if not isinstance(rule_id, str):
-            plan.append({"id": None, "outcome": "refused", "reason": f"rule entry {n} must be an object with a string id"})
+        if not isinstance(rule_id, str) or not rule_id.strip():
+            plan.append({"id": None, "outcome": "refused",
+                         "reason": f"rule entry {n} must be an object with a non-empty string id"})
             continue
         item = {"id": rule_id}
         unknown = set(entry) - RULE_KEYS
@@ -76,21 +161,21 @@ def plan_import(conn, doc):
         elif rule_id not in current:
             item.update(outcome="refused", reason=f"unknown rule {rule_id!r}; an import cannot add detection logic")
         else:
-            payload = {k: entry[k] for k in ("params", "enabled", "grouping") if k in entry}
             try:
-                merged = improve.validate_rule_update(conn, rule_id, payload)
+                payload = _tuning_payload(entry, current[rule_id])
+                merged = improve.validate_rule_update(conn, rule_id, payload) if payload else None
             except improve.ChangeError as exc:
                 item.update(outcome="refused", reason=str(exc))
             else:
                 changes = {}
-                today = rules_mod.validate_params(rule_id, current[rule_id]["params"])
-                params = {k: v for k, v in (merged or {}).items() if v != today[k]}
-                if params:
-                    changes["params"] = params
-                if "enabled" in payload and payload["enabled"] != bool(current[rule_id]["enabled"]):
+                if payload and "params" in payload:
+                    params = _changed_params(rule_id, current[rule_id], merged)
+                    if params:
+                        changes["params"] = params
+                if payload and "enabled" in payload:
                     changes["enabled"] = payload["enabled"]
-                if "grouping" in payload and payload["grouping"] != current[rule_id]["grouping"]:
-                    changes["grouping"] = payload["grouping"]
+                if payload and "grouping" in payload:
+                    changes["grouping"] = _copy_tuning(payload["grouping"])
                 if changes:
                     item.update(outcome="would_propose", changes=changes)
                 else:
@@ -114,19 +199,22 @@ def summary(plan):
 
 def propose_import(conn, plan, label, actor):
     """Turn each would_propose outcome into a pending rule_update change request, and audit the import."""
-    for item in plan:
-        if item["outcome"] != "would_propose":
-            continue
-        try:
-            change = improve.propose_change(conn, "rule_update", item["id"], item["changes"],
-                                            f"imported from {label}", actor)
-        except improve.ChangeError as exc:  # e.g. the true-positive gate on an ignore-list addition
-            item.update(outcome="refused", reason=str(exc))
-        else:
-            item.update(outcome="proposed", change_id=change["id"])
-    audit(conn, actor, "rules_imported", label, {
-        "proposed": [item["change_id"] for item in plan if item["outcome"] == "proposed"],
-        "unchanged": sum(1 for item in plan if item["outcome"] == "unchanged"),
-        "refused": {str(item["id"]): item["reason"] for item in plan if item["outcome"] == "refused"},
-    })
+    # One transaction: an unexpected failure rolls back proposals already inserted. A ChangeError
+    # (the true-positive gate) refuses that rule and still commits the others with this audit.
+    with transaction(conn):
+        for item in plan:
+            if item["outcome"] != "would_propose":
+                continue
+            try:
+                change = improve.propose_change(conn, "rule_update", item["id"], item["changes"],
+                                                f"imported from {label}", actor)
+            except improve.ChangeError as exc:
+                item.update(outcome="refused", reason=str(exc))
+            else:
+                item.update(outcome="proposed", change_id=change["id"])
+        audit(conn, actor, "rules_imported", label, {
+            "proposed": [item["change_id"] for item in plan if item["outcome"] == "proposed"],
+            "unchanged": sum(1 for item in plan if item["outcome"] == "unchanged"),
+            "refused": _refused_reasons(plan),
+        })
     return plan
