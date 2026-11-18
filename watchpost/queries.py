@@ -43,6 +43,9 @@ TOP_FAILURE_LIMIT = 5
 # alerts_by_rule_omitted is how many rule ids on alerts were past that cap.
 # A rule with no alerts is not a row and is not omitted.
 ALERTS_BY_RULE_LIMIT = 100
+# Event detail returns this many linked alerts, newest by alert id, then id order.
+# alerts_omitted is how many linked alerts were past that cap.
+EVENT_ALERT_LIMIT = 50
 _ATTACKER_FROM = (
     " FROM alerts a JOIN alert_events ae ON ae.alert_id = a.id"
     " JOIN events e ON e.id = ae.event_id WHERE e.src_ip IS NOT NULL")
@@ -210,9 +213,19 @@ def get_event(conn, event_id):
     if row is None:
         raise QueryError("event not found", 404)
     event = dict(row)
+    # Newest by alert id, then id order in the response. A later created_at on a lower id is still the older row.
+    total = conn.execute(
+        "SELECT COUNT(*) AS n FROM alerts a JOIN alert_events ae ON ae.alert_id = a.id"
+        " WHERE ae.event_id = ?",
+        (event_id,)).fetchone()["n"]
     event["alerts"] = [dict(r) for r in conn.execute(
-        "SELECT a.id, a.title, a.status FROM alerts a JOIN alert_events ae ON ae.alert_id = a.id"
-        " WHERE ae.event_id = ?", (event_id,))]
+        "SELECT id, title, status FROM ("
+        " SELECT a.id, a.title, a.status FROM alerts a"
+        " JOIN alert_events ae ON ae.alert_id = a.id"
+        " WHERE ae.event_id = ? ORDER BY a.id DESC LIMIT ?"
+        ") ORDER BY id",
+        (event_id, EVENT_ALERT_LIMIT))]
+    event["alerts_omitted"] = total - len(event["alerts"])
     return event
 
 
