@@ -449,17 +449,24 @@ def _top(conn, where, args, stage):
     """The N most common values. Percents are shares of every matched event, including ones with no value.
 
     `total` is that match count. `missing` is how many of them have no value in the grouped field, which
-    is why the shown percents can sum under 100 even when `truncated` is false. The column is from FIELDS.
+    is why the shown percents can sum under 100 even when `truncated` is false. `groups_omitted` is how
+    many groups were past N (0 when the list fits). `truncated` is true exactly when that count is not 0.
+    Events with no value in the field are not groups. The column is from FIELDS.
     """
     (field, column), = stage["by"]
     expr = _group_expr(field, column)
     total, missing = conn.execute(
         f"SELECT COUNT(*), COALESCE(SUM({column} IS NULL), 0) FROM events{_where(where)}", args).fetchone()
-    rows = conn.execute(f"SELECT {expr}, COUNT(*) FROM events{_where(where, [f'{column} IS NOT NULL'])}"
-                        f" GROUP BY {expr} ORDER BY 2 DESC, 1 LIMIT ?", args + [stage["limit"] + 1]).fetchall()
+    present = f"{column} IS NOT NULL"
+    # Count every group, then read only the capped page. A limit+1 fetch cannot name the leftover.
+    grouped = f"SELECT 1 FROM events{_where(where, [present])} GROUP BY {expr}"
+    groups = conn.execute(f"SELECT COUNT(*) FROM ({grouped})", args).fetchone()[0]
+    rows = conn.execute(f"SELECT {expr}, COUNT(*) FROM events{_where(where, [present])}"
+                        f" GROUP BY {expr} ORDER BY 2 DESC, 1 LIMIT ?", args + [stage["limit"]]).fetchall()
+    omitted = groups - len(rows)
     return {"columns": [field, "count", "percent"],
-            "rows": [[value, count, round(100 * count / total, 2)] for value, count in rows[:stage["limit"]]],
-            "truncated": len(rows) > stage["limit"], "total": total, "missing": missing}
+            "rows": [[value, count, round(100 * count / total, 2)] for value, count in rows],
+            "truncated": omitted != 0, "groups_omitted": omitted, "total": total, "missing": missing}
 
 
 def _window(compiled, now):
