@@ -407,18 +407,33 @@ def mfa_admin_reset(conn, username, actor):
 
 # --- Sessions -------------------------------------------------------------------------------
 
-def list_sessions(conn, username=None, current_sid=None):
-    """Active sessions (all users when `username` is None). Never includes the token or its hash."""
-    sql = ("SELECT s.sid, u.username, s.created_at, s.last_seen_at, s.expires_at FROM sessions s"
-           " JOIN users u ON u.id = s.user_id WHERE s.expires_at >= ?")
+# Active sessions returned by the list routes, newest by created_at then sid.
+SESSION_LIST_LIMIT = 100
+
+
+def list_sessions(conn, username=None, current_sid=None, limit=SESSION_LIST_LIMIT):
+    """Active sessions, newest by created_at then sid, and how many were left out.
+
+    All users when `username` is None. The second value is 0 when the list fits,
+    including when none are active. An expired session is not a row and is not
+    part of that count. The rows never include the token or its hash. A later
+    created_at wins. The same timestamp keeps the greater sid.
+    """
+    where = " WHERE s.expires_at >= ?"
     args = [now_iso()]
     if username is not None:
-        sql += " AND u.username = ?"
+        where += " AND u.username = ?"
         args.append(username)
-    rows = conn.execute(sql + " ORDER BY s.created_at DESC", args).fetchall()
-    return [{"id": r["sid"], "username": r["username"], "created_at": r["created_at"],
-             "last_seen_at": r["last_seen_at"], "expires_at": r["expires_at"],
-             "current": r["sid"] == current_sid} for r in rows]
+    base = "FROM sessions s JOIN users u ON u.id = s.user_id" + where
+    total = conn.execute("SELECT COUNT(*) " + base, args).fetchone()[0]
+    rows = conn.execute(
+        "SELECT s.sid, u.username, s.created_at, s.last_seen_at, s.expires_at " + base
+        + " ORDER BY s.created_at DESC, s.sid DESC LIMIT ?",
+        (*args, limit)).fetchall()
+    listed = [{"id": r["sid"], "username": r["username"], "created_at": r["created_at"],
+               "last_seen_at": r["last_seen_at"], "expires_at": r["expires_at"],
+               "current": r["sid"] == current_sid} for r in rows]
+    return listed, total - len(listed)
 
 
 def revoke_session(conn, sid, actor, owner=None):

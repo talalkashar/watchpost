@@ -203,7 +203,10 @@ def mfa_disable(req):
 
 @route("GET", "/api/auth/sessions")
 def my_sessions(req):
-    return auth.list_sessions(req.conn, req.user["username"], req.user.get("sid"))
+    rows, omitted = auth.list_sessions(
+        req.conn, req.user["username"], req.user.get("sid"))
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", r"/api/auth/sessions/([0-9a-f]{16})/revoke", role="analyst")
@@ -1070,7 +1073,10 @@ def token_revoke(req, token_id):
 
 @route("GET", "/api/sessions", role="admin")
 def sessions(req):
-    return auth.list_sessions(req.conn, req.query.get("user") or None, req.user.get("sid"))
+    rows, omitted = auth.list_sessions(
+        req.conn, req.query.get("user") or None, req.user.get("sid"))
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", r"/api/sessions/([0-9a-f]{16})/revoke", role="admin")
