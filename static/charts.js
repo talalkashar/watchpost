@@ -8,7 +8,8 @@ function esc(value) {
   return String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 
-const n2 = (v) => (Math.round(v * 100) / 100).toString();
+const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+const n2 = (v) => (Math.round(num(v) * 100) / 100).toString();
 
 function svgOpen(w, h, cls, label) {
   return `<svg xmlns="http://www.w3.org/2000/svg" class="chart ${esc(cls || "")}" width="${n2(w)}" height="${n2(h)}" ` +
@@ -26,10 +27,10 @@ function pathFrom(points) {
 
 // Tiny trend line with a soft area; the last point is marked.
 function sparkline(values, { w = 120, h = 28, cls = "accent", label = "trend" } = {}) {
-  const vals = values.length ? values : [0];
+  const vals = (values.length ? values : [0]).map((v) => Math.max(0, num(v)));
   const max = scaleMax(vals);
   const step = vals.length > 1 ? w / (vals.length - 1) : w;
-  const pts = vals.map((v, i) => [i * step, h - 2 - (Math.max(0, v) / max) * (h - 4)]);
+  const pts = vals.map((v, i) => [i * step, h - 2 - (v / max) * (h - 4)]);
   const [lx, ly] = pts[pts.length - 1];
   return svgOpen(w, h, "spark", label) +
     `<path class="area f-${esc(cls)}" d="${pathFrom(pts)}L${n2(w)} ${h}L0 ${h}Z"/>` +
@@ -44,7 +45,7 @@ function line(series, { w = 400, h = 140, labels = [], label = "line chart", pad
   const count = Math.max(1, ...series.map((s) => s.values.length));
   const iw = w - pad - 6, ih = h - 18;
   const x = (i) => pad + (count > 1 ? (i * iw) / (count - 1) : 0);
-  const y = (v) => 4 + ih - (v / max) * (ih - 4);
+  const y = (v) => 4 + ih - (Math.max(0, num(v)) / max) * (ih - 4);
   let out = svgOpen(w, h, "line", label);
   for (let t = 0; t <= 2; t++) {
     const v = (max * t) / 2, yy = y(v);
@@ -52,7 +53,7 @@ function line(series, { w = 400, h = 140, labels = [], label = "line chart", pad
       `<text class="tick" x="${pad - 4}" y="${n2(yy + 3)}" text-anchor="end">${esc(Math.round(v))}</text>`;
   }
   for (const s of series) {
-    const pts = s.values.map((v, i) => [x(i), y(Math.max(0, v))]);
+    const pts = s.values.map((v, i) => [x(i), y(v)]);
     out += `<path class="area f-${esc(s.cls)}" d="${pathFrom(pts)}L${n2(x(pts.length - 1))} ${n2(y(0))}L${pad} ${n2(y(0))}Z"/>` +
       `<path class="stroke s-${esc(s.cls)}" d="${pathFrom(pts)}"><title>${esc(s.label || "")}</title></path>`;
   }
@@ -69,7 +70,7 @@ function bars(values, { w = 300, h = 100, cls = "accent", titles = [], label = "
   const bw = w / Math.max(1, values.length);
   let out = svgOpen(w, h, "bars", label);
   values.forEach((v, i) => {
-    const bh = (Math.max(0, v) / max) * (h - 2);
+    const bh = (Math.max(0, num(v)) / max) * (h - 2);
     out += `<rect class="f-${esc(cls)}" x="${n2(i * bw + 1)}" y="${n2(h - bh)}" width="${n2(Math.max(1, bw - 2))}" height="${n2(bh)}">` +
       `<title>${esc(titles[i] ?? v)}</title></rect>`;
   });
@@ -81,7 +82,7 @@ function bars(values, { w = 300, h = 100, cls = "accent", titles = [], label = "
 function stackedBars(bins, keys, { w = 400, h = 150, overlay = null, labels = [], title = null, label = "stacked bars" } = {}) {
   const pad = 30, top = 8, bottom = 18;
   const ih = h - top - bottom, iw = w - pad - 4;
-  const totals = bins.map((b) => keys.reduce((sum, k) => sum + (b[k] || 0), 0));
+  const totals = bins.map((b) => keys.reduce((sum, k) => sum + Math.max(0, num(b[k])), 0));
   const max = scaleMax(totals);
   const bw = iw / Math.max(1, bins.length);
   let out = svgOpen(w, h, "stacked", label);
@@ -92,7 +93,7 @@ function stackedBars(bins, keys, { w = 400, h = 150, overlay = null, labels = []
   }
   if (overlay && overlay.length) {
     const omax = scaleMax(overlay);
-    const pts = overlay.map((v, i) => [pad + i * bw + bw / 2, top + ih - (Math.max(0, v) / omax) * ih * 0.9]);
+    const pts = overlay.map((v, i) => [pad + i * bw + bw / 2, top + ih - (Math.max(0, num(v)) / omax) * ih * 0.9]);
     out += `<path class="area f-volume" d="${pathFrom(pts)}L${n2(pts[pts.length - 1][0])} ${top + ih}L${n2(pts[0][0])} ${top + ih}Z"/>` +
       `<path class="stroke s-volume" d="${pathFrom(pts)}"/>`;
   }
@@ -102,7 +103,7 @@ function stackedBars(bins, keys, { w = 400, h = 150, overlay = null, labels = []
     const tip = title ? title(b, i) : String(totals[i]);
     if (!totals[i]) out += `<rect class="empty" x="${n2(x)}" y="${n2(top + ih - 1)}" width="${n2(width)}" height="1"/>`;
     for (const k of keys) {
-      const v = b[k] || 0;
+      const v = Math.max(0, num(b[k]));
       if (!v) continue;
       const bh = (v / max) * ih;
       y -= bh;
@@ -134,13 +135,13 @@ function hbars(rows, { w = 300, rowH = 22, labelW = 118, label = "ranking" } = {
   rows.forEach((r, i) => {
     const y = i * rowH;
     const mid = y + rowH / 2;
-    const bw = (Math.max(0, r.value) / max) * trackW;
+    const bw = (Math.max(0, num(r.value)) / max) * trackW;
     const labelY = r.sub ? y + rowH * 0.40 : mid + 4;
     out += `<g class="hrow"><title>${esc(r.title ?? `${r.label}: ${r.value}`)}</title>` +
       `<text class="hl" x="0" y="${n2(labelY)}">${esc(clip(r.label, fit))}</text>` +
       (r.sub ? `<text class="hs${r.subCls ? " " + esc(r.subCls) : ""}" x="0" y="${n2(y + rowH * 0.84)}">${esc(clip(r.sub, fitSub))}</text>` : "") +
       `<rect class="track" x="${trackX}" y="${n2(mid - barH / 2)}" width="${n2(trackW)}" height="${barH}"/>` +
-      `<rect class="f-${esc(r.cls || "accent")}" x="${trackX}" y="${n2(mid - barH / 2)}" width="${n2(Math.max(1.5, bw))}" height="${barH}"/>` +
+      `<rect class="f-${esc(r.cls || "accent")}" x="${trackX}" y="${n2(mid - barH / 2)}" width="${n2(bw > 0 ? Math.max(1.5, bw) : 0)}" height="${barH}"/>` +
       `<text class="hv" x="${n2(w)}" y="${n2(mid + 4)}" text-anchor="end">${esc(r.value)}</text></g>`;
   });
   return out + "</svg>";
@@ -183,7 +184,7 @@ function heatMatrix(columns, { w = 700, cellH = 22, headH = 30, maxRows = 8, lab
   const overflow = list.some((c) => c.cells.length > rows);
   const h = headH + rows * (cellH + 3) + (overflow ? 12 : 0);
   const max = scaleMax(list.flatMap((c) => c.cells.map((x) => x.value || 0)));
-  const heatOf = (v) => (!v ? 0 : Math.min(5, 1 + Math.floor((Math.log(v + 1) / Math.log(max + 1)) * 4.999)));
+  const heatOf = (v) => { const n = num(v); return n <= 0 ? 0 : Math.min(5, 1 + Math.floor((Math.log(n + 1) / Math.log(max + 1)) * 4.999)); };
   const bandGap = 8;
   let out = svgOpen(cw * perRow, bands * h + (bands - 1) * bandGap, "heat", label);
   list.forEach((c, i) => {
