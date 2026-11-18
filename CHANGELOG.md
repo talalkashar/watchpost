@@ -6,6 +6,8 @@ All bundled data is synthetic. PR numbers refer to https://github.com/talalkasha
 
 ### Fixed
 
+- Hunt `stats`, `top`, and `timechart` group `user` case-insensitively, and `dc(user)` counts those spellings once. The group label is the lowercase account. Other fields still compare exactly.
+
 - Alert and incident Markdown and PDF reports list each ATT&CK technique with its evidence level. Mapped means a rule names the technique and is not proof; only validated is a labeled scenario.
 
 - Incident case Markdown lists each ATT&CK technique with its evidence level. Mapped means a rule names the technique and is not proof; only validated is a labeled scenario.
