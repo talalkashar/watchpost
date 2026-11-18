@@ -151,7 +151,10 @@ DEFAULT_RULES = [
                        "listed name also covers its subdomains. The service is read from cloud audit events of "
                        "the form '<action> on <service>' (CloudTrail-style JSON, or a proxy/CASB feed sent as "
                        "JSON); events that name no service are skipped. Uses of one service by one account "
-                       "within `window_seconds` join the same alert. Unsanctioned is not the same as hostile: "
+                       "within `window_seconds` join the same alert. The account folds ASCII letters only, the "
+                       "same fold as `ignore_users`: `Alice` and `alice` are one account, and `ÉRIN` and `érin` "
+                       "stay two. Sanctioned-service matching still folds the whole service name. Unsanctioned "
+                       "is not the same as hostile: "
                        "a newly approved tool alerts until the list is changed through review.",
         "techniques": techniques("T1567"),
         "severity": "medium",
@@ -403,17 +406,33 @@ def _group(events, key):
 
 
 def _group_users(events):
-    """Group by account name, ignoring case."""
+    """Group by account. ASCII letters only, the same fold as ignore_users.
+
+    Alice, alice, and ALICE are one account. ÉRIN and érin stay two.
+    """
     groups = defaultdict(list)
     for event in events:
         if event.get("user"):
-            groups[event["user"].lower()].append(event)
+            groups[_ascii_fold(event["user"])].append(event)
     return groups
 
 
 def _account_name(user):
-    """Account spelling for a count. Alice and alice are one name."""
-    return user.lower()
+    """Account spelling for a count. ASCII letters only. Alice and alice are one name."""
+    return _ascii_fold(user)
+
+
+def _principal(event):
+    """The account, or the source IP when the event has no account.
+
+    An account folds ASCII letters only, the same fold as ignore_users.
+    Alice and alice are one principal. ÉRIN and érin stay two.
+    An IP principal stays the stored address.
+    """
+    user = event.get("user") or ""
+    if user:
+        return _ascii_fold(user)
+    return event.get("src_ip")
 
 
 def brute_force_ip(events, params):
@@ -436,7 +455,7 @@ def brute_force_ip(events, params):
 
 
 def _account_names(events):
-    """Distinct account names, ignoring case. Alice and alice are one account."""
+    """Distinct account names. ASCII letters only. Alice and alice are one account."""
     return {_account_name(e["user"]) for e in events if e.get("user")}
 
 
@@ -461,8 +480,8 @@ def password_spray(events, params):
 def account_repeated_failures(events, params):
     threshold, window = params["threshold"], params["window_seconds"]
     findings = []
-    # One list per lowercase account. Exact spellings are two groups, so
-    # neither may reach the threshold on its own.
+    # One list per ASCII-folded account. Spellings that share those letters
+    # are one group, so four plus four can reach the threshold.
     for user, group in _group_users(_filtered(events, params, "auth_failure")).items():
         for cluster in _clusters(group, window, lambda w: len(w) >= threshold):
             ips = sorted({e.get("src_ip") or "unknown" for e in cluster})
@@ -478,12 +497,12 @@ def account_repeated_failures(events, params):
 
 def success_after_failures(events, params):
     needed, window = params["failures"], params["window_seconds"]
-    # One list per lowercase account. A dict of exact spellings drops every
+    # One list per ASCII-folded account. A dict of exact spellings drops every
     # spelling but the last, so a success can miss failures that still count.
     failures = _group_users(_filtered(events, params, "auth_failure"))
     findings = []
     for success in _filtered(events, params, LOGIN_SUCCESS_TYPES):
-        user = (success.get("user") or "").lower()
+        user = _ascii_fold(success.get("user") or "")
         if not user or user not in failures:
             continue
         t = _epoch(success)
@@ -510,7 +529,8 @@ def off_hours_privileged_login(events, params):
     start, end = params["business_start_hour"], params["business_end_hour"]
     findings = []
     for event in _filtered(events, params, LOGIN_SUCCESS_TYPES):
-        user = (event.get("user") or "").lower()
+        # ASCII only, the same fold covers already used, so ÉRIN and érin are two alerts.
+        user = _ascii_fold(event.get("user") or "")
         if not covers("privileged_users", privileged, event):
             continue
         dt = parse_iso(event["ts"])
@@ -601,7 +621,7 @@ def privilege_escalation_after_login(events, params):
     logins = _group_users(_filtered(events, params, LOGIN_SUCCESS_TYPES))
     findings = []
     for esc in _filtered(events, params, "privilege_escalation"):
-        user = (esc.get("user") or "").lower()
+        user = _ascii_fold(esc.get("user") or "")
         t = _epoch(esc)
         recent = [l for l in logins.get(user, []) if 0 <= t - _epoch(l) <= reach]
         for login in reversed(recent):  # most recent qualifying login first
@@ -679,7 +699,7 @@ def data_exfil_volume(events, params):
     for e in _filtered(events, params, EXFIL_TYPES):
         if e["event_type"] != "cloud_data_access" and not e.get("bytes"):
             continue
-        key = (e.get("user") or "").lower() or e.get("src_ip")
+        key = _principal(e)
         if key:
             groups[key].append(e)
     multiplier, history = params["baseline_multiplier"], params["history_seconds"]
@@ -748,7 +768,9 @@ def unsanctioned_cloud_service(events, params):
     window = params["window_seconds"]
     groups = defaultdict(list)
     for e in _filtered(events, params, CLOUD_TYPES):
-        service, user = _service(e), (e.get("user") or "").lower()
+        service = _service(e)
+        # ASCII letters only, the same fold as ignore_users. ÉRIN and érin stay two accounts.
+        user = _ascii_fold(e.get("user") or "")
         if not service or not user or covers("sanctioned_services", sanctioned, e):
             continue
         groups[(user, service)].append(e)
@@ -773,7 +795,7 @@ def cloud_logging_disabled(events, params):
     window = params["window_seconds"]
     groups = defaultdict(list)
     for e in _filtered(events, params, CLOUD_TYPES):
-        key = (e.get("user") or "").lower() or e.get("src_ip")
+        key = _principal(e)
         if key and covers("logging_actions", actions, e):
             groups[key].append(e)
     findings = []

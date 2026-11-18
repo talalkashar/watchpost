@@ -516,6 +516,316 @@ class AdminNewSourceTests(unittest.TestCase):
                     events, params("admin_action_from_new_source", **override)), [])
 
 
+class AccountAsciiFoldTests(unittest.TestCase):
+    """Account counts and finding keys use the ASCII fold, the same one as ignore_users.
+
+    Alice, alice, and ALICE stay one account. ÉRIN and érin stay two, so a spray of
+    only those two meets distinct_users 2. ÉRIN and Érin stay one account Érin and
+    stay quiet at that threshold.
+    """
+
+    def test_spray_keeps_accented_accounts_apart(self):
+        p = params("password_spray", distinct_users=2)
+        apart = make([fail(0, user="ÉRIN"), fail(30, user="érin")])
+        found = rules.password_spray(apart, p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "203.0.113.1")
+        self.assertIn("2 different accounts (Érin, érin)", found[0]["explanation"])
+        # The ASCII letters match, so this pair is one account and stays quiet.
+        same = make([fail(0, user="ÉRIN"), fail(30, user="Érin")])
+        self.assertEqual(rules.password_spray(same, p), [])
+        ascii_one = make([fail(0, user="Alice"), fail(10, user="alice"), fail(20, user="ALICE")])
+        self.assertEqual(rules.password_spray(ascii_one, p), [])
+        # The named accounts in a brute-force finding use the same spelling.
+        burst = make([fail(i, user="ÉRIN") for i in range(5)] + [fail(5 + i, user="érin") for i in range(5)])
+        named = rules.brute_force_ip(burst, params("brute_force_ip"))
+        self.assertIn("Most targeted accounts: Érin (5), érin (5).", named[0]["explanation"])
+
+    def test_repeated_failures_key_uses_the_folded_spelling(self):
+        p = params("account_repeated_failures")
+        merged = make(
+            [fail(i * 10, user="ÉRIN") for i in range(4)]
+            + [fail(40 + i * 10, user="Érin") for i in range(4)]
+        )
+        found = rules.account_repeated_failures(merged, p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "Érin")
+        self.assertEqual(found[0]["event_ids"], list(range(1, 9)))
+        split = make(
+            [fail(i * 10, user="ÉRIN") for i in range(4)]
+            + [fail(40 + i * 10, user="érin") for i in range(4)]
+        )
+        self.assertEqual(rules.account_repeated_failures(split, p), [])
+
+    def test_success_after_failures_looks_up_the_ascii_account(self):
+        p = params("success_after_failures")
+        failures = [fail(i * 10, user="ÉRIN") for i in range(3)] + [fail(30 + i * 10, user="Érin") for i in range(2)]
+        other = rules.success_after_failures(make(failures + [ok(80, user="érin")]), p)
+        self.assertEqual(other, [])
+        found = rules.success_after_failures(make(failures + [ok(80, user="ÉRIN")]), p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "Érin|203.0.113.1")
+        self.assertEqual(found[0]["event_ids"], list(range(1, 7)))
+        self.assertIn("ÉRIN", found[0]["title"])
+
+    def test_impossible_travel_keeps_accented_accounts_apart(self):
+        p = params("impossible_geo_login")
+        apart = make([
+            ev(0, "auth_success", "ÉRIN", "10.0.1.24"),
+            ev(25 * 60, "vpn_login", "érin", "203.0.113.150"),
+        ])
+        self.assertEqual(rules.impossible_geo_login(apart, p), [])
+        same = make([
+            ev(0, "auth_success", "ÉRIN", "10.0.1.24"),
+            ev(25 * 60, "vpn_login", "Érin", "203.0.113.150"),
+        ])
+        found = rules.impossible_geo_login(same, p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "Érin|10.0.1.24|203.0.113.150")
+
+    def test_privilege_escalation_looks_up_the_ascii_account(self):
+        p = params("privilege_escalation_after_login")
+
+        def attack(user, host="web01"):
+            rows = [ev(i * 20, "auth_failure", "ÉRIN", "192.0.2.140") for i in range(3)]
+            rows += [ev(60, "auth_success", "Érin", "192.0.2.140"),
+                     ev(420, "privilege_escalation", user, "192.0.2.140", host=host)]
+            return rows
+
+        self.assertEqual(rules.privilege_escalation_after_login(make(attack("érin")), p), [])
+        found = rules.privilege_escalation_after_login(make(attack("Érin")), p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "Érin|web01")
+        self.assertIn("Érin", found[0]["title"])
+
+    def test_new_principal_history_is_per_ascii_account(self):
+        p = params("cloud_iam_change_by_new_principal")
+        prior = [ev(0, "cloud_api_call", "ÉRIN")]
+        other = rules.cloud_iam_change_by_new_principal(
+            make(prior + [ev(900, "cloud_iam_change", "érin")]), p)
+        self.assertEqual([f["group_key"] for f in other], ["érin"])
+        self.assertEqual(rules.cloud_iam_change_by_new_principal(
+            make(prior + [ev(900, "cloud_iam_change", "Érin")]), p), [])
+        alone = rules.cloud_iam_change_by_new_principal(make([ev(0, "cloud_iam_change", "ÉRIN")]), p)
+        self.assertEqual([f["group_key"] for f in alone], ["Érin"])
+
+    def test_admin_new_source_baseline_is_per_ascii_account(self):
+        p = params("admin_action_from_new_source")
+        history = [priv(-DAY * back, user="ÉRIN", ip="10.0.1.33") for back in (3, 2, 1)]
+        other = priv(0, user="érin", ip="198.51.100.77")
+        self.assertEqual(rules.admin_action_from_new_source(make(history + [other]), p), [])
+        same = priv(0, user="Érin", ip="198.51.100.77")
+        found = rules.admin_action_from_new_source(make(history + [same]), p)
+        self.assertEqual([f["group_key"] for f in found], ["Érin|198.51.100.77"])
+
+    def test_the_docs_name_the_account_fold(self):
+        text = (Path(__file__).resolve().parent.parent / "docs" / "REFERENCE.md").read_text()
+        self.assertIn("fold ASCII letters only, the same fold as `ignore_users`", text)
+        self.assertIn("`ÉRIN` and `érin` stay two accounts (`Érin` and `érin`)", text)
+
+
+def _gb(sec, user, ip="203.0.113.9"):
+    """1.2 GB as two cloud reads. One read alone stays under the 1 GB threshold."""
+    return [ev(sec, "cloud_data_access", user, ip, bytes=600_000_000),
+            ev(sec + 10, "cloud_data_access", user, ip, bytes=600_000_000)]
+
+
+class PrincipalAsciiFoldTests(unittest.TestCase):
+    """data_exfil_volume and cloud_logging_disabled key the account with the ASCII fold.
+
+    Alice, alice, and ALICE stay one principal and share one exfil baseline.
+    ÉRIN and érin stay two, so one account's history does not quiet the other.
+    An IP principal stays the stored address.
+    """
+
+    def test_exfil_keeps_accented_principals_apart(self):
+        p = params("data_exfil_volume")
+        half = rules.data_exfil_volume(make([
+            ev(0, "cloud_data_access", "Alice", bytes=600_000_000),
+            ev(10, "cloud_data_access", "alice", bytes=600_000_000),
+        ]), p)
+        self.assertEqual(len(half), 1)
+        self.assertEqual(half[0]["group_key"], "alice")
+        self.assertEqual(half[0]["event_ids"], [1, 2])
+        self.assertEqual(rules.data_exfil_volume(make([
+            ev(0, "cloud_data_access", "Alice", bytes=600_000_000),
+        ]), p), [])
+        apart = rules.data_exfil_volume(make([
+            ev(0, "cloud_data_access", "ÉRIN", bytes=600_000_000),
+            ev(10, "cloud_data_access", "érin", bytes=600_000_000),
+        ]), p)
+        self.assertEqual(apart, [])
+        both = rules.data_exfil_volume(make(_gb(0, "ÉRIN") + _gb(30, "érin")), p)
+        self.assertEqual(sorted(f["group_key"] for f in both), ["Érin", "érin"])
+        same = rules.data_exfil_volume(make(_gb(0, "ÉRIN") + _gb(30, "Érin")), p)
+        self.assertEqual([f["group_key"] for f in same], ["Érin"])
+        self.assertEqual(same[0]["event_ids"], [1, 2, 3, 4])
+
+    def test_exfil_baseline_is_per_ascii_principal(self):
+        # baseline_principals is engine-supplied; validate_params rejects it.
+        def excepted(*principals):
+            return {**params("data_exfil_volume"), "baseline_principals": list(principals)}
+
+        shared = excepted("alice")
+        found = rules.data_exfil_volume(make(_gb(-86400, "Alice") + _gb(0, "ALICE")), shared)
+        self.assertEqual([f["group_key"] for f in found], ["alice"])
+        self.assertEqual(found[0]["event_ids"], [1, 2])
+        self.assertIn("Baseline mode", found[0]["explanation"])
+        split = excepted("Érin")
+        found = rules.data_exfil_volume(make(_gb(-86400, "ÉRIN") + _gb(0, "érin")), split)
+        by_key = {f["group_key"]: f for f in found}
+        self.assertEqual(set(by_key), {"Érin", "érin"})
+        self.assertEqual(by_key["Érin"]["event_ids"], [1, 2])
+        self.assertIn("Baseline mode", by_key["Érin"]["explanation"])
+        self.assertEqual(by_key["érin"]["event_ids"], [3, 4])
+        self.assertIn("no approved tuning exception", by_key["érin"]["explanation"])
+
+    def test_exfil_ip_principal_stays_the_stored_address(self):
+        uploads = [ev(i * 60, "fw_allow", None, "2001:DB8::1", bytes=600_000_000) for i in range(2)]
+        found = rules.data_exfil_volume(make(uploads), params("data_exfil_volume"))
+        self.assertEqual([f["group_key"] for f in found], ["2001:DB8::1"])
+
+    def test_logging_disabled_keeps_accented_principals_apart(self):
+        p = params("cloud_logging_disabled")
+        merged = rules.cloud_logging_disabled(make([
+            trail(0, "StopLogging", user="Alice"),
+            trail(30, "DeleteTrail", user="ALICE"),
+        ]), p)
+        self.assertEqual([f["group_key"] for f in merged], ["alice"])
+        self.assertEqual(merged[0]["event_ids"], [1, 2])
+        apart = rules.cloud_logging_disabled(make([
+            trail(0, "StopLogging", user="ÉRIN"),
+            trail(30, "DeleteTrail", user="érin"),
+        ]), p)
+        self.assertEqual(sorted(f["group_key"] for f in apart), ["Érin", "érin"])
+        self.assertEqual(sorted(f["event_ids"] for f in apart), [[1], [2]])
+        same = rules.cloud_logging_disabled(make([
+            trail(0, "StopLogging", user="ÉRIN"),
+            trail(30, "DeleteTrail", user="Érin"),
+        ]), p)
+        self.assertEqual([f["group_key"] for f in same], ["Érin"])
+        self.assertEqual(same[0]["event_ids"], [1, 2])
+        found = rules.cloud_logging_disabled(
+            make([trail(0, "StopLogging", user=None, ip="2001:DB8::1")]), p)
+        self.assertEqual(found[0]["group_key"], "2001:DB8::1")
+
+    def test_the_docs_name_the_principal_fold(self):
+        text = (Path(__file__).resolve().parent.parent / "docs" / "REFERENCE.md").read_text()
+        self.assertIn("`data_exfil_volume`, `cloud_logging_disabled`, and `unsanctioned_cloud_service`", text)
+        self.assertIn("an exception for `Érin` does not quiet `érin`", text)
+        self.assertIn("`2001:DB8::1` is not folded", text)
+
+
+def _cloud(sec, user, service="personal-drive.example"):
+    return ev(sec, "cloud_data_access", user, "10.0.1.40", message=f"UploadFile on {service} (x)")
+
+
+class UnsanctionedAccountFoldTests(unittest.TestCase):
+    """unsanctioned_cloud_service keys the account with the ASCII fold.
+
+    Alice, alice, and ALICE stay one finding. ÉRIN and érin stay two findings on
+    the same service. Sanctioned-service matching still folds the whole name.
+    The title shows the account as logged.
+    """
+
+    def test_accented_accounts_stay_two_findings(self):
+        p = params("unsanctioned_cloud_service")
+        merged = rules.unsanctioned_cloud_service(make([
+            _cloud(0, "Alice"),
+            _cloud(30, "ALICE"),
+        ]), p)
+        self.assertEqual([f["group_key"] for f in merged], ["alice|personal-drive.example"])
+        self.assertEqual(merged[0]["event_ids"], [1, 2])
+        self.assertIn("Alice", merged[0]["title"])
+        apart = rules.unsanctioned_cloud_service(make([
+            _cloud(0, "ÉRIN"),
+            _cloud(30, "érin"),
+        ]), p)
+        self.assertEqual(sorted(f["group_key"] for f in apart), [
+            "Érin|personal-drive.example", "érin|personal-drive.example"])
+        self.assertEqual(sorted(f["event_ids"] for f in apart), [[1], [2]])
+        self.assertEqual(sorted(f["title"] for f in apart), [
+            "Unsanctioned cloud service: ÉRIN used personal-drive.example",
+            "Unsanctioned cloud service: érin used personal-drive.example"])
+        same = rules.unsanctioned_cloud_service(make([
+            _cloud(0, "ÉRIN"),
+            _cloud(30, "Érin"),
+        ]), p)
+        self.assertEqual([f["group_key"] for f in same], ["Érin|personal-drive.example"])
+        self.assertEqual(same[0]["event_ids"], [1, 2])
+        self.assertIn("ÉRIN", same[0]["title"])
+
+    def test_sanctioned_service_still_folds_the_whole_name(self):
+        p = params("unsanctioned_cloud_service", sanctioned_services=[".ÉXAMPLE.com"])
+        quiet = rules.unsanctioned_cloud_service(make([_cloud(0, "ÉRIN", "éxample.com")]), p)
+        self.assertEqual(quiet, [])
+        found = rules.unsanctioned_cloud_service(make([_cloud(0, "érin", "other.example")]), p)
+        self.assertEqual([f["group_key"] for f in found], ["érin|other.example"])
+        self.assertEqual(rules.unsanctioned_cloud_service(make([
+            ev(0, "cloud_data_access", None, "10.0.1.40",
+               message="UploadFile on personal-drive.example (x)"),
+        ]), params("unsanctioned_cloud_service")), [])
+
+
+NIGHT = datetime(2026, 9, 15, 3, 0, tzinfo=timezone.utc)
+
+
+class OffHoursAccountFoldTests(unittest.TestCase):
+    """off_hours_privileged_login keys the account with the ASCII fold.
+
+    covers already used that fold. The finding key used str.lower(), so ÉRIN
+    and érin shared one alert. Alice, alice, and ALICE stay one key. The title
+    shows the account as logged.
+    """
+
+    def test_accented_accounts_do_not_share_a_key(self):
+        p = params("off_hours_privileged_login", privileged_users=["ÉRIN", "érin", "alice"])
+        merged = rules.off_hours_privileged_login(make([
+            ok(0, "Alice", base=NIGHT),
+            ok(60, "ALICE", base=NIGHT),
+        ]), p)
+        self.assertEqual([f["group_key"] for f in merged], [
+            "alice|203.0.113.1|2026-09-15",
+            "alice|203.0.113.1|2026-09-15",
+        ])
+        self.assertEqual(merged[0]["event_ids"], [1])
+        self.assertEqual(merged[1]["event_ids"], [2])
+        self.assertIn("Alice", merged[0]["title"])
+        self.assertIn("ALICE", merged[1]["title"])
+        apart = rules.off_hours_privileged_login(make([
+            ok(0, "ÉRIN", base=NIGHT),
+            ok(60, "érin", base=NIGHT),
+        ]), p)
+        self.assertEqual([f["group_key"] for f in apart], [
+            "Érin|203.0.113.1|2026-09-15",
+            "érin|203.0.113.1|2026-09-15",
+        ])
+        self.assertEqual([f["title"] for f in apart], [
+            "Off-hours privileged login: ÉRIN",
+            "Off-hours privileged login: érin",
+        ])
+        same = rules.off_hours_privileged_login(make([
+            ok(0, "ÉRIN", base=NIGHT),
+            ok(60, "Érin", base=NIGHT),
+        ]), p)
+        self.assertEqual([f["group_key"] for f in same], [
+            "Érin|203.0.113.1|2026-09-15",
+            "Érin|203.0.113.1|2026-09-15",
+        ])
+        self.assertIn("ÉRIN", same[0]["title"])
+        self.assertIn("Érin", same[1]["title"])
+        other_ip = rules.off_hours_privileged_login(make([
+            ok(0, "ÉRIN", ip="198.51.100.8", base=NIGHT),
+        ]), p)
+        self.assertEqual([f["group_key"] for f in other_ip], ["Érin|198.51.100.8|2026-09-15"])
+
+    def test_the_docs_name_the_off_hours_fold(self):
+        text = (Path(__file__).resolve().parent.parent / "docs" / "REFERENCE.md").read_text()
+        self.assertIn("`off_hours_privileged_login`", text)
+        self.assertIn("the key is `account|src_ip|date`", text)
+        self.assertIn("the title still shows the account as logged", text)
+
+
 class TechniqueMappingTests(unittest.TestCase):
     def test_every_rule_has_techniques_and_a_function(self):
         for rule in rules.DEFAULT_RULES:

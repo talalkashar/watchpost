@@ -38,6 +38,9 @@ CRITICALITY_BOOST = {"low": 0, "medium": 0, "high": 1, "critical": 2}
 SENSITIVE_BOOST = 1
 MAX_BOOST = 2
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,128}$")
+# SQLite COLLATE NOCASE and entity host keys fold these letters only. str.lower also
+# folds É, so an asset named Érin-host would match events on érin-host.
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 ASSET_COLUMNS = ("name", "kind", "criticality", "data_tags", "addresses", "owner", "description", "synthetic")
 
 # Fictional inventory for the synthetic demo data. Hosts match simulate.py and storyline.py.
@@ -134,7 +137,8 @@ def review_reasons(before, after, taken=frozenset()):
             reasons.append(f"lowers criticality from {before['criticality']} to {after['criticality']}")
         reasons += [f"removes sensitive-data tag {t}" for t in sorted(set(before["data_tags"]) - set(after["data_tags"]))]
         reasons += [f"removes address {a}" for a in sorted(set(before["addresses"]) - set(after["addresses"]))]
-        if after["name"].lower() != before["name"].lower():  # matching ignores case, so a re-case is no rename
+        # Matching folds ASCII letters only, so WEB01 to web01 is no rename. Érin-host to érin-host is.
+        if _host_key(after["name"]) != _host_key(before["name"]):
             reasons.append(f"renames {before['name']} to {after['name']}")
     old = set(before["addresses"]) if before else set()
     reasons += [f"claims address {a}, which another asset already has" for a in after["addresses"]
@@ -148,15 +152,21 @@ def _public(asset):
     return {k: asset[k] for k in ("id", "name", "kind", "criticality", "data_tags", "synthetic") if k in asset}
 
 
+def _host_key(name):
+    """Host key for inventory matching. WEB01 is web01. Érin-host stays Érin-host."""
+    return name.translate(_ASCII_FOLD)
+
+
 def index(assets):
-    """Lookup tables for fast matching: lowercase host name -> asset, IP string -> every asset listing it.
+    """Lookup tables for fast matching: ASCII-folded host name -> asset, IP string -> every asset listing it.
 
     An address shared by several assets matches all of them, so inventory order (which a direct raise or
-    re-case can change) never decides which asset an alert keeps.
+    re-case can change) never decides which asset an alert keeps. The address key is the form already
+    stored (validate canonicalizes it). A different spelling of the same IP is not a second key.
     """
     by_name, by_ip = {}, {}
     for a in assets:
-        by_name[a["name"].lower()] = a
+        by_name[_host_key(a["name"])] = a
         for ip in a.get("addresses") or []:
             by_ip.setdefault(ip, []).append(a)
     return {"by_name": by_name, "by_ip": by_ip}
@@ -167,8 +177,8 @@ def match(idx, events):
     found = {}
     for e in events:
         host = e.get("host")
-        if host and host.lower() in idx["by_name"]:
-            a = idx["by_name"][host.lower()]
+        if host and _host_key(host) in idx["by_name"]:
+            a = idx["by_name"][_host_key(host)]
             found[a["name"]] = a
         for field in ("dest_ip", "src_ip"):
             ip = e.get(field)

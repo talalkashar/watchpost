@@ -226,6 +226,8 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | `admin_action_from_new_source` | an account makes a privileged action (privilege use/escalation, cloud IAM change) from an IP it used for none of its privileged actions in the previous 7 days, and it made ≥ 3 in that span | medium |
 | `log_source_silent` | a source and host with a learned cadence stops sending: quiet for > 6× its median gap between arrivals, > 1 h, and > twice its longest recent gap ([Log source health](#log-source-health)) | medium |
 
+Rules that count or key an account (`brute_force_ip` targeted names, `password_spray`, `account_repeated_failures`, `success_after_failures`, `impossible_geo_login`, `privilege_escalation_after_login`, `cloud_iam_change_by_new_principal`, `admin_action_from_new_source`, `off_hours_privileged_login`, `data_exfil_volume`, `cloud_logging_disabled`, and `unsanctioned_cloud_service`) fold ASCII letters only, the same fold as `ignore_users`. `Alice`, `alice`, and `ALICE` are one account, and the finding key uses that spelling. `ÉRIN` and `érin` stay two accounts (`Érin` and `érin`). For `data_exfil_volume` that key is also the baseline: an approved exception for `alice` compares Alice and alice with one history, and an exception for `Érin` does not quiet `érin`. An IP principal, used when the event has no account, stays the stored address (`2001:DB8::1` is not folded). For `unsanctioned_cloud_service` the key is `account|service`, so `ÉRIN` and `érin` are two findings on the same service. Sanctioned-service matching stays a full-string fold. For `off_hours_privileged_login` the key is `account|src_ip|date`, so `ÉRIN` and `érin` are two findings, and the title still shows the account as logged.
+
 Every rule maps to MITRE ATT&CK techniques from a small static catalog (`watchpost/attack.py`, 20 techniques, no network fetch). `GET /api/attack/coverage` grades each technique by evidence (below) and counts how often its rules fired.
 
 The two newest rules use only fields the schema already carries, and each has a labeled attack and a benign look-alike in the noise lab (both detect their attack, tp 1 / fn 0 / fp 0, and stay quiet on their look-alike):
@@ -252,7 +254,7 @@ The scenarios are synthetic, so "validated" means a rule detected the project's 
 
 ### Incidents (correlation)
 
-After each detection run, `watchpost/correlate.py` groups related alerts into incidents: alerts whose evidence shares a source IP, account, or host within 30 minutes. An incident needs two related alerts or one critical alert, lists its kill-chain stages (ATT&CK tactics in order), and is raised one severity level when it spans three or more tactics. Account and host values that differ only by case are stored as one lowercase entry (`WEB01` and `web01` are one host). Source IPs stay as written. Reruns change nothing; new alerts join an open incident.
+After each detection run, `watchpost/correlate.py` groups related alerts into incidents: alerts whose evidence shares a source IP, account, or host within 30 minutes. An incident needs two related alerts or one critical alert, lists its kill-chain stages (ATT&CK tactics in order), and is raised one severity level when it spans three or more tactics. Account and host values fold ASCII letters only, the same fold as entity pages (`WEB01` and `web01` are one host `web01`; `ÉRIN` and `érin` stay two accounts, and `Érin-host` and `érin-host` stay two hosts). Source IPs stay the stored address. Reruns change nothing; new alerts join an open incident.
 
 Every rule except `log_source_silent` accepts `ignore_ips` and `ignore_users`. `ignore_users` and `privileged_users` fold ASCII letters only, the same fold as entity keys: `Alice`, `alice`, and `ALICE` are one account, and `érin` does not match `ÉRIN`. `josé` still matches `josé`. Sanctioned service names and logging actions still fold the whole string. The review gate uses those same helpers. The engine merges overlapping findings into one open alert instead of creating duplicates, and a rescan never re-alerts on evidence already attached to an alert.
 
@@ -714,7 +716,9 @@ What these numbers do and do not say:
 
 Alert grouping and incident correlation are deliberately separate. A reviewed per-rule grouping override changes
 the stable key used to deduplicate that rule's alerts (up to three allowlisted event fields) while retaining the
-finding's evidence event IDs. Correlation still combines distinct alerts into incidents using its own entities and
+finding's evidence event IDs. `user` and `host` in that key fold ASCII case only, so Alice and alice share a key
+and ÉRIN stays apart from érin. `src_ip` and `dest_ip` stay the stored address. `event_type` and `source` stay
+the stored spelling. Correlation still combines distinct alerts into incidents using its own entities and
 time window; changing an alert grouping key does not change that incident logic.
 
 **Synthetic:** all bundled data. The demo dataset and simulator scenarios (`watchpost/simulate.py`) and the files in `samples/` are invented. External IPs come from the RFC 5737 documentation ranges. Synthetic events are stored with `synthetic=1`, sourced `demo:*`, and tagged in the UI. The evaluation scores (recall and precision) measure the rules against these hand-labeled scenarios only. They say nothing about real-world accuracy.
