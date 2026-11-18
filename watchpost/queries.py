@@ -11,6 +11,8 @@ ALERT_STATUSES = ("open", "investigating", "resolved")
 DISPOSITIONS = ("true_positive", "false_positive", "benign")
 # OFFSET makes SQLite visit every skipped row. Past this, walk newer events with since_id.
 MAX_EVENT_OFFSET = 10_000
+# A longer needle used to be sliced, so it matched messages that lacked the rest.
+MAX_SEARCH_Q = 200
 EVENT_FIELDS = "id, ts, ingested_at, source, host, event_type, outcome, severity, user, src_ip, dest_ip, dest_port, " \
                "bytes, message, synthetic, batch_id"
 
@@ -73,8 +75,11 @@ def search_events(conn, params):
         where.append("(src_ip = ? OR dest_ip = ?)")
         args += [params["ip"], params["ip"]]
     if params.get("q"):
+        needle = params["q"]
+        if not isinstance(needle, str) or len(needle) > MAX_SEARCH_Q:
+            raise QueryError(f"q must be at most {MAX_SEARCH_Q} characters")
         where.append("message LIKE ? ESCAPE '\\'")
-        args.append("%" + _escape_like(params["q"][:200]) + "%")
+        args.append("%" + _escape_like(needle) + "%")
     if params.get("synthetic") in ("0", "1"):
         where.append("synthetic = ?")
         args.append(int(params["synthetic"]))

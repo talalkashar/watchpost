@@ -126,7 +126,7 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 | `ip` | Matches `src_ip` or `dest_ip` |
 | `event_type` | One normalized type |
 | `severity` | Comma list, or a single level with `severity_mode=min` for "at least" |
-| `q` | Substring of `message` (`%` and `_` are literal) |
+| `q` | Substring of `message` (`%` and `_` are literal), at most 200 characters. A longer value is 400 naming that maximum |
 | `synthetic` | `0` or `1` |
 | `limit` (1–1000, default 100), `offset` (0–10000, default 0) | Paging; response includes `total`. An offset above 10000 is 400 naming that maximum |
 | `since_id` | Only events stored after that event id, newest stored first (ignores event time). This is how to walk newer events; it does not skip rows with `offset`. Used by the dashboard's polling fallback |
