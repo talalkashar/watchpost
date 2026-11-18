@@ -1,6 +1,7 @@
 import sqlite3
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import quote
 
 from tests.helpers import ServerTestCase
@@ -246,7 +247,8 @@ class RefusalTests(unittest.TestCase):
 
     def test_injection_attempts_in_values_are_bound(self):
         data = hunt.run(self.conn, {"q": "user:\"x' OR 1=1 --\" | stats count by user"}, now=NOW)
-        self.assertEqual(data["rows"], [["x' OR 1=1 --", 1]])
+        # The value stays bound (one account, not every row). The group label folds ASCII case.
+        self.assertEqual(data["rows"], [["x' or 1=1 --", 1]])
         data = hunt.run(self.conn, {"q": "user:\"a' UNION SELECT 1 --\" | top user"}, now=NOW)
         self.assertEqual(data["rows"], [])
 
@@ -277,6 +279,76 @@ class PipeParsingTests(unittest.TestCase):
         data = hunt.run(self.conn, {"q": "user:alice"}, now=NOW)
         self.assertEqual(set(data), {"total", "limit", "offset", "events", "query", "terms"})
         self.assertEqual(data["total"], 5)
+
+
+class UserGroupCaseTests(unittest.TestCase):
+    """stats, top, and timechart fold account spellings; other fields stay exact."""
+
+    ROWS = [
+        ("2026-10-07T10:00:00.000Z", "auth_failure", "alice", "10.0.0.5", "web01", 22, "a"),
+        ("2026-10-07T10:30:00.000Z", "auth_failure", "Alice", "10.0.0.5", "WEB01", 22, "b"),
+        ("2026-10-07T11:00:00.000Z", "auth_failure", "ALICE", "10.0.0.5", "web01", 22, "c"),
+        ("2026-10-07T11:10:00.000Z", "auth_failure", "bob", "10.0.0.8", "db01", 22, "d"),
+        ("2026-10-07T11:20:00.000Z", "auth_failure", "Bob", "10.0.0.8", "db01", 22, "e"),
+        ("2026-10-07T11:40:00.000Z", "process_start", None, None, "web01", None, "no user"),
+        ("2026-10-07T11:45:00.000Z", "auth_failure", "Érin", "10.0.0.9", "mail01", 22, "accent"),
+        ("2026-10-07T11:50:00.000Z", "auth_failure", "érin", "10.0.0.9", "mail01", 22, "accent"),
+    ]
+
+    def setUp(self):
+        self.conn = memory_db(self.ROWS)
+        self.addCleanup(self.conn.close)
+
+    def run_q(self, text):
+        return hunt.run(self.conn, {"q": text}, now=NOW)
+
+    def test_stats_top_and_timechart_fold_user_only(self):
+        self.assertEqual(self.run_q("| stats count by user")["rows"],
+                         [["alice", 3], ["bob", 2], ["Érin", 1], ["érin", 1]])
+        self.assertEqual(self.run_q("| stats count by user, host")["rows"],
+                         [["alice", "web01", 2], ["bob", "db01", 2], ["alice", "WEB01", 1],
+                          ["Érin", "mail01", 1], ["érin", "mail01", 1]])
+        self.assertEqual(self.run_q("| stats count by host")["rows"],
+                         [["web01", 3], ["db01", 2], ["mail01", 2], ["WEB01", 1]])
+        # dc(user) counts the account, not each spelling. dc(host) still sees WEB01.
+        self.assertEqual(self.run_q("| stats dc(user)")["rows"], [[4]])
+        self.assertEqual(self.run_q("| stats count, dc(user) by src_ip")["rows"],
+                         [["10.0.0.5", 3, 1], ["10.0.0.8", 2, 1], ["10.0.0.9", 2, 2]])
+        self.assertEqual(self.run_q("| stats dc(host)")["rows"], [[4]])
+        top = self.run_q("| top user")
+        self.assertEqual(top["rows"], [["alice", 3, 37.5], ["bob", 2, 25.0],
+                                       ["Érin", 1, 12.5], ["érin", 1, 12.5]])
+        self.assertNotIn("Alice", [row[0] for row in top["rows"]])
+        chart = self.run_q("| timechart span=1h by user")
+        self.assertEqual(chart["columns"], ["_time", "alice", "bob", "Érin", "érin", "other"])
+        self.assertEqual(chart["rows"], [
+            ["2026-10-07T10:00:00.000Z", 2, 0, 0, 0, 0],
+            ["2026-10-07T11:00:00.000Z", 1, 2, 1, 1, 1],
+        ])
+
+    def test_user_group_sql_folds_with_lower(self):
+        statements = []
+        self.conn.set_trace_callback(statements.append)
+        self.run_q("| stats count by user")
+        self.run_q("| top user")
+        self.run_q("| timechart span=1h by user")
+        self.run_q("| stats dc(user)")
+        self.conn.set_trace_callback(None)
+        grouped = [s for s in statements if "GROUP BY" in s.upper()]
+        self.assertTrue(grouped)
+        self.assertTrue(all("lower(user)" in s for s in grouped))
+        statements.clear()
+        self.conn.set_trace_callback(statements.append)
+        self.run_q("| stats count by host")
+        self.conn.set_trace_callback(None)
+        host_sql = " ".join(s for s in statements if "GROUP BY" in s.upper())
+        self.assertIn("GROUP BY host", host_sql)
+        self.assertNotIn("lower(", host_sql)
+
+    def test_reference_says_user_groups_fold(self):
+        text = (Path(__file__).resolve().parent.parent / "docs" / "REFERENCE.md").read_text()
+        self.assertIn("Accounts fold ASCII case", text)
+        self.assertNotIn("lists `Alice` and `alice` separately", text)
 
 
 class IndexTests(unittest.TestCase):
