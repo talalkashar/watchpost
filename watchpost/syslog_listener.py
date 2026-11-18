@@ -23,8 +23,8 @@ from collections import deque
 
 from . import engine, health
 from .db import connect, iso, now_iso, utcnow
-from .diagnostics import describe_exception, log, record_error, redact
-from .normalize import MAX_LEN, EventError, clean_text, normalize_authlog_line, normalize_weblog_line
+from .diagnostics import describe_exception, log, record_error, redact_cut
+from .normalize import MAX_LEN, EventError, clean_text, normalize_authlog_line, normalize_weblog_line, stored_text
 
 SOURCE = "syslog"
 SUBMITTED_BY = "syslog-listener"
@@ -104,8 +104,8 @@ def frame_to_event(frame, peer_ip=None, now=None):
     if event["event_type"] == "other":
         event["event_type"] = "syslog"
         event["severity"] = PRI_SEVERITY[parsed["level"]]
-        event["message"] = redact(clean_text(f"{app}: {msg}" if app else msg, "message"))
-    event["raw"] = redact(frame.strip("\r\n\x00"))[: MAX_LEN["raw"]]
+        event["message"] = stored_text(f"{app}: {msg}" if app else msg, "message")
+    event["raw"] = redact_cut(frame.strip("\r\n\x00"), MAX_LEN["raw"])
     return event
 
 
