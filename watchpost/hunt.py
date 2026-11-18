@@ -49,6 +49,8 @@ ENUMS = {"event_type": sorted(EVENT_TYPES), "severity": SEVERITIES}
 FLAGS = {"1": 1, "true": 1, "0": 0, "false": 0}
 LAST_UNITS = {"m": 1, "h": 60, "d": 1440}
 LAST_MAX_MINUTES = 365 * 1440
+# ASCII letters only. 24H is 24h. 24İ is not a unit. Not str.lower().
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 
 # bytes:>=N (and >, <=, <, =). The operator is chosen from this tuple; the integer is a bound parameter.
 BYTES_OPS = (">=", ">", "<=", "<", "=")
@@ -193,7 +195,10 @@ def _term_sql(term, now):
         if term["negate"]:
             raise HuntError(f"{field} cannot be negated")
         if field == "last":
-            match = _LAST.fullmatch(value)
+            # ASCII letters only. 24H is 24 hours. 24İ, a bare number, and a window
+            # past 365 days stay the error below.
+            folded = value.translate(_ASCII_FOLD) if isinstance(value, str) else ""
+            match = _LAST.fullmatch(folded)
             minutes = int(match.group(1)) * LAST_UNITS[match.group(2)] if match else 0
             if not 1 <= minutes <= LAST_MAX_MINUTES:
                 raise HuntError("last must be a number with m, h or d, such as 15m, 24h or 7d (at most 365d)")

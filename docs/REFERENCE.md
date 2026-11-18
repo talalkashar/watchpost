@@ -537,7 +537,7 @@ Send `{"value": 0}` the same way to turn it off. A viewer with masking on gets `
 | `field:"quoted"` | `user:"svc backup"` | Literal value; spaces and `*` are not special, `\"` escapes a quote |
 | word or `"phrase"` | `"invalid password"` | Message contains (`%` and `_` are literal) |
 | `NOT term` or `-term` | `NOT src_ip:10.0.0.5` | Excludes; events with no value in that field are kept |
-| `last:` | `last:15m`, `last:24h`, `last:7d` | Window up to now, at most 365 days |
+| `last:` | `last:15m`, `last:24h`, `last:7d` | Window up to now, at most 365 days. The unit folds ASCII case, so `24H` is 24 hours, `15M` is 15 minutes, and `7D` is 7 days. `24İ`, `24`, and a window past 365 days stay an error |
 | `since:` / `until:` | `since:2026-10-01 until:2026-10-02T06:00Z` | ISO times, UTC unless an offset is given |
 | `bytes:opN` | `bytes:>=1000000` | Byte count on the event. `op` is `>=`, `>`, `<=`, `<` or `=`, and `N` is an integer from 0 to 1000000000000000. The number is a bound parameter. Events with no byte count do not match. Any other `bytes:` value is an error that lists those operators. |
 
