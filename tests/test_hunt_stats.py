@@ -134,13 +134,15 @@ class TopTests(unittest.TestCase):
         self.assertEqual(data["columns"], ["src_ip", "count", "percent"])
         # 7 matched events: 4, 2 and 1 of them.
         self.assertEqual(data["rows"], [["10.0.0.5", 4, 57.14], ["203.0.113.45", 2, 28.57], ["10.0.0.6", 1, 14.29]])
-        self.assertFalse(data["truncated"])
+        self.assertEqual((data["truncated"], data["groups_omitted"]), (False, 0))
 
     def test_top_n(self):
         data = self.run_q("event_type:auth_failure | top 2 src_ip")
         self.assertEqual([r[0] for r in data["rows"]], ["10.0.0.5", "203.0.113.45"])
-        self.assertTrue(data["truncated"])
-        self.assertEqual(self.run_q("| top 100 user")["rows"][0], ["alice", 5, 55.56])
+        self.assertEqual((data["truncated"], data["groups_omitted"]), (True, 1))
+        wide = self.run_q("| top 100 user")
+        self.assertEqual(wide["rows"][0], ["alice", 5, 55.56])
+        self.assertEqual((wide["truncated"], wide["groups_omitted"]), (False, 0))
         for bad in ["| top 0 user", "| top 101 user", "| top", "| top 5", "| top user host", "| top -1 user"]:
             with self.subTest(bad=bad), self.assertRaises(hunt.HuntError) as ctx:
                 self.run_q(bad)
@@ -148,7 +150,8 @@ class TopTests(unittest.TestCase):
 
     def test_top_on_no_matches(self):
         data = self.run_q("user:nobody | top src_ip")
-        self.assertEqual((data["rows"], data["truncated"], data["total"], data["missing"]), ([], False, 0, 0))
+        self.assertEqual((data["rows"], data["truncated"], data["groups_omitted"], data["total"], data["missing"]),
+                         ([], False, 0, 0, 0))
 
     def test_top_names_total_and_events_missing_the_field(self):
         # One stored event has no source IP. Percents stay shares of every match, so they sum under 100.
@@ -163,11 +166,46 @@ class TopTests(unittest.TestCase):
         self.assertEqual(round(sum(row[2] for row in complete["rows"]), 2), 100.0)
         # A short top still reports the full match count. Shown percents are not renormalized.
         short = self.run_q("event_type:auth_failure | top 2 src_ip")
-        self.assertEqual((short["total"], short["missing"], short["truncated"]), (7, 0, True))
+        self.assertEqual((short["total"], short["missing"], short["truncated"], short["groups_omitted"]),
+                         (7, 0, True, 1))
         self.assertEqual([row[2] for row in short["rows"]], [57.14, 28.57])
         # Every match lacks the field: no groups, and missing equals total.
         empty_field = self.run_q("event_type:process_start | top user")
-        self.assertEqual((empty_field["rows"], empty_field["total"], empty_field["missing"]), ([], 1, 1))
+        self.assertEqual((empty_field["rows"], empty_field["total"], empty_field["missing"],
+                          empty_field["groups_omitted"], empty_field["truncated"]), ([], 1, 1, 0, False))
+
+    def test_groups_omitted_names_the_values_past_the_cap(self):
+        # Fifty hosts, one event each. A top of 10 keeps the first ten names and leaves out forty.
+        # A blank host is not a group and is not omitted. Percents stay shares of every match.
+        rows = [(f"2026-10-07T09:00:{n % 60:02d}.000Z", "auth_failure", "alice", "203.0.113.10",
+                 f"h{n:02d}", None, "d") for n in range(50)]
+        rows.append(("2026-10-07T09:00:00.000Z", "auth_failure", None, "203.0.113.10", None, None, "blank"))
+        conn = memory_db(rows)
+        self.addCleanup(conn.close)
+        data = hunt.run(conn, {"q": "| top 10 host"}, now=NOW)
+        self.assertEqual(len(data["rows"]), 10)
+        self.assertEqual((data["truncated"], data["groups_omitted"]), (True, 40))
+        self.assertEqual([row[0] for row in data["rows"]], [f"h{n:02d}" for n in range(10)])
+        self.assertNotIn("h49", [row[0] for row in data["rows"]])
+        self.assertEqual((data["total"], data["missing"]), (51, 1))
+        self.assertEqual([row[2] for row in data["rows"]], [round(100 / 51, 2)] * 10)
+        default = hunt.run(conn, {"q": "| top host"}, now=NOW)
+        self.assertEqual((len(default["rows"]), default["truncated"], default["groups_omitted"],
+                          default["total"], default["missing"]), (10, True, 40, 51, 1))
+        exact = memory_db(rows[:10])
+        self.addCleanup(exact.close)
+        fitted = hunt.run(exact, {"q": "| top 10 host"}, now=NOW)
+        self.assertEqual((len(fitted["rows"]), fitted["truncated"], fitted["groups_omitted"]), (10, False, 0))
+        self.assertEqual(fitted["rows"][-1][0], "h09")
+        empty = self.run_q("user:nobody | top src_ip")
+        self.assertEqual((empty["rows"], empty["truncated"], empty["groups_omitted"]), ([], False, 0))
+        with self.assertRaises(hunt.HuntError) as ctx:
+            hunt.run(conn, {"q": "| top 101 host"}, now=NOW)
+        self.assertIn("100", str(ctx.exception))
+        text = (Path(__file__).resolve().parent.parent / "docs" / "REFERENCE.md").read_text()
+        self.assertIn("`groups_omitted` is how many groups were past N", text)
+        api = (Path(__file__).resolve().parent.parent / "docs" / "API.md").read_text()
+        self.assertIn("`groups_omitted`, how many groups were past N", api)
 
 
 class TimechartTests(unittest.TestCase):
@@ -520,6 +558,23 @@ class HuntStatsApiTests(ServerTestCase):
         self.assertEqual(data["columns"], ["_time", "h1", "h2", "h3", "h4", "h5", "other"])
         self.assertEqual((data["series_omitted"], data["truncated"]), (2, False))
         self.assertEqual(sum(data["rows"][0][1:]), 7)
+
+    def test_top_groups_omitted_on_the_api(self):
+        db = sqlite3.connect(self.db_path)
+        with db:
+            insert(db, [(f"2026-10-07T09:00:{n % 60:02d}.000Z", "auth_failure", "alice", "203.0.113.10",
+                         f"h{n:02d}", None, "d") for n in range(50)])
+        db.close()
+        status, data, _ = self.client("viewer").get("/api/hunt?q=" + quote("host:h* | top 10 host"))
+        self.assertEqual(status, 200, data)
+        self.assertEqual((data["kind"], len(data["rows"]), data["truncated"], data["groups_omitted"]),
+                         ("top", 10, True, 40))
+        self.assertEqual((data["total"], data["missing"]), (50, 0))
+        self.assertEqual(data["rows"][0][0], "h00")
+        self.assertNotIn("h49", [row[0] for row in data["rows"]])
+        status, fitted, _ = self.client("viewer").get("/api/hunt?q=" + quote("user:nobody | top src_ip"))
+        self.assertEqual((status, fitted["groups_omitted"], fitted["truncated"], fitted["total"], fitted["missing"]),
+                         (200, 0, False, 0, 0))
 
     def test_bad_stage_is_a_400(self):
         status, data, _ = self.client("viewer").get("/api/hunt?q=" + quote("| stats count by message"))
