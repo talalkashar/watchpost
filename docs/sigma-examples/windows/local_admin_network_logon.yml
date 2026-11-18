@@ -1,0 +1,35 @@
+# Successful network logon (4624 type 3) as the built-in local Administrator or Admin.
+# Type 3 is SMB, WMI, WinRM, and PsExec. Console logon (type 2) and Remote Desktop (type 10) do not match.
+# The address may be private: reuse of the local administrator hash is lateral movement inside the network.
+title: Windows Local Administrator Network Logon
+id: 7f40f918-a6fc-4b8e-9aca-0336a2f848a6
+status: experimental
+description: |
+  A successful logon as Administrator or Admin whose message says logon type 3 (network).
+  That is the built-in local account used over SMB, WMI, WinRM, or a similar network logon,
+  including from a private address. A console logon by the same account does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1078/003/
+tags:
+  - attack.initial_access
+  - attack.t1078.003
+logsource:
+  category: authentication
+  product: windows
+  service: security
+detection:
+  selection:
+    event.action: auth_success
+    TargetUserName:
+      - administrator
+      - admin
+    message|contains:
+      - 'Logon Type: 3'
+      - "Logon Type:\t3"
+      - "Logon Type:\t\t3"
+  condition: selection
+falsepositives:
+  - IT signing in as the built-in local Administrator over SMB or WinRM for maintenance
+level: high

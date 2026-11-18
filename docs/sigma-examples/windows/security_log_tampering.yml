@@ -1,0 +1,48 @@
+# Clearing or disabling the Windows Security log, or turning audit success/failure off.
+# Event 1102 renders as "The audit log was cleared". Command lines are read from the process message
+# (Security 4688 folded into process_start). Querying the log (wevtutil qe / gl) does not match.
+title: Windows Security Log Tampering
+id: 3ab7bbed-daf6-4621-a8bc-0856b72e13f0
+status: experimental
+description: |
+  Someone cleared an event log, disabled a log channel, deleted the USN journal, or turned Windows
+  auditing off. The 1102 message "The audit log was cleared" matches on its own. Process starts match
+  wevtutil cl, Clear-EventLog, Remove-EventLog, auditpol /clear, audit success/failure disabled,
+  fsutil usn deletejournal, or wevtutil with /e:false.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1562/006/
+tags:
+  - attack.defense_evasion
+  - attack.t1562.006
+logsource:
+  category: process_creation
+  product: windows
+  service: security
+detection:
+  cleared:
+    message|contains: 'The audit log was cleared'
+  commands:
+    event.action: process_start
+    message|contains:
+      - 'wevtutil cl'
+      - 'wevtutil.exe cl'
+      - Clear-EventLog
+      - Remove-EventLog
+      - 'auditpol /clear'
+      - 'auditpol.exe /clear'
+      - '/success:disable'
+      - '/failure:disable'
+      - 'fsutil usn deletejournal'
+      - 'fsutil.exe usn deletejournal'
+  disable_channel:
+    event.action: process_start
+    message|contains|all:
+      - wevtutil
+      - '/e:false'
+  condition: cleared or commands or disable_channel
+falsepositives:
+  - A quoted copy of the 1102 sentence ingested as its own log line
+  - A change script that disables one audit subcategory on purpose
+level: critical

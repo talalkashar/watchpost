@@ -1,0 +1,34 @@
+# Windows process start (Security 4688, folded into event.action process_start) whose command
+# line names a port scanner. The command line has to be in the event message. System tools such as
+# net view are not this rule; they are a different discovery technique.
+title: Windows Port Scan Tool Started
+id: 1168e99d-07ea-4837-b2a8-671e133ecf55
+status: experimental
+description: |
+  A process start whose message names nmap, masscan, portqry, rustscan, Angry IP Scanner (ipscan.exe),
+  or the PowerShell cmdlet Test-NetConnection. Those are network service discovery tools on a Windows host.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1046/
+tags:
+  - attack.discovery
+  - attack.t1046
+logsource:
+  category: process_creation
+  product: windows
+  service: security
+detection:
+  selection:
+    event.action: process_start
+    message|contains:
+      - 'nmap.exe'
+      - 'masscan.exe'
+      - 'portqry.exe'
+      - 'rustscan.exe'
+      - 'ipscan.exe'
+      - Test-NetConnection
+  condition: selection
+falsepositives:
+  - An administrator running Test-NetConnection against one host, or a scanner stored on a share and launched by IT
+level: medium

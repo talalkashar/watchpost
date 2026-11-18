@@ -1,0 +1,47 @@
+# Successful Windows logon that is Remote Desktop, from a non-private address.
+# 4624 logon type 10 is RemoteInteractive. Some pipelines put that word in the message; others keep
+# "Logon Type: 10" or the listener port 3389. A type 3 network logon is not this rule.
+title: Windows External Remote Desktop Logon
+id: 3e5c2531-bb75-4c1c-966c-03ffdf997d03
+status: experimental
+description: |
+  A successful logon from a non-private address that is Remote Desktop: message text for logon type 10
+  or RemoteInteractive, or destination port 3389. Watchpost folds EventID 4624 into event.action
+  auth_success. Internal RDP and failed RDP do not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1133/
+tags:
+  - attack.initial_access
+  - attack.t1133
+logsource:
+  category: authentication
+  product: windows
+  service: security
+detection:
+  success:
+    event.action: auth_success
+  rdp:
+    - message|contains: 'Logon Type: 10'
+    - message|contains: "Logon Type:\t10"
+    - message|contains: "Logon Type:\t\t10"
+    - message|contains: RemoteInteractive
+    - DestinationPort: 3389
+  has_source:
+    - source.ip: '*.*'
+    - source.ip: '*:*'
+  internal:
+    IpAddress|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+      - 169.254.0.0/16
+      - '::1/128'
+      - 'fc00::/7'
+      - 'fe80::/10'
+  condition: success and rdp and has_source and not internal
+falsepositives:
+  - An administrator opening Remote Desktop from home or from a VPN address that is not private
+level: high

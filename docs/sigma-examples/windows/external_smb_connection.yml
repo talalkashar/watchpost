@@ -1,0 +1,42 @@
+# A Windows host opened SMB (445 or 139) to an address outside the private ranges.
+# Internal file servers stay quiet. HTTPS to the internet is not SMB and does not match.
+title: Windows SMB To External Host
+id: 4473eb05-d84a-4679-add0-8e3f0dc1ba16
+status: experimental
+description: |
+  A network connection from a Windows host to port 445 or 139 on a non-private address.
+  Outbound SMB is a common path for copying data off the network and for worms. Private ranges,
+  including link-local and IPv6 unique-local, do not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1048/
+tags:
+  - attack.exfiltration
+  - attack.t1048
+logsource:
+  category: network_connection
+  product: windows
+detection:
+  smb:
+    event.action: network_connection
+    DestinationPort:
+      - 445
+      - 139
+  has_dest:
+    - destination.ip: '*.*'
+    - destination.ip: '*:*'
+  internal:
+    DestinationIp|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+      - 169.254.0.0/16
+      - '::1/128'
+      - 'fc00::/7'
+      - 'fe80::/10'
+  condition: smb and has_dest and not internal
+falsepositives:
+  - A partner file server on a public address that the site actually uses
+level: high
