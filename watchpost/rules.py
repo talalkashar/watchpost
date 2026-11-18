@@ -417,11 +417,13 @@ def password_spray(events, params):
 def account_repeated_failures(events, params):
     threshold, window = params["threshold"], params["window_seconds"]
     findings = []
-    for user, group in _group(_filtered(events, params, "auth_failure"), "user").items():
+    # One list per lowercase account. Exact spellings are two groups, so
+    # neither may reach the threshold on its own.
+    for user, group in _group_users(_filtered(events, params, "auth_failure")).items():
         for cluster in _clusters(group, window, lambda w: len(w) >= threshold):
             ips = sorted({e.get("src_ip") or "unknown" for e in cluster})
             findings.append(_finding(
-                user.lower(), cluster,
+                user, cluster,
                 f"Repeated failures for account {user}: {len(cluster)} attempts",
                 f"Account {user} had {len(cluster)} failed logins from {len(ips)} source IP(s) "
                 f"({', '.join(ips[:5])}) between {cluster[0]['ts']} and {cluster[-1]['ts']}. "

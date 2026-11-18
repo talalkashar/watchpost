@@ -66,6 +66,36 @@ class OtherRuleTests(unittest.TestCase):
         self.assertIn("8 source IP", found[0]["explanation"])
         self.assertEqual(rules.brute_force_ip(events, params("brute_force_ip")), [])
 
+    def test_account_repeated_failures_merges_user_spellings(self):
+        p = params("account_repeated_failures")
+        # Four plus four: neither spelling reaches eight, so two groups stay quiet.
+        split = make(
+            [fail(i * 10, user="Alice", ip=f"192.0.2.{i}") for i in range(4)]
+            + [fail(40 + i * 10, user="alice", ip=f"198.51.100.{i}") for i in range(4)]
+        )
+        found = rules.account_repeated_failures(split, p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "alice")
+        self.assertEqual(found[0]["event_ids"], list(range(1, 9)))
+        self.assertIn("8 failed", found[0]["explanation"])
+        self.assertIn("8 source IP", found[0]["explanation"])
+        # A spelling that already meets the threshold still keeps the other spelling's failures.
+        both = make(
+            [fail(i * 10, user="Alice") for i in range(8)]
+            + [fail(80 + i * 10, user="alice") for i in range(2)]
+        )
+        found = rules.account_repeated_failures(both, p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "alice")
+        self.assertEqual(found[0]["event_ids"], list(range(1, 11)))
+        self.assertIn("10 failed", found[0]["explanation"])
+        # Seven across both spellings stays under the threshold.
+        short = make(
+            [fail(i, user="Alice") for i in range(4)]
+            + [fail(10 + i, user="alice") for i in range(3)]
+        )
+        self.assertEqual(rules.account_repeated_failures(short, p), [])
+
     def test_success_after_failures(self):
         p = params("success_after_failures")
         events = make([fail(i * 10, user="dave") for i in range(5)] + [ok(60, user="Dave")])
