@@ -24,6 +24,12 @@ TIMELINE_LIMIT = 300
 # Each list stays in id order. The older rows are notes_omitted and activity_omitted.
 NOTE_LIMIT = 100
 ACTIVITY_LIMIT = 100
+# Dashboard attacker list is this many source IPs, most alerts then most events.
+# attackers_omitted is how many source IPs on alerts were past that cap.
+ATTACKER_LIMIT = 40
+_ATTACKER_FROM = (
+    " FROM alerts a JOIN alert_events ae ON ae.alert_id = a.id"
+    " JOIN events e ON e.id = ae.event_id WHERE e.src_ip IS NOT NULL")
 EVENT_FIELDS = "id, ts, ingested_at, source, host, event_type, outcome, severity, user, src_ip, dest_ip, dest_port, " \
                "bytes, message, synthetic, batch_id"
 
@@ -571,10 +577,10 @@ def dashboard(conn):
         f"SELECT e.src_ip AS ip, COUNT(DISTINCT e.id) AS events, COUNT(DISTINCT a.id) AS alerts,"
         f" MAX(MAX({sev_events}), MAX({sev_alerts})) AS sev_rank, MAX(e.ts) AS last_seen,"
         f" SUM(a.status != 'resolved') AS open_alerts"
-        f" FROM alerts a JOIN alert_events ae ON ae.alert_id = a.id JOIN events e ON e.id = ae.event_id"
-        f" WHERE e.src_ip IS NOT NULL GROUP BY e.src_ip ORDER BY alerts DESC, events DESC LIMIT 40")]
+        f"{_ATTACKER_FROM} GROUP BY e.src_ip ORDER BY alerts DESC, events DESC LIMIT {ATTACKER_LIMIT}")]
     for a in attackers:
         del a["sev_rank"]
+    attackers_omitted = one(f"SELECT COUNT(DISTINCT e.src_ip){_ATTACKER_FROM}") - len(attackers)
 
     top_rules = [dict(r) for r in conn.execute(
         "SELECT a.rule_id, r.name, r.severity, COUNT(*) AS alerts, SUM(a.status != 'resolved') AS open"
@@ -597,6 +603,7 @@ def dashboard(conn):
         "events_per_minute": epm,
         "alert_timeline": _alert_timeline(conn),
         "attackers": attackers,
+        "attackers_omitted": attackers_omitted,
         "top_rules": top_rules,
         "alerts": board,
         "recent_events": recent,
