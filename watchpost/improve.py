@@ -719,17 +719,21 @@ def get_change(conn, change_id):
     return _change(conn.execute("SELECT * FROM change_requests WHERE id = ?", (change_id,)).fetchone())
 
 
-def list_changes(conn, status=None, limit=100):
+def list_changes(conn, status=None, limit=100, kinds=None):
     """Change requests, newest id first, and how many the limit left out.
 
     The second value is 0 when every match fits. A status filter counts only
-    that status. Callers that return the bare array send that count as
-    X-Watchpost-Omitted.
+    that status. `kinds` counts only those kinds. Callers that return the bare
+    array send that count as X-Watchpost-Omitted.
     """
-    where, args = "", []
+    clauses, args = [], []
     if status:
-        where = " WHERE status = ?"
+        clauses.append("status = ?")
         args.append(status)
+    if kinds:
+        clauses.append(f"kind IN ({','.join('?' for _ in kinds)})")
+        args.extend(kinds)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     total = conn.execute(f"SELECT COUNT(*) FROM change_requests{where}", args).fetchone()[0]
     rows = [_change(r) for r in conn.execute(
         f"SELECT * FROM change_requests{where} ORDER BY id DESC LIMIT ?", args + [limit])]

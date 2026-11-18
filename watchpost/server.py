@@ -966,10 +966,10 @@ def evaluation_run(req):
 
 @route("GET", "/api/assets")
 def asset_list(req):
-    pending_rows, _pending_omitted = improve.list_changes(req.conn, "pending")
-    pending = [c for c in pending_rows if c["kind"] in improve.ASSET_KINDS]
+    pending, pending_omitted = improve.list_changes(req.conn, "pending", kinds=improve.ASSET_KINDS)
     return {"assets": assets.list_assets(req.conn), "criticalities": list(assets.CRITICALITIES),
-            "kinds": list(assets.KINDS), "data_tags": assets.DATA_TAGS, "pending": pending}
+            "kinds": list(assets.KINDS), "data_tags": assets.DATA_TAGS, "pending": pending,
+            "pending_omitted": pending_omitted}
 
 
 def _asset_saved(req, asset):
