@@ -36,6 +36,8 @@ AUDIT_LIMIT = 200
 BATCH_LIMIT = 50
 # Change requests, newest by id. A status filter counts only that status.
 CHANGES_LIMIT = 100
+# Evaluation history, newest by id.
+EVALUATIONS_LIMIT = 20
 OMITTED_HEADER = "X-Watchpost-Omitted"
 
 
@@ -687,7 +689,7 @@ def event_stream(req):
 @route("GET", "/api/rules")
 def rules(req):
     perf = improve.rule_performance(req.conn)
-    latest = improve.list_evaluations(req.conn, limit=1)
+    latest, _omitted = improve.list_evaluations(req.conn, limit=1)
     evaluation = latest[0]["results"]["rules"] if latest else {}
     return [{**r, "performance": perf.get(r["id"]), "evaluation": evaluation.get(r["id"]),
              **({"sigma": _sigma_detail(req.conn, r)} if sigma.is_sigma(r["id"]) else {}),
@@ -941,7 +943,9 @@ def change_review(req, change_id):
 
 @route("GET", "/api/evaluations")
 def evaluations(req):
-    return improve.list_evaluations(req.conn)
+    rows, omitted = improve.list_evaluations(req.conn, EVALUATIONS_LIMIT)
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", "/api/evaluations", role="analyst")
