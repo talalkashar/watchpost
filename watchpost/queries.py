@@ -27,8 +27,9 @@ ACTIVITY_LIMIT = 100
 # Dashboard attacker list is this many source IPs, most alerts then most events.
 # attackers_omitted is how many source IPs on alerts were past that cap.
 ATTACKER_LIMIT = 40
-# Dashboard top rules is this many rule ids, most alerts first.
+# Dashboard top rules is this many rule ids, most alerts first, then rule_id.
 # rules_omitted is how many rule ids on alerts were past that cap.
+# A rule with no alerts is not a row and is not omitted.
 TOP_RULE_LIMIT = 10
 # Dashboard alert board is this many alerts. Not resolved first, then severity,
 # then last_seen. board_omitted is how many alerts were past that cap.
@@ -681,10 +682,11 @@ def dashboard(conn):
         del a["sev_rank"]
     attackers_omitted = one(f"SELECT COUNT(DISTINCT e.src_ip){_ATTACKER_FROM}") - len(attackers)
 
+    # Equal counts keep the lower rule_id. A rule with no alerts is not a row.
     top_rules = [dict(r) for r in conn.execute(
         "SELECT a.rule_id, r.name, r.severity, COUNT(*) AS alerts, SUM(a.status != 'resolved') AS open"
         " FROM alerts a LEFT JOIN rules r ON r.id = a.rule_id GROUP BY a.rule_id"
-        f" ORDER BY alerts DESC LIMIT {TOP_RULE_LIMIT}")]
+        f" ORDER BY alerts DESC, a.rule_id LIMIT {TOP_RULE_LIMIT}")]
     rules_omitted = one("SELECT COUNT(DISTINCT rule_id) FROM alerts") - len(top_rules)
     board = [dict(r) for r in conn.execute(
         "SELECT id, rule_id, severity, title, status, group_key, first_seen, last_seen, event_count, synthetic,"

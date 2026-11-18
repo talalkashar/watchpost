@@ -1,7 +1,8 @@
 """The dashboard top-rules list says how many rule ids the cap dropped.
 
-The rows stay ordered by alerts. A quieter rule is the one left out when 10
-busier rules fill the list. A list that fits, including an empty table, returns
+The rows stay the rule ids with the most alerts, then rule_id. A quieter rule
+is the one left out when 10 busier rules fill the list. Equal counts keep the
+lower rule_id. A list that fits, including an empty table, returns
 rules_omitted 0. A rule with no alerts is not in that count.
 """
 
@@ -15,7 +16,7 @@ from watchpost.db import connect, init_schema
 from watchpost.queries import TOP_RULE_LIMIT, dashboard
 
 API = Path(__file__).resolve().parent.parent / "docs" / "API.md"
-QUIET = "quiet_rule"
+QUIET = "zzz_quiet"
 
 
 def memory_db():
@@ -57,9 +58,24 @@ class RulesOmittedTests(unittest.TestCase):
         add_alerts(self.conn, QUIET, n=1)
         omitted, ids = self.board()
         self.assertEqual(omitted, 1)
-        self.assertEqual(len(ids), TOP_RULE_LIMIT)
+        self.assertEqual(ids, kept)
         self.assertNotIn(QUIET, ids)
-        self.assertEqual(set(ids), set(kept))
+
+    def test_equal_counts_keep_the_lower_rule_id(self):
+        # The later name is inserted first. Order is rule_id, not insert order.
+        add_alerts(self.conn, QUIET, n=1, status="resolved")
+        kept = [f"rule_{i:02d}" for i in range(TOP_RULE_LIMIT)]
+        for rule_id in reversed(kept):
+            add_alerts(self.conn, rule_id, n=1)
+        add_rule(self.conn, "idle", "Idle rule")
+        omitted, ids = self.board()
+        self.assertEqual(omitted, 1)
+        self.assertEqual(ids, kept)
+        self.assertNotIn(QUIET, ids)
+        self.assertNotIn("idle", ids)
+        rows = {r["rule_id"]: r for r in dashboard(self.conn)["top_rules"]}
+        self.assertTrue(all(row["alerts"] == 1 for row in rows.values()))
+        self.assertEqual(rows["rule_00"]["open"], 1)
 
     def test_more_alerts_outrank_a_quieter_rule(self):
         add_rule(self.conn, "busy", "Busy rule", "high")
@@ -102,7 +118,7 @@ class RulesOmittedTests(unittest.TestCase):
             " (0 when there are 10 or fewer)",
             api)
         self.assertIn("A rule with no alerts is not in that count", api)
-        self.assertIn("the top 10 by alerts", api)
+        self.assertIn("the top 10 by alerts, then `rule_id`", api)
 
 
 class RulesOmittedApiTests(ServerTestCase):
@@ -116,7 +132,9 @@ class RulesOmittedApiTests(ServerTestCase):
         self.assertEqual(status, 200, body)
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertEqual(body["rules_omitted"], 1)
-        self.assertEqual(len(body["top_rules"]), TOP_RULE_LIMIT)
+        self.assertEqual(
+            [row["rule_id"] for row in body["top_rules"]],
+            [f"rule_{i:02d}" for i in range(TOP_RULE_LIMIT)])
         self.assertNotIn(QUIET, [row["rule_id"] for row in body["top_rules"]])
         self.assertTrue(all(row["alerts"] == 2 for row in body["top_rules"]))
 
