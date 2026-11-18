@@ -745,18 +745,31 @@ for _kind in entities.KINDS:
 
 @route("GET", "/api/geo")
 def geo_lookup(req):
-    """Positions from the synthetic geo table only. Addresses outside it come back null ("unknown")."""
-    ips = [ip.strip() for ip in req.query.get("ips", "").split(",") if ip.strip()]
-    if len(ips) > GEO_MAX_IPS:
-        raise ApiError(400, f"at most {GEO_MAX_IPS} ips per request")
-    for ip in ips:
+    """Positions from the synthetic geo table only. Addresses outside it come back null ("unknown").
+
+    The response key is the compressed form ipaddress uses, so 2001:DB8::1 and 2001:db8::1 are one key.
+    A repeated address counts once toward GEO_MAX_IPS.
+    """
+    keys = []
+    seen = set()
+    for raw in req.query.get("ips", "").split(","):
+        text = raw.strip()
+        if not text:
+            continue
         try:
-            ipaddress.ip_address(ip)
+            key = str(ipaddress.ip_address(text))
         except ValueError:
             raise ApiError(400, "ips must be a comma-separated list of IP addresses")
-    located = {ip: geo.locate(ip) for ip in ips}
-    return {"label": geo.LABEL,
-            "ips": {ip: ({**loc, "internal": geo.is_internal(ip)} if loc else None) for ip, loc in located.items()}}
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+    if len(keys) > GEO_MAX_IPS:
+        raise ApiError(400, f"at most {GEO_MAX_IPS} ips per request")
+    ips = {}
+    for key in keys:
+        loc = geo.locate(key)
+        ips[key] = {**loc, "internal": geo.is_internal(key)} if loc else None
+    return {"label": geo.LABEL, "ips": ips}
 
 
 class _StreamResponse:
