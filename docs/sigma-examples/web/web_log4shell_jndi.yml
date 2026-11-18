@@ -1,0 +1,44 @@
+# CVE-2021-44228. The lookup is often in the User-Agent, which Watchpost appends
+# as "ua=...". Obfuscated lookups split the word "jndi" as ${::-j} and never
+# contain the literal string ${jndi:.
+title: Log4Shell JNDI Lookup in a Web Request
+id: a22f74cf-66f4-4868-9ba3-d70e3ec836a7
+status: experimental
+description: |
+  A web request that carries a Log4j JNDI lookup in the URL or the User-Agent,
+  including the ${::-j} obfuscation and the percent-encoded form of ${jndi: that
+  nginx writes into the path.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1190/
+  - https://nvd.nist.gov/vuln/detail/CVE-2021-44228
+tags:
+  - attack.initial_access
+  - attack.t1190
+logsource:
+  category: webserver
+detection:
+  web:
+    event.action:
+      - web_request
+      - web_scan
+      - web_error
+  jndi:
+    message|contains:
+      - '${jndi:'
+      - '${::-j}'
+      - '${${::-j}'
+      - '%24%7bjndi:'
+      - '%24%7bjndi%3a'
+      - '$%7bjndi:'
+      - 'jndi:ldap://'
+      - 'jndi:ldaps://'
+      - 'jndi:rmi://'
+      - 'jndi:dns://'
+      - 'jndi:nis://'
+      - 'jndi:iiop://'
+  condition: web and jndi
+falsepositives:
+  - A lab page that echoes a sample lookup string in the query
+level: critical

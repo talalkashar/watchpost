@@ -1,0 +1,47 @@
+# Reflected XSS probes in the request line. "javascript" alone is not enough:
+# the colon (or its %3a form) keeps a page named javascript-guide from matching.
+title: Web Cross-Site Scripting Probe
+id: a42b5362-d469-4601-9c5d-27de4542cc52
+status: experimental
+description: |
+  A web request that plants a script tag, an HTML event handler, or a javascript:
+  URL in the path or query. Patterns cover the raw characters and the percent-encoded
+  form an access log stores.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1190/
+  - https://cwe.mitre.org/data/definitions/79.html
+tags:
+  - attack.initial_access
+  - attack.t1190
+logsource:
+  category: webserver
+detection:
+  web:
+    event.action:
+      - web_request
+      - web_scan
+      - web_error
+  xss:
+    message|contains:
+      - '<script'
+      - '%3cscript'
+      - '</script'
+      - '%3c/script'
+      - '<svg'
+      - '%3csvg'
+      - '<iframe'
+      - '%3ciframe'
+      - '<img'
+      - '%3cimg'
+      - 'javascript:'
+      - 'javascript%3a'
+      - 'onerror='
+      - 'onerror%3d'
+      - 'onload='
+      - 'onload%3d'
+  condition: web and xss
+falsepositives:
+  - A request that legitimately submits HTML in a query parameter
+level: high
