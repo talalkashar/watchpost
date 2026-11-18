@@ -36,10 +36,11 @@ def _newest(conn, table_where, args):
 def build(conn, incident_id):
     """Combine an incident's evidence and analyst workflow into one ordered record."""
     incident = incidents.get_incident(conn, incident_id)
-    # Every linked alert, not only the ones whose evidence made the event cap.
-    linked = [row["alert_id"] for row in conn.execute(
-        "SELECT alert_id FROM incident_alerts WHERE incident_id = ?", (incident_id,))]
-    alerts = {alert["id"]: alert for alert in incident["alerts"]}
+    # Every linked alert, including ones past the incident-detail page of 200, and not only
+    # the ones whose evidence made the event cap.
+    full_alerts = incidents.linked_alerts(conn, incident_id)
+    alerts = {alert["id"]: alert for alert in full_alerts}
+    linked = [alert["id"] for alert in full_alerts]
     timeline = [{"ts": incident["created_at"], "type": "incident_created",
                  "detail": f"Incident #{incident_id} created"}]
 
@@ -109,7 +110,7 @@ def build(conn, incident_id):
         "status_changes_omitted": status_omitted,
         "alerts": [{key: alert.get(key) for key in
                     ("id", "rule_id", "title", "severity", "status", "disposition", "assignee", "first_seen",
-                     "last_seen", "event_count")} for alert in incident["alerts"]],
+                     "last_seen", "event_count")} for alert in full_alerts],
         "timeline": timeline,
     }
 

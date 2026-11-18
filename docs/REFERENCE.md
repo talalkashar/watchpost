@@ -266,6 +266,8 @@ manually ended windows remain visible under Rules & review; ending one early is 
 
 ### Incident case timeline
 
+Incident detail returns the earliest 200 linked alerts by `first_seen`, then `id`, and one timeline entry for each of those. `alerts_omitted` is how many linked alerts were left out (0 when there are 200 or fewer, including none). Techniques, stages, and severity still come from every linked alert. The case export and the incident report still list every linked alert.
+
 An incident detail page links to a chronological case export in JSON and Markdown. `GET /api/incidents/<id>/case.json`
 and `.md` (viewer and above) combine the incident creation and alert-membership
 times, every linked evidence event, alert assignments and status transitions, analyst notes, and incident status

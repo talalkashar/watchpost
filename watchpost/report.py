@@ -227,7 +227,8 @@ def build_from_alert(conn, alert_id):
 def build(conn, incident_id):
     try:
         incident = incidents.get_incident(conn, incident_id)
-        alerts = [get_alert(conn, a["id"]) for a in incident["alerts"]]
+        # The detail page caps alerts. The report still covers every linked alert, earliest first.
+        alerts = [get_alert(conn, row["id"]) for row in incidents.linked_alerts(conn, incident_id)]
     except QueryError as exc:
         raise ReportError(str(exc), exc.status)
     model = _assemble(conn, "incident", incident["id"], incident["title"], alerts, {})
