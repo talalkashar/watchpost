@@ -71,6 +71,30 @@ function stamp(ts) {
 }
 const pill = (text, cls) => el("span", { class: `pill ${cls}` }, text);
 const sev = (s) => pill(s, `sev-${s}`);
+// Same order as watchpost.normalize.SEVERITIES. Asset weight only moves up.
+const SEVERITY_RANK = { info: 0, low: 1, medium: 2, high: 3, critical: 4 };
+
+// Title-row pair when asset weight lifts the rule severity. Null when the
+// alert was not raised (same level, missing base, unknown label, or a drop).
+function raisedSeverity(alert) {
+  const base = alert && alert.base_severity;
+  const raised = alert && alert.severity;
+  if (!base || !raised) return null;
+  const baseRank = SEVERITY_RANK[base];
+  const raisedRank = SEVERITY_RANK[raised];
+  if (baseRank === undefined || raisedRank === undefined || raisedRank <= baseRank) return null;
+  return { base, raised };
+}
+
+function alertHeaderSevs(alert) {
+  const lifted = raisedSeverity(alert);
+  if (!lifted) return sev(alert.severity);
+  return el("span", { class: "sev-raise", title: alert.severity_note || null },
+    el("span", { class: "sr-only" }, "Rule severity "),
+    sev(lifted.base),
+    el("span", { class: "sev-raise-label" }, "raised to"),
+    sev(lifted.raised));
+}
 const status = (s) => pill(s, `st-${s}`);
 const synth = (flag) => (flag ? pill("synthetic", "synthetic") : null);
 const pct = (v) => (v === null || v === undefined ? "—" : `${Math.round(v * 100)}%`);
@@ -157,6 +181,7 @@ function openModal() {
 // ---------- auth ----------
 function showLogin() {
   state.user = null; state.csrf = null;
+  document.title = consoleTitle(false);
   Live.stop();
   document.body.classList.remove("authed");
   $("#login-view").hidden = false;
@@ -441,7 +466,7 @@ async function alertDetail(id) {
     el("div", { class: "split" },
       el("div", {},
         el("div", { class: "card" },
-          el("div", { class: "row" }, sev(a.severity), status(a.status), synth(a.synthetic)),
+          el("div", { class: "row alert-head" }, alertHeaderSevs(a), status(a.status), synth(a.synthetic)),
           el("h1", { style: { marginTop: "8px" } }, a.title),
           el("div", { class: "explain" }, el("strong", {}, "Why this fired: "), a.explanation),
           el("p", { class: "muted" }, `Rule: ${a.rule?.name ?? a.rule_id} (v${a.rule_version}). ${a.rule?.description ?? ""}`),
@@ -477,6 +502,49 @@ function reportLinks(kind, id) {
     el("a", { class: "button", href: `/api/${kind}/${id}/report.md`, download: "" }, "Report (Markdown)"));
 }
 
+// Full Enterprise kill chain for one incident. `tactics` is [name, short] in kill-chain order
+// (dashboard.js TACTICS). Fired stages come from the incident; technique ids come from the
+// grouped rule metadata. A stage the catalog does not name is appended, not dropped.
+function incidentKillChain(tactics, incident) {
+  const names = tactics.map((pair) => pair[0]);
+  const seen = new Set(names);
+  for (const name of incident.stages || []) {
+    if (name && !seen.has(name)) {
+      seen.add(name);
+      names.push(name);
+    }
+  }
+  const byTactic = new Map();
+  for (const group of incident.techniques_by_tactic || []) {
+    const ids = [];
+    for (const t of group.techniques || []) {
+      const id = typeof t === "string" ? t : t && t.id;
+      if (id && !ids.includes(id)) ids.push(id);
+    }
+    byTactic.set(group.tactic, ids);
+  }
+  const fired = new Set(incident.stages || []);
+  return names.map((name) => ({ name, fired: fired.has(name), techniques: byTactic.get(name) || [] }));
+}
+
+function killChainList(incident) {
+  const stages = incidentKillChain(TACTICS, incident);
+  return el("div", { class: "killchain-wrap" },
+    el("ol", { class: "killchain", "aria-label": "ATT&CK kill chain. Filled stages fired in this incident. Dim stages were not observed." },
+      stages.map((s) => el("li", { class: s.fired ? "kc fired" : "kc quiet" },
+        el("span", { class: "kc-name" }, s.name),
+        el("span", { class: "sr-only" }, s.fired ? ", observed. " : ", not observed. "),
+        el("span", { class: "kc-ids" }, s.techniques.length ? s.techniques.join(" ") : "—")))),
+    el("p", { class: "muted kc-note" }, "Filled stages fired in this incident. Dim stages were not observed."));
+}
+
+// Plain correlation rule (correlate.rule_summary). The server sentence wins; the fallback matches
+// the default 30-minute window so the entity list is never unlabeled.
+function correlationRule(incident) {
+  const text = incident && typeof incident.correlation_rule === "string" ? incident.correlation_rule.trim() : "";
+  return text || "Alerts that share a source IP, account, or host within 30 minutes are grouped into this incident.";
+}
+
 // ---------- incidents ----------
 async function incidentDetail(id) {
   const i = await api(`/api/incidents/${id}`);
@@ -499,7 +567,7 @@ async function incidentDetail(id) {
         el("div", { class: "card" },
           el("div", { class: "row" }, sev(i.severity), status(i.status), synth(i.synthetic), i.escalated ? pill("escalated: 3+ tactics", "sev-critical") : null),
           el("h1", { style: { marginTop: "8px" } }, `Incident #${i.id}: ${i.title}`),
-          el("div", { class: "row" }, i.stages.map((t, n) => el("span", {}, n ? "→ " : "", pill(t, "stage")))),
+          killChainList(i),
           actions),
         el("div", { class: "card" }, el("h2", {}, `Alert timeline (${i.alerts.length})`),
           table(["First seen", "Severity", "Alert", "Tactics", "Techniques", "Status"],
@@ -509,17 +577,80 @@ async function incidentDetail(id) {
           table(["Time", "Type", "User", "Source IP", "Host", "Message"],
             i.events.map((e) => ({ cells: [stamp(e.ts), e.event_type, entityLink("user", e.user), el("code", {}, entityLink("src_ip", e.src_ip)), entityLink("host", e.host), e.message ?? ""] }))))),
       el("div", {},
-        el("div", { class: "card" }, el("h2", {}, "Details"), el("dl", { class: "kv" },
-          ...[["Incident", `#${i.id}`], ["First seen", fmtTime(i.first_seen)], ["Last seen", fmtTime(i.last_seen)],
-            ["Source IPs", entityLinks("src_ip", i.entities.src_ip)], ["Accounts", entityLinks("user", i.entities.user)],
-            ["Hosts", entityLinks("host", i.entities.host)], ["Assignee", i.assignee ?? "—"], ["Resolved", fmtTime(i.resolved_at)]]
-            .flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]))),
+        el("div", { class: "card" }, el("h2", {}, "Details"),
+          el("dl", { class: "kv" },
+            ...[["Incident", `#${i.id}`], ["First seen", fmtTime(i.first_seen)], ["Last seen", fmtTime(i.last_seen)]]
+              .flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)])),
+          el("p", { class: "muted entity-rule", id: "correlation-rule" }, correlationRule(i)),
+          el("dl", { class: "kv" },
+            ...[["Source IPs", entityLinks("src_ip", i.entities.src_ip)], ["Accounts", entityLinks("user", i.entities.user)],
+              ["Hosts", entityLinks("host", i.entities.host)], ["Assignee", i.assignee ?? "—"], ["Resolved", fmtTime(i.resolved_at)]]
+              .flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]))),
         el("div", { class: "card" }, el("h2", {}, "Assets involved"),
           el("p", { class: "muted" }, "Inventoried systems reached by this incident. Alerts touching high or critical assets, or systems that process sensitive data, carry a raised severity."),
           assetChips(i.assets)),
         el("div", { class: "card" }, el("h2", {}, "MITRE ATT&CK"),
           i.techniques_by_tactic.map((g) => el("div", { class: "note" }, el("h3", {}, g.tactic), techniques(g.techniques)))))),
   );
+}
+
+// One bar per UTC day of this entity's stored events. Counts come from the server
+// (newest evidence event that names the entity), so the page only draws them.
+function entityAlertBars(series) {
+  const days = Array.isArray(series && series.days) ? series.days : [];
+  const bars = days.map((d) => ({
+    day: String(d.day || ""),
+    count: Math.max(0, Number(d.count) || 0),
+  })).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d.day));
+  const max = Math.max(1, ...bars.map((b) => b.count));
+  const total = bars.reduce((n, b) => n + b.count, 0);
+  const omitted = Math.max(0, Number(series && series.omitted) || 0);
+  const start = bars.length ? bars[0].day : "";
+  const end = bars.length ? bars[bars.length - 1].day : "";
+  const span = start === end ? start : `${start} to ${end}`;
+  const older = omitted
+    ? ` ${omitted} older ${omitted === 1 ? "alert is" : "alerts are"} outside this window.`
+    : "";
+  return {
+    empty: bars.length === 0,
+    label: bars.length
+      ? `Alerts by day, event time, ${span}: ${bars.map((b) => `${b.day} ${b.count}`).join(", ")}`
+      : "No stored events for this entity.",
+    note: bars.length
+      ? `${total} ${total === 1 ? "alert" : "alerts"} across ${bars.length} ${bars.length === 1 ? "day" : "days"}, ${span}.${older}`
+      : "No stored events for this entity.",
+    bars: bars.map((b) => ({ day: b.day, count: b.count, share: b.count / max })),
+  };
+}
+
+function entityDayChart(series) {
+  const model = entityAlertBars(series);
+  const head = [
+    el("h2", {}, "Alerts by day"),
+    el("p", { class: "muted" }, "Each alert counts on the UTC day of its newest stored event for this entity."),
+    el("p", { class: "muted", id: "entity-day-note" }, model.note),
+  ];
+  if (model.empty) return el("div", { id: "entity-days" }, head);
+  const W = 520, H = 84, labelH = 16, top = 4, n = model.bars.length;
+  const slot = W / n, inner = H - labelH - top;
+  const round = (v) => (Math.round(v * 100) / 100).toString();
+  const marks = model.bars.map((b, i) => {
+    const h = b.count ? Math.max(2, b.share * inner) : 1;
+    return svgEl("rect", {
+      class: b.count ? "f-accent" : "empty",
+      x: round(i * slot + 1), y: round(top + inner - h),
+      width: round(Math.max(1, slot - 2)), height: round(h),
+    }, svgEl("title", {}, `${b.day}: ${b.count}`));
+  });
+  const axis = [
+    svgEl("text", { class: "tick", x: 0, y: H - 2 }, model.bars[0].day.slice(5)),
+    n > 1 ? svgEl("text", { class: "tick", x: W, y: H - 2, "text-anchor": "end" }, model.bars[n - 1].day.slice(5)) : null,
+  ];
+  return el("div", { id: "entity-days" }, head,
+    svgEl("svg", {
+      class: "chart bars day-chart", viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": model.label,
+    }, marks, axis),
+    el("ul", { class: "sr-only" }, model.bars.map((b) => el("li", {}, `${b.day}: ${b.count}`))));
 }
 
 // ---------- entity page ----------
@@ -537,7 +668,8 @@ async function entityDetail(kind, value) {
       el("p", {}, huntLink(e.kind, e.value, `Hunt this ${ENTITY_KINDS[e.kind].toLowerCase()} (last 7 days)`)),
       el("div", { class: "kpis" },
         kpi(e.score, "Risk score"), kpi(counted.length, "Alerts counted"), kpi(e.incidents.length, "Incidents"),
-        kpi(e.event_count.toLocaleString(), "Events"), kpi(fmtTime(e.first_seen), "First seen"), kpi(fmtTime(e.last_seen), "Last seen"))),
+        kpi(e.event_count.toLocaleString(), "Events"), kpi(fmtTime(e.first_seen), "First seen"), kpi(fmtTime(e.last_seen), "Last seen")),
+      entityDayChart(e.alerts_by_day)),
     el("div", { class: "card" }, el("h2", {}, "Why this score"),
       el("p", { class: "muted" }, `Each alert whose evidence includes this ${ENTITY_KINDS[e.kind].toLowerCase()} adds its severity weight (${weights}), halved for every ${e.half_life_hours} hours between the alert and the newest event in the data (${fmtTime(e.anchor)}). Alerts closed as ${e.excluded_dispositions.map((d) => d.replace("_", " ")).join(" or ")} add nothing. The weights below sum to the score.`),
       table(["Alert", "Severity", "Status", "Last seen", "Base weight", "Age (h)", "Decay", "Weight"],
@@ -657,6 +789,13 @@ const HUNT_SYNTAX = [
   ["| timechart span=5m|15m|1h|6h|1d [count] [by f]", "last:24h | timechart span=1h by user", "Events per time bucket (at most 500 buckets); by keeps the top 5 plus other"],
 ];
 const HUNT_FIELDS = "user host source outcome src_ip dest_ip ip batch_id event_type severity dest_port synthetic message last since until";
+// Each query matches one labeled scenario in the synthetic demo. That dataset is dated on the previous
+// weekday, so last:7d still covers it. Clicking a link puts the query in the hash and runs it.
+const HUNT_EXAMPLES = [
+  ["Brute force", "event_type:auth_failure user:admin src_ip:203.0.113.45 synthetic:1 last:7d"],
+  ["Impossible travel", "user:erin source:demo:impossible_travel synthetic:1 last:7d"],
+  ["Large transfer", 'event_type:cloud_data_access user:svc-deploy-tmp "customer-exports" synthetic:1 last:7d'],
+];
 const huntHref = (q) => `#hunt/${encodeURIComponent(q)}`;
 const huntValue = (v) => (/^[^\s"\\]+$/.test(v) && !v.endsWith("*") ? v : `"${v.replace(/[\\"]/g, "\\$&")}"`);
 const huntLink = (field, value, label, onclick) => el("a", { href: huntHref(`${field}:${huntValue(String(value))} last:7d`),
@@ -679,6 +818,12 @@ async function huntView(query = "", offset = 0) {
       el("label", { style: { flex: "1 1 220px", minWidth: "0" } }, "Query", input),
       el("button", { type: "submit" }, "Hunt"),
       can("analyst") ? el("button", { type: "button", class: "ghost", onclick: () => saveHuntDialog(input.value.trim()) }, "Save search") : null),
+    el("div", { id: "hunt-examples" },
+      el("p", { class: "muted" }, "Example queries on the synthetic demo"),
+      el("div", { class: "row" }, HUNT_EXAMPLES.map(([label, q]) => el("a", {
+        class: `button ghost hunt-example${query === q ? " active" : ""}`, href: huntHref(q),
+        title: `Run this query on the synthetic demo: ${q}`,
+      }, el("span", {}, label), el("code", {}, q))))),
     el("details", { style: { marginTop: "10px" } }, el("summary", { class: "muted" }, "Syntax"),
       el("p", { class: "muted" }, "Terms are ANDed; there is no OR. Fields: ", el("code", {}, HUNT_FIELDS), ". ip matches source or destination."),
       el("p", { class: "muted" }, "One ", el("code", {}, "|"), " stage may follow the filter to aggregate it (a | inside quotes is part of the value). ",
@@ -749,9 +894,22 @@ function svgEl(tag, attrs = {}, ...children) {
   return node;
 }
 
+// A timechart with no events is a blank box of zero bars. Name the query and the span instead.
+const HUNT_TIMECHART_SPANS = ["5m", "15m", "1h", "6h", "1d"];
+function huntTimechartEmpty(data) {
+  const rows = data && Array.isArray(data.rows) ? data.rows : [];
+  const hit = rows.some((row) => Array.isArray(row) && row.slice(1).some((n) => Number(n) > 0));
+  if (hit) return "";
+  const span = data && data.span;
+  const query = data && typeof data.query === "string" ? data.query.trim() : "";
+  if (!HUNT_TIMECHART_SPANS.includes(span) || !query) return "No matching events.";
+  return `No events match ${query} in ${span} buckets.`;
+}
+
 // Bars for one series, lines for several (by), and the same numbers as a table for screen readers and copying.
 function huntTimechart(data) {
-  if (!data.rows.length) return el("p", { class: "muted" }, "No matching events.");
+  const empty = huntTimechartEmpty(data);
+  if (empty) return el("p", { class: "muted", id: "hunt-timechart-empty", role: "status" }, empty);
   const series = data.columns.slice(1);
   const colors = ["--accent", "--high", "--low", "--med", "--synthetic", "--info"];
   const W = 760, H = 200, L = 44, B = 22, T = 8, n = data.rows.length;
@@ -875,16 +1033,27 @@ function ingestSummary(r) {
     r.rejections?.length ? el("ul", {}, r.rejections.slice(0, 10).map((x) => el("li", {}, `Record ${x.index}: ${x.reason}`))) : null);
 }
 
+// Noise-lab word for a built-in rule. Imported Sigma rules and promoted searches are proved by
+// their own labeled sample, so they stay unmarked here. Unknown words are dropped.
+function ruleLabMark(rule, labRules) {
+  if (!rule || rule.sigma || rule.search || !Array.isArray(labRules)) return null;
+  const row = labRules.find((r) => r && r.rule_id === rule.id);
+  const verdict = row && row.verdict;
+  if (!["quiet", "noisy", "blind", "disabled", "untested"].includes(verdict)) return null;
+  return { verdict, summary: typeof row.summary === "string" ? row.summary : "" };
+}
+
 // ---------- rules ----------
 async function rules(focus) {
-  const [list, changes, settings, evals, exceptions, suppressionWindows] = await Promise.all([api("/api/rules"), api("/api/changes"), api("/api/settings"), api("/api/evaluations"), api("/api/suppressions"), api("/api/rule-suppression-windows")]);
+  const [list, changes, settings, evals, exceptions, suppressionWindows, lab] = await Promise.all([api("/api/rules"), api("/api/changes"), api("/api/settings"), api("/api/evaluations"), api("/api/suppressions"), api("/api/rule-suppression-windows"), api("/api/noise-lab")]);
   const pending = changes.filter((c) => c.status === "pending");
   const ruleCards = list.map((r) => {
     const p = r.performance || {};
     const ev = r.evaluation;
     return el("div", { class: "card", id: `rule-${r.id}`, tabindex: "-1" },
-      el("div", { class: "row", style: { justifyContent: "space-between" } },
-        el("h2", {}, r.name), el("span", {}, sev(r.severity), " ", r.enabled ? pill("enabled", "st-ok") : pill("disabled", "st-rejected"))),
+      el("div", { class: "row rule-head", style: { justifyContent: "space-between" } },
+        el("div", { class: "row rule-name" }, el("h2", {}, r.name), ruleLabPill(ruleLabMark(r, lab.rules))),
+        el("span", {}, sev(r.severity), " ", r.enabled ? pill("enabled", "st-ok") : pill("disabled", "st-rejected"))),
       el("p", { class: "muted" }, r.description),
       el("p", {}, el("strong", {}, "MITRE ATT&CK: "), techniques(r.techniques)),
       el("p", {}, el("strong", {}, "Alert grouping: "), r.grouping.length ? r.grouping.join(" + ") : "rule default",
@@ -1472,6 +1641,15 @@ async function historyDialog(rule) {
 // ---------- noise lab ----------
 const VERDICT_CLASS = { quiet: "st-ok", noisy: "st-degraded", blind: "st-failing", disabled: "st-rejected", untested: "st-rejected" };
 
+function ruleLabPill(mark) {
+  if (!mark) return null;
+  return el("span", {
+    class: `pill rule-lab ${VERDICT_CLASS[mark.verdict] || "st-rejected"}`,
+    title: mark.summary || null,
+    "aria-label": `Noise lab ${mark.verdict}`,
+  }, mark.verdict);
+}
+
 // A rule id may break after an underscore when the column is narrow. The characters stay the id.
 function ruleId(id) {
   const parts = String(id).split("_");
@@ -1492,6 +1670,41 @@ function noiseStat(cls, label, value) {
   return el("div", { class: `nr-stat ${cls}` }, el("span", {}, label), el("b", {}, value));
 }
 
+// Three counts and a pass/fail word. Null when the payload has no strip, so the page still renders.
+function noiseStripFacts(strip) {
+  if (!strip || typeof strip.scenarios !== "number" || typeof strip.detected_attacks !== "number"
+      || typeof strip.false_positives !== "number") return null;
+  const pass = strip.verdict === "pass";
+  const detected = Number.isInteger(strip.attacks) && strip.attacks > 0
+    ? `${strip.detected_attacks} of ${strip.attacks}`
+    : String(strip.detected_attacks);
+  return {
+    verdict: pass ? "pass" : "fail",
+    scenarios: String(strip.scenarios),
+    detected,
+    falsePositives: String(strip.false_positives),
+    missed: Array.isArray(strip.missed) ? strip.missed : [],
+    fired: Array.isArray(strip.false_positive_scenarios) ? strip.false_positive_scenarios : [],
+  };
+}
+
+function noiseStripStat(label, value, title) {
+  return el("div", { class: "lab-fig", title: title || null }, el("b", {}, value), el("span", {}, label));
+}
+
+function noiseStrip(strip) {
+  const facts = noiseStripFacts(strip);
+  if (!facts) return null;
+  const pass = facts.verdict === "pass";
+  return el("div", { id: "noise-strip", class: `lab-strip ${pass ? "lab-pass" : "lab-fail"}`, role: "status" },
+    pill(facts.verdict, pass ? "st-ok" : "st-failing"),
+    noiseStripStat("Scenarios", facts.scenarios, "Labeled synthetic scenarios in this run"),
+    noiseStripStat("Detected attacks", facts.detected,
+      facts.missed.length ? `Missed: ${facts.missed.join(", ")}` : "Every labeled attack was detected"),
+    noiseStripStat("False positives", facts.falsePositives,
+      facts.fired.length ? facts.fired.join(", ") : "No benign scenario fired"));
+}
+
 async function noiseLab() {
   const lab = await api("/api/noise-lab");
   const rules = lab.rules.map((r) => el("article", { class: "nr" },
@@ -1507,13 +1720,14 @@ async function noiseLab() {
   const lookalikes = lab.scenarios.filter((s) => s.lookalike_of);
   render(
     el("h1", {}, "Noise lab"),
+    noiseStrip(lab.strip),
     el("div", { class: "card" },
       el("h2", {}, "Where the rules get noisy"),
       el("p", {}, `Every rule runs against every labeled synthetic scenario, each in isolation: the attacks it should catch and ${lab.summary.lookalikes} benign look-alikes written to resemble them. ${lab.summary.noisy} of ${lab.summary.rules} rules fire on benign activity. That is shown here, not tuned away: a rule is only changed when there is a principled fix that keeps its attack detected.`),
       el("p", { class: "muted" }, "Recall is attacks caught out of attacks labeled. Precision is true detections out of everything the rule fired on, counted on these scenarios only: it says nothing about real traffic. Results use the current rule parameters and approved tuning exceptions (seed ", lab.seed, "). data_exfil_volume uses flat thresholds, so the nightly backup fires here until a tuning exception for the backup server is approved; only then is that one principal compared with its own history.")),
     el("div", { class: "card" }, el("h2", {}, "Rules against their look-alikes"),
       el("div", { class: "noise-rules" }, rules)),
-    el("div", { class: "card" }, el("h2", {}, "The benign look-alikes"),
+    el("div", { class: "card", id: "noise-scenarios" }, el("h2", {}, "The benign look-alikes"),
       table(["Scenario", "Written for", "What happens"], lookalikes.map((s) => ({ cells: [
         el("span", {}, el("code", {}, s.name), " ", synth(true)), el("code", {}, s.lookalike_of), s.description] })))),
   );
@@ -1527,6 +1741,7 @@ function coverageDetail(t, meaning) {
   return el("div", {},
     el("h2", {}, `${t.id} ${t.name}`),
     el("p", {}, levelPill(t.level), " ", meaning[t.level]),
+    t.level === "mapped" && t.why ? el("p", { class: "cov-why" }, t.why) : null,
     el("p", { class: "muted" }, `Tactic: ${t.tactic}. ${t.hits} live alert(s) from the rules mapped here.`),
     el("h3", {}, "Proving scenarios"),
     t.scenarios.length
@@ -1586,12 +1801,19 @@ async function coverageView() {
     el("div", { class: "card" }, el("h2", {}, `Gaps: not validated (${gaps.length})`),
       gaps.length ? el("ul", { class: "cov-gaps" }, gaps.map((t) => el("li", {}, levelPill(t.level), " ",
         el("button", { type: "button", class: "ghost mini", onclick: () => { show(t); detail.scrollIntoView({ block: "nearest" }); } }, `${t.id} ${t.name}`),
+        t.level === "mapped" && t.why ? el("span", { class: "cov-why" }, t.why) : null,
         " ", el("span", { class: "muted" }, t.rules.length ? `Rules: ${t.rules.map((r) => r.id + (r.enabled ? "" : " (disabled)")).join(", ")}` : "No rule"))))
         : el("p", { class: "muted" }, "Every catalog technique is validated on the labeled scenarios.")),
   );
 }
 
 // ---------- health ----------
+// The server owns the sentence. A blank or non-string value draws nothing.
+function checkMeans(check) {
+  const text = typeof check?.means === "string" ? check.means.trim() : "";
+  return text;
+}
+
 // ---------- log source health ----------
 // GET /api/sources/health: per (source, host) status computed from arrival times against the wall clock.
 const SOURCE_STATUS = { healthy: "st-ok", late: "st-degraded", silent: "st-failing", learning: "st-pending" };
@@ -1662,11 +1884,15 @@ async function health() {
           can("analyst") ? el("button", { onclick: () => guarded(async () => { const r = await api("/api/detection/run", { method: "POST" }); toast(`Detection ${r.status}: ${r.alerts_created} created, ${r.alerts_updated} updated${r.error ? ` — ${r.error}` : ""}`); health(); refreshBanner(); }) }, "Run detection (full scan)") : null,
           el("button", { class: "ghost", onclick: () => guarded(() => { refreshBanner(); return health(); }) }, "Re-check"))),
       el("p", { class: "muted" }, `Checked ${fmtTime(h.checked_at)}. Unauthenticated monitors can poll GET /api/health (statuses only; HTTP 503 when failing).`),
-      h.checks.map((c) => el("div", { class: "check" },
-        el("div", {}, el("strong", {}, c.name), el("div", {}, status(c.status)), el("div", { class: "muted" }, `${c.latency_ms} ms`)),
-        el("div", {}, el("div", {}, c.message),
-          c.guidance ? el("div", { class: "guidance" }, el("strong", {}, "What to do: "), c.guidance) : null,
-          el("details", {}, el("summary", { class: "muted" }, "details"), el("pre", {}, JSON.stringify(c.details, null, 2))))))),
+      h.checks.map((c) => {
+        const means = checkMeans(c);
+        return el("div", { class: "check" },
+          el("div", {}, el("strong", {}, c.name), el("div", {}, status(c.status)), el("div", { class: "muted" }, `${c.latency_ms} ms`)),
+          el("div", {}, el("div", {}, c.message),
+            c.guidance ? el("div", { class: "guidance" }, el("strong", {}, "What to do: "), c.guidance) : null,
+            el("details", {}, el("summary", { class: "muted" }, "details"), el("pre", {}, JSON.stringify(c.details, null, 2)))),
+          means ? el("p", { class: "check-means" }, means) : null);
+      })),
     sourceHealthCard(srcs),
     el("div", { class: "card" }, el("h2", {}, "Recent errors (redacted)"),
       table(["When", "Component", "Error", "Guidance"], h.recent_errors.map((e) => ({ cells: [fmtTime(e.created_at), e.component, el("code", {}, e.message), e.guidance ?? ""] })))),

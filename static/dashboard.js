@@ -59,6 +59,61 @@ function parseMaybeJson(v) {
 }
 const asList = (v) => { const p = parseMaybeJson(v); return Array.isArray(p) ? p : p ? [p] : []; };
 const fmtN = (v) => (v === null || v === undefined ? "—" : Number(v).toLocaleString());
+// First paint of the status strip. Open alerts, critical, and stored events come from
+// /api/dashboard; until that returns they are skeletons, not em dashes. Incidents use the
+// same skeleton until /api/incidents returns. A later failure keeps the last number.
+function stripDashboardTiles(summary) {
+  if (!summary) {
+    return {
+      open: { loading: true },
+      critical: { loading: true, hot: false },
+      stored: { loading: true },
+    };
+  }
+  return {
+    open: { loading: false, text: fmtN(summary.alerts_open + summary.alerts_investigating) },
+    critical: { loading: false, text: fmtN(summary.alerts_critical_open), hot: summary.alerts_critical_open > 0 },
+    stored: { loading: false, text: fmtN(summary.events_total) },
+  };
+}
+function stripIncidentTile(incidents) {
+  const state = incidents && incidents.state;
+  if (state === "ok") {
+    const open = incidents.list.filter((i) => boardColumn(i.status) !== "resolved").length;
+    return { loading: false, text: fmtN(open), dim: false, title: "" };
+  }
+  if (state === "pending") {
+    return {
+      loading: false,
+      text: "pending",
+      dim: true,
+      title: "Incidents arrive with the correlation engine (/api/incidents)",
+    };
+  }
+  if (state === "error") return { keep: true, dim: true };
+  return { loading: true, dim: false, title: "" };
+}
+function applyStripTile(node, tile) {
+  if (!node || !tile) return;
+  if (tile.keep) {
+    node.classList.toggle("dim", !!tile.dim);
+    return;
+  }
+  node.classList.toggle("skel", tile.loading === true);
+  node.classList.toggle("dim", !!tile.dim);
+  if (Object.prototype.hasOwnProperty.call(tile, "title")) node.title = tile.title;
+  if (tile.loading) {
+    node.setAttribute("aria-busy", "true");
+    if (!node.querySelector(".skel-bar")) {
+      node.replaceChildren(
+        el("span", { class: "skel-bar", "aria-hidden": "true" }),
+        el("span", { class: "sr-only" }, "Loading"));
+    }
+    return;
+  }
+  node.removeAttribute("aria-busy");
+  node.textContent = tile.text;
+}
 const sevOf = (s) => (SEV_RANK[s] !== undefined ? s : "info");
 const maxSev = (a, b) => (SEV_RANK[sevOf(a)] >= SEV_RANK[sevOf(b)] ? sevOf(a) : sevOf(b));
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
@@ -76,6 +131,34 @@ function panel(id, title, meta, ...body) {
     el("header", { class: "ph" }, el("h2", {}, title), el("div", { class: "pm", id: `${id}-meta` }, ...(meta || []))),
     el("div", { class: "pb", id: `${id}-body` }, ...body));
 }
+
+// A store with zero events is one explanation, not a note in every panel.
+// Only an admin gets the control that loads the labeled synthetic dataset.
+function emptyDashboard(eventsTotal, isAdmin) {
+  if (typeof eventsTotal !== "number" || eventsTotal !== 0) return null;
+  const load = isAdmin === true;
+  return {
+    title: "No events yet",
+    body: "Nothing is stored yet, so the attack map, alerts, and incidents have nothing to draw. Load the labeled synthetic dataset to fill this console. Every event in that dataset is marked synthetic.",
+    load,
+    hint: load ? "" : "An admin loads the synthetic demo.",
+  };
+}
+// The public <title> stays the search title. Once signed in, the tab names the open critical count.
+const PUBLIC_TITLE = "Watchpost: an open-source SIEM and SOC console in Python";
+function consoleTitle(signedIn, criticalOpen) {
+  if (signedIn !== true) return PUBLIC_TITLE;
+  if (typeof criticalOpen !== "number" || !Number.isInteger(criticalOpen) || criticalOpen < 0) return PUBLIC_TITLE;
+  return `Watchpost · ${criticalOpen} critical`;
+}
+// How often the feed polls after the event stream fails. The feed sentence uses this same interval.
+const STREAM_POLL_MS = 3000;
+function feedPollNote(mode) {
+  if (mode !== "poll") return "";
+  const seconds = STREAM_POLL_MS / 1000;
+  if (!Number.isInteger(seconds) || seconds <= 0) return "";
+  return `polling every ${seconds}s`;
+}
 const chip = (text, cls = "") => el("span", { class: `chip ${cls}` }, text);
 const SEV_SHORT = { critical: "CRIT", high: "HIGH", medium: "MED", low: "LOW", info: "INFO" };
 const sevTag = (s) => el("span", { class: `sevtag sev-${sevOf(s)}` }, SEV_SHORT[sevOf(s)]);
@@ -90,6 +173,7 @@ function normIncidents(payload) {
       status: String(i.status || "open"), first_seen: i.first_seen, last_seen: i.last_seen || i.updated_at,
       alert_count: i.alert_count ?? i.alerts_count ?? (alerts.length || asList(i.alert_ids).length),
       tactics: asList(i.kill_chain ?? i.stages ?? i.kill_chain_stages ?? i.tactics).map((t) => (typeof t === "string" ? t : t.name || t.tactic)).filter(Boolean),
+      top_technique: techniqueRef(i.top_technique),
       entities: parseMaybeJson(i.entities ?? i.entity_summary) || {}, synthetic: i.synthetic,
     };
   });
@@ -106,6 +190,79 @@ function normCoverage(payload) {
   }));
 }
 const tacticKey = (name) => String(name).toLowerCase().replace(/[^a-z]/g, "");
+
+function techniqueRef(value) {
+  if (!value) return null;
+  if (typeof value === "string") return value ? { id: value, name: "", tactic: "" } : null;
+  const id = value.id || value.technique_id;
+  if (!id) return null;
+  return { id: String(id), name: value.name || "", tactic: value.tactic || "" };
+}
+
+// Evidence counts for the one-line chip shown when a layout hides the matrix.
+// A payload with no level still treats a covered technique as validated, matching the matrix.
+function coverageLevel(technique) {
+  const level = technique && technique.level;
+  if (level === "validated" || level === "mapped" || level === "disabled" || level === "gap") return level;
+  const rules = technique && technique.rules;
+  const proven = technique && (technique.covered ?? (Array.isArray(rules) && rules.length > 0));
+  return proven ? "validated" : "gap";
+}
+function coverageCounts(list) {
+  const counts = { validated: 0, mapped: 0, disabled: 0, gap: 0 };
+  for (const technique of list || []) counts[coverageLevel(technique)] += 1;
+  return counts;
+}
+function coverageChipText(counts) {
+  return `${counts.validated} validated · ${counts.mapped} mapped · ${counts.disabled} disabled · ${counts.gap} gap`;
+}
+function layoutHidesMatrix(layout) {
+  return !(layout || []).includes("p-attack");
+}
+function coverageChipLabel(coverage) {
+  if (!coverage || coverage.state === "loading") return "coverage loading";
+  if (coverage.state !== "ok") return coverage.state === "error" ? "coverage unavailable" : "coverage pending";
+  return coverageChipText(coverageCounts(coverage.list));
+}
+
+// The heat matrix is an SVG image, so its cells are not text. One row per cell, including
+// cells the chart clips behind "+N", names the technique, the tactic, and the evidence level.
+function matrixTextRows(columns) {
+  const rows = [];
+  for (const column of columns || []) {
+    const tactic = (column && (column.name || column.short)) || "Unmapped";
+    for (const cell of (column && column.cells) || []) {
+      if (!cell || cell.id === undefined || cell.id === null || String(cell.id) === "") continue;
+      rows.push({ id: String(cell.id), tactic: String(tactic), level: coverageLevel(cell) });
+    }
+  }
+  return rows;
+}
+function matrixTextLine(row) {
+  return `${row.id}, ${row.tactic}, ${row.level}`;
+}
+function mountMatrixText(box, columns) {
+  if (!box) return;
+  const items = matrixTextRows(columns).map((row) => el("li", {}, matrixTextLine(row)));
+  box.append(el("ul", { class: "sr-only", id: "attack-text" }, ...items));
+}
+
+// Tactic tags (at most four) plus the earliest kill-chain technique, the same order as the matrix.
+function boardTags(tactics, technique) {
+  const tags = [];
+  const tech = techniqueRef(technique);
+  if (tech) tags.push({ kind: "tech", id: tech.id, name: tech.name, tactic: tech.tactic });
+  for (const name of (Array.isArray(tactics) ? tactics : []).slice(0, 4)) {
+    if (name) tags.push({ kind: "tactic", text: String(name) });
+  }
+  return tags;
+}
+
+function techniqueTagTitle(tag) {
+  const name = tag.name ? ` ${tag.name}` : "";
+  const tactic = tag.tactic ? ` (${tag.tactic})` : "";
+  return `${tag.id}${name}${tactic}`;
+}
 function boardColumn(status) {
   const s = String(status).toLowerCase();
   if (["resolved", "closed", "false_positive", "benign"].includes(s)) return "resolved";
@@ -114,6 +271,28 @@ function boardColumn(status) {
 }
 
 // ---------- synthetic geo cache ----------
+// Side list for the attack map. Each arc is one fictional city aimed at HQ, busiest first.
+// `unknown` counts source IPs the synthetic geo table does not know.
+// A locate() of undefined is still in flight and is neither an arc nor unknown.
+function mapSide(sources, locate) {
+  const cities = new Map();
+  let unknown = 0;
+  for (const s of sources || []) {
+    const loc = locate(s.ip);
+    if (loc === undefined) continue;
+    if (loc === null) { unknown += 1; continue; }
+    if (loc.internal || !loc.city) continue;
+    const row = cities.get(loc.city) || { city: loc.city, events: 0, sev: "info", ips: 0 };
+    row.events += Number(s.events) || 0;
+    row.ips += 1;
+    row.sev = maxSev(row.sev, s.sev);
+    cities.set(loc.city, row);
+  }
+  const ranked = [...cities.values()].sort((a, b) =>
+    b.events - a.events || SEV_RANK[b.sev] - SEV_RANK[a.sev] || a.city.localeCompare(b.city));
+  return { arcs: ranked.slice(0, 5), locations: ranked.length, unknown };
+}
+
 const Geo = {
   cache: new Map(),  // ip -> location | null (null = no table entry: "unknown")
   get(ip) { return this.cache.get(ip); },
@@ -191,7 +370,7 @@ const Live = {
       } catch { /* api() already handles 401 */ }
     };
     poll();
-    this.timers.poll = setInterval(poll, 3000);
+    this.timers.poll = setInterval(poll, STREAM_POLL_MS);
     this.timers.retry = setTimeout(() => { this.stopPolling(); this.connect(); }, 30000);
   },
   stopPolling() {
@@ -201,10 +380,19 @@ const Live = {
   setMode(mode) {
     this.mode = mode;
     const pill = $("#k-live");
-    if (!pill) return;
-    pill.dataset.mode = mode;
-    $("#k-live-text").textContent = { live: "LIVE · SSE", poll: "POLLING 3s", reconnecting: "RECONNECTING", off: "OFFLINE" }[mode] || mode;
-    if (Dash.mounted) Dash.renderHealth();
+    if (pill) {
+      pill.dataset.mode = mode;
+      $("#k-live-text").textContent = { live: "LIVE · SSE", poll: "POLLING 3s", reconnecting: "RECONNECTING", off: "OFFLINE" }[mode] || mode;
+      if (Dash.mounted) Dash.renderHealth();
+    }
+    this.paintFeedPoll();
+  },
+  paintFeedPoll() {
+    const note = $("#feed-poll");
+    if (!note) return;
+    const text = feedPollNote(this.mode);
+    note.textContent = text;
+    note.hidden = !text;
   },
 
   onEvents(events, count) {
@@ -212,7 +400,11 @@ const Live = {
     if (this.summary) this.summary.events_total += count;
     for (const e of events) this.lastEventId = Math.max(this.lastEventId, e.id || 0);
     this.renderStrip();
-    if (Dash.mounted) Dash.enqueue(events);
+    if (Dash.mounted) {
+      // The first stored event replaces the empty-store card with the panels.
+      if ($("#soc")?.hidden && this.summary && this.summary.events_total > 0) Dash.update(this.summary);
+      Dash.enqueue(events);
+    }
     if (events.some((e) => e.synthetic)) $("#k-synth").hidden = false;
   },
   onAlert(a) {
@@ -288,17 +480,13 @@ const Live = {
   },
   renderStrip() {
     const d = this.summary;
-    if (d) {
-      $("#k-open").textContent = fmtN(d.alerts_open + d.alerts_investigating);
-      $("#k-crit").textContent = fmtN(d.alerts_critical_open);
-      $("#k-crit").parentElement.classList.toggle("hot", d.alerts_critical_open > 0);
-      $("#k-events").textContent = fmtN(d.events_total);
-    }
-    const inc = this.incidents;
-    const kInc = $("#k-inc");
-    if (inc.state === "ok") { kInc.textContent = fmtN(inc.list.filter((i) => boardColumn(i.status) !== "resolved").length); kInc.title = ""; }
-    else if (inc.state === "pending") { kInc.textContent = "pending"; kInc.title = "Incidents arrive with the correlation engine (/api/incidents)"; }
-    kInc.classList.toggle("dim", inc.state !== "ok");
+    document.title = consoleTitle(!!state.user, d ? d.alerts_critical_open : undefined);
+    const tiles = stripDashboardTiles(d);
+    applyStripTile($("#k-open"), tiles.open);
+    applyStripTile($("#k-crit"), tiles.critical);
+    $("#k-crit").parentElement.classList.toggle("hot", !!tiles.critical.hot);
+    applyStripTile($("#k-events"), tiles.stored);
+    applyStripTile($("#k-inc"), stripIncidentTile(this.incidents));
     $("#k-epm").textContent = fmtN(this.rollingEpm());
     this.renderSpark();
     const checks = Object.entries(this.health);
@@ -336,25 +524,27 @@ const Dash = {
     this.feedCount = 0;
     const pause = el("button", { class: "mini ghost", id: "feed-pause", onclick: () => this.togglePause() }, "Pause");
     render(el("div", { class: "view-bar", id: "dashboard-view-bar" }, el("p", { class: "muted" }, "Loading saved dashboard views…")),
+      el("div", { id: "dash-empty", hidden: true }),
       el("div", { class: "soc", id: "soc" },
       panel("p-map", "Attack map", [chip("SYNTHETIC GEO", "synthetic"), el("span", { class: "muted", id: "map-count" })],
         el("div", { class: "mapwrap", id: "map" }),
         el("div", { class: "map-side", id: "map-side" }),
         el("div", { class: "map-legend" }, ...["critical", "high", "medium", "low"].map((s) => el("span", {}, el("i", { class: `dot sev-${s}` }), s)),
           el("span", {}, el("i", { class: "dot hq" }), "HQ target"))),
-      panel("p-feed", "Live event stream", [el("span", { class: "muted", id: "feed-rate" }), pause],
+      panel("p-feed", "Live event stream", [el("span", { class: "muted", id: "feed-poll", hidden: true }), el("span", { class: "muted", id: "feed-rate" }), pause],
         el("div", { class: "feed-head" }, el("span", {}, "TIME"), el("span", {}, "SEV"), el("span", {}, "EVENT")),
         el("div", { class: "feed", id: "feed", onmouseenter: () => this.hover(true), onmouseleave: () => this.hover(false) })),
       panel("p-timeline", "Alerts over time", [el("span", { class: "muted", id: "tl-bucket" })], el("div", { class: "chartbox", id: "tl-chart" }),
         el("div", { class: "legend" }, ...["critical", "high", "medium", "low"].map((s) => el("span", {}, el("i", { class: `dot sev-${s}` }), s)),
           el("span", {}, el("i", { class: "dot volume" }), "event volume"))),
       panel("p-attackers", "Top attacker IPs", [el("span", { class: "muted" }, "by evidence events")], el("div", { class: "chartbox", id: "atk-chart" })),
-      panel("p-attack", "MITRE ATT&CK coverage", [el("span", { class: "muted", id: "attack-meta" }), el("a", { href: "/api/attack/navigator.json", download: "watchpost-navigator-layer.json", title: "MITRE ATT&CK Navigator layer (JSON) colored by evidence level; scores come from synthetic demo data" }, "Export Navigator layer")], el("div", { class: "chartbox", id: "attack-chart", tabindex: "0", role: "region", "aria-label": "ATT&CK technique matrix" })),
+      panel("p-attack", "MITRE ATT&CK coverage", [el("span", { class: "muted", id: "attack-meta" }), el("a", { href: "/api/attack/navigator.json", download: "watchpost-navigator-layer.json", title: "MITRE ATT&CK Navigator layer (JSON) colored by evidence level; scores come from synthetic demo data" }, "Export Navigator layer")], el("div", { class: "chartbox", id: "attack-chart", tabindex: "0", role: "region", "aria-label": "ATT&CK technique matrix" }), el("div", { class: "heat-legend", id: "attack-legend" })),
       panel("p-board", "Incident board", [el("span", { id: "board-meta" })], el("div", { class: "board", id: "board" })),
       panel("p-rules", "Top rules", [el("span", { class: "muted" }, "alerts all time")], el("div", { class: "chartbox", id: "rules-chart" })),
       panel("p-health", "Health", [el("a", { href: "#health", class: "muted" }, "details →")], el("div", { id: "health-body" })),
       panel("p-entities", "Riskiest entities", [el("span", { class: "muted" }, "alert weight, decayed by age")], el("div", { id: "ent-list" })),
     ));
+    Live.paintFeedPoll();
     this.timers.drip = setInterval(() => this.drip(), 110);
     this.timers.details = setInterval(() => this.loadHealthDetails(), 30000);
     const soc = $("#soc");
@@ -383,14 +573,62 @@ const Dash = {
   },
   async update(d) {
     this.data = d;
+    if (this.renderEmpty()) return;
     if (!this.feedCount) this.fillFeed(d.recent_events);
     const ips = [...d.attackers.map((a) => a.ip), ...d.recent_events.map((e) => e.src_ip), ...d.recent_events.map((e) => e.dest_ip), "10.0.0.10"].filter(Boolean);
     this.redraw();
     if (await Geo.resolve(ips)) this.renderMarks();
     this.renderAttackers();
   },
+  // Returns true when the store is empty: one card, and the panel grid stays hidden.
+  renderEmpty() {
+    const box = $("#dash-empty");
+    const soc = $("#soc");
+    if (!box || !soc || !this.data) return false;
+    const copy = emptyDashboard(this.data.events_total, can("admin"));
+    if (!copy) {
+      if (soc.hidden || !box.hidden) {
+        box.hidden = true;
+        box.replaceChildren();
+        delete box.dataset.mode;
+        soc.hidden = false;
+      }
+      return false;
+    }
+    soc.hidden = true;
+    const mode = copy.load ? "load" : "wait";
+    if (box.hidden || box.dataset.mode !== mode) {
+      box.dataset.mode = mode;
+      box.hidden = false;
+      box.replaceChildren(el("div", { class: "card dash-empty", role: "status" },
+        el("h2", {}, copy.title),
+        el("p", {}, copy.body),
+        copy.load
+          ? el("button", { type: "button", id: "dash-load-demo", onclick: () => guarded(() => this.loadDemo()) }, "Load synthetic demo data")
+          : el("p", { class: "muted" }, copy.hint)));
+    }
+    return true;
+  },
+  async loadDemo() {
+    const button = $("#dash-load-demo");
+    if (button) button.disabled = true;
+    try {
+      let loaded;
+      try { loaded = await api("/api/demo/load", { method: "POST", body: {} }); }
+      catch (e) {
+        if (e.status !== 409 || !confirm(`${e.message}. Load another copy?`)) throw e;
+        loaded = await api("/api/demo/load", { method: "POST", body: { force: true } });
+      }
+      toast(`Synthetic demo loaded (${Object.keys(loaded).length} scenarios).`);
+      await Live.refreshSummary();
+      await Live.refreshIncidents();
+      this.loadCoverage();
+    } finally {
+      if (button && button.isConnected) button.disabled = false;
+    }
+  },
   redraw() {
-    if (!this.mounted || !this.data) return;
+    if (!this.mounted || !this.data || emptyDashboard(this.data.events_total, false)) return;
     this.renderMap(); this.renderTimeline(); this.renderAttackers(); this.renderRules(); this.renderEntities(); this.renderMatrix(); this.renderBoard(); this.renderHealth();
     this.applyView();
   },
@@ -444,8 +682,14 @@ const Dash = {
       }); });
       save = el("details", { class: "view-save" }, el("summary", {}, "Save a view"), form);
     }
-    bar.replaceChildren(el("span", { class: "view-name" }, this.currentView ? this.currentView.name : "Default layout"),
-      el("div", { class: "view-controls" }, ...controls), ...(save ? [save] : []));
+    const lead = [el("span", { class: "view-name" }, this.currentView ? this.currentView.name : "Default layout")];
+    if (layoutHidesMatrix(this.layout)) {
+      lead.push(el("a", {
+        class: "chip coverage-chip", id: "coverage-chip", href: "#coverage",
+        title: "Synthetic ATT&CK catalog. Only validated counts as covered. This layout hides the matrix.",
+      }, coverageChipLabel(this.coverage)));
+    }
+    bar.replaceChildren(...lead, el("div", { class: "view-controls" }, ...controls), ...(save ? [save] : []));
   },
   applyView() {
     const soc = $("#soc");
@@ -499,12 +743,9 @@ const Dash = {
     const [w, h] = this.mapDims;
     const hq = this.hq();
     const cities = new Map();
-    const unknown = [], internal = [];
     for (const s of this.sources()) {
       const loc = Geo.get(s.ip);
-      if (loc === undefined) continue;
-      if (loc === null) { unknown.push(s); continue; }
-      if (loc.internal) { internal.push(s); continue; }
+      if (!loc || loc.internal) continue;
       const c = cities.get(loc.city) || { ...loc, ips: [], events: 0, sev: "info" };
       c.ips.push(s.ip); c.events += s.events; c.sev = maxSev(c.sev, s.sev);
       cities.set(loc.city, c);
@@ -548,19 +789,20 @@ const Dash = {
       `<text class="ml" x="${hqx.toFixed(1)}" y="${hqy.toFixed(1)}" text-anchor="${hqEnd ? "end" : "start"}">HQ</text></g>`;
     setSvgChildren(svg.querySelector("g.arcs"), arcs);
     setSvgChildren(svg.querySelector("g.marks"), marks);
-    $("#map-count").textContent = `${ranked.length} source locations · ${unknown.length} unknown`;
-
+    const summary = mapSide(this.sources(), (ip) => Geo.get(ip));
+    const count = $("#map-count");
+    if (count) count.textContent = `${summary.locations} ${summary.locations === 1 ? "arc" : "arcs"} · ${summary.unknown} no geo entry`;
     const side = $("#map-side");
-    const row = (s, where, cls) => el("div", { class: "ms-row" }, el("i", { class: `dot sev-${s.sev}` }), el("code", {}, s.ip), el("span", { class: cls || "" }, where));
-    const top = this.sources().filter((s) => Geo.get(s.ip) && !Geo.get(s.ip).internal)
-      .sort((a, b) => SEV_RANK[b.sev] - SEV_RANK[a.sev] || b.events - a.events).slice(0, 5);
-    side.replaceChildren(...[
-      el("div", { class: "ms-h" }, "Top sources"),
-      ...(top.length ? top.map((s) => row(s, Geo.get(s.ip).city)) : [el("div", { class: "muted" }, "No external sources yet")]),
-      el("div", { class: "ms-h" }, `Unknown · no geo entry · ${unknown.length}`),
-      ...(unknown.length ? unknown.slice(0, 4).map((s) => row(s, "unknown", "muted")) : [el("div", { class: "muted" }, "none")]),
-      unknown.length > 4 ? el("div", { class: "muted" }, `+${unknown.length - 4} more`) : null,
-      internal.length ? el("div", { class: "ms-h" }, `Internal sources · ${internal.length}`) : null].filter(Boolean));
+    if (!side) return;
+    const arcRow = (a) => el("div", { class: "ms-row", title: `${a.city} → HQ · ${a.events} events from ${a.ips} source ${a.ips === 1 ? "IP" : "IPs"} · synthetic geo` },
+      el("i", { class: `dot sev-${a.sev}` }),
+      el("span", { class: "ms-city" }, a.city),
+      el("b", { class: "ms-n" }, String(a.events)));
+    side.replaceChildren(
+      el("div", { class: "ms-h" }, "Busiest arcs"),
+      ...(summary.arcs.length ? summary.arcs.map(arcRow) : [el("div", { class: "muted" }, "No external arcs yet")]),
+      el("div", { class: "ms-h" }, "No geo entry"),
+      el("div", { class: "muted" }, summary.unknown ? `${summary.unknown} source ${summary.unknown === 1 ? "IP" : "IPs"}` : "none"));
   },
   pulse(e) {
     const svg = $("#map svg");
@@ -711,6 +953,8 @@ const Dash = {
     this.renderMatrix();
   },
   renderMatrix() {
+    const chipNode = $("#coverage-chip");
+    if (chipNode) chipNode.textContent = coverageChipLabel(this.coverage);
     const box = $("#attack-chart");
     if (!box) return;
     const cov = this.coverage;
@@ -728,29 +972,32 @@ const Dash = {
             crit: t.hits > 0 && t.rules.some((id) => critRules.has(id)) });
         }
       }
-      for (const col of byTactic.values()) col.cells.sort((a, b) => b.value - a.value || a.id.localeCompare(b.id));
+      for (const col of byTactic.values()) col.cells.sort((a, b) => a.id.localeCompare(b.id));
     }
-    let columns = [...byTactic.values()];
-    let quiet = [];
-    if (cov.state === "ok") {
-      quiet = columns.filter((c) => !c.cells.length);
-      columns = columns.filter((c) => c.cells.length);
-    }
+    // Empty tactics stay in the row so a gap in the kill chain is visible, not dropped.
+    const columns = [...byTactic.values()];
     const meta = $("#attack-meta");
+    const legend = $("#attack-legend");
     if (cov.state === "ok") {
-      const validated = cov.list.filter((t) => t.covered ?? t.rules.length > 0).length;
+      const validated = cov.list.filter((t) => (t.level ? t.level === "validated" : (t.covered ?? t.rules.length > 0))).length;
+      const mapped = cov.list.filter((t) => t.level === "mapped").length;
       const hot = cov.list.filter((t) => t.hits > 0).length;
       const tallest = columns.reduce((n, c) => Math.max(n, c.cells.length), 0);
-      meta.textContent = `${validated}/${cov.list.length} techniques validated on synthetic scenarios · ${hot} observed · `;
+      const levelNote = cov.list.some((t) => t.level) ? ` · ${mapped} mapped only` : "";
+      meta.textContent = `${validated}/${cov.list.length} techniques validated on synthetic scenarios${levelNote} · ${hot} observed · `;
       meta.append(el("a", { href: "#coverage" }, "details"));
       mountSvg(box, WPCharts.heatMatrix(columns.length ? columns : [{ name: "None", short: "—", cells: [] }], {
-        w: Math.max(w, columns.length * 110), cellH: 22, maxRows: Math.max(3, Math.min(4, tallest || 3)),
-        label: `ATT&CK coverage heat matrix: ${validated} of ${cov.list.length} techniques validated, ${hot} seen in alerts. The Coverage view lists every technique as text.`,
+        w: Math.max(w, columns.length * 86), cellH: 22, maxRows: Math.max(tallest, 1),
+        label: `ATT&CK coverage: ${validated} of ${cov.list.length} techniques validated on synthetic scenarios, ${mapped} mapped only, ${hot} seen in alerts. Empty tactics have no catalog technique. Colors match the Coverage view.`,
       }));
+      mountMatrixText(box, columns);
+      if (legend) legend.replaceChildren(
+        ...[["heat", "Validated (heat = alert count)"], ["mapped", "Mapped only"], ["disabled", "Disabled"], ["gap", "Gap"], ["crit", "On a critical alert"]]
+          .map(([cls, text]) => el("span", {}, el("i", { class: `swatch ${cls}`, "aria-hidden": "true" }), text)));
       box.parentElement.querySelector(".cov-quiet")?.remove();
-      if (quiet.length) box.parentElement.append(el("p", { class: "cov-quiet" }, `No mapped techniques: ${quiet.map((c) => c.short || c.name).join(", ")}.`));
       return;
     }
+    if (legend) legend.replaceChildren();
     meta.textContent = cov.state === "pending" ? "" : cov.state === "error" ? cov.error : "loading…";
     const ghost = svgNode(WPCharts.heatMatrix(columns, { w, cellH: 21, maxRows: 3, label: "ATT&CK matrix (pending)" }));
     box.replaceChildren(el("div", { class: "pending-wrap" }, ghost,
@@ -796,7 +1043,7 @@ function incidentBoard(inc, alerts, perColumn) {
   if (inc.state === "ok") {
     for (const i of inc.list) cols[boardColumn(i.status)].push({
       href: `#incidents/${i.id}`, sev: i.severity, title: i.title, time: i.last_seen, synthetic: i.synthetic,
-      meta: `${i.alert_count || 0} alerts`, tags: i.tactics.slice(0, 4),
+      meta: `${i.alert_count || 0} alerts`, tags: boardTags(i.tactics, i.top_technique),
     });
   } else {
     for (const a of alerts || []) cols[boardColumn(a.status)].push({
@@ -812,7 +1059,9 @@ function incidentBoard(inc, alerts, perColumn) {
       ...items.slice(0, perColumn).map((c) => el("a", { class: `bcard sev-${sevOf(c.sev)}`, href: c.href },
         el("div", { class: "bt" }, c.title),
         el("div", { class: "bm" }, sevTag(c.sev), el("span", {}, c.meta), el("span", { class: "muted" }, ago(c.time)), c.synthetic ? el("span", { class: "syn" }, "SYN") : null),
-        c.tags.length ? el("div", { class: "btags" }, ...c.tags.map((t) => el("span", { class: "tag" }, t))) : null)),
+        c.tags.length ? el("div", { class: "btags" }, ...c.tags.map((t) => (t.kind === "tech"
+          ? el("span", { class: "tag tech", title: techniqueTagTitle(t) }, t.id)
+          : el("span", { class: "tag" }, t.text)))) : null)),
       items.length > perColumn ? el("div", { class: "muted bmore" }, `+${items.length - perColumn} more`) : null,
       !items.length ? el("div", { class: "muted bmore" }, "—") : null);
   });

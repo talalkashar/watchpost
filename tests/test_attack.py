@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 from unittest import mock
 
@@ -90,10 +91,20 @@ class EvidenceTests(unittest.TestCase):
         t = self.by_id["T1190"]
         self.assertEqual((t["level"], t["covered"], t["scenarios"]), ("mapped", False, []))
         self.assertEqual(t["rules"][0]["proves"], [])
+        self.assertNotIn("detected", t["rules"][0])
+        self.assertEqual(t["why"], "probe detects probe, which exercises T1595.002, not T1190.")
         self.assertEqual(self.by_id["T1046"]["level"], "mapped")  # maps it, detects nothing
+        self.assertEqual(self.by_id["T1046"]["why"], "sweep detects no labeled scenario.")
 
     def test_a_benign_scenario_never_validates(self):
-        self.assertEqual(self.by_id["T1567"]["level"], "mapped")
+        t = self.by_id["T1567"]
+        self.assertEqual(t["level"], "mapped")
+        self.assertEqual(t["why"], "upload fires only on benign scenario(s) (benign_twin), not a labeled attack.")
+
+    def test_only_mapped_techniques_carry_a_reason(self):
+        self.assertIsNone(self.by_id["T1110.001"]["why"])
+        self.assertIsNone(self.by_id["T1048"]["why"])  # disabled
+        self.assertIsNone(self.by_id["T1530"]["why"])  # gap
 
     def test_only_disabled_rules_is_disabled_even_when_the_rule_would_detect(self):
         t = self.by_id["T1048"]
@@ -149,12 +160,24 @@ class ScenarioTechniqueTests(unittest.TestCase):
         result = attack.evidence(attack.coverage(engine.load_rules(conn, enabled_only=False), {}),
                                  improve.noise_lab(conn)["rules"], simulate.SCENARIOS)
         levels = {t["id"]: t["level"] for t in result["techniques"]}
+        by_id = {t["id"]: t for t in result["techniques"]}
         # web_scan probes and injects but never exploits; exfiltration reads storage with no protocol shown.
         self.assertEqual({i for i, lvl in levels.items() if lvl != "validated"}, {"T1190", "T1048", "T1595.001"})
+        self.assertEqual(by_id["T1190"]["why"],
+                         "web_scanner detects web_scan, which probes and injects but never exploits.")
+        self.assertEqual(by_id["T1595.001"]["why"],
+                         "firewall_port_sweep detects port_sweep, which sweeps one host's ports "
+                         "and never scans IP blocks.")
+        self.assertEqual(by_id["T1048"]["why"],
+                         "data_exfil_volume detects exfiltration, which reads cloud storage "
+                         "and never shows an exfiltration channel.")
+        self.assertTrue(all(t["why"] is None for t in result["techniques"] if t["level"] != "mapped"))
+        layer = {t["techniqueID"]: t for t in attack.navigator_layer(result)["techniques"]}
+        self.assertIn(by_id["T1190"]["why"], layer["T1190"]["comment"])
+        self.assertNotIn("never exploits", layer["T1110"]["comment"])
         self.assertEqual(len(attack.TECHNIQUES), 20)  # milestone 5 added T1562.008, milestone 17 T1562.006
         self.assertEqual(result["summary"]["levels"],
                          {"validated": len(attack.TECHNIQUES) - 3, "mapped": 3, "disabled": 0, "gap": 0})
-        by_id = {t["id"]: t for t in result["techniques"]}
         # Each milestone-5 rule proves its technique with its own scenario, not by borrowing another rule's.
         self.assertEqual(by_id["T1562.008"]["scenarios"], ["logging_disabled"])
         self.assertEqual({r["id"]: r["proves"] for r in by_id["T1562.008"]["rules"]},
@@ -228,9 +251,23 @@ class NavigatorLayerTests(unittest.TestCase):
         self.assertEqual(by_id["T1595.003"]["color"], attack.LEVEL_COLORS["disabled"])
         self.assertTrue(by_id["T1048"]["comment"].startswith("Mapped"))
         self.assertIn("not counted as covered", by_id["T1048"]["comment"].lower())
+        self.assertIn("never shows an exfiltration channel", by_id["T1048"]["comment"])
         for rule_id in ("success_after_failures", "impossible_geo_login", "privilege_escalation_after_login"):
             self.assertIn(rule_id, by_id["T1078"]["comment"])
         self.assertEqual(self.layer({})["gradient"]["maxValue"], 1)  # no alerts yet: still a valid range
+
+
+class CoverageDetailUiTests(unittest.TestCase):
+    def test_mapped_reason_is_on_the_detail_and_the_gap_list(self):
+        app = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text()
+        detail = app.split("function coverageDetail", 1)[1].split("\nasync function coverageView", 1)[0]
+        view = app.split("async function coverageView", 1)[1].split("\n// ---------- health", 1)[0]
+        self.assertIn('t.level === "mapped" && t.why', detail)
+        self.assertIn('class: "cov-why"', detail)
+        self.assertIn('t.level === "mapped" && t.why', view)
+        css = (Path(__file__).resolve().parent.parent / "static" / "style.css").read_text()
+        self.assertIn(".cov-why", css)
+        self.assertIn(".cov-gaps .cov-why", css)
 
 
 class GeoTests(unittest.TestCase):

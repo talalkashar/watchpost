@@ -18,6 +18,45 @@ STATUS_ORDER = {"ok": 0, "degraded": 1, "failing": 2}
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 LOW_DISK_BYTES = 100 * 1024 * 1024
 
+# One sentence per check: what failing or degraded means on this labeled demo.
+# Shown even when the check is ok, so a viewer can read the status without waiting for a fault.
+CHECK_MEANS = {
+    "storage": (
+        "On this demo, failing means the synthetic event store cannot be read or written, "
+        "and degraded means less than 100 MB of disk is left so new labeled events may stop landing."
+    ),
+    "ingestion": (
+        "On this demo, failing means the ingest check itself crashed, and degraded means recent "
+        "synthetic batches were rejected or failed server-side so those events never became alerts."
+    ),
+    "detection": (
+        "On this demo, failing means the last detection run died and new synthetic events stay "
+        "unalerted, and degraded means rules are off, a run is stuck, or some batches were skipped "
+        "so coverage is incomplete."
+    ),
+    "dependencies": (
+        "On this demo, failing means Python, SQLite, or a writable database directory is missing, "
+        "and degraded means the bundled console files are missing so the pages will not load."
+    ),
+    "syslog": (
+        "On this demo, failing means the optional syslog listener is down so live lab senders "
+        "cannot add events, and degraded means a recent batch was dropped while the labeled data "
+        "already stored is unchanged."
+    ),
+    "storyline": (
+        "On this demo, failing means the storyline check itself crashed, and degraded means the "
+        "last synthetic replay failed while earlier labeled events stay on the dashboard."
+    ),
+}
+DEFAULT_MEANS = (
+    "On this demo, failing means this component is down, and degraded means it is running with a "
+    "fault while the labeled synthetic events already stored stay readable."
+)
+
+
+def status_means(name):
+    return CHECK_MEANS.get(name, DEFAULT_MEANS)
+
 # Optional components (e.g. the syslog listener) register a check while they run.
 # Each check is a no-argument callable returning (status, message, guidance, details).
 _COMPONENT_CHECKS = {}
@@ -46,6 +85,7 @@ def _check(name, fn, *args):
         guidance = "The check itself could not run; the component is most likely unavailable. See error details."
     return {
         "name": name, "status": status, "message": message, "guidance": guidance,
+        "means": status_means(name),
         "details": details, "latency_ms": round((time.perf_counter() - started) * 1000, 1),
     }
 
@@ -173,6 +213,7 @@ def run_health_checks(open_conn, db_path):
             "name": "storage", "status": "failing",
             "message": f"cannot open database: {describe_exception(exc)}",
             "guidance": "Check that SIEM_DB points to a writable location and the disk is not full, then restart.",
+            "means": status_means("storage"),
             "details": {}, "latency_ms": 0,
         }
         checks = [failing, _check("dependencies", check_dependencies, db_path), *_component_checks()]

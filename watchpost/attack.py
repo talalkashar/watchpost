@@ -114,6 +114,47 @@ LEVEL_MEANING = {
     "gap": "No rule maps here.",
 }
 
+# What a labeled scenario actually shows when a rule maps a technique the scenario does not exercise.
+# The clause is used only while that scenario is detected and the technique stays untagged, so a later
+# scenario that does exercise the technique drops the line (the technique is validated instead).
+_UNPROVEN = {
+    ("web_scan", "T1190"): "probes and injects but never exploits",
+    ("port_sweep", "T1595.001"): "sweeps one host's ports and never scans IP blocks",
+    ("exfiltration", "T1048"): "reads cloud storage and never shows an exfiltration channel",
+}
+
+
+def mapped_why(technique_id, rules, scenarios):
+    """One sentence for a mapped technique: why no labeled scenario validates it.
+
+    `rules` are evidence rows ({"id", "enabled", "detected": [scenario names]}). `scenarios` is
+    {name: {"malicious", "techniques"}}. Returns None when no enabled rule is left to explain.
+    """
+    clauses = []
+    for rule in rules:
+        if not rule.get("enabled"):
+            continue
+        detected = [n for n in (rule.get("detected") or []) if n in scenarios]
+        malicious = [n for n in detected if scenarios[n].get("malicious")]
+        if malicious:
+            for name in malicious:
+                fact = _UNPROVEN.get((name, technique_id))
+                if fact:
+                    clauses.append(f"{rule['id']} detects {name}, which {fact}")
+                else:
+                    others = [t for t in scenarios[name].get("techniques") or [] if t != technique_id]
+                    shown = f"exercises {', '.join(others)}" if others else "is not tagged with it"
+                    clauses.append(f"{rule['id']} detects {name}, which {shown}, not {technique_id}")
+        else:
+            benign = [n for n in detected if not scenarios[n].get("malicious")]
+            if benign:
+                clauses.append(f"{rule['id']} fires only on benign scenario(s) ({', '.join(benign)}), "
+                               "not a labeled attack")
+            else:
+                clauses.append(f"{rule['id']} detects no labeled scenario")
+    unique = list(dict.fromkeys(clauses))
+    return "; ".join(unique) + "." if unique else None
+
 
 def evidence(cov, lab_rules, scenarios):
     """Grade each technique in `coverage()` output by what the labeled scenarios prove.
@@ -129,20 +170,23 @@ def evidence(cov, lab_rules, scenarios):
         rules, proving = [], set()
         for r in t["rules"]:
             row = lab.get(r["id"], {})
-            proves = sorted(n for n in row.get("detected", []) if r["enabled"] and n in scenarios
+            detected = list(row.get("detected") or [])
+            proves = sorted(n for n in detected if r["enabled"] and n in scenarios
                             and scenarios[n]["malicious"] and t["id"] in scenarios[n].get("techniques", ()))
             proving.update(proves)
             rules.append({**r, "verdict": row.get("verdict"), "lookalikes_tested": row.get("lookalikes_tested", []),
                           "lookalikes_fired": row.get("lookalikes_fired", []) + row.get("other_benign_fired", []),
-                          "proves": proves})
+                          "proves": proves, "detected": detected})
         if proving:
             level = "validated"
         elif any(r["enabled"] for r in t["rules"]):
             level = "mapped"
         else:
             level = "disabled" if t["rules"] else "gap"
-        items.append({**t, "rules": rules, "level": level, "covered": level == "validated",
-                      "scenarios": sorted(proving)})
+        why = mapped_why(t["id"], rules, scenarios) if level == "mapped" else None
+        published = [{k: v for k, v in rule.items() if k != "detected"} for rule in rules]
+        items.append({**t, "rules": published, "level": level, "covered": level == "validated",
+                      "scenarios": sorted(proving), "why": why})
     levels = {lvl: sum(i["level"] == lvl for i in items) for lvl in LEVELS}
     return {**cov, "techniques": items, "levels": list(LEVELS), "level_meaning": LEVEL_MEANING,
             "summary": {**cov["summary"], "covered": levels["validated"], "levels": levels}}
@@ -161,7 +205,8 @@ def navigator_layer(cov):
     def comment(t):
         rules = ", ".join(r["id"] + ("" if r["enabled"] else " (disabled)") for r in t["rules"]) or "none"
         proof = f" Detected on synthetic scenario(s): {', '.join(t['scenarios'])}." if t["scenarios"] else ""
-        return f"{t['level'].capitalize()}: {LEVEL_MEANING[t['level']]}{proof} Rules: {rules}"
+        why = f" {t['why']}" if t.get("why") else ""
+        return f"{t['level'].capitalize()}: {LEVEL_MEANING[t['level']]}{proof}{why} Rules: {rules}"
 
     return {
         "name": "Watchpost rule coverage",

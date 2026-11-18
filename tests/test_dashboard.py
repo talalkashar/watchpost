@@ -1,6 +1,8 @@
 import json
 import re
+import shutil
 import socket
+import subprocess
 import time
 import unittest
 from datetime import timedelta
@@ -318,6 +320,268 @@ class StaticAssetTests(unittest.TestCase):
         self.assertIn("script-src 'self'", csp)
         self.assertNotIn("unsafe-inline", csp)
         self.assertNotIn("unsafe-eval", csp)
+
+
+class HeatMatrixLevelTests(unittest.TestCase):
+    """The dashboard matrix must color by evidence level. Node runs the chart function; CI images have it."""
+
+    def setUp(self):
+        self.node = shutil.which("node")
+        if self.node is None:
+            self.skipTest("node is not installed")
+
+    def svg(self, columns, **opts):
+        script = r"""
+const fs = require("fs");
+const vm = require("vm");
+const sandbox = {};
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(process.argv[1], "utf8"), sandbox);
+const input = JSON.parse(fs.readFileSync(0, "utf8"));
+process.stdout.write(sandbox.WPCharts.heatMatrix(input.columns, input.opts));
+"""
+        payload = json.dumps({"columns": columns, "opts": opts})
+        out = subprocess.run(
+            [self.node, "-e", script, str(STATIC / "charts.js")],
+            input=payload, capture_output=True, text=True, check=False)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return out.stdout
+
+    def cell_class(self, svg, technique_id):
+        match = re.search(
+            rf'class="cell ([^"]+)"[^>]*/>\s*<text class="cid [^"]*"[^>]*>{re.escape(technique_id)}</text>',
+            svg)
+        self.assertIsNotNone(match, svg)
+        return match.group(1)
+
+    def test_mapped_is_not_painted_as_a_gap(self):
+        svg = self.svg([{"name": "Initial Access", "short": "Init", "cells": [
+            {"id": "T1190", "name": "Exploit Public-Facing Application", "value": 4,
+             "covered": False, "level": "mapped", "rules": ["web_scanner"]},
+            {"id": "T1078", "name": "Valid Accounts", "value": 9,
+             "covered": True, "level": "validated", "crit": True, "rules": ["success_after_failures"]},
+        ]}])
+        self.assertEqual(self.cell_class(svg, "T1190"), "mapped")
+        self.assertNotIn('class="cell gap"', svg)
+        self.assertIn("mapped only; no labeled scenario proves detection", svg)
+        self.assertEqual(self.cell_class(svg, "T1078"), "h5 crit")
+
+    def test_disabled_and_unleveled_gap_keep_their_classes(self):
+        svg = self.svg([
+            {"name": "Persistence", "short": "Persist", "cells": [
+                {"id": "T1136.003", "value": 0, "covered": False, "level": "disabled", "rules": ["old_rule"]}]},
+            {"name": "Impact", "short": "Impact", "cells": [
+                {"id": "T1486", "value": 2, "covered": False, "rules": []}]},
+        ])
+        self.assertEqual(self.cell_class(svg, "T1136.003"), "disabled")
+        self.assertEqual(self.cell_class(svg, "T1486"), "gap")
+
+    def test_rows_past_max_are_named_instead_of_dropped(self):
+        cells = [{"id": f"T100{i}", "value": 0, "covered": True, "level": "validated"} for i in range(5)]
+        clipped = self.svg([{"name": "Initial Access", "short": "Init", "cells": cells}], maxRows=4)
+        self.assertIn(">T1003</text>", clipped)
+        self.assertNotIn(">T1004</text>", clipped)
+        self.assertIn('class="more"', clipped)
+        self.assertIn(">T1004</title>", clipped)
+        full = self.svg([{"name": "Initial Access", "short": "Init", "cells": cells}], maxRows=5)
+        self.assertIn(">T1004</text>", full)
+        self.assertNotIn('class="more"', full)
+
+    def test_empty_tactic_stays_on_the_kill_chain(self):
+        svg = self.svg([
+            {"name": "Reconnaissance", "short": "Recon", "cells": [
+                {"id": "T1595.002", "value": 1, "covered": True, "level": "validated"}]},
+            {"name": "Resource Development", "short": "Res Dev", "cells": []},
+        ])
+        self.assertIn('class="th quiet"', svg)
+        self.assertIn(">Res Dev<", svg)
+        self.assertIn(">0 tech", svg)
+
+    def test_dashboard_asks_for_every_row_and_a_legend(self):
+        src = (STATIC / "dashboard.js").read_text()
+        start = src.index("renderMatrix()")
+        chunk = src[start:src.index("// --- incident board")]
+        self.assertNotIn("Math.min(4", chunk)
+        self.assertIn("maxRows: Math.max(tallest, 1)", chunk)
+        self.assertNotIn("columns.filter", chunk)
+        self.assertIn("Empty tactics stay", chunk)
+        self.assertIn("Mapped only", chunk)
+        self.assertIn('id: "attack-legend"', src)
+        css = (STATIC / "style.css").read_text()
+        self.assertIn(".heat .cell.mapped", css)
+        self.assertIn(".heat .cell.disabled", css)
+        self.assertIn(".heat .cell.h5.crit", css)
+        self.assertNotRegex(css, r"\.heat \.cell\.crit \{[^}]*fill:")
+
+
+class MapSideTests(unittest.TestCase):
+    """The attack-map side list names the fictional city on each busiest arc and counts unknown source IPs."""
+
+    def setUp(self):
+        self.node = shutil.which("node")
+        if self.node is None:
+            self.skipTest("node is not installed")
+        self.source = (STATIC / "dashboard.js").read_text()
+
+    def summary(self, sources, locations):
+        prelude = []
+        for name in ("SEV_RANK", "sevOf", "maxSev"):
+            match = re.search(rf"^const {name} = .*$", self.source, re.M)
+            self.assertIsNotNone(match, name)
+            prelude.append(match.group(0))
+        body = re.search(r"^function mapSide\(.*?^\}$", self.source, re.S | re.M)
+        self.assertIsNotNone(body, "function mapSide not found")
+        script = "\n".join(prelude) + "\n" + body.group(0) + """
+const input = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const table = new Map(Object.entries(input.locations));
+const out = mapSide(input.sources, (ip) => table.has(ip) ? table.get(ip) : undefined);
+process.stdout.write(JSON.stringify(out));
+"""
+        out = subprocess.run(
+            [self.node, "-e", script],
+            input=json.dumps({"sources": sources, "locations": locations}),
+            capture_output=True, text=True, check=False)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_busiest_arc_is_named_by_fictional_city(self):
+        ironvale = {"city": "Ironvale", "internal": False, "synthetic": True}
+        kestrel = {"city": "Kestrel Bay", "internal": False, "synthetic": True}
+        out = self.summary([
+            {"ip": "203.0.113.10", "events": 10, "sev": "medium"},
+            {"ip": "203.0.113.20", "events": 4, "sev": "low"},
+            {"ip": "198.51.100.8", "events": 9, "sev": "critical"},
+            {"ip": "10.0.0.5", "events": 40, "sev": "critical"},
+        ], {
+            "203.0.113.10": ironvale,
+            "203.0.113.20": ironvale,
+            "198.51.100.8": kestrel,
+            "10.0.0.5": {"city": "Riverton HQ", "internal": True, "synthetic": True},
+        })
+        self.assertEqual(out["locations"], 2)
+        self.assertEqual([(a["city"], a["events"], a["ips"]) for a in out["arcs"]],
+                         [("Ironvale", 14, 2), ("Kestrel Bay", 9, 1)])
+        self.assertEqual(out["arcs"][1]["sev"], "critical")
+        self.assertEqual(out["unknown"], 0)
+
+    def test_unknown_source_ips_are_counted_not_plotted_as_arcs(self):
+        out = self.summary([
+            {"ip": "203.0.113.10", "events": 2, "sev": "low"},
+            {"ip": "8.8.8.8", "events": 50, "sev": "critical"},
+            {"ip": "1.1.1.1", "events": 3, "sev": "high"},
+            {"ip": "198.51.100.4", "events": 1, "sev": "info"},
+        ], {
+            "203.0.113.10": {"city": "Ironvale", "internal": False},
+            "8.8.8.8": None,
+            "1.1.1.1": None,
+        })
+        self.assertEqual([a["city"] for a in out["arcs"]], ["Ironvale"])
+        self.assertEqual(out["unknown"], 2)
+        self.assertEqual(out["locations"], 1)
+
+    def test_ties_break_by_severity_then_city_and_the_list_stops_at_five(self):
+        cities = ["Northhaven", "Saltmere", "Kestrel Bay", "Duskport", "Ironvale", "Emberfield"]
+        sources = [{"ip": f"192.0.2.{i}", "events": 5, "sev": "high" if i == 5 else "low"} for i in range(6)]
+        locations = {s["ip"]: {"city": cities[i], "internal": False} for i, s in enumerate(sources)}
+        out = self.summary(sources, locations)
+        self.assertEqual(out["locations"], 6)
+        self.assertEqual([a["city"] for a in out["arcs"]],
+                         ["Emberfield", "Duskport", "Ironvale", "Kestrel Bay", "Northhaven"])
+        self.assertEqual(out["arcs"][0]["sev"], "high")
+
+    def test_side_list_renders_cities_and_the_unknown_count(self):
+        start = self.source.index("renderMarks()")
+        chunk = self.source[start:self.source.index("pulse(e)")]
+        self.assertIn("mapSide(this.sources()", chunk)
+        self.assertIn("Busiest arcs", chunk)
+        self.assertIn("No geo entry", chunk)
+        self.assertIn("ms-city", chunk)
+        self.assertIn("no geo entry", chunk)
+        self.assertNotIn("Top sources", chunk)
+        self.assertNotIn("unknown.slice", chunk)
+        css = (STATIC / "style.css").read_text()
+        self.assertIn("grid-template-columns: 12px minmax(0, 1fr) auto", css)
+        self.assertIn(".ms-row .ms-city", css)
+
+
+class CoverageChipTests(unittest.TestCase):
+    """Layouts that hide the matrix still state validated, mapped, disabled, and gap counts."""
+
+    def setUp(self):
+        self.node = shutil.which("node")
+        if self.node is None:
+            self.skipTest("node is not installed")
+        self.source = (STATIC / "dashboard.js").read_text()
+
+    def call(self, names, expression, payload):
+        script = "\n".join(function_body(self.source, name) for name in names) + f"""
+const input = JSON.parse(require("fs").readFileSync(0, "utf8"));
+process.stdout.write(JSON.stringify({expression}));
+"""
+        out = subprocess.run(
+            [self.node, "-e", script], input=json.dumps(payload),
+            capture_output=True, text=True, check=False)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_counts_keep_mapped_and_disabled_out_of_the_gap(self):
+        counts = self.call(
+            ["coverageLevel", "coverageCounts"],
+            "coverageCounts(input)",
+            [
+                {"id": "T1078", "level": "validated", "covered": True},
+                {"id": "T1190", "level": "mapped", "covered": False, "hits": 4},
+                {"id": "T1110", "level": "disabled", "rules": ["off"]},
+                {"id": "T1003", "level": "gap"},
+                {"id": "T1059", "covered": True},
+                {"id": "T1021", "rules": []},
+            ])
+        self.assertEqual(counts, {"validated": 2, "mapped": 1, "disabled": 1, "gap": 2})
+
+    def test_chip_is_one_line_of_evidence_counts(self):
+        text = self.call(
+            ["coverageChipText"],
+            "coverageChipText(input)",
+            {"validated": 18, "mapped": 6, "disabled": 2, "gap": 4})
+        self.assertEqual(text, "18 validated · 6 mapped · 2 disabled · 4 gap")
+        self.assertNotIn("\n", text)
+
+    def test_triage_and_telemetry_hide_the_matrix_and_full_does_not(self):
+        triage = ["p-board", "p-timeline", "p-feed", "p-entities"]
+        telemetry = ["p-map", "p-feed", "p-attackers", "p-health"]
+        self.assertTrue(self.call(["layoutHidesMatrix"], "layoutHidesMatrix(input)", triage))
+        self.assertTrue(self.call(["layoutHidesMatrix"], "layoutHidesMatrix(input)", telemetry))
+        self.assertFalse(self.call(["layoutHidesMatrix"], "layoutHidesMatrix(input)", ["p-attack", "p-board"]))
+        self.assertTrue(self.call(["layoutHidesMatrix"], "layoutHidesMatrix(input)", None))
+
+    def test_label_waits_and_then_uses_the_counts(self):
+        names = ["coverageLevel", "coverageCounts", "coverageChipText", "coverageChipLabel"]
+        self.assertEqual(self.call(names, "coverageChipLabel(input)", {"state": "loading"}), "coverage loading")
+        self.assertEqual(self.call(names, "coverageChipLabel(input)", {"state": "error", "error": "down"}), "coverage unavailable")
+        label = self.call(names, "coverageChipLabel(input)", {
+            "state": "ok",
+            "list": [{"level": "validated"}, {"level": "mapped"}, {"level": "gap"}],
+        })
+        self.assertEqual(label, "1 validated · 1 mapped · 0 disabled · 1 gap")
+
+    def test_view_bar_mounts_the_chip_only_when_the_matrix_is_hidden(self):
+        start = self.source.index("renderViewBar()")
+        chunk = self.source[start:self.source.index("\n  applyView()")]
+        self.assertIn("layoutHidesMatrix(this.layout)", chunk)
+        self.assertIn('id: "coverage-chip"', chunk)
+        self.assertIn('href: "#coverage"', chunk)
+        self.assertIn("coverageChipLabel(this.coverage)", chunk)
+        matrix = self.source[self.source.index("renderMatrix()"):self.source.index("// --- incident board")]
+        self.assertIn("coverageChipLabel(this.coverage)", matrix)
+        css = (STATIC / "style.css").read_text()
+        self.assertIn("a.chip.coverage-chip", css)
+
+
+def function_body(source, name):
+    match = re.search(rf"^(?:async )?function {name}\(.*?^\}}$", source, re.S | re.M)
+    if not match:
+        raise AssertionError(f"function {name} not found")
+    return match.group(0)
 
 
 if __name__ == "__main__":

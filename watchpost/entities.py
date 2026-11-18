@@ -15,6 +15,8 @@ Age is measured from the newest event in the database, not from the wall clock: 
 replayed with older timestamps and would otherwise decay to nothing.
 """
 
+from datetime import date, timedelta
+
 from .db import parse_iso
 from .queries import EVENT_FIELDS, QueryError, _int
 
@@ -24,6 +26,8 @@ HALF_LIFE_HOURS = 24
 EXCLUDED_DISPOSITIONS = ("false_positive", "benign")
 _SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 _ALERT_FIELDS = "id, rule_id, severity, base_severity, severity_note, title, status, disposition, first_seen, last_seen, event_count, synthetic"
+# The entity page draws one bar per UTC day. A longer stored history keeps the newest month.
+_DAY_BARS = 31
 
 
 def _anchor(conn):
@@ -48,6 +52,44 @@ def _contribution(alert, anchor):
 
 def _score(contributions):
     return round(sum(c["weight"] for c in contributions), 2)
+
+
+def _utc_day(ts):
+    return date.fromisoformat(ts[:10])
+
+
+def _alerts_by_day(conn, kind, value):
+    """Count this entity's alerts on each UTC day of its stored events.
+
+    An alert is placed on the day of its newest evidence event that names the entity.
+    That timestamp is the event's `ts`, so replayed demo data stays on the day it
+    depicts. Days from the first stored event to the last are filled, including zeros.
+    A span longer than `_DAY_BARS` keeps the newest days. `omitted` is how many alerts
+    sit on a day older than that window.
+    """
+    match = f"e.{kind} = ?" + (" COLLATE NOCASE" if kind == "user" else "")
+    span = conn.execute(
+        f"SELECT MIN(e.ts) AS first_seen, MAX(e.ts) AS last_seen FROM events e WHERE {match}", (value,)).fetchone()
+    if not span["first_seen"]:
+        return {"start": None, "end": None, "days": [], "omitted": 0}
+    counts = {}
+    for row in conn.execute(
+            "SELECT ae.alert_id AS alert_id, MAX(e.ts) AS ts FROM alert_events ae"
+            f" JOIN events e ON e.id = ae.event_id WHERE {match} GROUP BY ae.alert_id", (value,)):
+        key = _utc_day(row["ts"]).isoformat()
+        counts[key] = counts.get(key, 0) + 1
+    start, end = _utc_day(span["first_seen"]), _utc_day(span["last_seen"])
+    if (end - start).days + 1 > _DAY_BARS:
+        start = end - timedelta(days=_DAY_BARS - 1)
+    days = []
+    cursor = start
+    while cursor <= end:
+        key = cursor.isoformat()
+        days.append({"day": key, "count": counts.get(key, 0)})
+        cursor += timedelta(days=1)
+    # Alerts whose newest evidence day is older than the drawn window stay counted here.
+    omitted = sum(n for day_key, n in counts.items() if day_key < start.isoformat())
+    return {"start": start.isoformat(), "end": end.isoformat(), "days": days, "omitted": omitted}
 
 
 def _entity_alerts(conn, where="", args=()):
@@ -90,7 +132,7 @@ def list_entities(conn, params):
 
 
 def get_entity(conn, kind, value):
-    """Score breakdown, alerts, incidents, and recent events for one entity.
+    """Score breakdown, alerts, incidents, recent events, and alerts by day for one entity.
 
     An entity nothing has been seen for is not an error: it has a score of 0 and empty lists.
     """
@@ -119,6 +161,7 @@ def get_entity(conn, kind, value):
         "half_life_hours": HALF_LIFE_HOURS, "severity_weights": SEVERITY_WEIGHTS,
         "excluded_dispositions": list(EXCLUDED_DISPOSITIONS), "contributions": contributions,
         "alerts": alerts, "incidents": incidents, "recent_events": recent,
+        "alerts_by_day": _alerts_by_day(conn, kind, value),
         "first_seen": seen["first_seen"], "last_seen": seen["last_seen"], "event_count": seen["event_count"],
         "synthetic": bool(seen["synthetic"]),
     }
