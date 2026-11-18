@@ -314,7 +314,7 @@ class ChangeEvidenceTests(ServerTestCase):
                          [(alert["id"], "investigating -> resolved (false_positive)")])
         # The same key proposed by someone who touched nothing shows none.
         impact = self.exception(self.second_admin())[1]["evaluation"]["live_impact"]
-        self.assertEqual(impact["proposer_verdict_changes"], {"count": 0, "recent": []})
+        self.assertEqual(impact["proposer_verdict_changes"], {"count": 0, "recent": [], "omitted": 0})
 
     def ignore(self, client, *ips, rule="brute_force_ip"):
         return client.post(f"/api/rules/{rule}/proposals",

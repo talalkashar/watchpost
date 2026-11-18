@@ -447,7 +447,7 @@ def _validate_search(conn, kind, target, payload):
         raise ChangeError(str(exc))
 
 
-LIVE_IMPACT_RECENT = 5  # newest matching alerts listed in an exception's evidence
+LIVE_IMPACT_RECENT = 5  # matching alerts, and the proposer's status changes, listed in evidence
 BACKTEST_EVIDENCE_LIMIT = 10  # kept/new/lost findings listed in a rule change's evidence; counts are complete
 
 
@@ -478,12 +478,18 @@ def _alert_impact(alerts, history, ids, proposer):
         by_status[row["status"]] = by_status.get(row["status"], 0) + 1
         if row["disposition"]:
             by_disposition[row["disposition"]] = by_disposition.get(row["disposition"], 0) + 1
+    recent = rows[:LIVE_IMPACT_RECENT]
+    own_recent = own[:LIVE_IMPACT_RECENT]
     return {
         "alerts": len(rows), "by_status": by_status, "by_disposition": by_disposition,
-        "recent": rows[:LIVE_IMPACT_RECENT],
+        "recent": recent,
+        # How many matching alerts were past the newest LIVE_IMPACT_RECENT by id. 0 when the list fits.
+        "recent_omitted": len(rows) - len(recent),
         "ever_true_positive": len(ever_true_positive),
         # Status and verdict changes the proposer made on these alerts, so the reviewer sees them.
-        "proposer_verdict_changes": {"count": len(own), "recent": own[:LIVE_IMPACT_RECENT]},
+        # `omitted` is how many of those rows were past the newest LIVE_IMPACT_RECENT by activity id.
+        "proposer_verdict_changes": {
+            "count": len(own), "recent": own_recent, "omitted": len(own) - len(own_recent)},
     }
 
 
