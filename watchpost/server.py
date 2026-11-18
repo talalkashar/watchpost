@@ -436,7 +436,9 @@ def hunt_run(req):
 
 @route("GET", "/api/hunt/saved")
 def hunt_saved(req):
-    return hunt.list_saved(req.conn)
+    rows, omitted = hunt.list_saved(req.conn)
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", "/api/hunt/saved", role="analyst")

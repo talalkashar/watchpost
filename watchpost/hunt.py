@@ -567,9 +567,22 @@ def _text(value, name, limit, required=False):
     return value
 
 
-def list_saved(conn):
-    return [dict(r) for r in conn.execute(
-        "SELECT id, name, query, description, owner, created_at FROM saved_searches ORDER BY name COLLATE NOCASE")]
+# Saved searches returned by GET /api/hunt/saved. The rest are X-Watchpost-Omitted.
+SAVED_LIST_LIMIT = 100
+
+
+def list_saved(conn, limit=SAVED_LIST_LIMIT):
+    """Saved searches in name COLLATE NOCASE order, and how many the limit left out.
+
+    The second value is 0 when the list fits. Callers that return the bare array
+    send that count as X-Watchpost-Omitted. Names are unique under COLLATE NOCASE,
+    so two spellings of one name are not two rows.
+    """
+    total = conn.execute("SELECT COUNT(*) FROM saved_searches").fetchone()[0]
+    rows = conn.execute(
+        "SELECT id, name, query, description, owner, created_at FROM saved_searches"
+        " ORDER BY name COLLATE NOCASE LIMIT ?", (limit,)).fetchall()
+    return [dict(r) for r in rows], total - len(rows)
 
 
 def _stored_saved_name(conn, name):
