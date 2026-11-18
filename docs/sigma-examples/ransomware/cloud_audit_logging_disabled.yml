@@ -1,0 +1,37 @@
+# Stop or delete cloud audit logs so the later theft and encryption are not recorded.
+# ATT&CK T1562.008. Matched on the API name inside message, and only on cloud events.
+title: Ransomware Cloud Logging Disabled
+id: 6a1c9f33-8d27-4e15-9b40-c5e7a2d81460
+status: experimental
+description: |
+  A cloud API or IAM event whose message names an action that stops or deletes audit logging:
+  StopLogging, DeleteTrail, DeleteFlowLogs, StopConfigurationRecorder, or DeleteDeliveryChannel.
+  Reads such as DescribeTrails do not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1562/008/
+  - https://www.cisa.gov/stopransomware
+tags:
+  - attack.defense_evasion
+  - attack.t1562.008
+logsource:
+  category: cloud
+  product: aws
+  service: cloudtrail
+detection:
+  cloud:
+    event.action:
+      - cloud_api_call
+      - cloud_iam_change
+  action:
+    message|contains:
+      - StopLogging
+      - DeleteTrail
+      - DeleteFlowLogs
+      - StopConfigurationRecorder
+      - DeleteDeliveryChannel
+  condition: cloud and action
+falsepositives:
+  - A platform team retiring a trail during a reviewed change
+level: high
