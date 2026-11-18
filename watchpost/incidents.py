@@ -55,6 +55,12 @@ def top_techniques(conn, incident_ids):
 
 
 def list_incidents(conn, params):
+    """Matching incidents, and how many the limit left out.
+
+    Rows stay not-resolved first, then severity, then last_seen. The second
+    value is 0 when every match fits. Callers that return the bare array send
+    that count as X-Watchpost-Omitted.
+    """
     where, args = [], []
     if params.get("status"):
         # One status or a comma list. Spaces around a name are ignored.
@@ -72,6 +78,7 @@ def list_incidents(conn, params):
         args += levels
     limit = _int(params.get("limit"), "limit", 100, 1, 500)
     clause = (" WHERE " + " AND ".join(where)) if where else ""
+    total = conn.execute(f"SELECT COUNT(*) FROM incidents{clause}", args).fetchone()[0]
     rows = conn.execute(f"SELECT * FROM incidents{clause} ORDER BY status = 'resolved', {_SEVERITY_ORDER},"
                         f" last_seen DESC LIMIT ?", args + [limit])
     items = [_incident(r) for r in rows]
@@ -81,7 +88,7 @@ def list_incidents(conn, params):
     for item in items:
         item["top_technique"] = tops.get(item["id"])
         item["correlation_rule"] = sentence
-    return items
+    return items, total - len(items)
 
 
 def get_incident(conn, incident_id):

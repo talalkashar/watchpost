@@ -65,7 +65,7 @@ class CorrelationRuleTests(unittest.TestCase):
                 (incident_id, f"Synthetic probe {incident_id}", "high", "open", seen, seen,
                  json.dumps({"src_ip": ["203.0.113.10"], "user": ["erin"], "host": ["web01"]}),
                  json.dumps(["Initial Access"]), 1, 1, now, now))
-        listed = incidents.list_incidents(conn, {})
+        listed, _omitted = incidents.list_incidents(conn, {})
         detail = incidents.get_incident(conn, 1)
         conn.close()
         self.assertEqual([row["correlation_rule"] for row in listed], [RULE, RULE])

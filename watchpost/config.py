@@ -37,7 +37,7 @@ class Config:
     login_rate_per_minute: float = 10.0
     rate_burst: int = 300
     rate_per_minute: float = 1200.0
-    # Behind a reverse proxy on loopback, take the client IP from the last X-Forwarded-For entry.
+    # Behind a reverse proxy on loopback, take the client IP from the last entry of the one X-Forwarded-For header.
     trust_proxy: bool = False
     # Attack storyline auto-replay for public demos (off unless SIEM_DEMO_LOOP=<minutes between runs>).
     demo_loop_minutes: int = 0

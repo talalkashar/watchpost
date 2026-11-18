@@ -6,7 +6,8 @@ through here.
 
 - Usernames are matched by exact known value (every distinct events.user plus every account name), up to
   CANDIDATE_LIMIT distinct names; past that a viewer is refused (Unavailable) rather than shown raw names. Matched
-  case-insensitively, in structured fields and inside free text alike. Not by guessing what a name looks like.
+  on ASCII case only (A–Z), in structured fields and inside free text alike, so Alice and alice are one name
+  and ÉRIN and érin stay two. Not by guessing what a name looks like.
   An account named after a role ("analyst") is masked in identity fields (USER_FIELDS) but not as a word in
   text, where it is the product's own vocabulary ("Analyst notes"). An event username is masked everywhere.
 - IPs are found with an IPv4/IPv6 regex and confirmed with `ipaddress`. Only internal addresses are masked
@@ -33,6 +34,8 @@ from .auth import ROLES
 SETTING = "viewer_masking"
 CANDIDATE_LIMIT = 10000  # distinct usernames / IPs considered per request
 DIGEST_CHARS = 8
+# A–Z only. str.lower() and re.IGNORECASE also fold É/é, which would make two accounts one pseudonym.
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 INTERNAL_NETS = [ipaddress.ip_network(n) for n in (
     "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16",
     "::1/128", "fe80::/10", "fc00::/7")]
@@ -48,6 +51,11 @@ PSEUDONYM_RE = re.compile(r"\b(?:user|internal)-[0-9a-f]{%d}\b" % DIGEST_CHARS)
 class Unavailable(Exception):
     """More distinct usernames than masking can match: refuse the viewer rather than leave names in text."""
     status = 503
+
+
+def _ascii_fold(value):
+    """Fold A–Z and leave every other character, including É, as it is."""
+    return value.translate(_ASCII_FOLD)
 
 
 def is_internal(ip):
@@ -74,11 +82,12 @@ def for_user(conn, user):
     """A Masker for this request, or None: only viewers are masked, and only with the setting on."""
     if not user or user.get("role") != "viewer" or not enabled(conn):
         return None
+    # SQLite lower() folds ASCII only. The count uses that set, so ÉRIN and érin are two names toward the cap.
     names = {r[0] for r in conn.execute("SELECT DISTINCT lower(user) FROM events WHERE user IS NOT NULL"
                                         " AND user != '' LIMIT ?", (CANDIDATE_LIMIT + 1,))}
     if len(names) > CANDIDATE_LIMIT:  # fail closed: names past the bound would go out unmasked in free text
         raise Unavailable(f"the masked view is unavailable: more than {CANDIDATE_LIMIT:,} distinct usernames")
-    names |= {r[0].lower() for r in conn.execute("SELECT username FROM users")} - set(ROLES)
+    names |= {_ascii_fold(r[0]) for r in conn.execute("SELECT username FROM users")} - set(ROLES)
     return Masker(key(conn), names, self_name=user["username"])
 
 
@@ -86,14 +95,15 @@ def for_user(conn, user):
 def _names_re(names):
     if not names:
         return None
-    return re.compile(r"(?<![\w.@-])(?:" + "|".join(map(re.escape, names)) + r")(?![\w@-])", re.IGNORECASE)
+    # Names are already ASCII-folded. The search text is folded the same way, so this stays case-sensitive.
+    return re.compile(r"(?<![\w.@-])(?:" + "|".join(map(re.escape, names)) + r")(?![\w@-])")
 
 
 class Masker:
     def __init__(self, secret, names, self_name=None):
         self.secret = secret
-        self.self_name = (self_name or "").lower()
-        names = {n.lower() for n in names if n} - {self.self_name}
+        self.self_name = _ascii_fold(self_name or "")
+        names = {_ascii_fold(n) for n in names if n} - {self.self_name}
         self.names = tuple(sorted(names, key=lambda n: (-len(n), n)))  # longest first: ops-admin before admin
         self.names_re = _names_re(self.names)
 
@@ -101,7 +111,7 @@ class Masker:
         return hmac.new(self.secret, f"{kind}\0{value}".encode(), hashlib.sha256).hexdigest()[:DIGEST_CHARS]
 
     def user(self, name):
-        return "user-" + self._digest("user", name.lower())
+        return "user-" + self._digest("user", _ascii_fold(name))
 
     def ip(self, ip):
         return "internal-" + self._digest("ip", str(ip))
@@ -115,11 +125,22 @@ class Masker:
 
     def text(self, s):
         s = IP_RE.sub(self._ip_sub, s)  # IPs first, so a numeric username cannot split an address
-        return self.names_re.sub(lambda m: self.user(m.group(0)), s) if self.names_re else s
+        if not self.names_re:
+            return s
+        # ASCII fold keeps the same length, so a match on the folded copy is the same span in s.
+        folded = _ascii_fold(s)
+        parts = []
+        last = 0
+        for match in self.names_re.finditer(folded):
+            parts.append(s[last:match.start()])
+            parts.append(self.user(s[match.start():match.end()]))
+            last = match.end()
+        parts.append(s[last:])
+        return "".join(parts)
 
     def mask(self, value, field=None):
         if isinstance(value, str):
-            if field in USER_FIELDS and value and value.lower() != self.self_name:
+            if field in USER_FIELDS and value and _ascii_fold(value) != self.self_name:
                 return self.user(value)
             return self.text(value)
         if isinstance(value, dict):

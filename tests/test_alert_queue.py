@@ -48,7 +48,8 @@ class AlertListFilterTests(unittest.TestCase):
         add_alert(self.conn, 7, "high", "resolved")
 
     def ids(self, **params):
-        return [row["id"] for row in list_alerts(self.conn, params)]
+        rows, _omitted = list_alerts(self.conn, params)
+        return [row["id"] for row in rows]
 
     def test_open_critical_and_high_is_the_working_queue(self):
         self.assertEqual(self.ids(status="open", severity="critical,high"), [1, 2])

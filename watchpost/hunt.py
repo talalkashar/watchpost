@@ -418,19 +418,31 @@ def _aggregate_sql(field, column):
 
 
 def _stats(conn, where, args, stage):
+    """One row per group, largest first, at most MAX_GROUPS rows.
+
+    `groups_omitted` is how many groups were past that cap (0 when the list fits, including a
+    stats with no `by`). `truncated` is true exactly when that count is not 0. Events with no
+    value in a `by` field are not groups. The row order stays count, then the group values.
+    """
     by = stage["by"]
     exprs = [_group_expr(f, c) for f, c in by]
     selects = exprs + [_aggregate_sql(field, column) for _, field, column in stage["aggregates"]]
     # NULL stays on the stored column. lower(NULL) is NULL, and the column can use an index.
     sql = f"SELECT {', '.join(selects)} FROM events{_where(where, [f'{c} IS NOT NULL' for _, c in by])}"
     if by:
+        # Count every group, then read only the capped page. The page query stays last so a plan
+        # check still sees the grouped SELECT.
+        grouped = f"SELECT 1 FROM events{_where(where, [f'{c} IS NOT NULL' for _, c in by])} GROUP BY {', '.join(exprs)}"
+        total = conn.execute(f"SELECT COUNT(*) FROM ({grouped})", args).fetchone()[0]
         order = [f"{len(by) + 1} DESC"] + [str(n + 1) for n in range(len(by))]
         sql += f" GROUP BY {', '.join(exprs)} ORDER BY {', '.join(order)} LIMIT ?"
-        rows = [list(r) for r in conn.execute(sql, args + [MAX_GROUPS + 1])]
+        rows = [list(r) for r in conn.execute(sql, args + [MAX_GROUPS])]
+        omitted = total - len(rows)
     else:
         rows = [list(conn.execute(sql, args).fetchone())]
+        omitted = 0
     return {"columns": [f for f, _ in by] + [name for name, _, _ in stage["aggregates"]],
-            "rows": rows[:MAX_GROUPS], "truncated": len(rows) > MAX_GROUPS}
+            "rows": rows, "truncated": omitted != 0, "groups_omitted": omitted}
 
 
 def _top(conn, where, args, stage):
@@ -468,7 +480,13 @@ def _epoch(ts):
 
 
 def _timechart(conn, where, args, stage, window):
-    """Counts per span bucket, every bucket in range filled (0 when empty), refused past MAX_BUCKETS."""
+    """Counts per span bucket, every bucket in range filled (0 when empty), refused past MAX_BUCKETS.
+
+    With `by`, the MAX_SERIES largest non-null series are columns. `series_omitted` is how many
+    distinct non-null series were past that cap (0 when every series is drawn, including a chart
+    with no `by`). Events with no value in the field are not a series. The rest stay in `other`.
+    `truncated` stays false, and the filled buckets do not change.
+    """
     span = SPANS[stage["span"]]
     start, end = window
     if start is None or end is None:
@@ -477,19 +495,25 @@ def _timechart(conn, where, args, stage, window):
     by = stage["by"]
     columns = ["_time"] + ([] if by else ["count"])
     if start is None or end is None or start > end:
-        return {"columns": columns, "rows": [], "truncated": False, "span": stage["span"]}
+        return {"columns": columns, "rows": [], "truncated": False, "span": stage["span"],
+                "series_omitted": 0}
     first, last = _epoch(start) // span * span, _epoch(end) // span * span
     buckets = (last - first) // span + 1
     if buckets > MAX_BUCKETS:
         raise HuntError(f"timechart span={stage['span']} needs {buckets:,} buckets here, and at most "
                         f"{MAX_BUCKETS} are drawn; narrow the time range (last:, since:, until:) or use a wider span")
     series = []
+    omitted = 0
     if by:
         (field, column), = by
         expr = _group_expr(field, column)
+        present = f"{column} IS NOT NULL"
+        grouped = f"SELECT 1 FROM events{_where(where, [present])} GROUP BY {expr}"
+        total = conn.execute(f"SELECT COUNT(*) FROM ({grouped})", args).fetchone()[0]
         series = [r[0] for r in conn.execute(
-            f"SELECT {expr} FROM events{_where(where, [f'{column} IS NOT NULL'])}"
+            f"SELECT {expr} FROM events{_where(where, [present])}"
             f" GROUP BY {expr} ORDER BY COUNT(*) DESC, 1 LIMIT ?", args + [MAX_SERIES])]
+        omitted = total - len(series)
         marks = ", ".join("?" for _ in series) or "NULL"
         sql = (f"SELECT {_BUCKET} AS bucket, CASE WHEN {expr} IN ({marks}) THEN {expr} END AS series, COUNT(*)"
                f" FROM events{_where(where)} GROUP BY bucket, series LIMIT ?")
@@ -509,7 +533,8 @@ def _timechart(conn, where, args, stage, window):
         keys = series + ([None] if has_other else [])
     rows = [[iso(datetime.fromtimestamp(t, timezone.utc))] + [counts.get((t, k), 0) for k in keys]
             for t in range(first, last + 1, span)]
-    return {"columns": columns, "rows": rows, "truncated": False, "span": stage["span"]}
+    return {"columns": columns, "rows": rows, "truncated": False, "span": stage["span"],
+            "series_omitted": omitted}
 
 
 def _timechart_note(query, span, rows):

@@ -122,7 +122,10 @@ class StreamTests(ServerTestCase):
         self.assertEqual(data["events"][0]["src_ip"], "203.0.113.77")
         self.assertNotIn("raw", data["events"][0])
         health = s.until("health")
-        self.assertEqual(health, {"partial": True, "checks": {"detection": "ok"}, "error": None})
+        self.assertEqual(health, {
+            "partial": True, "checks": {"detection": "ok"}, "error": None,
+            "alerts_omitted": 0, "incidents_omitted": 0,
+        })
         alerts = {}
         while "brute_force_ip" not in alerts:
             alert = s.until("alert")

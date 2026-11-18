@@ -24,6 +24,24 @@ TIMELINE_LIMIT = 300
 # Each list stays in id order. The older rows are notes_omitted and activity_omitted.
 NOTE_LIMIT = 100
 ACTIVITY_LIMIT = 100
+# Dashboard attacker list is this many source IPs, most alerts then most events.
+# attackers_omitted is how many source IPs on alerts were past that cap.
+ATTACKER_LIMIT = 40
+# Dashboard top rules is this many rule ids, most alerts first.
+# rules_omitted is how many rule ids on alerts were past that cap.
+TOP_RULE_LIMIT = 10
+# Dashboard alert board is this many alerts. Not resolved first, then severity,
+# then last_seen. board_omitted is how many alerts were past that cap.
+BOARD_LIMIT = 60
+# Dashboard recent events are this many, newest by ts, then id.
+# recent_events_omitted is how many stored events were past that cap.
+RECENT_LIMIT = 60
+# Metrics failure lists are this many groups, most failures first.
+# top_failure_ips_omitted and top_failure_users_omitted are how many groups were past that cap.
+TOP_FAILURE_LIMIT = 5
+_ATTACKER_FROM = (
+    " FROM alerts a JOIN alert_events ae ON ae.alert_id = a.id"
+    " JOIN events e ON e.id = ae.event_id WHERE e.src_ip IS NOT NULL")
 EVENT_FIELDS = "id, ts, ingested_at, source, host, event_type, outcome, severity, user, src_ip, dest_ip, dest_port, " \
                "bytes, message, synthetic, batch_id"
 
@@ -194,6 +212,12 @@ def get_event(conn, event_id):
 
 
 def list_alerts(conn, params):
+    """Matching alerts, and how many the limit left out.
+
+    Rows stay not-resolved first, then severity, then last_seen. The second
+    value is 0 when every match fits. Callers that return the bare array send
+    that count as X-Watchpost-Omitted.
+    """
     where, args = [], []
     if params.get("status"):
         # One status or a comma list. Spaces around a name are ignored.
@@ -214,11 +238,13 @@ def list_alerts(conn, params):
         args.append(params["rule_id"])
     limit = _int(params.get("limit"), "limit", 100, 1, 500)
     clause = (" WHERE " + " AND ".join(where)) if where else ""
+    total = conn.execute(f"SELECT COUNT(*) FROM alerts{clause}", args).fetchone()[0]
     order = ("CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 "
              "WHEN 'low' THEN 3 ELSE 4 END, last_seen DESC")
     rows = conn.execute(f"SELECT * FROM alerts{clause} ORDER BY status = 'resolved', {order} LIMIT ?",
                         args + [limit])
-    return [alert_row(r) for r in rows]
+    shown = [alert_row(r) for r in rows]
+    return shown, total - len(shown)
 
 
 def alert_row(row):
@@ -462,6 +488,19 @@ def metrics(conn, hours=24):
     aging = {"buckets": [{"label": label, "count": sum(low <= a < high for a in ages)}
                          for label, low, high in AGING_BUCKETS],
              "oldest_minutes": round(max(ages), 1) if ages else None}
+    # Addresses stay the stored spelling. Accounts fold ASCII case with SQLite lower(),
+    # the same fold hunt user groups use. Alice and alice are one row named alice.
+    # Érin and érin stay two rows. Each list is the busiest TOP_FAILURE_LIMIT groups.
+    top_ips = by("SELECT src_ip, COUNT(*) AS count FROM events WHERE event_type = 'auth_failure'"
+                 " AND src_ip IS NOT NULL GROUP BY src_ip ORDER BY count DESC"
+                 f" LIMIT {TOP_FAILURE_LIMIT}")
+    top_users = by("SELECT lower(user) AS user, COUNT(*) AS count FROM events WHERE event_type = 'auth_failure'"
+                   " AND user IS NOT NULL GROUP BY lower(user) ORDER BY count DESC"
+                   f" LIMIT {TOP_FAILURE_LIMIT}")
+    ips_omitted = one("SELECT COUNT(DISTINCT src_ip) FROM events WHERE event_type = 'auth_failure'"
+                      " AND src_ip IS NOT NULL") - len(top_ips)
+    users_omitted = one("SELECT COUNT(DISTINCT lower(user)) FROM events WHERE event_type = 'auth_failure'"
+                        " AND user IS NOT NULL") - len(top_users)
     return {
         "window_hours": hours,
         "window_scope": {
@@ -482,14 +521,10 @@ def metrics(conn, hours=24):
         "dispositions": by("SELECT disposition, COUNT(*) AS count FROM alerts WHERE disposition IS NOT NULL"
                            " GROUP BY disposition"),
         "mean_time_to_resolve_minutes": round(mttr, 1) if mttr is not None else None,
-        # Addresses stay the stored spelling. Accounts fold ASCII case with SQLite lower(),
-        # the same fold hunt user groups use. Alice and alice are one row named alice.
-        # Érin and érin stay two rows.
-        "top_failure_ips": by("SELECT src_ip, COUNT(*) AS count FROM events WHERE event_type = 'auth_failure'"
-                              " AND src_ip IS NOT NULL GROUP BY src_ip ORDER BY count DESC LIMIT 5"),
-        "top_failure_users": by(
-            "SELECT lower(user) AS user, COUNT(*) AS count FROM events WHERE event_type = 'auth_failure'"
-            " AND user IS NOT NULL GROUP BY lower(user) ORDER BY count DESC LIMIT 5"),
+        "top_failure_ips": top_ips,
+        "top_failure_ips_omitted": ips_omitted,
+        "top_failure_users": top_users,
+        "top_failure_users_omitted": users_omitted,
         "events_by_type": by("SELECT event_type, COUNT(*) AS count FROM events GROUP BY event_type"
                              " ORDER BY count DESC"),
         "activity_last_24h_of_data": histogram,
@@ -563,23 +598,28 @@ def dashboard(conn):
         f"SELECT e.src_ip AS ip, COUNT(DISTINCT e.id) AS events, COUNT(DISTINCT a.id) AS alerts,"
         f" MAX(MAX({sev_events}), MAX({sev_alerts})) AS sev_rank, MAX(e.ts) AS last_seen,"
         f" SUM(a.status != 'resolved') AS open_alerts"
-        f" FROM alerts a JOIN alert_events ae ON ae.alert_id = a.id JOIN events e ON e.id = ae.event_id"
-        f" WHERE e.src_ip IS NOT NULL GROUP BY e.src_ip ORDER BY alerts DESC, events DESC LIMIT 40")]
+        f"{_ATTACKER_FROM} GROUP BY e.src_ip ORDER BY alerts DESC, events DESC LIMIT {ATTACKER_LIMIT}")]
     for a in attackers:
         del a["sev_rank"]
+    attackers_omitted = one(f"SELECT COUNT(DISTINCT e.src_ip){_ATTACKER_FROM}") - len(attackers)
 
     top_rules = [dict(r) for r in conn.execute(
         "SELECT a.rule_id, r.name, r.severity, COUNT(*) AS alerts, SUM(a.status != 'resolved') AS open"
-        " FROM alerts a LEFT JOIN rules r ON r.id = a.rule_id GROUP BY a.rule_id ORDER BY alerts DESC LIMIT 10")]
+        " FROM alerts a LEFT JOIN rules r ON r.id = a.rule_id GROUP BY a.rule_id"
+        f" ORDER BY alerts DESC LIMIT {TOP_RULE_LIMIT}")]
+    rules_omitted = one("SELECT COUNT(DISTINCT rule_id) FROM alerts") - len(top_rules)
     board = [dict(r) for r in conn.execute(
         "SELECT id, rule_id, severity, title, status, group_key, first_seen, last_seen, event_count, synthetic,"
         " assignee FROM alerts ORDER BY status = 'resolved', "
-        + SEVERITY_RANK_SQL.format(col="severity") + " DESC, last_seen DESC LIMIT 60")]
+        + SEVERITY_RANK_SQL.format(col="severity")
+        + f" DESC, last_seen DESC LIMIT {BOARD_LIMIT}")]
+    board_omitted = one("SELECT COUNT(*) FROM alerts") - len(board)
     recent = [dict(r) for r in conn.execute(
-        f"SELECT {EVENT_FIELDS} FROM events ORDER BY ts DESC, id DESC LIMIT 60")]
+        f"SELECT {EVENT_FIELDS} FROM events ORDER BY ts DESC, id DESC LIMIT {RECENT_LIMIT}")]
+    events_total = one("SELECT COUNT(*) FROM events")
     return {
         "generated_at": now_iso(),
-        "events_total": one("SELECT COUNT(*) FROM events"),
+        "events_total": events_total,
         "synthetic_events": one("SELECT COUNT(*) FROM events WHERE synthetic = 1"),
         "alerts_open": one("SELECT COUNT(*) FROM alerts WHERE status = 'open'"),
         "alerts_investigating": one("SELECT COUNT(*) FROM alerts WHERE status = 'investigating'"),
@@ -589,7 +629,11 @@ def dashboard(conn):
         "events_per_minute": epm,
         "alert_timeline": _alert_timeline(conn),
         "attackers": attackers,
+        "attackers_omitted": attackers_omitted,
         "top_rules": top_rules,
+        "rules_omitted": rules_omitted,
         "alerts": board,
+        "board_omitted": board_omitted,
         "recent_events": recent,
+        "recent_events_omitted": events_total - len(recent),
     }
