@@ -1,11 +1,14 @@
+import inspect
 import json
+import re
 import unittest
 from datetime import datetime, timezone
 
 from watchpost.db import connect, init_schema
 from watchpost.diagnostics import record_error, redact
-from watchpost.normalize import (EventError, MAX_LEN, normalize_authlog_line, normalize_record,
-                                 normalize_weblog_line, parse_payload)
+from watchpost.normalize import (EventError, MAX_LEN, classify_web_request, normalize_authlog_line,
+                                 normalize_record, normalize_weblog_line, parse_payload)
+from watchpost import normalize
 
 NOW = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
 
@@ -149,6 +152,42 @@ class WebLogTests(unittest.TestCase):
         self.assertEqual(self.parse("/", 200, agent="sqlmap/1.7")["event_type"], "web_scan")
         self.assertEqual(self.parse("/api/orders", 502)["event_type"], "web_error")
         self.assertEqual(self.parse("/missing", 404)["event_type"], "web_request")
+
+    def test_scan_folds_ascii_letters_only(self):
+        # UNION SELECT and /.ENV stay scans. Dotless i, dotted I, and Kelvin do not become those words.
+        scans = ("union select", "UNION SELECT", "UNION ALL SELECT", "/.env", "/.ENV", "/.GIT",
+                 "/blog/.GIT/config", "SLEEP(1)", "Or 1=1", "<SCRIPT", "${JNDI:",
+                 "/q?s=1%20UNION%20SELECT%20password")
+        for path in scans:
+            with self.subTest(path=path):
+                self.assertEqual(classify_web_request(path, 200), "web_scan", path)
+        self.assertEqual(self.parse("/.ENV", 404)["event_type"], "web_scan")
+        self.assertEqual(self.parse("/q?s=1+UNION+SELECT+password", 200)["event_type"], "web_scan")
+        lookalikes = ("unıon select", "UNİON SELECT", "benchmarK(", "ınformation_schema", "/.gİt")
+        for path in lookalikes:
+            with self.subTest(path=path):
+                self.assertEqual(classify_web_request(path, 200), "web_request", path)
+                self.assertEqual(classify_web_request(path, 500), "web_error", path)
+        self.assertEqual(self.parse("/.gİt", 404)["event_type"], "web_request")
+        self.assertEqual(self.parse("/.gİt", 502)["event_type"], "web_error")
+        self.assertEqual(self.parse("/q?s=benchmarK(", 200)["event_type"], "web_request")
+        self.assertNotEqual(classify_web_request("/.gİt", 200), classify_web_request("/.git", 200))
+        source = inspect.getsource(classify_web_request)
+        self.assertNotIn(".lower(", source)
+        self.assertNotIn("re.I", source)
+        self.assertNotIn("IGNORECASE", source)
+        self.assertFalse(normalize._SCAN_PATTERN.flags & re.IGNORECASE)
+        api = (self._docs("API.md"))
+        reference = self._docs("REFERENCE.md")
+        for text in (api, reference):
+            self.assertIn("`UNION SELECT` and `/.ENV` are `web_scan`", text)
+            self.assertIn("`unıon select` and `/.gİt` are not", text)
+        self.assertIn("`/.gİt` is not `/.git`", reference)
+
+    @staticmethod
+    def _docs(name):
+        from pathlib import Path
+        return (Path(__file__).resolve().parent.parent / "docs" / name).read_text()
 
     def test_detect_and_reject(self):
         text = self.LINE.format(path="/.env", status=404, agent="x") + "\nnot a log line\n"

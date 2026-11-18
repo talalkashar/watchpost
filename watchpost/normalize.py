@@ -350,15 +350,22 @@ _WEBLOG = re.compile(
 SCAN_PATHS = ("/.env", "/.git", "/.svn", "/.aws", "/.ds_store", "/.htaccess", "/wp-login.php", "/wp-admin",
               "/xmlrpc.php", "/phpmyadmin", "/pma/", "/server-status", "/cgi-bin/", "/actuator",
               "/vendor/phpunit", "/boot.ini", "/etc/passwd", "/config.php", "/admin.php", "/manager/html")
+# A–Z only, the same fold as SQLite NOCASE. İ and K stay themselves.
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 _SCAN_PATTERN = re.compile(
     r"union\s+(?:all\s+)?select|'\s*or\s+'?\d|\bor\s+1\s*=\s*1|sleep\(\s*\d|benchmark\(|information_schema"
-    r"|\.\./|<script|\$\{jndi:", re.I)
+    r"|\.\./|<script|\$\{jndi:")
 _SCANNER_AGENT = re.compile(r"nikto|sqlmap|nmap|masscan|zgrab|gobuster|dirbuster|wpscan|nuclei|acunetix", re.I)
 
 
 def classify_web_request(path, status, agent=None):
-    """web_scan for scanner paths, injection patterns, or scanner user agents; web_error for 5xx."""
-    decoded = unquote_plus(path or "").lower()
+    """web_scan for scanner paths, injection patterns, or scanner user agents; web_error for 5xx.
+
+    The decoded path folds ASCII letters only, then the scanner-path list and the injection
+    pattern run on that text. UNION SELECT and /.ENV are web_scan. A dotted I or a Kelvin
+    sign stays, so those lookalikes are not scans.
+    """
+    decoded = unquote_plus(path or "").translate(_ASCII_FOLD)
     if any(p in decoded for p in SCAN_PATHS) or _SCAN_PATTERN.search(decoded) \
             or (agent and _SCANNER_AGENT.search(agent)):
         return "web_scan"
