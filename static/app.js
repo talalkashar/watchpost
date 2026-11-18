@@ -894,9 +894,22 @@ function svgEl(tag, attrs = {}, ...children) {
   return node;
 }
 
+// A timechart with no events is a blank box of zero bars. Name the query and the span instead.
+const HUNT_TIMECHART_SPANS = ["5m", "15m", "1h", "6h", "1d"];
+function huntTimechartEmpty(data) {
+  const rows = data && Array.isArray(data.rows) ? data.rows : [];
+  const hit = rows.some((row) => Array.isArray(row) && row.slice(1).some((n) => Number(n) > 0));
+  if (hit) return "";
+  const span = data && data.span;
+  const query = data && typeof data.query === "string" ? data.query.trim() : "";
+  if (!HUNT_TIMECHART_SPANS.includes(span) || !query) return "No matching events.";
+  return `No events match ${query} in ${span} buckets.`;
+}
+
 // Bars for one series, lines for several (by), and the same numbers as a table for screen readers and copying.
 function huntTimechart(data) {
-  if (!data.rows.length) return el("p", { class: "muted" }, "No matching events.");
+  const empty = huntTimechartEmpty(data);
+  if (empty) return el("p", { class: "muted", id: "hunt-timechart-empty", role: "status" }, empty);
   const series = data.columns.slice(1);
   const colors = ["--accent", "--high", "--low", "--med", "--synthetic", "--info"];
   const W = 760, H = 200, L = 44, B = 22, T = 8, n = data.rows.length;

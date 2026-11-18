@@ -397,7 +397,7 @@ def _timechart(conn, where, args, stage, window):
     by = stage["by"]
     columns = ["_time"] + ([] if by else ["count"])
     if start is None or end is None or start > end:
-        return {"columns": columns, "rows": [], "truncated": False}
+        return {"columns": columns, "rows": [], "truncated": False, "span": stage["span"]}
     first, last = _epoch(start) // span * span, _epoch(end) // span * span
     buckets = (last - first) // span + 1
     if buckets > MAX_BUCKETS:
@@ -428,7 +428,7 @@ def _timechart(conn, where, args, stage, window):
         keys = series + ([None] if has_other else [])
     rows = [[iso(datetime.fromtimestamp(t, timezone.utc))] + [counts.get((t, k), 0) for k in keys]
             for t in range(first, last + 1, span)]
-    return {"columns": columns, "rows": rows, "truncated": False}
+    return {"columns": columns, "rows": rows, "truncated": False, "span": stage["span"]}
 
 
 # --- Saved searches ----------------------------------------------------------------------
