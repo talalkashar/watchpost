@@ -637,12 +637,14 @@ def metrics(conn, hours=24):
         "alerts_open": one("SELECT COUNT(*) FROM alerts WHERE status = 'open'"),
         "alerts_investigating": one("SELECT COUNT(*) FROM alerts WHERE status = 'investigating'"),
         "alerts_resolved": one("SELECT COUNT(*) FROM alerts WHERE status = 'resolved'"),
-        # Catalog rank, not scan order. A level or disposition with no rows is not invented.
+        # Rank, then the stored severity. critical through low each have their own rank.
+        # info and any other open name share rank 0, so the name keeps that tie in one order.
+        # A severity with no open or investigating alert is not a row.
         # An empty table stays an empty list. A resolved alert stays out of alerts_by_severity.
         "alerts_by_severity": by(
             "SELECT severity, COUNT(*) AS count FROM alerts WHERE status != 'resolved'"
             " GROUP BY severity ORDER BY "
-            + SEVERITY_RANK_SQL.format(col="severity") + " DESC"),
+            + SEVERITY_RANK_SQL.format(col="severity") + " DESC, severity"),
         "alerts_by_rule": alerts_by_rule,
         "alerts_by_rule_omitted": alerts_by_rule_omitted,
         "dispositions": by(

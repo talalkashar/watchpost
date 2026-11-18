@@ -1,7 +1,8 @@
 """Metrics severity and disposition lists stay in catalog order.
 
-alerts_by_severity is critical, high, medium, low, then info. dispositions is
-true_positive, false_positive, then benign. A name with no rows is not
+alerts_by_severity is severity rank, then severity. critical through low each
+have their own rank. info and any other open name share rank 0. dispositions
+is true_positive, false_positive, then benign. A name with no rows is not
 invented. An empty table is an empty list. window_scope stays as it is.
 """
 
@@ -111,15 +112,43 @@ class MetricsOrderTests(unittest.TestCase):
                         and "GROUP BY severity" in sql)
         disposition = next(sql for sql in captured if "disposition IS NOT NULL" in sql
                            and "GROUP BY disposition" in sql)
-        self.assertIn("ORDER BY " + SEVERITY_RANK_SQL.format(col="severity") + " DESC", severity)
+        self.assertIn(
+            "ORDER BY " + SEVERITY_RANK_SQL.format(col="severity") + " DESC, severity", severity)
         self.assertIn("ORDER BY " + DISPOSITION_ORDER_SQL.format(col="disposition"), disposition)
+        self.assertNotIn(", disposition", disposition)
         self.assertNotIn("GROUP BY severity ORDER BY count", severity)
+
+    def test_rank_zero_orders_by_severity_and_leaves_resolved_out(self):
+        # Quiet names first. A rank-only read can swap alert, info, and urgent.
+        add_alert(self.conn, "urgent", status="open", key="urgent")
+        add_alert(self.conn, "info", status="investigating", key="info")
+        add_alert(self.conn, "alert", status="open", key="alert")
+        add_alert(self.conn, "high", status="open", key="high")
+        add_alert(self.conn, "medium", status="resolved", disposition="benign", key="closed-medium")
+        body = metrics(self.conn)
+        self.assertEqual(
+            body["alerts_by_severity"],
+            [{"severity": "high", "count": 1},
+             {"severity": "alert", "count": 1},
+             {"severity": "info", "count": 1},
+             {"severity": "urgent", "count": 1}])
+        self.assertNotIn("medium", [row["severity"] for row in body["alerts_by_severity"]])
+        self.assertEqual(
+            body["dispositions"],
+            [{"disposition": "benign", "count": 1}])
+        self.assertEqual(body["window_scope"]["note"], METRICS_WINDOW_NOTE)
 
     def test_the_docs_name_the_catalog_order(self):
         api = API.read_text()
         self.assertIn(
-            "`alerts_by_severity` is open and investigating alerts, ordered `critical`, `high`,"
-            " `medium`, `low`, then `info`",
+            "`alerts_by_severity` is open and investigating alerts, ordered by severity rank,"
+            " then `severity`: `critical`, `high`, `medium`, `low`, then `info`",
+            api)
+        self.assertIn(
+            "A name outside that catalog shares rank 0 with `info` and sorts by `severity`",
+            api)
+        self.assertIn(
+            "sorts by `severity` (`alert`, then `info`, then `urgent`)",
             api)
         self.assertIn(
             "`dispositions` is alerts that have a disposition, ordered `true_positive`,"
@@ -154,6 +183,26 @@ class MetricsOrderApiTests(ServerTestCase):
         self.assertEqual(status, 401)
         self.assertNotIn("alerts_by_severity", denied)
         self.assertNotIn("dispositions", denied)
+
+    def test_rank_zero_open_severities_stay_in_name_order(self):
+        with sqlite3.connect(self.db_path) as db:
+            add_alert(db, "urgent", status="open", key="urgent")
+            add_alert(db, "info", status="investigating", key="info")
+            add_alert(db, "alert", status="open", key="alert")
+            add_alert(db, "critical", status="resolved", disposition="true_positive", key="closed")
+        status, body, headers = self.client("viewer").get("/api/metrics")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(
+            body["alerts_by_severity"],
+            [{"severity": "alert", "count": 1},
+             {"severity": "info", "count": 1},
+             {"severity": "urgent", "count": 1}])
+        self.assertEqual(body["dispositions"], [{"disposition": "true_positive", "count": 1}])
+        self.assertEqual(body["window_scope"]["note"], METRICS_WINDOW_NOTE)
+        status, denied, _ = self.client().get("/api/metrics")
+        self.assertEqual(status, 401)
+        self.assertNotIn("alerts_by_severity", denied)
 
 
 class ResolveOrderTests(unittest.TestCase):
