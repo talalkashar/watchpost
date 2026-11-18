@@ -150,8 +150,16 @@ def run_evaluation(conn, actor):
 
 
 def list_evaluations(conn, limit=20):
-    rows = conn.execute("SELECT * FROM evaluation_runs ORDER BY id DESC LIMIT ?", (limit,))
-    return [row_to_dict(r, ["results"]) for r in rows]
+    """Evaluation runs, newest id first, and how many the limit left out.
+
+    The second value is 0 when the history fits. A later created_at on a
+    lower id is the one left out. Callers that return the bare array send
+    that count as X-Watchpost-Omitted.
+    """
+    total = conn.execute("SELECT COUNT(*) FROM evaluation_runs").fetchone()[0]
+    rows = [row_to_dict(r, ["results"]) for r in conn.execute(
+        "SELECT * FROM evaluation_runs ORDER BY id DESC LIMIT ?", (limit,))]
+    return rows, total - len(rows)
 
 
 # --- Analyst feedback -> rule performance ---------------------------------------------
