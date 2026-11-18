@@ -1335,12 +1335,14 @@ class Handler(BaseHTTPRequestHandler):
         return "; ".join(parts)
 
     def _static(self, path):
+        """A file that exists is no-cache. A missing path or a non-GET is no-store, like an API error."""
         if self.command != "GET":
-            return self._send(405, {"error": "method not allowed"})
+            return self._send(405, {"error": "method not allowed"},
+                              extra_headers={"Cache-Control": "no-store"})
         name = "index.html" if path in ("", "/") else path.lstrip("/")
         target = (STATIC_DIR / name).resolve()
         if STATIC_DIR.resolve() not in target.parents or not target.is_file():
-            return self._send(404, b"not found", "text/plain")
+            return self._send(404, b"not found", "text/plain", {"Cache-Control": "no-store"})
         ctype = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         if ctype.startswith("text/") or ctype.endswith("javascript"):
             ctype += "; charset=utf-8"
