@@ -289,7 +289,8 @@ class MaskingServerTests(ServerTestCase):
             elif group == "([a-z_]+)":
                 values = ids["rules"]
             elif group == "([^/]+)":
-                values = ids["entities"][prefix.rstrip("/").rsplit("/", 1)[-1]]
+                kind = prefix.rstrip("/").rsplit("/", 1)[-1]
+                values = ids["rules"] if kind == "rules" else ids["entities"][kind]
             else:
                 self.fail(f"no sample values for {group} in {pattern.pattern}")
             paths = [p.replace(group, quote(str(v), safe=""), 1) for p in paths for v in values]

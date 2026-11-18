@@ -826,8 +826,14 @@ def _sigma_detail(conn, rule):
             "sample_result": sigma.sample_result(rule["params"], rec["sample"])}
 
 
-@route("GET", r"/api/rules/([a-z_]+)/history")
+def _rule_id(rule_id):
+    """Percent-encoded rule ids (Érin stays Érin) decode once. ASCII ids are unchanged."""
+    return unquote(rule_id)
+
+
+@route("GET", r"/api/rules/([^/]+)/history")
 def rule_history(req, rule_id):
+    rule_id = _rule_id(rule_id)
     rows, omitted = improve.list_rule_history(req.conn, rule_id, RULE_HISTORY_LIMIT)
     _set_omitted(req, omitted)
     return rows
@@ -844,8 +850,9 @@ def _backtest_quota(req, limiter, cost=1):
             raise ApiError(429, f"too many backtests{needed}; retry in {retry_after} s")
 
 
-@route("POST", r"/api/rules/([a-z_]+)/proposals", role="analyst")
+@route("POST", r"/api/rules/([^/]+)/proposals", role="analyst")
 def rule_propose(req, rule_id):
+    rule_id = _rule_id(rule_id)
     data = body_json(req)
     _backtest_quota(req, req.app.change_backtest_limiter)  # the proposal's evidence carries a backtest
     payload = {k: data[k] for k in ("params", "enabled", "grouping") if k in data}
@@ -924,18 +931,20 @@ def sigma_import(req):
                                   req.user["username"])
 
 
-@route("POST", r"/api/rules/([a-z_]+)/sigma-sample", role="analyst")
+@route("POST", r"/api/rules/([^/]+)/sigma-sample", role="analyst")
 def sigma_sample_propose(req, rule_id):
     """Attach or replace an imported rule's labeled sample; a change request like any other."""
+    rule_id = _rule_id(rule_id)
     data = body_json(req)
     req.status = 201
     return improve.propose_change(req.conn, "sigma_sample", rule_id, {"sample": data.get("sample")},
                                   data.get("reason"), req.user["username"])
 
 
-@route("POST", r"/api/rules/([a-z_]+)/search-sample", role="analyst")
+@route("POST", r"/api/rules/([^/]+)/search-sample", role="analyst")
 def search_sample_propose(req, rule_id):
     """Attach or replace a promoted search rule's labeled sample; a change request like any other."""
+    rule_id = _rule_id(rule_id)
     data = body_json(req)
     req.status = 201
     return improve.propose_change(req.conn, "search_sample", rule_id, {"sample": data.get("sample")},
@@ -946,13 +955,14 @@ BACKTEST_BURST, BACKTEST_PER_MINUTE = 6, 12
 CHANGE_BACKTEST_BURST = 20  # rule proposals and approvals: room for a review session
 
 
-@route("GET", r"/api/rules/([a-z_]+)/backtest", role="analyst")
+@route("GET", r"/api/rules/([^/]+)/backtest", role="analyst")
 def rule_backtest(req, rule_id):
     """Preview a draft rule change on stored events before proposing it. Changes nothing.
 
     Analyst and above, like proposing; a viewer sees the backtest inside a change request's evidence.
     ?params=<JSON object of the params to change>&days=<1-30, default 7>.
     """
+    rule_id = _rule_id(rule_id)
     try:
         params = json.loads(req.query.get("params") or "{}")
     except json.JSONDecodeError:
@@ -964,9 +974,10 @@ def rule_backtest(req, rule_id):
     return improve.preview_backtest(req.conn, rule_id, params, int(days))
 
 
-@route("POST", r"/api/rules/([a-z_]+)/suppressions", role="analyst")
+@route("POST", r"/api/rules/([^/]+)/suppressions", role="analyst")
 def suppression_propose(req, rule_id):
     """Propose a tuning exception; nothing is suppressed until an admin approves the change request."""
+    rule_id = _rule_id(rule_id)
     data = body_json(req)
     req.status = 201
     return improve.propose_change(req.conn, "suppression_add", rule_id,
@@ -981,8 +992,9 @@ def suppressions(req):
     return rows
 
 
-@route("POST", r"/api/rules/([a-z_]+)/suppression-windows", role="analyst")
+@route("POST", r"/api/rules/([^/]+)/suppression-windows", role="analyst")
 def rule_suppression_propose(req, rule_id):
+    rule_id = _rule_id(rule_id)
     data = body_json(req)
     req.status = 201
     return improve.propose_change(req.conn, "rule_suppression_add", rule_id,

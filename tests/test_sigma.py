@@ -5,6 +5,7 @@ import time
 import unittest
 from datetime import timedelta
 from pathlib import Path
+from urllib.parse import quote
 
 from watchpost import rules as rules_mod
 from watchpost import sigma
@@ -234,6 +235,48 @@ class CompileTests(unittest.TestCase):
         self.assertFalse(sigma.matches(c["params"], {"event_type": "auth_success", "user": "root", "src_ip": "203.0.113.5"}))
 
 
+_SEL = "  sel:\n    user: x\n  condition: sel\n"
+
+
+class SigmaSlugTests(unittest.TestCase):
+    def test_ascii_case_folds_and_other_letters_stay(self):
+        self.assertEqual(sigma.slug("Suspicious Login"), "sigma_suspicious_login")
+        self.assertEqual(sigma.slug("suspicious login"), "sigma_suspicious_login")
+        self.assertEqual(sigma.slug("SUSPICIOUS LOGIN"), "sigma_suspicious_login")
+        self.assertEqual(sigma.slug("Brute Force IP!"), "sigma_brute_force_ip")
+        self.assertEqual(sigma.slug("Érin login"), "sigma_Érin_login")
+        self.assertEqual(sigma.slug("érin login"), "sigma_érin_login")
+        self.assertNotEqual(sigma.slug("Érin login"), sigma.slug("érin login"))
+        # U+0130 is not an ASCII letter, so it is not folded into i.
+        self.assertEqual(sigma.slug("HİGH alert"), "sigma_hİgh_alert")
+        self.assertNotEqual(sigma.slug("HİGH alert"), sigma.slug("high alert"))
+        # A combining acute is not a letter, so it is not the precomposed é.
+        self.assertEqual(sigma.slug("e\u0301rin login"), "sigma_e_rin_login")
+        self.assertNotEqual(sigma.slug("e\u0301rin login"), sigma.slug("érin login"))
+
+    def test_no_ascii_letter_is_refused_and_the_base_stays_capped(self):
+        for title in ("É", "日本語", "---", "!!!", "123"):
+            with self.subTest(title=title):
+                with self.assertRaises(sigma.SigmaError) as ctx:
+                    sigma.slug(title)
+                self.assertIn("must contain letters", str(ctx.exception))
+        long = sigma.slug("n" * 60)
+        self.assertTrue(long.startswith("sigma_"))
+        self.assertEqual(len(long) - len("sigma_"), 48)
+        kept = sigma.slug("É" + "a" * 60)
+        self.assertEqual(len(kept) - len("sigma_"), 48)
+        self.assertTrue(kept.startswith("sigma_É"))
+
+    def test_compile_uses_the_folded_id(self):
+        self.assertEqual(sigma.compile_rule(rule_yaml(_SEL, title="Suspicious Login"))["rule_id"],
+                         "sigma_suspicious_login")
+        self.assertEqual(sigma.compile_rule(rule_yaml(_SEL, title="Érin login"))["rule_id"], "sigma_Érin_login")
+        self.assertEqual(sigma.compile_rule(rule_yaml(_SEL, title="érin login"))["rule_id"], "sigma_érin_login")
+        with self.assertRaises(sigma.SigmaError) as ctx:
+            sigma.compile_rule(rule_yaml(_SEL, title="É"))
+        self.assertIn("must contain letters", str(ctx.exception))
+
+
 class SigmaGroupKeyTests(unittest.TestCase):
     def test_host_and_user_keys_fold_ascii_only(self):
         params = compiled("  sel:\n    message: hit\n  condition: sel\n")
@@ -322,6 +365,30 @@ class ImportWorkflowTests(ServerTestCase):
         self.assertIn("regular expressions are refused", data["refused"])
         self.assertEqual(analyst.get("/api/changes")[1], [])
         self.assertIsNone(self.rule(analyst))
+
+    def test_accented_titles_stay_two_rule_ids(self):
+        analyst, admin = self.client("analyst"), self.client("admin")
+        high = rule_yaml(_SEL, title="Érin login")
+        low = rule_yaml(_SEL, title="érin login")
+        status, data, _ = self.import_rule(analyst, high, dry_run=True)
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["compiled"]["rule_id"], "sigma_Érin_login")
+        status, other, _ = self.import_rule(analyst, low, dry_run=True)
+        self.assertEqual(status, 200, other)
+        self.assertEqual(other["compiled"]["rule_id"], "sigma_érin_login")
+        self.assertNotEqual(data["compiled"]["rule_id"], other["compiled"]["rule_id"])
+        status, refused, _ = self.import_rule(analyst, rule_yaml(_SEL, title="É"), dry_run=True)
+        self.assertEqual(status, 200, refused)
+        self.assertFalse(refused["ok"])
+        self.assertIn("must contain letters", refused["refused"])
+        status, change, _ = self.import_rule(analyst, high)
+        self.assertEqual(status, 201, change)
+        self.approve(admin, change)
+        path = "/api/rules/" + quote("sigma_Érin_login", safe="") + "/history"
+        status, rows, _ = analyst.get(path)
+        self.assertEqual(status, 200, rows)
+        self.assertEqual(rows[0]["rule_id"], "sigma_Érin_login")
+        self.assertIsNone(self.rule(analyst, "sigma_érin_login"))
         # A real import of a refused rule is a 400 naming the reason.
         status, data, _ = self.import_rule(analyst, rule_yaml("  s:\n    Image: x\n  condition: s\n"))
         self.assertEqual(status, 400)

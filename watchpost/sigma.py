@@ -527,9 +527,21 @@ class _Condition:
 
 
 def slug(title):
-    """Rule id for a Sigma title: sigma_<letters and underscores>. Never collides with a built-in rule id."""
-    base = re.sub(r"[^a-z]+", "_", title.lower()).strip("_")[:48].strip("_")
-    if not base:
+    """Rule id for a Sigma title: sigma_ plus letters and underscores.
+
+    ASCII letters fold. Any other letter stays, so Érin login and érin login
+    are two ids. A run that is not a letter becomes one underscore. A title
+    with no ASCII letter is refused. The base is at most 48 characters.
+    """
+    folded = title.translate(_ASCII_FOLD)
+    pieces = []
+    for ch in folded:
+        if ch.isalpha():
+            pieces.append(ch)
+        else:
+            pieces.append("_")
+    base = re.sub(r"_+", "_", "".join(pieces)).strip("_")[:48].strip("_")
+    if not re.search(r"[a-z]", base):
         raise SigmaError("the title must contain letters (it names the rule id)")
     return RULE_PREFIX + base
 
