@@ -116,6 +116,35 @@ async function auditView(page, label, width) {
   check(!problems.length, `${width}px ${label}${problems.length ? `: ${problems.join("; ")}` : ""}`);
 }
 
+// SVG font-size is in user units. Include the screen transform to catch a
+// readable CSS declaration being scaled down by the chart's viewBox.
+function matrixGeometry(box) {
+  const labels = [...box.querySelectorAll(".heat text")];
+  const columns = [...box.querySelectorAll(".tactic")];
+  const bounds = box.getBoundingClientRect();
+  const edges = columns.map((column) => {
+    const ctm = column.getScreenCTM();
+    return { left: ctm.e, right: ctm.e + column.width.baseVal.value * ctm.a };
+  });
+  const impact = columns.findIndex((column) => column.querySelector(".th title").textContent === "Impact");
+  return {
+    columns: columns.length,
+    font: Math.min(...labels.map((el) => {
+      const m = el.getScreenCTM();
+      return parseFloat(getComputedStyle(el).fontSize) * Math.hypot(m.c, m.d);
+    })),
+    fit: edges.every(({ left, right }) => left >= bounds.left - 0.02 && right <= bounds.right + 0.02),
+    clipped: labels.filter((el) => {
+      const { left, right } = el.getBoundingClientRect();
+      const column = el.ownerSVGElement;
+      const m = column.getScreenCTM();
+      return left < m.e - 0.02 || right > m.e + column.width.baseVal.value * m.a + 0.02;
+    }).map((el) => el.firstChild.textContent),
+    impactRight: edges[impact]?.right, containerRight: bounds.right,
+    contentWidth: box.scrollWidth, containerWidth: box.clientWidth, pageWidth: document.scrollingElement.scrollWidth,
+  };
+}
+
 async function main() {
   const server = startServer();
   console.log(`server pid ${server.proc.pid}, db ${server.dir}`);
@@ -139,6 +168,18 @@ async function main() {
     await admin.page.click("text=Load synthetic demo data");
     await admin.page.waitForSelector("text=Alerts created", { timeout: 60000 });
     ok("demo data loaded");
+    await admin.page.goto(BASE + "#dashboard");
+    for (const width of [1101, 1180, 1280, 1440, 1920]) {
+      await admin.page.setViewportSize({ width, height: 900 });
+      await admin.page.reload();
+      await admin.page.waitForSelector("#attack-chart .cellg");
+      const size = await admin.page.locator("#attack-chart").evaluate(matrixGeometry);
+      check(size.columns === 14 && size.fit && size.impactRight <= size.containerRight + 0.02
+        && size.contentWidth === size.containerWidth && size.pageWidth === width && !size.clipped.length && size.font >= 11,
+        `${width}px ATT&CK matrix: ${size.font.toFixed(2)}px labels, IMPACT right ${size.impactRight?.toFixed(2)} / ${size.containerRight.toFixed(2)}, clipped [${size.clipped}]`);
+    }
+    await admin.page.setViewportSize({ width: 1440, height: 900 });
+
     const alertId = await admin.page.evaluate(async () => (await (await fetch("/api/alerts?status=open")).json())[0].id);
     const incidentId = await admin.page.evaluate(async () => (await (await fetch("/api/incidents")).json())[0]?.id);
     const ruleId = await admin.page.evaluate(async () => (await (await fetch("/api/rules")).json())[0].id);

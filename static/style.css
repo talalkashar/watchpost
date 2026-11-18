@@ -281,7 +281,6 @@ dialog::backdrop { background: rgb(8 8 8 / .72); }
 #p-rules, #p-health { overflow: visible; }
 #p-rules .chartbox { height: auto; }
 @media (min-width: 1101px) {
-  #attack-chart .heat { max-width: 100%; height: auto; }
   #ent-list:has(.erow:nth-child(5)), #health-body:has(.hrow2:nth-child(5)) {
     display: grid; height: 100%; align-content: stretch;
   }
@@ -401,6 +400,7 @@ dialog::backdrop { background: rgb(8 8 8 / .72); }
 .spark .area { opacity: .18; }
 
 /* ATT&CK heat matrix */
+.heat .tactic { overflow: visible; }
 .heat .th { fill: var(--ink-2); font: 500 11px var(--sans); letter-spacing: 0; text-transform: uppercase; }
 .heat .th.quiet, .heat .tc.quiet { fill: var(--muted); }
 .heat .tc { fill: var(--muted); font: 11px var(--mono); }
