@@ -243,26 +243,30 @@ def suggest_for_rule(conn, rule):
     tp_ips = set().union(*[t["ips"] for t in tps]) if tps else set()
     tp_users = set().union(*[t["users"] for t in tps]) if tps else set()
 
-    ip_counts = Counter(ip for f in fps for ip in f["ips"])
-    ips = sorted(ip for ip, n in ip_counts.items()
-                 if n >= MIN_FEEDBACK_FOR_SUGGESTION and ip not in tp_ips and ip not in params["ignore_ips"])
-    if ips:
-        return {
-            "params": {"ignore_ips": params["ignore_ips"] + ips},
-            "reason": f"{len(fps)} alerts from this rule were marked false positive by analysts; "
-                      f"{', '.join(ips)} appeared in {max(ip_counts[i] for i in ips)} of them and in no "
-                      f"true-positive alert. Proposed: exclude these IP(s) from this rule.",
-        }
+    # Only suggest a list the rule already stores. log_source_silent has neither list; indexing
+    # them raised KeyError and aborted suggestions for every other rule.
+    if "ignore_ips" in params:
+        ip_counts = Counter(ip for f in fps for ip in f["ips"])
+        ips = sorted(ip for ip, n in ip_counts.items()
+                     if n >= MIN_FEEDBACK_FOR_SUGGESTION and ip not in tp_ips and ip not in params["ignore_ips"])
+        if ips:
+            return {
+                "params": {"ignore_ips": params["ignore_ips"] + ips},
+                "reason": f"{len(fps)} alerts from this rule were marked false positive by analysts; "
+                          f"{', '.join(ips)} appeared in {max(ip_counts[i] for i in ips)} of them and in no "
+                          f"true-positive alert. Proposed: exclude these IP(s) from this rule.",
+            }
 
-    user_counts = Counter(u for f in fps for u in f["users"])
-    users = sorted(u for u, n in user_counts.items()
-                   if n >= MIN_FEEDBACK_FOR_SUGGESTION and u not in tp_users and u not in params["ignore_users"])
-    if users:
-        return {
-            "params": {"ignore_users": params["ignore_users"] + users},
-            "reason": f"{len(fps)} false-positive alerts involved the account(s) {', '.join(users)}, "
-                      f"which never appeared in a true-positive alert. Proposed: exclude them from this rule.",
-        }
+    if "ignore_users" in params:
+        user_counts = Counter(u for f in fps for u in f["users"])
+        users = sorted(u for u, n in user_counts.items()
+                       if n >= MIN_FEEDBACK_FOR_SUGGESTION and u not in tp_users and u not in params["ignore_users"])
+        if users:
+            return {
+                "params": {"ignore_users": params["ignore_users"] + users},
+                "reason": f"{len(fps)} false-positive alerts involved the account(s) {', '.join(users)}, "
+                          f"which never appeared in a true-positive alert. Proposed: exclude them from this rule.",
+            }
 
     key = "threshold" if "threshold" in params else None
     if key and tps:
@@ -318,9 +322,12 @@ def _validate_change(conn, kind, target, payload):
             raise ChangeError("enabled must be true or false")
         if sigma.is_sigma(target):
             # Imported logic is not tuned in place, and it runs only once its labeled sample passes.
-            if "params" in payload and payload["params"] != {} and \
-                    {**json.loads(rule["params"]), **payload["params"]} != json.loads(rule["params"]):
-                raise ChangeError("a Sigma rule has no tunable params: change its YAML and import it again")
+            if "params" in payload:
+                if not isinstance(payload["params"], dict):
+                    raise ChangeError("params must be an object")
+                current = json.loads(rule["params"])
+                if payload["params"] != {} and {**current, **payload["params"]} != current:
+                    raise ChangeError("a Sigma rule has no tunable params: change its YAML and import it again")
             if payload.get("enabled") is True:
                 _require_passing_sample(conn, sigma, target, "Sigma rule")
             return json.loads(rule["params"]) if "params" in payload else None
@@ -791,6 +798,8 @@ def review_change(conn, change_id, decision, reviewer, note="", digest=None, ack
             raise ChangeError(f"change request is already {change['status']}", 409)
         if change["proposed_by"] == reviewer:
             raise ChangeError("you cannot review your own change request; a second person must approve it", 403)
+        if note is not None and not isinstance(note, str):
+            raise ChangeError("note must be a string")
         note = (note or "").strip()[:2000]
         problem, lost, lost_alerts = None, [], []
         if decision == "approve":
