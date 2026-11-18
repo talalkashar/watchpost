@@ -712,13 +712,20 @@ def get_change(conn, change_id):
 
 
 def list_changes(conn, status=None, limit=100):
-    sql, args = "SELECT * FROM change_requests", []
+    """Change requests, newest id first, and how many the limit left out.
+
+    The second value is 0 when every match fits. A status filter counts only
+    that status. Callers that return the bare array send that count as
+    X-Watchpost-Omitted.
+    """
+    where, args = "", []
     if status:
-        sql += " WHERE status = ?"
+        where = " WHERE status = ?"
         args.append(status)
-    sql += " ORDER BY id DESC LIMIT ?"
-    args.append(limit)
-    return [_change(r) for r in conn.execute(sql, args)]
+    total = conn.execute(f"SELECT COUNT(*) FROM change_requests{where}", args).fetchone()[0]
+    rows = [_change(r) for r in conn.execute(
+        f"SELECT * FROM change_requests{where} ORDER BY id DESC LIMIT ?", args + [limit])]
+    return rows, total - len(rows)
 
 
 def review_change(conn, change_id, decision, reviewer, note="", digest=None, acknowledge_detection_loss=False):
