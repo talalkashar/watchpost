@@ -21,7 +21,7 @@ from .db import parse_iso
 from .queries import EVENT_FIELDS, QueryError, _int, canonical_ip
 
 KINDS = ("user", "src_ip", "host")
-# SQLite COLLATE NOCASE folds these letters only. Host keys use the same fold.
+# SQLite COLLATE NOCASE folds these letters only. User and host keys use the same fold.
 _ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 SEVERITY_WEIGHTS = {"critical": 40, "high": 20, "medium": 10, "low": 5, "info": 1}
 HALF_LIFE_HOURS = 24
@@ -63,15 +63,14 @@ def _utc_day(ts):
 def _entity_value(kind, value):
     """The value an entity is keyed and returned as.
 
-    Accounts use str.lower, which is what the list already did. Hosts fold ASCII
-    letters only, the same fold as COLLATE NOCASE and event search, so WEB01 and
-    web01 are one host and Érin-host stays apart from érin-host. A source IP stays
-    as stored. `get_entity` canonicalizes the path before this, so the key is the
-    form ingest stores.
+    Accounts and hosts fold ASCII letters only, the same fold as COLLATE NOCASE
+    and event search. Erin, ERIN, and erin are one account whose value is erin,
+    and WEB01 and web01 are one host. str.lower would also fold É, so ÉRIN and
+    érin would share the key érin while the lookup would miss the ÉRIN rows.
+    Those two stay apart. A source IP stays as stored. `get_entity` canonicalizes
+    an IP path before this, so that key is the form ingest stores.
     """
-    if kind == "user":
-        return value.lower()
-    if kind == "host":
+    if kind in ("user", "host"):
         return value.translate(_ASCII_FOLD)
     return value
 
@@ -119,7 +118,7 @@ def _alerts_by_day(conn, kind, value):
 def _entity_alerts(conn, where="", args=()):
     """{(kind, value): {alert_id, ...}} from evidence events.
 
-    Accounts are lowercased. Hosts fold ASCII case, so WEB01 and web01 share one score.
+    Accounts and hosts fold ASCII case, so Erin and erin share one score, and so do WEB01 and web01.
     """
     found = {}
     for row in conn.execute("SELECT DISTINCT ae.alert_id, e.user, e.src_ip, e.host FROM alert_events ae"
@@ -181,7 +180,7 @@ def get_entity(conn, kind, value):
 
     An entity nothing has been seen for is not an error: it has a score of 0 and empty lists.
     A source IP is the form ingest stores (`2001:DB8::1` is `2001:db8::1`). Anything
-    that is not one address is 400. User and host folding stay as they are.
+    that is not one address is 400. A user or host path is the ASCII-folded key.
     """
     if kind not in KINDS:
         raise QueryError("entity kind not found", 404)
