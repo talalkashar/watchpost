@@ -83,11 +83,14 @@ def backtest(conn, rule_id, new_params, window_days=DEFAULT_WINDOW_DAYS, max_eve
     Deterministic for a given database state, so its digest is stable until an event is appended or a
     rule, exception or open alert changes.
     """
-    row = conn.execute("SELECT params FROM rules WHERE id = ?", (rule_id,)).fetchone()
+    row = conn.execute("SELECT params, grouping FROM rules WHERE id = ?", (rule_id,)).fetchone()
     if row is None:
         raise rules_mod.RuleConfigError(f"unknown rule {rule_id!r}")
     current = rules_mod.validate_params(rule_id, json.loads(row["params"]))
     proposed = rules_mod.validate_params(rule_id, new_params)
+    # The same stored grouping detection applies (rules.grouping). A proposed grouping change is previewed
+    # on its own; both sides of this replay use what is stored now.
+    grouping = json.loads(row["grouping"] or "[]")
     window_days = max(1, min(int(window_days), MAX_WINDOW_DAYS))
     running = {"today": bool(running[0]), "proposed": bool(running[1])}
 
@@ -96,17 +99,31 @@ def backtest(conn, rule_id, new_params, window_days=DEFAULT_WINDOW_DAYS, max_eve
     end = conn.execute("SELECT MAX(ts) FROM events WHERE id <= ?", (max_id,)).fetchone()[0]
     if end is None:
         return _empty(rule_id, window_days, max_events, running)
-    start = iso(parse_iso(end) - timedelta(days=window_days))
-    rules = [{"id": rule_id, "params": current}, {"id": rule_id, "params": proposed}]
+    end_dt = parse_iso(end)
+    requested = end_dt - timedelta(days=window_days)
+    rules = [{"id": rule_id, "params": current, "grouping": grouping},
+             {"id": rule_id, "params": proposed, "grouping": grouping}]
     pad = timedelta(seconds=rules_mod.lookback_seconds(rules))
-    # The newest event past the cap, if the padded window holds more than max_events: start after it.
+    # The newest event past the cap, if the padded window holds more than max_events. id breaks ties.
     over = conn.execute(
-        "SELECT ts FROM events WHERE id <= ? AND ts >= ? AND ts <= ? ORDER BY ts DESC LIMIT 1 OFFSET ?",
-        (max_id, iso(parse_iso(start) - pad), end, max_events)).fetchone()
+        "SELECT ts FROM events WHERE id <= ? AND ts >= ? AND ts <= ?"
+        " ORDER BY ts DESC, id DESC LIMIT 1 OFFSET ?",
+        (max_id, iso(requested - pad), end, max_events)).fetchone()
     if over:
-        start = min(end, iso(parse_iso(over["ts"]) + timedelta(milliseconds=1) + pad))
+        candidate = parse_iso(over["ts"]) + timedelta(milliseconds=1) + pad
+        if candidate <= end_dt:
+            scan_from = finding_start = iso(candidate)
+        else:
+            # The cut sits inside one rule lookback of the newest event. scan_events subtracts `pad`
+            # again, so the scan argument stays `end` and the loaded span stays [end-pad, end].
+            # Count findings across that lookback (not only those ending on the newest timestamp)
+            # and do not report a window wider than the one that was asked for.
+            scan_from = end
+            finding_start = iso(max(requested, end_dt - pad))
+    else:
+        scan_from = finding_start = iso(requested)
 
-    events, history, scan_start = engine.scan_events(conn, rules, max_id, start, end)
+    events, history, scan_start = engine.scan_events(conn, rules, max_id, scan_from, end)
     scanned = events + history
     events_by_id = {e["id"]: e for e in scanned}
     suppressed = engine.active_suppressions(conn)
@@ -114,9 +131,10 @@ def backtest(conn, rule_id, new_params, window_days=DEFAULT_WINDOW_DAYS, max_eve
     def run(params, on):
         if not on:
             return {}, 0
-        findings, skipped = engine.rule_findings({"id": rule_id, "params": params}, events, history,
-                                                 scan_start, suppressed)
-        return _by_key(f for f in findings if f["last_seen"] >= start), skipped  # ends inside the window
+        findings, skipped = engine.rule_findings(
+            {"id": rule_id, "params": params, "grouping": grouping}, events, history,
+            scan_start, suppressed)
+        return _by_key(f for f in findings if f["last_seen"] >= finding_start), skipped  # ends inside the window
 
     today, skipped_today = run(current, running["today"])
     after, skipped_after = run(proposed, running["proposed"])
@@ -148,7 +166,7 @@ def backtest(conn, rule_id, new_params, window_days=DEFAULT_WINDOW_DAYS, max_eve
                        key=lambda a: a["id"])
     return {
         "rule": rule_id,
-        "window": {"start": start, "end": end},
+        "window": {"start": finding_start, "end": end},
         "window_days": window_days,
         "capped": bool(over),
         "max_events": max_events,
@@ -174,7 +192,9 @@ def preview_new_rule(conn, rule_id, params, matches, window_days=DEFAULT_WINDOW_
     saved search). `rule_id` only picks the rule function; `matches(event)` counts the events its filter matches.
 
     Uses the engine's own event loading and finding filter (engine.scan_events / rule_findings), so it reads
-    what detection would read. Window: the last `window_days` of stored event time, newest event last.
+    what detection would read, including the lookback those functions load. Findings that end before the
+    window are left out. Events scanned are the ones inside the window. `window_days` is capped at
+    MAX_WINDOW_DAYS, the same bound as a rule backtest.
     """
     rule = {"id": rule_id, "params": params}
     max_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
@@ -184,20 +204,36 @@ def preview_new_rule(conn, rule_id, params, matches, window_days=DEFAULT_WINDOW_
            "sample_findings": [], "capped": False}
     if end is None:
         return out
-    start = iso(parse_iso(end) - timedelta(days=window_days))
-    over = conn.execute("SELECT ts FROM events WHERE id <= ? AND ts >= ? AND ts <= ? ORDER BY ts DESC LIMIT 1"
-                        " OFFSET ?", (max_id, start, end, max_events)).fetchone()
+    window_days = max(1, min(int(window_days), MAX_WINDOW_DAYS))
+    end_dt = parse_iso(end)
+    start = iso(end_dt - timedelta(days=window_days))
+    # id breaks ties. The row past the cap is not part of the window.
+    over = conn.execute(
+        "SELECT id, ts FROM events WHERE id <= ? AND ts >= ? AND ts <= ?"
+        " ORDER BY ts DESC, id DESC LIMIT 1 OFFSET ?",
+        (max_id, start, end, max_events)).fetchone()
+    drop_id = None
     if over:
-        start = over["ts"]
+        boundary = parse_iso(over["ts"]) + timedelta(milliseconds=1)
+        if boundary <= end_dt:
+            start = iso(boundary)
+        else:
+            # Every event in the cap shares the newest timestamp. Keep the newer ids there so the
+            # window is neither empty nor the whole burst.
+            start = over["ts"]
+            drop_id = over["id"]
     events, history, scan_start = engine.scan_events(conn, [rule], max_id, start, end)
-    events = [e for e in events if e["ts"] >= start]
-    findings, _ = engine.rule_findings(rule, events, [], None, set())
+    if drop_id is not None:
+        events = [e for e in events if not (e["ts"] == start and e["id"] <= drop_id)]
+    findings, _ = engine.rule_findings(rule, events, history, scan_start, set())
+    findings = [f for f in findings if start <= f["last_seen"] <= end]
+    window_events = [e for e in events if start <= e["ts"] <= end]
     keys = sorted({f["group_key"] for f in findings})
     shown = keys[:PREVIEW_GROUP_KEYS]
     newest = sorted(findings, key=lambda f: (f["last_seen"], f["group_key"]), reverse=True)
-    out.update(window={"start": start, "end": end}, events_scanned=len(events),
-               synthetic_events=sum(1 for e in events if e["synthetic"]), capped=bool(over),
-               matched_events=sum(1 for e in events if matches(e)), findings=len(findings),
+    out.update(window={"start": start, "end": end}, events_scanned=len(window_events),
+               synthetic_events=sum(1 for e in window_events if e["synthetic"]), capped=bool(over),
+               matched_events=sum(1 for e in window_events if matches(e)), findings=len(findings),
                group_keys=shown, group_keys_omitted=len(keys) - len(shown),
                sample_findings=[{"group_key": f["group_key"], "event_count": len(f["event_ids"]),
                                  "first_seen": f["first_seen"], "last_seen": f["last_seen"], "title": f["title"]}
