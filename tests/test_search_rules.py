@@ -44,6 +44,7 @@ QUERIES = [
     "user:alice", "user:ALICE", "user:émile", "user:Émile", "user:al*", "user:AL*", 'user:"al*"', "user:al_ice",
     "NOT user:alice", "-user:bob", "host:web*", "host:WEB*", "host:web01", "host:WEB01", "host:*", "NOT host:*",
     "src_ip:10.0.0.5", "ip:10.0.0.5", "ip:10.*", "NOT ip:10.*", "dest_ip:198.51.100.1", "dest_port:22",
+    "src_ip:2001:DB8::1", "ip:2001:0db8:0:0:0:0:0:1", "src_ip:2001:DB8*",
     "NOT dest_port:22", "event_type:auth_failure", "event_type:auth*", "NOT event_type:web_request",
     "synthetic:1", "synthetic:false", "bytes:>=1000000", "bytes:>100", "bytes:<=100", "bytes:<100",
     "bytes:=0", "NOT bytes:>=1000000", "password", "PASSWORD", '"100%"', "under_score", '"under_"', "école",
@@ -70,6 +71,12 @@ class MatcherCrossCheckTests(unittest.TestCase):
                               "bytes": BYTE_COUNTS[k % 4],
                               "message": MESSAGES[k % 8]})
             engine.store_batch(self.conn, batch, [], "test", "json", "test", synthetic=synthetic)
+        # Ingest stores this compressed form. The queries above spell the same address differently.
+        engine.store_batch(self.conn, [{
+            "ts": iso(T0), "source": "lab", "severity": "low", "host": "web01",
+            "event_type": "auth_failure", "user": "alice", "src_ip": "2001:db8::1",
+            "message": "[SYNTHETIC] v6",
+        }], [], "test", "json", "test", synthetic=True)
         self.events = [dict(r) for r in self.conn.execute(f"SELECT {engine.RULE_EVENT_FIELDS} FROM events")]
 
     def test_python_matcher_agrees_with_sql(self):

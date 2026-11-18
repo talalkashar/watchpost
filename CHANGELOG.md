@@ -6,6 +6,8 @@ All bundled data is synthetic. PR numbers refer to https://github.com/talalkasha
 
 ### Fixed
 
+- Hunt and event search bind a complete IP in the form ingest stores, so `src_ip:2001:DB8::1` and `GET /api/events?ip=2001:DB8::1` match a row stored as `2001:db8::1`. A trailing `*` stays a text prefix. Anything that is neither a prefix nor one address is 400.
+
 - Alert related timeline matches `user` case-insensitively (ASCII, like event search). Evidence stored as `Alice` includes events stored as `alice`. Source IP matches stay exact.
 
 - Event search and hunt match `host` case-insensitively (ASCII, like the asset inventory). `WEB01` and `web01` are one host in `host=` and `host:`. Grouping by host stays exact. The lookup uses `idx_events_host_nocase`.

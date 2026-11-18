@@ -1,8 +1,8 @@
 """Read-side queries and analyst workflow operations."""
 
-from datetime import timedelta
-
+import ipaddress
 import json
+from datetime import timedelta
 
 from .db import audit, iso, now_iso, parse_iso, row_to_dict, transaction, utcnow
 from .normalize import EVENT_TYPES, SEVERITIES, EventError, parse_timestamp
@@ -21,6 +21,20 @@ class QueryError(ValueError):
     def __init__(self, message, status=400):
         super().__init__(message)
         self.status = status
+
+
+def canonical_ip(value, field):
+    """The address form ingest stores (`str(ipaddress.ip_address)`).
+
+    A complete address binds as that form, so `2001:DB8::1` matches a row stored as `2001:db8::1`.
+    A prefix is not passed here. Anything else is 400.
+    """
+    if isinstance(value, str):
+        try:
+            return str(ipaddress.ip_address(value))
+        except ValueError:
+            pass
+    raise QueryError(f"{field} must be a valid IP address")
 
 
 def _int(value, name, default, low, high):
@@ -72,8 +86,10 @@ def search_events(conn, params):
                 where.append(f"{column} = ? COLLATE NOCASE" if field in ("user", "host") else f"{column} = ?")
                 args.append(params[field])
     if params.get("ip"):
+        # Equality only. A trailing * is a hunt prefix, not an address, so it is 400 here.
+        address = canonical_ip(params["ip"], "ip")
         where.append("(src_ip = ? OR dest_ip = ?)")
-        args += [params["ip"], params["ip"]]
+        args += [address, address]
     if params.get("q"):
         needle = params["q"]
         if not isinstance(needle, str) or len(needle) > MAX_SEARCH_Q:

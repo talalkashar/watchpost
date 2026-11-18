@@ -123,7 +123,7 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 |---|---|
 | `start`, `end` | ISO timestamps (inclusive) |
 | `source`, `host`, `user`, `batch_id` | Exact match (`user` and `host` ignore ASCII case, the same way the asset inventory matches a host name); a trailing `*` makes it a prefix match |
-| `ip` | Matches `src_ip` or `dest_ip` |
+| `ip` | Matches `src_ip` or `dest_ip`. A complete address is the form ingest stores (`2001:DB8::1` matches `2001:db8::1`). Anything that is not one address is 400 |
 | `event_type` | One normalized type |
 | `severity` | Comma list, or a single level with `severity_mode=min` for "at least" |
 | `q` | Substring of `message` (`%` and `_` are literal), at most 200 characters. A longer value is 400 naming that maximum |

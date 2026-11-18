@@ -10,7 +10,9 @@ with the hunt's SQL semantics: same fields and value checks, a trailing `*` on a
 match, message terms are "contains", NOT keeps events missing the field, and a bytes term uses the
 same >=, >, <=, < or = comparison as the hunt. Comparisons fold case the way SQLite does
 (ASCII only): user and host equality, every prefix match and message contains ignore ASCII case;
-other equality is exact. tests/test_search_rules.py cross-checks this matcher against hunt.compile_query in SQL.
+other equality is exact. `src_ip`, `dest_ip`, and `ip` equality use the address form ingest stores;
+a prefix stays the typed text. tests/test_search_rules.py cross-checks this matcher against
+hunt.compile_query in SQL.
 
 Hunt fields the engine does not load (outcome, severity, batch_id) are refused, and so are time terms: the
 window replaces them. The rule's params are the compiled definition; only `threshold` and `window_seconds`
@@ -28,6 +30,7 @@ from datetime import timedelta
 from . import attack
 from . import hunt
 from . import sigma
+from .queries import canonical_ip
 from .db import iso, parse_iso
 from .normalize import EventError, parse_timestamp
 
@@ -124,10 +127,14 @@ def _predicate(term):
         if prefix is not None:
             p = _fold(prefix)
             return lambda e: _starts(e.get("src_ip"), p) or _starts(e.get("dest_ip"), p)
-        return lambda e: e.get("src_ip") == value or e.get("dest_ip") == value
+        address = canonical_ip(value, field)
+        return lambda e: e.get("src_ip") == address or e.get("dest_ip") == address
     if prefix is not None:
         p = _fold(prefix)
         return lambda e: _starts(e.get(column), p)
+    if field in ("src_ip", "dest_ip"):
+        address = canonical_ip(value, field)
+        return lambda e: e.get(column) == address
     if field in ("user", "host"):  # COLLATE NOCASE, ASCII only, same as the asset inventory's host names
         folded = _fold(value)
         return lambda e: isinstance(e.get(column), str) and _fold(e[column]) == folded
