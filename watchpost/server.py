@@ -1046,9 +1046,9 @@ def asset_propose(req, asset_id):
 
 @route("GET", "/api/tokens", role="admin")
 def tokens(req):
-    return [row_to_dict(r, json_fields=("capabilities",)) for r in req.conn.execute(
-        "SELECT id, name, prefix, created_by, created_at, last_used_at, revoked_at, role, capabilities, expires_at"
-        " FROM api_tokens ORDER BY id")]
+    rows, omitted = auth.list_api_tokens(req.conn)
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", "/api/tokens", role="admin")
