@@ -690,8 +690,12 @@ def dashboard_view_delete(req, view_id):
 
 @route("GET", "/api/dashboard")
 def dashboard(req):
+    # The entity list already drops false positives. Keep that score, and say how many
+    # scored entities sit past the eight shown.
+    ranked = entities.list_entities(req.conn, {"limit": DASHBOARD_ENTITIES})
     return {**queries.dashboard(req.conn),
-            "risky_entities": entities.list_entities(req.conn, {"limit": DASHBOARD_ENTITIES})["entities"]}
+            "risky_entities": ranked["entities"],
+            "risky_entities_omitted": ranked["entities_omitted"]}
 
 
 @route("GET", "/api/entities")
