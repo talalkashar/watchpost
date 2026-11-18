@@ -16,6 +16,8 @@ DISPOSITIONS = ("true_positive", "false_positive", "benign")
 MAX_EVENT_OFFSET = 10_000
 # A longer needle used to be sliced, so it matched messages that lacked the rest.
 MAX_SEARCH_Q = 200
+# Alert detail returns this many evidence events, earliest first. The rest are evidence_omitted.
+EVIDENCE_LIMIT = 500
 EVENT_FIELDS = "id, ts, ingested_at, source, host, event_type, outcome, severity, user, src_ip, dest_ip, dest_port, " \
                "bytes, message, synthetic, batch_id"
 
@@ -214,8 +216,15 @@ def get_alert(conn, alert_id):
                                              " WHERE id = ?", (alert["rule_id"],)).fetchone(), ["techniques"])
     alert["evidence"] = [dict(r) for r in conn.execute(
         f"SELECT {', '.join('e.' + c.strip() for c in EVENT_FIELDS.split(','))} FROM events e"
-        " JOIN alert_events ae ON ae.event_id = e.id WHERE ae.alert_id = ? ORDER BY e.ts, e.id LIMIT 500",
-        (alert_id,))]
+        " JOIN alert_events ae ON ae.event_id = e.id WHERE ae.alert_id = ?"
+        " ORDER BY e.ts, e.id LIMIT ?",
+        (alert_id, EVIDENCE_LIMIT))]
+    # Count the same join the page returns. A stored event_count, or a link whose event is gone, is not a row.
+    total = conn.execute(
+        "SELECT COUNT(*) AS n FROM events e"
+        " JOIN alert_events ae ON ae.event_id = e.id WHERE ae.alert_id = ?",
+        (alert_id,)).fetchone()["n"]
+    alert["evidence_omitted"] = total - len(alert["evidence"])
     alert["notes"] = [dict(r) for r in conn.execute(
         "SELECT * FROM alert_notes WHERE alert_id = ? ORDER BY id", (alert_id,))]
     alert["activity"] = [dict(r) for r in conn.execute(
