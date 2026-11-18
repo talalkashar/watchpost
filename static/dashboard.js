@@ -532,7 +532,7 @@ const Dash = {
         el("div", { class: "map-legend" }, ...["critical", "high", "medium", "low"].map((s) => el("span", {}, el("i", { class: `dot sev-${s}` }), s)),
           el("span", {}, el("i", { class: "dot hq" }), "HQ target"))),
       panel("p-feed", "Live event stream", [el("span", { class: "muted", id: "feed-poll", hidden: true }), el("span", { class: "muted", id: "feed-rate" }), pause],
-        el("div", { class: "feed-head" }, el("span", {}, "TIME"), el("span", {}, "SEV"), el("span", {}, "EVENT")),
+        el("div", { class: "feed-head" }, el("span", {}, "Time"), el("span", {}, "Sev"), el("span", {}, "Event")),
         el("div", { class: "feed", id: "feed", onmouseenter: () => this.hover(true), onmouseleave: () => this.hover(false) })),
       panel("p-timeline", "Alerts over time", [el("span", { class: "muted", id: "tl-bucket" })], el("div", { class: "chartbox", id: "tl-chart" }),
         el("div", { class: "legend" }, ...["critical", "high", "medium", "low"].map((s) => el("span", {}, el("i", { class: `dot sev-${s}` }), s)),
@@ -1055,7 +1055,7 @@ function incidentBoard(inc, alerts, perColumn) {
   return Object.entries(cols).map(([name, items]) => {
     items.sort(order);
     return el("div", { class: `bcol bc-${name}` },
-      el("div", { class: "bh" }, el("span", {}, name.toUpperCase()), el("b", {}, items.length)),
+      el("div", { class: "bh" }, el("span", {}, name[0].toUpperCase() + name.slice(1)), el("b", {}, items.length)),
       ...items.slice(0, perColumn).map((c) => el("a", { class: `bcard sev-${sevOf(c.sev)}`, href: c.href },
         el("div", { class: "bt" }, c.title),
         el("div", { class: "bm" }, sevTag(c.sev), el("span", {}, c.meta), el("span", { class: "muted" }, ago(c.time)), c.synthetic ? el("span", { class: "syn" }, "SYN") : null),
