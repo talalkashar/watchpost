@@ -43,6 +43,12 @@ class AssignCaseTests(unittest.TestCase):
         if disabled:
             self.conn.execute("UPDATE users SET disabled = 1 WHERE username = ?", (username,))
 
+    def insert_user(self, username, role="analyst", disabled=0):
+        """A second ASCII spelling. create_user itself returns 409 for that name."""
+        self.conn.execute(
+            "INSERT INTO users(username, pw_hash, role, disabled, created_at) VALUES (?,?,?,?,?)",
+            (username, "unused-hash", role, 1 if disabled else 0, NOW))
+
     def stored(self, alert_id=1):
         return self.conn.execute(
             "SELECT assignee, status FROM alerts WHERE id = ?", (alert_id,)).fetchone()
@@ -66,7 +72,7 @@ class AssignCaseTests(unittest.TestCase):
         self.user("solo")
         assign(self.conn, 1, "analyst", "solo")
         self.user("pat", "analyst")
-        self.user("Pat", "admin")
+        self.insert_user("Pat", "admin")
         activity = self.conn.execute("SELECT COUNT(*) FROM alert_activity").fetchone()[0]
         audits = self.conn.execute(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'alert_assigned'").fetchone()[0]
@@ -91,10 +97,10 @@ class AssignCaseTests(unittest.TestCase):
 
     def test_a_disabled_account_and_a_viewer_do_not_match(self):
         self.user("dana", disabled=1)
-        self.user("Dana", "analyst")
+        self.insert_user("Dana", "analyst")
         self.user("Quinn", "viewer")
-        self.user("Pat", "viewer")
         self.user("pat", "analyst")
+        self.insert_user("Pat", "viewer")
         for bad in ("nobody", "Quinn"):
             with self.subTest(assignee=bad):
                 with self.assertRaises(QueryError) as caught:

@@ -6,6 +6,7 @@ import hmac
 import json
 import os
 import secrets
+import sqlite3
 from datetime import timedelta
 from pathlib import Path
 
@@ -55,17 +56,42 @@ def validate_password_strength(password):
         raise AuthError("password is too long", 400)
 
 
+def _stored_username(conn, username):
+    """The saved spelling of `username`. `COLLATE NOCASE` folds ASCII letters only.
+
+    `Admin` is the stored `admin`. `Érin` is not `érin`. The table's UNIQUE index is
+    case-sensitive, so this lookup is what refuses the second spelling.
+    """
+    row = conn.execute(
+        "SELECT username FROM users WHERE username = ? COLLATE NOCASE", (username,)).fetchone()
+    return None if row is None else row["username"]
+
+
+def _username_taken(stored):
+    raise AuthError(f"a user named {stored!r} already exists", 409)
+
+
 def create_user(conn, username, password, role, actor="system"):
     if role not in ROLES:
         raise AuthError(f"role must be one of {', '.join(ROLES)}", 400)
     if not isinstance(username, str) or not (3 <= len(username) <= 32) or not username.replace("_", "").isalnum():
         raise AuthError("username must be 3-32 letters, digits, or underscores", 400)
     validate_password_strength(password)
-    conn.execute(
-        "INSERT INTO users(username, pw_hash, role, created_at) VALUES (?,?,?,?)",
-        (username, hash_password(password), role, now_iso()),
-    )
-    audit(conn, actor, "user_created", username, {"role": role})
+    with transaction(conn):
+        stored = _stored_username(conn, username)
+        if stored is not None:
+            _username_taken(stored)
+        try:
+            # Hash only after the name is free. A taken spelling never reaches PBKDF2.
+            conn.execute(
+                "INSERT INTO users(username, pw_hash, role, created_at) VALUES (?,?,?,?)",
+                (username, hash_password(password), role, now_iso()),
+            )
+        except sqlite3.IntegrityError:
+            # A concurrent insert of the same spelling can pass the lookup and still hit UNIQUE.
+            stored = _stored_username(conn, username)
+            _username_taken(stored if stored is not None else username)
+        audit(conn, actor, "user_created", username, {"role": role})
 
 
 def bootstrap_users(conn, config, data_dir):
