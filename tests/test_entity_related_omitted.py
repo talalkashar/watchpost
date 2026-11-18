@@ -212,6 +212,53 @@ class EntityRelatedOmittedTests(unittest.TestCase):
             "The score and `contributions` still include every alert."
             " A false positive or benign close stays weight 0.",
             text)
+        self.assertIn(
+            "That page is `ORDER BY i.last_seen DESC, i.id DESC LIMIT`"
+            " and the omitted count is `COUNT(DISTINCT i.id)` minus the page."
+            " The score query is not limited.",
+            text)
+        reference = Path(__file__).resolve().parent.parent.joinpath("docs", "REFERENCE.md").read_text()
+        self.assertIn("ORDER BY i.last_seen DESC, i.id DESC LIMIT", reference)
+        self.assertIn("`incidents_omitted` is `COUNT(DISTINCT i.id)` minus that page", reference)
+        self.assertIn("The score still sums every alert.", reference)
+
+    def test_the_incident_page_uses_limit_and_the_score_query_does_not(self):
+        event_id = add_event(self.conn)
+        first = add_alert(self.conn, event_id, hours=0)
+        second = add_alert(self.conn, event_id, hours=-1)
+        kept = add_incident(self.conn, first, hours=0)
+        older = add_incident(self.conn, second, hours=-1)
+        calls = []
+        real = self.conn.execute
+
+        def execute(sql, params=()):
+            calls.append((" ".join(sql.split()), params))
+            return real(sql, params)
+
+        self.conn.execute = execute
+        try:
+            detail = get_entity(self.conn, "user", "alice")
+        finally:
+            self.conn.execute = real
+
+        pages = [call for call in calls if "FROM incidents i" in call[0] and "COUNT" not in call[0]]
+        counts = [call for call in calls if call[0].startswith("SELECT COUNT(DISTINCT i.id)")]
+        self.assertEqual(len(pages), 1)
+        self.assertEqual(len(counts), 1)
+        self.assertIn("ORDER BY i.last_seen DESC, i.id DESC LIMIT ?", pages[0][0])
+        self.assertNotIn("LIMIT", counts[0][0])
+        self.assertEqual(pages[0][1], [first, second, RELATED_LIMIT])
+        self.assertEqual(counts[0][1], [first, second])
+        scores = [call for call in calls if call[0].startswith("SELECT id, rule_id")]
+        self.assertEqual(len(scores), 1)
+        self.assertNotIn("LIMIT", scores[0][0])
+        self.assertIn("ORDER BY last_seen DESC, id DESC", scores[0][0])
+        self.assertEqual(scores[0][1], [first, second])
+        self.assertEqual([row["id"] for row in detail["incidents"]], [kept, older])
+        self.assertEqual(detail["incidents_omitted"], 0)
+        self.assertEqual(len(detail["contributions"]), 2)
+        source = Path(__file__).resolve().parent.parent.joinpath("watchpost", "entities.py").read_text()
+        self.assertNotIn("incidents[:RELATED_LIMIT]", source)
 
 
 class EntityRelatedOmittedApiTests(ServerTestCase):
