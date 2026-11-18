@@ -186,6 +186,30 @@ class CompileTests(unittest.TestCase):
         self.assertIn("`bac\u212aup` does not match `backup`", text)
         self.assertNotIn("full case fold", text)
 
+    def test_condition_globs_fold_ascii_letters_only(self):
+        # Backup* matches backup. A Kelvin sign in the pattern is not k.
+        kelvin = "bac\u212a"
+        det = ("  backup:\n    user: alice\n  BACKUP:\n    user: bob\n  other:\n    host: web01\n"
+               "  condition: {}\n")
+        matched = compiled(det.format("1 of Backup*"))
+        self.assertTrue(sigma.matches(matched, {"user": "alice"}))
+        self.assertTrue(sigma.matches(matched, {"user": "bob"}))
+        self.assertFalse(sigma.matches(matched, {"host": "web01"}))
+        them = compiled(det.format("1 of them"))
+        self.assertTrue(sigma.matches(them, {"user": "alice"}))
+        self.assertTrue(sigma.matches(them, {"user": "bob"}))
+        self.assertTrue(sigma.matches(them, {"host": "web01"}))
+        with self.assertRaises(sigma.SigmaError) as ctx:
+            sigma.compile_rule(rule_yaml(det.format(f"1 of {kelvin}*")))
+        self.assertIn("matches no selection", str(ctx.exception))
+        self.assertIn(f"{kelvin}*", str(ctx.exception))
+        source = inspect.getsource(sigma._glob_names)
+        self.assertNotIn(".casefold(", source)
+        self.assertNotIn(".lower(", source)
+        text = (EXAMPLE.parent.parent / "REFERENCE.md").read_text()
+        self.assertIn("`1 of Backup*` matches selection `backup`", text)
+        self.assertIn(f"`1 of {kelvin}*` matches no selection", text)
+
     def test_conditions(self):
         det = ("  sel_a:\n    user: alice\n  sel_b:\n    src_ip: 203.0.113.9\n  other:\n    host: web01\n"
                "  condition: {}\n")

@@ -426,7 +426,9 @@ def _selection(name, body):
     raise SigmaError(f"{where} must be a map of fields, a list of maps, or a keyword list")
 
 
-_TOKEN = re.compile(r"\s*(\(|\)|[A-Za-z0-9_*.\-]+)")
+# Letters beyond A-Z stay in the token so a lookalike reaches the glob. ASCII folding
+# then refuses it, instead of the token stopping at the first such letter.
+_TOKEN = re.compile(r"\s*(\(|\)|[\w*.\-]+)")
 
 
 def _tokens(text):
@@ -443,8 +445,12 @@ def _tokens(text):
 
 
 def _glob_names(pattern, names):
-    """Selection names matching a condition pattern like 'sel*' (a trailing or embedded * only)."""
-    return [n for n in names if _glob(_pattern(pattern), n.casefold())]
+    """Selection names matching a condition pattern like 'sel*' (a trailing or embedded * only).
+
+    ASCII letters fold. Backup* matches backup. bacK* does not match backup.
+    """
+    folded = _pattern(pattern)
+    return [n for n in names if _glob(folded, n.translate(_ASCII_FOLD))]
 
 
 class _Condition:
