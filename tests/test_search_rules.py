@@ -195,6 +195,22 @@ class WindowTests(unittest.TestCase):
         finding, = search_rules.run([ev(n, n, user=u) for n, u in enumerate(["alice", "Alice", "ALICE"], 1)], by_user)
         self.assertEqual((finding["group_key"], finding["event_ids"]), ("alice", [1, 2, 3]))
 
+    def test_user_group_folds_ascii_letters_only(self):
+        by_user = compiled("event_type:web_request", group_by="user")["params"]
+        # Two and two stay under a threshold of 3. str.lower() would make one group of 4.
+        apart = [ev(1, 0, user="ÉRIN"), ev(2, 1, user="ÉRIN"), ev(3, 2, user="érin"), ev(4, 3, user="érin")]
+        self.assertEqual(search_rules.run(apart, by_user), [])
+        finding, = search_rules.run(
+            [ev(n, n, user=u) for n, u in enumerate(["ÉRIN", "Érin", "ÉRIN"], 1)], by_user)
+        self.assertEqual((finding["group_key"], finding["event_ids"]), ("Érin", [1, 2, 3]))
+        self.assertIn("user Érin", finding["title"])
+        # A host group stays the stored spelling, so these two names do not share a threshold.
+        by_host = compiled("event_type:web_request", group_by="host")["params"]
+        hosts = [ev(1, 0, host="WEB01"), ev(2, 1, host="WEB01"), ev(3, 2, host="web01"), ev(4, 3, host="web01")]
+        self.assertEqual(search_rules.run(hosts, by_host), [])
+        finding, = search_rules.run([ev(n, n, host="WEB01") for n in range(1, 4)], by_host)
+        self.assertEqual(finding["group_key"], "WEB01")
+
     def test_sample_result(self):
         malicious = [{"event_type": "web_request", "src_ip": "203.0.113.9"}] * 3
         benign = [{"event_type": "web_request", "src_ip": "203.0.113.9"}] * 2

@@ -6,6 +6,8 @@ All bundled data is synthetic. PR numbers refer to https://github.com/talalkasha
 
 ### Fixed
 
+- A promoted saved search groups `user` with the ASCII fold the `user:` filter uses. `Alice`, `alice`, and `ALICE` stay one key. `ÉRIN` and `érin` stay two keys and no longer trip a threshold together. The finding key is the folded spelling. A host group stays the stored spelling, so `WEB01` and `web01` stay two groups.
+
 - Viewer masking folds usernames on ASCII letters only. `Alice` and `alice` stay one pseudonym. `ÉRIN` and `érin` stay two, and a viewer named `érin` no longer sees `ÉRIN` in clear. The 10,000-name cap still counts those as two and still fails closed. Public addresses stay visible and internal addresses stay masked.
 
 - With `SIEM_TRUST_PROXY=1`, the rate-limit client IP is the last entry of exactly one `X-Forwarded-For` header on a loopback connection. A second header is not used, so a client-supplied line cannot choose the key. A value that is not an address stays the peer address. One header `192.0.2.1, 203.0.113.7` still uses `203.0.113.7`.

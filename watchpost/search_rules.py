@@ -11,7 +11,9 @@ match, message terms are "contains", NOT keeps events missing the field, and a b
 same >=, >, <=, < or = comparison as the hunt. Comparisons fold case the way SQLite does
 (ASCII only): user, host, source, and outcome equality, every prefix match and message contains ignore ASCII case.
 `event_type` and `severity` fold ASCII case and bind the catalog spelling (`Auth_Failure` is `auth_failure`).
-Other equality is exact. Grouping by source, outcome, event_type, and severity stays the stored spelling.
+Other equality is exact. Grouping by user folds ASCII letters only, the same fold as the user: filter,
+so Alice and alice share a key and ÉRIN stays apart from érin. Grouping by host, source, outcome,
+event_type, and severity stays the stored spelling.
 `src_ip`, `dest_ip`, and `ip` equality use the address form ingest stores;
 a prefix stays the typed text. tests/test_search_rules.py cross-checks this matcher against
 hunt.compile_query in SQL.
@@ -257,9 +259,9 @@ def run(events, params):
     for e in events:
         key = e.get(column)
         if key is not None and key != "" and match(e):
-            # Accounts group case-insensitively, as the user: filter matches them (and entities.py keys them):
-            # otherwise "alice", "Alice" and "ALICE" would each stay under the threshold.
-            groups[str(key).lower() if params["group_by"] == "user" else str(key)].append(e)
+            # Accounts group with the ASCII fold the user: filter uses. Alice and alice share a key;
+            # ÉRIN and érin stay two keys. Other fields stay the stored spelling.
+            groups[_fold(str(key)) if params["group_by"] == "user" else str(key)].append(e)
     findings = []
     for key, group in groups.items():
         group.sort(key=lambda e: (rules_mod._epoch(e), e["id"]))
