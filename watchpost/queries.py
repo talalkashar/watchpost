@@ -32,7 +32,8 @@ ATTACKER_LIMIT = 40
 # A rule with no alerts is not a row and is not omitted.
 TOP_RULE_LIMIT = 10
 # Dashboard alert board is this many alerts. Not resolved first, then severity,
-# then last_seen. board_omitted is how many alerts were past that cap.
+# then last_seen, then id descending (the newer id stays).
+# board_omitted is how many alerts were past that cap.
 BOARD_LIMIT = 60
 # Dashboard recent events are this many, newest by ts, then id.
 # recent_events_omitted is how many stored events were past that cap.
@@ -263,9 +264,10 @@ def get_event(conn, event_id):
 def list_alerts(conn, params):
     """Matching alerts, and how many the limit left out.
 
-    Rows stay not-resolved first, then severity, then last_seen. The second
-    value is 0 when every match fits. Callers that return the bare array send
-    that count as X-Watchpost-Omitted.
+    Rows stay not-resolved first, then severity, then last_seen, then id
+    descending (the newer id stays). The second value is 0 when every match
+    fits. Callers that return the bare array send that count as
+    X-Watchpost-Omitted.
     """
     where, args = [], []
     if params.get("status"):
@@ -291,7 +293,7 @@ def list_alerts(conn, params):
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     total = conn.execute(f"SELECT COUNT(*) FROM alerts{clause}", args).fetchone()[0]
     order = ("CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 "
-             "WHEN 'low' THEN 3 ELSE 4 END, last_seen DESC")
+             "WHEN 'low' THEN 3 ELSE 4 END, last_seen DESC, id DESC")
     rows = conn.execute(f"SELECT * FROM alerts{clause} ORDER BY status = 'resolved', {order} LIMIT ?",
                         args + [limit])
     shown = [alert_row(r) for r in rows]
@@ -697,7 +699,7 @@ def dashboard(conn):
         "SELECT id, rule_id, severity, title, status, group_key, first_seen, last_seen, event_count, synthetic,"
         " assignee FROM alerts ORDER BY status = 'resolved', "
         + SEVERITY_RANK_SQL.format(col="severity")
-        + f" DESC, last_seen DESC LIMIT {BOARD_LIMIT}")]
+        + f" DESC, last_seen DESC, id DESC LIMIT {BOARD_LIMIT}")]
     board_omitted = one("SELECT COUNT(*) FROM alerts") - len(board)
     recent = [dict(r) for r in conn.execute(
         f"SELECT {EVENT_FIELDS} FROM events ORDER BY ts DESC, id DESC LIMIT {RECENT_LIMIT}")]
