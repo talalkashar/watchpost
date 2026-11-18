@@ -872,6 +872,94 @@ class ValidationTests(unittest.TestCase):
                 with self.assertRaises(rules.RuleConfigError):
                     rules.validate_params(rule_id, p)
 
+    def test_bad_rule_errors_name_the_value(self):
+        cases = [
+            ("brute_force_ip", {"threshold": "10"},
+             "threshold must be an integer between 2 and 10000 (got '10', a str)"),
+            ("brute_force_ip", {"threshold": True},
+             "threshold must be an integer between 2 and 10000 (got True, a boolean)"),
+            ("brute_force_ip", {"threshold": 1},
+             "threshold must be an integer between 2 and 10000 (got 1)"),
+            ("brute_force_ip", {"nope": 1},
+             "unknown parameter(s) for brute_force_ip: nope. "
+             "Known parameters: ignore_ips, ignore_users, threshold, window_seconds"),
+            ("brute_force_ip", {1: 2, "nope": 3},
+             "unknown parameter(s) for brute_force_ip: 'nope', 1. "
+             "Known parameters: ignore_ips, ignore_users, threshold, window_seconds"),
+            ("brute_force_ip", ["threshold"],
+             "params must be an object (got list)"),
+            ("cloud_logging_disabled", {"logging_actions": "StopLogging"},
+             "logging_actions must be a list with 1-500 entries (got a str)"),
+            ("cloud_logging_disabled", {"logging_actions": []},
+             "logging_actions must be a list with 1-500 entries (got 0)"),
+            ("cloud_logging_disabled", {"logging_actions": [""]},
+             "logging_actions entries must be non-empty strings of at most 128 characters "
+             "(logging_actions[0] has length 0)"),
+            ("cloud_logging_disabled", {"logging_actions": [1]},
+             "logging_actions entries must be non-empty strings (logging_actions[0] is int)"),
+            ("cloud_logging_disabled", {"logging_actions": ["x" * 129]},
+             "logging_actions entries must be non-empty strings of at most 128 characters "
+             "(logging_actions[0] has length 129)"),
+            ("brute_force_ip", {"ignore_ips": ["10.0.0.0/8"]},
+             "ignore_ips entry '10.0.0.0/8' is not an IP address (a prefix is not one address)"),
+            ("brute_force_ip", {"ignore_ips": ["not-an-ip"]},
+             "ignore_ips entry 'not-an-ip' is not an IP address"),
+            ("brute_force_ip", {"ignore_users": [" admin"]},
+             "ignore_users entry ' admin' has surrounding whitespace or control characters; "
+             "stored events do not keep them, so this entry would match nothing"),
+            ("brute_force_ip", {"ignore_users": ["ad\x00min"]},
+             "ignore_users entry 'ad\\x00min' has surrounding whitespace or control characters; "
+             "stored events do not keep them, so this entry would match nothing"),
+            ("off_hours_privileged_login", {"privileged_users": ["   "]},
+             "privileged_users entry '   ' has surrounding whitespace or control characters; "
+             "stored events do not keep them, so this entry would match nothing"),
+            ("off_hours_privileged_login", {"business_start_hour": 18, "business_end_hour": 8},
+             "business_start_hour must be before business_end_hour (got 18 and 8)"),
+            ("off_hours_privileged_login", {"business_start_hour": 20},
+             "business_start_hour must be before business_end_hour (got 20 and 18)"),
+            ("unsanctioned_cloud_service", {"sanctioned_services": ["..."]},
+             "sanctioned_services entry '...' is only dots and matches no service"),
+            ("unsanctioned_cloud_service", {"sanctioned_services": ["corp drive.example"]},
+             "sanctioned_services entry 'corp drive.example' must be a single word; a space never matches"),
+            ("unsanctioned_cloud_service", {"sanctioned_services": ["amazonaws.com."]},
+             "sanctioned_services entry 'amazonaws.com.' has punctuation the service parser strips, "
+             "so it would match nothing"),
+            ("cloud_logging_disabled", {"logging_actions": ["Stop Logging"]},
+             "logging_actions entry 'Stop Logging' must be a single word; a space never matches"),
+            ("missing_rule", {}, "unknown rule 'missing_rule'"),
+            (None, {}, "unknown rule None"),
+        ]
+        for rule_id, bad, message in cases:
+            with self.subTest(rule=rule_id, params=bad):
+                with self.assertRaises(rules.RuleConfigError) as caught:
+                    rules.validate_params(rule_id, bad)
+                self.assertEqual(str(caught.exception), message)
+
+    def test_a_long_bad_value_stays_a_short_message(self):
+        with self.assertRaises(rules.RuleConfigError) as caught:
+            rules.validate_params("brute_force_ip", {"threshold": "x" * 500})
+        text = str(caught.exception)
+        self.assertLess(len(text), 200)
+        self.assertIn("threshold must be an integer", text)
+        self.assertIn("a str", text)
+
+    def test_entries_that_can_match_still_pass(self):
+        merged = rules.validate_params("brute_force_ip", {
+            "threshold": 2,
+            "ignore_ips": ["2001:DB8::1"],
+            "ignore_users": ["érin", "John Doe"],
+        })
+        self.assertEqual(merged["threshold"], 2)
+        self.assertEqual(merged["ignore_ips"], ["2001:DB8::1"])
+        self.assertEqual(merged["ignore_users"], ["érin", "John Doe"])
+        self.assertEqual(merged["window_seconds"], 300)
+        rules.validate_params("unsanctioned_cloud_service", {"sanctioned_services": [".ÉXAMPLE.com"]})
+        rules.validate_params("off_hours_privileged_login", {
+            "business_start_hour": 0, "business_end_hour": 24, "privileged_users": ["root"],
+        })
+        rules.validate_params("cloud_logging_disabled", {"logging_actions": ["StopLogging"]})
+        self.assertEqual(rules.validate_params("data_exfil_volume", {"baseline_multiplier": 0})["baseline_multiplier"], 0)
+
 
 class EvaluationTests(unittest.TestCase):
     def test_default_rules_on_labeled_scenarios(self):
