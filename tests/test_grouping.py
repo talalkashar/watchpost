@@ -51,6 +51,68 @@ class GroupingTests(unittest.TestCase):
         shared = grouping.apply([{"group_key": "old", "event_ids": [1, 5, 3, 4]}], events, ["user"])[0]
         self.assertEqual(shared["group_key"], "alice,Érin")
 
+    def test_separators_inside_values_do_not_alias_another_group(self):
+        events = [
+            {"id": 1, "user": "a,b", "src_ip": "9.9.9.9"},
+            {"id": 2, "user": "a", "src_ip": "b"},
+            {"id": 3, "user": "a|b", "src_ip": "9.9.9.9"},
+            {"id": 4, "user": "a\\,b", "src_ip": "9.9.9.9"},
+            {"id": 5, "user": "a", "src_ip": "b|9.9.9.9"},
+        ]
+        findings = [{"group_key": "old", "event_ids": [i]} for i in range(1, 6)]
+        keys = [item["group_key"] for item in grouping.apply(findings, events, ["user", "src_ip"])]
+        self.assertEqual(keys, [
+            "a\\,b|9.9.9.9",
+            "a|b",
+            "a\\|b|9.9.9.9",
+            "a\\\\\\,b|9.9.9.9",
+            "a|b\\|9.9.9.9",
+        ])
+        self.assertEqual(len(set(keys)), len(keys))
+        straight = grouping.apply(
+            [{"group_key": "old", "event_ids": [1, 2]}], events, ["user"])[0]["group_key"]
+        flipped = grouping.apply(
+            [{"group_key": "old", "event_ids": [2, 1]}], list(reversed(events)), ["user"])[0]
+        self.assertEqual(straight, "a,a\\,b")
+        self.assertEqual(flipped["group_key"], straight)
+        self.assertEqual(flipped["event_ids"], [2, 1])
+
+    def test_a_stored_missing_marker_is_not_a_missing_value(self):
+        events = [
+            {"id": 1, "user": "(none)"},
+            {"id": 2, "host": "web01"},
+            {"id": 3, "user": ""},
+            {"id": 4, "user": None},
+            {"id": 5, "user": "(NONE)"},
+        ]
+        findings = [{"group_key": "old", "event_ids": [i]} for i in range(1, 6)]
+        keys = [item["group_key"] for item in grouping.apply(findings, events, ["user"])]
+        self.assertEqual(keys, ["\\(none)", "(none)", "(none)", "(none)", "\\(none)"])
+        # source stays the stored spelling, so the marker is escaped and a gap is not.
+        marked = [{"id": 6, "source": "(none)"}, {"id": 7}]
+        stored = [item["group_key"] for item in grouping.apply(
+            [{"group_key": "old", "event_ids": [6]}, {"group_key": "old", "event_ids": [7]}],
+            marked, ["source"])]
+        self.assertEqual(stored, ["\\(none)", "(none)"])
+
+    def test_duplicate_event_ids_do_not_follow_list_order(self):
+        finding = {"group_key": "old", "event_ids": [7]}
+        forward = [{"id": 7, "user": "bob"}, {"id": 7, "user": "Alice"}]
+        backward = list(reversed(forward))
+        first = grouping.apply([finding], forward, ["user"])[0]
+        second = grouping.apply([finding], backward, ["user"])[0]
+        self.assertEqual(first["group_key"], "alice,bob")
+        self.assertEqual(second["group_key"], first["group_key"])
+        self.assertEqual(finding["group_key"], "old")
+
+    def test_a_field_name_string_is_not_a_list_of_fields(self):
+        events = [{"id": 1, "user": "alice"}]
+        finding = {"group_key": "old", "event_ids": [1]}
+        with self.assertRaises(ValueError):
+            grouping.apply([finding], events, "user")
+        self.assertEqual(finding["group_key"], "old")
+        self.assertEqual(grouping.apply([finding], events, [])[0]["group_key"], "old")
+
 
 class GroupingApiTests(ServerTestCase):
     def test_reviewed_grouping_preview_applies_and_preserves_evidence(self):

@@ -13,6 +13,8 @@ KEY_LIMIT = 20
 # src_ip and dest_ip stay the stored address. event_type and source stay the stored spelling.
 _ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 _FOLDED = frozenset({"user", "host"})
+# One field joins values with a comma. Fields join with a pipe. A missing value is this marker.
+_MISSING = "(none)"
 
 
 def validate(fields):
@@ -23,26 +25,48 @@ def validate(fields):
     return fields
 
 
-def _key_part(field, value):
+def _folded(field, value):
     text = str(value)
     if field in _FOLDED:
         return text.translate(_ASCII_FOLD)
     return text
 
 
+def _escape(text):
+    """Make one value safe to join. A stored comma, pipe, backslash, or "(none)" stays distinct."""
+    escaped = text.replace("\\", "\\\\").replace(",", "\\,").replace("|", "\\|")
+    if escaped == _MISSING:
+        return "\\" + escaped
+    return escaped
+
+
+def _index_events(events):
+    """Every row for an id. A repeated id must not depend on which copy was last in the list."""
+    by_id = {}
+    for event in events:
+        by_id.setdefault(event["id"], []).append(event)
+    return by_id
+
+
 def apply(findings, events, fields):
-    """Replace keys deterministically without changing a finding's attached evidence ids."""
+    """Replace keys deterministically without changing a finding's attached evidence ids.
+
+    Values are folded, sorted, then escaped, so event order and id order do not change the key.
+    A comma, pipe, or backslash inside a value cannot alias a different group.
+    """
     if not fields:
         return findings
-    by_id = {event["id"]: event for event in events}
+    fields = validate(fields)
+    by_id = _index_events(events)
     out = []
     for finding in findings:
-        evidence = [by_id[event_id] for event_id in finding["event_ids"] if event_id in by_id]
+        evidence = [event for event_id in finding["event_ids"] if event_id in by_id
+                    for event in by_id[event_id]]
         parts = []
         for field in fields:
             present = (event[field] for event in evidence if event.get(field) not in (None, ""))
-            values = sorted({_key_part(field, value) for value in present})
-            parts.append(",".join(values) if values else "(none)")
+            values = sorted({_folded(field, value) for value in present})
+            parts.append(",".join(_escape(value) for value in values) if values else _MISSING)
         key = "|".join(parts)
         if len(key) > 256:
             key = "sha256:" + hashlib.sha256(key.encode()).hexdigest()
