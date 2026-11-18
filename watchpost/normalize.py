@@ -180,7 +180,12 @@ def _pick(record, field):
     return None
 
 
+# A–Z only, the same fold as SQLite NOCASE. İ and K stay themselves.
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
 def normalize_type(record):
+    """Map a raw type onto the catalog. ASCII letters fold; a Kelvin sign stays."""
     event_id = record.get("EventID", record.get("event_id"))
     if event_id is not None:
         try:
@@ -192,7 +197,7 @@ def normalize_type(record):
     raw_type = _pick(record, "event_type")
     if raw_type is None:
         return "other"
-    key = re.sub(r"[\s\-]+", "_", str(raw_type).strip().lower())
+    key = re.sub(r"[\s\-]+", "_", str(raw_type).strip().translate(_ASCII_FOLD))
     key = TYPE_ALIASES.get(key, key)
     return key if key in EVENT_TYPES else "other"
 
@@ -350,8 +355,6 @@ _WEBLOG = re.compile(
 SCAN_PATHS = ("/.env", "/.git", "/.svn", "/.aws", "/.ds_store", "/.htaccess", "/wp-login.php", "/wp-admin",
               "/xmlrpc.php", "/phpmyadmin", "/pma/", "/server-status", "/cgi-bin/", "/actuator",
               "/vendor/phpunit", "/boot.ini", "/etc/passwd", "/config.php", "/admin.php", "/manager/html")
-# A–Z only, the same fold as SQLite NOCASE. İ and K stay themselves.
-_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 _SCAN_PATTERN = re.compile(
     r"union\s+(?:all\s+)?select|'\s*or\s+'?\d|\bor\s+1\s*=\s*1|sleep\(\s*\d|benchmark\(|information_schema"
     r"|\.\./|<script|\$\{jndi:")

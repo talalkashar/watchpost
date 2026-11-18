@@ -41,6 +41,59 @@ class NormalizeRecordTests(unittest.TestCase):
         self.assertEqual(normalize_record({"ts": "2026-09-15T10:00:00Z", "type": "weird"}, "x", NOW)["event_type"],
                          "other")
 
+    def test_event_types_fold_ascii_letters_only(self):
+        # Network_Connection, Account_Lockout, and Block stay catalog types. A Kelvin sign does not.
+        cases = (
+            ("Network_Connection", "network_connection"),
+            ("NETWORK_CONNECTION", "network_connection"),
+            ("Network Connection", "network_connection"),
+            ("Account_Lockout", "account_lockout"),
+            ("account-lockout", "account_lockout"),
+            ("Block", "fw_deny"),
+            ("BLOCK", "fw_deny"),
+            ("LOGIN-FAILED", "auth_failure"),
+        )
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                event = normalize_record(
+                    {"ts": "2026-09-15T10:00:00Z", "event_type": raw, "message": "labelled synthetic"},
+                    "api", NOW)
+                self.assertEqual(event["event_type"], expected)
+        self.assertEqual(
+            normalize_record({"ts": "2026-09-15T10:00:00Z", "action": "Block"}, "api", NOW)["event_type"],
+            "fw_deny")
+        kelvin_net = "networ\u212a_connection"
+        kelvin_block = "bloc\u212a"
+        for raw in (kelvin_net, kelvin_block):
+            with self.subTest(raw=raw):
+                event = normalize_record(
+                    {"ts": "2026-09-15T10:00:00Z", "type": raw, "message": raw}, "api", NOW)
+                self.assertEqual(event["event_type"], "other")
+                self.assertEqual(json.loads(event["raw"])["type"], raw)
+                self.assertEqual(event["message"], raw)
+        self.assertNotEqual(
+            normalize_record({"ts": "2026-09-15T10:00:00Z", "event_type": kelvin_net}, "api", NOW)["event_type"],
+            "network_connection")
+        self.assertNotEqual(
+            normalize_record({"ts": "2026-09-15T10:00:00Z", "event_type": kelvin_block}, "api", NOW)["event_type"],
+            "fw_deny")
+        source = inspect.getsource(normalize.normalize_type)
+        self.assertNotIn(".lower(", source)
+        self.assertNotIn(".casefold(", source)
+        for text in (self._docs("API.md"), self._docs("REFERENCE.md")):
+            self.assertIn("`Network_Connection` is `network_connection`", text)
+            self.assertIn("`Account_Lockout` is `account_lockout`", text)
+            self.assertIn("`Block` is `fw_deny`", text)
+            self.assertIn("`networ\u212a_connection` and `bloc\u212a` stay `other`", text)
+        reference = self._docs("REFERENCE.md")
+        self.assertIn("`networ\u212a_connection` stays `other` and is not `network_connection`", reference)
+        self.assertIn("`bloc\u212a` stays `other` and is not `fw_deny`", reference)
+
+    @staticmethod
+    def _docs(name):
+        from pathlib import Path
+        return (Path(__file__).resolve().parent.parent / "docs" / name).read_text()
+
     def test_rejections(self):
         cases = [
             ({}, "missing timestamp"),

@@ -62,7 +62,7 @@ Accepted fields (aliases in parentheses):
 | Field | Aliases | Notes |
 |---|---|---|
 | `ts` | `timestamp`, `@timestamp`, `time`, `TimeCreated`, `event_time` | **Required.** ISO-8601 or epoch seconds/ms. No zone = UTC. Must be ≤ 1 day in the future and ≥ year 2000. |
-| `event_type` | `type`, `action`, `category`, or Windows `EventID` | Normalized, e.g. `login_failed` → `auth_failure`; unknown → `other`. `syslog` is also accepted, and `GET /api/events?event_type=syslog` filters on it |
+| `event_type` | `type`, `action`, `category`, or Windows `EventID` | Normalized, e.g. `login_failed` → `auth_failure`; unknown → `other`. ASCII letters fold, so `Network_Connection` is `network_connection`, `Account_Lockout` is `account_lockout`, and `Block` is `fw_deny`. `networK_connection` and `blocK` stay `other`. `syslog` is also accepted, and `GET /api/events?event_type=syslog` filters on it |
 | `user` | `username`, `TargetUserName`, `account`, `user.name` | |
 | `src_ip` | `source_ip`, `client_ip`, `ip`, `IpAddress`, `source.ip` | Must be a valid IPv4/IPv6 address |
 | `dest_ip` | `destination_ip`, `server_ip`, `dst_ip` | |
