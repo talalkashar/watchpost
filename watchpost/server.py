@@ -44,6 +44,9 @@ WINDOWS_LIMIT = 100
 EVALUATIONS_LIMIT = 20
 # One rule's versions, newest by version. An unknown rule is an empty array.
 RULE_HISTORY_LIMIT = 50
+# The rules list, first by id. A Sigma rule on that page still includes its YAML.
+# The rest of the catalog is X-Watchpost-Omitted.
+RULES_LIMIT = 100
 OMITTED_HEADER = "X-Watchpost-Omitted"
 
 
@@ -788,13 +791,16 @@ def event_stream(req):
 
 @route("GET", "/api/rules")
 def rules(req):
+    catalog = engine.load_rules(req.conn, enabled_only=False)
+    shown = catalog[:RULES_LIMIT]
+    _set_omitted(req, len(catalog) - len(shown))
     perf = improve.rule_performance(req.conn)
-    latest, _omitted = improve.list_evaluations(req.conn, limit=1)
+    latest, _eval_omitted = improve.list_evaluations(req.conn, limit=1)
     evaluation = latest[0]["results"]["rules"] if latest else {}
     return [{**r, "performance": perf.get(r["id"]), "evaluation": evaluation.get(r["id"]),
              **({"sigma": _sigma_detail(req.conn, r)} if sigma.is_sigma(r["id"]) else {}),
              **({"search": _search_detail(req.conn, r)} if search_rules.is_search(r["id"]) else {})}
-            for r in engine.load_rules(req.conn, enabled_only=False)]
+            for r in shown]
 
 
 def _search_detail(conn, rule):
