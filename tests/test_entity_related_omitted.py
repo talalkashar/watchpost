@@ -1,7 +1,7 @@
 """Entity detail says how many alerts and incidents the 50-row cap dropped.
 
 The rows stay the newest 50 by last_seen, then id. A shorter list returns 0.
-The score and contributions still include every alert. A false positive stays weight 0.
+The score still includes every alert. A false positive stays weight 0.
 """
 
 import unittest
@@ -209,7 +209,10 @@ class EntityRelatedOmittedTests(unittest.TestCase):
             " (how many were past that cap; 0 when there are 50 or fewer)",
             text)
         self.assertIn(
-            "The score and `contributions` still include every alert."
+            "`contributions` is the first 100 by weight descending, then alert id."
+            " `contributions_omitted` is how many were past that cap"
+            " (0 when there are 100 or fewer, including none)."
+            " The score still sums every alert."
             " A false positive or benign close stays weight 0.",
             text)
         self.assertIn(

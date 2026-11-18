@@ -34,8 +34,11 @@ _DAY_BARS = 31
 RECENT_EVENTS_LIMIT = 50
 # Alerts and incidents on that page, newest by last_seen, then id. The rest are alerts_omitted
 # and incidents_omitted. Incidents are read with SQL LIMIT and a distinct count.
-# The score and contributions still use every alert. That alert read is not limited.
+# The score still uses every alert. That alert read is not limited.
 RELATED_LIMIT = 50
+# contributions is this many rows, highest weight first, then alert id. The rest are
+# contributions_omitted. A false positive or benign close stays weight 0 in the score.
+CONTRIBUTIONS_LIMIT = 100
 
 
 def _anchor(conn):
@@ -231,7 +234,10 @@ def get_entity(conn, kind, value):
     `alerts_omitted` and `incidents_omitted` are how many were past that cap.
     Incidents are that page from SQL (`ORDER BY i.last_seen DESC, i.id DESC LIMIT`)
     and `COUNT(DISTINCT i.id)` minus the page. The alert read that feeds the score
-    has no LIMIT. A false positive or benign close stays weight 0.
+    has no LIMIT. `contributions` is the first CONTRIBUTIONS_LIMIT by weight
+    descending, then alert id. `contributions_omitted` is how many were past that
+    cap. The score still sums every alert. A false positive or benign close stays
+    weight 0.
     """
     if kind not in KINDS:
         raise QueryError("entity kind not found", 404)
@@ -245,6 +251,9 @@ def get_entity(conn, kind, value):
     alerts = [dict(r) for r in conn.execute(
         f"SELECT {_ALERT_FIELDS} FROM alerts WHERE id IN ({marks}) ORDER BY last_seen DESC, id DESC", alert_ids)]
     contributions = sorted((_contribution(a, anchor) for a in alerts), key=lambda c: (-c["weight"], c["alert_id"]))
+    score = _score(contributions)
+    contributions_omitted = max(0, len(contributions) - CONTRIBUTIONS_LIMIT)
+    contributions = contributions[:CONTRIBUTIONS_LIMIT]
     alerts_omitted = max(0, len(alerts) - RELATED_LIMIT)
     alerts = alerts[:RELATED_LIMIT]
     incidents, incidents_omitted = _entity_incidents(conn, alert_ids)
@@ -255,9 +264,10 @@ def get_entity(conn, kind, value):
         f"SELECT {fields} FROM events e WHERE {match}"
         f" ORDER BY e.ts DESC, e.id DESC LIMIT {RECENT_EVENTS_LIMIT}", (value,))]
     return {
-        "kind": kind, "value": value, "score": _score(contributions), "anchor": anchor,
+        "kind": kind, "value": value, "score": score, "anchor": anchor,
         "half_life_hours": HALF_LIFE_HOURS, "severity_weights": SEVERITY_WEIGHTS,
         "excluded_dispositions": list(EXCLUDED_DISPOSITIONS), "contributions": contributions,
+        "contributions_omitted": contributions_omitted,
         "alerts": alerts, "alerts_omitted": alerts_omitted, "incidents": incidents,
         "incidents_omitted": incidents_omitted, "recent_events": recent,
         "recent_events_omitted": seen["event_count"] - len(recent),
