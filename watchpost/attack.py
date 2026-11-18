@@ -83,16 +83,24 @@ def coverage(rules, hits_by_rule):
     """Map each catalog technique to the rules that cover it and their alert counts.
 
     `rules`: [{"id", "name", "enabled", "techniques": [...]}]; `hits_by_rule`: {rule_id: alert count}.
+    Each technique id counts once per rule. A repeated id does not add that rule's alerts again.
+    A second, different technique on the same rule still receives those alerts.
     """
     by_technique = {t["id"]: {**t, "rules": [], "hits": 0} for t in catalog()}
     for rule in rules:
+        seen = set()
+        hits = hits_by_rule.get(rule["id"], 0)
         for t in rule.get("techniques") or []:
-            entry = by_technique.get(t["id"])
+            technique_id = t["id"]
+            if technique_id in seen:
+                continue
+            seen.add(technique_id)
+            entry = by_technique.get(technique_id)
             if entry is None:
                 continue
             entry["rules"].append({"id": rule["id"], "name": rule["name"], "enabled": bool(rule["enabled"]),
-                                   "hits": hits_by_rule.get(rule["id"], 0)})
-            entry["hits"] += hits_by_rule.get(rule["id"], 0)
+                                   "hits": hits})
+            entry["hits"] += hits
     items = list(by_technique.values())
     for item in items:
         item["covered"] = any(r["enabled"] for r in item["rules"])
