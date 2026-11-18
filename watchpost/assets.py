@@ -470,12 +470,23 @@ def rescore_open_alerts(conn, idx=None):
 
 
 def _reweigh_open(conn, idx):
-    """(alert row, weigh() result) for every unresolved alert against this inventory index. Writes nothing."""
-    rows = conn.execute("SELECT id, title, severity, base_severity FROM alerts WHERE status != 'resolved'").fetchall()
+    """(alert row, weigh() result) for every unresolved alert against this inventory index. Writes nothing.
+
+    Evidence for every unresolved alert is one query, grouped by alert id. A resolved alert is not a row.
+    """
+    rows = conn.execute(
+        "SELECT a.id, a.title, a.severity, a.base_severity,"
+        " json_group_array(json_object('host', e.host, 'src_ip', e.src_ip, 'dest_ip', e.dest_ip))"
+        " FILTER (WHERE e.id IS NOT NULL) AS events"
+        " FROM alerts a"
+        " LEFT JOIN alert_events ae ON ae.alert_id = a.id"
+        " LEFT JOIN events e ON e.id = ae.event_id"
+        " WHERE a.status != 'resolved'"
+        " GROUP BY a.id"
+        " ORDER BY a.id"
+    ).fetchall()
     for alert in rows:
-        events = [dict(r) for r in conn.execute(
-            "SELECT e.host, e.src_ip, e.dest_ip FROM events e JOIN alert_events ae ON ae.event_id = e.id"
-            " WHERE ae.alert_id = ?", (alert["id"],))]
+        events = json.loads(alert["events"])
         yield alert, weigh(alert["base_severity"] or alert["severity"], match(idx, events))
 
 
