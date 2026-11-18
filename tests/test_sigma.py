@@ -1,5 +1,6 @@
 """Sigma subset import: the YAML-subset parser, the compiled detection, and the reviewed import workflow."""
 
+import inspect
 import json
 import time
 import unittest
@@ -146,6 +147,44 @@ class CompileTests(unittest.TestCase):
         p = compiled("  sel:\n    message: 'a\\*b'\n  condition: sel\n")  # an escaped star is literal
         self.assertTrue(sigma.matches(p, {"message": "a*b"}))
         self.assertFalse(sigma.matches(p, {"message": "axxb"}))
+
+    def test_value_match_folds_ascii_letters_only(self):
+        # Alice matches alice. É and Kelvin sign do not fold into e and k.
+        exact = compiled("  sel:\n    user: Alice\n  condition: sel\n")
+        self.assertTrue(sigma.matches(exact, {"user": "alice"}))
+        self.assertTrue(sigma.matches(exact, {"user": "ALICE"}))
+        accent = compiled("  sel:\n    user: Érin\n  condition: sel\n")
+        self.assertTrue(sigma.matches(accent, {"user": "ÉRIN"}))
+        self.assertFalse(sigma.matches(accent, {"user": "érin"}))
+        lower = compiled("  sel:\n    user: érin\n  condition: sel\n")
+        self.assertTrue(sigma.matches(lower, {"user": "érin"}))
+        self.assertFalse(sigma.matches(lower, {"user": "ÉRIN"}))
+        self.assertFalse(sigma.matches(lower, {"user": "Érin"}))
+        kelvin = "bac\u212aup"
+        kept = compiled(f"  sel:\n    message: {kelvin}\n  condition: sel\n")
+        self.assertTrue(sigma.matches(kept, {"message": kelvin}))
+        self.assertTrue(sigma.matches(kept, {"message": "BAC\u212aUP"}))
+        self.assertFalse(sigma.matches(kept, {"message": "backup"}))
+        plain = compiled("  sel:\n    message: backup\n  condition: sel\n")
+        self.assertTrue(sigma.matches(plain, {"message": "BACKUP"}))
+        self.assertFalse(sigma.matches(plain, {"message": kelvin}))
+        dotted = compiled("  sel:\n    message|contains: HİGH\n  condition: sel\n")
+        self.assertTrue(sigma.matches(dotted, {"message": "seen hİgh here"}))
+        self.assertFalse(sigma.matches(dotted, {"message": "seen high here"}))
+        # Wildcards stay. An escaped star or question mark is that character, and ASCII around it still folds.
+        wild = compiled("  sel:\n    user: adm?n*\n  condition: sel\n")
+        self.assertTrue(sigma.matches(wild, {"user": "ADMIN01"}))
+        literal = compiled("  sel:\n    message: 'A\\*B'\n    host: 'C\\?D'\n  condition: sel\n")
+        self.assertTrue(sigma.matches(literal, {"message": "a*b", "host": "c?d"}))
+        self.assertFalse(sigma.matches(literal, {"message": "axxb", "host": "c?d"}))
+        self.assertFalse(sigma.matches(literal, {"message": "a*b", "host": "cxd"}))
+        source = inspect.getsource(sigma._pattern) + inspect.getsource(sigma._Compiled._one)
+        self.assertNotIn(".casefold(", source)
+        self.assertNotIn(".lower(", source)
+        text = (EXAMPLE.parent.parent / "REFERENCE.md").read_text()
+        self.assertIn("`Érin` does not match `érin`", text)
+        self.assertIn("`bac\u212aup` does not match `backup`", text)
+        self.assertNotIn("full case fold", text)
 
     def test_conditions(self):
         det = ("  sel_a:\n    user: alice\n  sel_b:\n    src_ip: 203.0.113.9\n  other:\n    host: web01\n"
@@ -334,9 +373,9 @@ class SigmaLevelTests(ServerTestCase):
 class SigmaGroupKeyTests(unittest.TestCase):
     def test_host_and_user_keys_fold_ascii_only(self):
         params = compiled("  sel:\n    message: hit\n  condition: sel\n")
-        # The matcher still casefolds the whole string. Grouping does not.
+        # Value matching folds ASCII letters only. É does not, so érin is not ÉRIN.
         folded = compiled("  sel:\n    user: érin\n  condition: sel\n")
-        self.assertTrue(sigma.matches(folded, {"user": "ÉRIN"}))
+        self.assertFalse(sigma.matches(folded, {"user": "ÉRIN"}))
         self.assertTrue(sigma.matches(folded, {"user": "érin"}))
 
         def event(i, **fields):

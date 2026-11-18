@@ -3,8 +3,8 @@
 Nothing here runs input as code. The parser reads only the YAML Sigma rules use (mappings, block lists,
 plain and quoted scalars, simple `[a, b]` lists, `|`/`>` text blocks, comments) and refuses the rest with a
 reason. The compiler turns `detection` into a small JSON tree (and/or/not/match), and `matches` walks that
-tree over one event dict. Value matching is plain string work: `*` and `?` wildcards are matched by a
-linear-time glob routine, never by a regular expression built from the rule.
+tree over one event dict. Value matching is plain string work: ASCII letters fold, and `*` and `?`
+wildcards are matched by a linear-time glob routine, never by a regular expression built from the rule.
 
 A compiled rule is stored as a Watchpost rule whose `params` are the compiled tree (not tunable: change the
 Sigma source and import again). Its original YAML text and sha256 live in the `sigma_rules` table, with an
@@ -683,12 +683,15 @@ _STAR, _ONE = object(), object()
 
 
 def _pattern(value):
-    """Sigma value -> list of casefolded chars and wildcard markers. `\\*`, `\\?` and `\\\\` are literals."""
+    """Sigma value -> ASCII-folded chars and wildcard markers. `\\*`, `\\?` and `\\\\` are literals.
+
+    ASCII letters fold. É and K stay, so Érin does not match érin and bacKup does not match backup.
+    """
     out, i = [], 0
     while i < len(value):
         c = value[i]
         if c == "\\" and value[i + 1:i + 2] in ("*", "?", "\\"):
-            out.extend(value[i + 1].casefold())
+            out.append(value[i + 1].translate(_ASCII_FOLD))
             i += 2
             continue
         if c == "*":
@@ -697,7 +700,7 @@ def _pattern(value):
         elif c == "?":
             out.append(_ONE)
         else:
-            out.extend(c.casefold())
+            out.append(c.translate(_ASCII_FOLD))
         i += 1
     return out
 
@@ -759,7 +762,8 @@ class _Compiled:
                 return ipaddress.ip_address(str(value)) in pat
             except ValueError:
                 return False
-        return _glob(pat, str(value).casefold())
+        # ASCII letters only, the same fold as the pattern.
+        return _glob(pat, str(value).translate(_ASCII_FOLD))
 
     def matches(self, event, node=None):
         node = self.tree if node is None else node
