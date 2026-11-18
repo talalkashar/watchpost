@@ -502,7 +502,9 @@ def event_ecs(req, event_id):
 @route("GET", "/api/alerts")
 def alerts(req):
     now = utcnow()
-    return [{**a, "sla_breach": triage.pending_breaches(a, now)} for a in queries.list_alerts(req.conn, req.query)]
+    rows, omitted = queries.list_alerts(req.conn, req.query)
+    _set_omitted(req, omitted)
+    return [{**a, "sla_breach": triage.pending_breaches(a, now)} for a in rows]
 
 
 @route("GET", r"/api/alerts/(\d+)")

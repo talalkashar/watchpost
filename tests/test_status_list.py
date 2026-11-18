@@ -47,7 +47,8 @@ class StatusListTests(unittest.TestCase):
         add_incident(self.conn, 3, "resolved")
 
     def alert_ids(self, **params):
-        return [row["id"] for row in list_alerts(self.conn, params)]
+        rows, _omitted = list_alerts(self.conn, params)
+        return [row["id"] for row in rows]
 
     def incident_ids(self, **params):
         return [row["id"] for row in list_incidents(self.conn, params)]

@@ -194,6 +194,12 @@ def get_event(conn, event_id):
 
 
 def list_alerts(conn, params):
+    """Matching alerts, and how many the limit left out.
+
+    Rows stay not-resolved first, then severity, then last_seen. The second
+    value is 0 when every match fits. Callers that return the bare array send
+    that count as X-Watchpost-Omitted.
+    """
     where, args = [], []
     if params.get("status"):
         # One status or a comma list. Spaces around a name are ignored.
@@ -214,11 +220,13 @@ def list_alerts(conn, params):
         args.append(params["rule_id"])
     limit = _int(params.get("limit"), "limit", 100, 1, 500)
     clause = (" WHERE " + " AND ".join(where)) if where else ""
+    total = conn.execute(f"SELECT COUNT(*) FROM alerts{clause}", args).fetchone()[0]
     order = ("CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 "
              "WHEN 'low' THEN 3 ELSE 4 END, last_seen DESC")
     rows = conn.execute(f"SELECT * FROM alerts{clause} ORDER BY status = 'resolved', {order} LIMIT ?",
                         args + [limit])
-    return [alert_row(r) for r in rows]
+    shown = [alert_row(r) for r in rows]
+    return shown, total - len(shown)
 
 
 def alert_row(row):
