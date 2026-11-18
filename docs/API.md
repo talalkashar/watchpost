@@ -45,7 +45,7 @@ curl -c jar -H 'Content-Type: application/json' -d '{"username":"analyst","passw
 
 | Endpoint | Role | Notes |
 |---|---|---|
-| `POST /api/auth/login` | public | `{username, password}`. A username that is not 3–32 characters is the same 401 `invalid username or password` as an unknown account. Login does not truncate it. A password that is not a string, or is longer than 256 characters, is that same 401. Login does not hash that value and does not look up the account. |
+| `POST /api/auth/login` | public | `{username, password}`. A username that is not 3–32 characters is the same 401 `invalid username or password` as an unknown account. Login does not truncate it. A password that is not a string, or is longer than 256 characters, is that same 401. Login does not hash that value and does not look up the account. A disabled account is that same 401. Login checks the stored hash, does not increment `failed_logins`, and does not lock the account. The body does not say the account is disabled. |
 | `POST /api/auth/logout` | any | |
 | `GET /api/auth/me` | any | current user and CSRF token |
 

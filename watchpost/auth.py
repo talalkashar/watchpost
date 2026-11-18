@@ -211,6 +211,18 @@ def _reject_unknown_login(conn, password):
     raise AuthError("invalid username or password")
 
 
+def _reject_disabled_login(conn, user, password):
+    """Check the stored hash, then the same 401 as a wrong password.
+
+    Returning before verify_password was faster than a wrong password and wrote no
+    audit row. failed_logins is not incremented and the account is not locked.
+    The error text does not say the account is disabled.
+    """
+    verify_password(password, user["pw_hash"])
+    audit(conn, user["username"], "login_failed", None, {"reason": "disabled"})
+    raise AuthError("invalid username or password")
+
+
 def login(conn, username, password, ttl_seconds):
     """Check the password. Returns (token, csrf, user), or an MfaChallenge when the account has TOTP enrolled.
 
@@ -222,6 +234,9 @@ def login(conn, username, password, ttl_seconds):
 
     A password that is not a string, or is longer than 256 characters, is rejected before the lookup
     and before any hash of that value. The response matches an unknown account.
+
+    A disabled account still checks the stored hash, then returns that same 401. It does not
+    increment failed_logins and it does not lock. The error text does not say the account is disabled.
     """
     if not _password_is_login_shaped(password):
         _reject_unknown_login(conn, password)
@@ -231,7 +246,7 @@ def login(conn, username, password, ttl_seconds):
     if user is None:
         _reject_unknown_login(conn, password)
     if user["disabled"]:
-        raise AuthError("invalid username or password")
+        _reject_disabled_login(conn, user, password)
     _check_not_locked(conn, user)
     if not verify_password(password, user["pw_hash"]):
         _record_failure(conn, user)
