@@ -1,0 +1,50 @@
+# Directory traversal that is trying to read a sensitive file. Both halves are required so a normal
+# relative link or a document that mentions passwd does not fire on its own.
+title: Path Traversal To Sensitive File In Web Request
+id: 4b7e2a90-1d36-4c85-a7f1-3e9c0b6d5a28
+status: experimental
+description: |
+  A web request walks the directory tree with ../ or an encoded equivalent and names a sensitive file
+  (passwd, shadow, win.ini, boot.ini, a private key, or an application secret).
+  Each matching event is evidence; Watchpost groups them per source IP.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1190/
+tags:
+  - attack.initial_access
+  - attack.t1190
+logsource:
+  category: webserver
+detection:
+  web:
+    event.action:
+      - web_request
+      - web_scan
+      - web_error
+  traversal:
+    message|contains:
+      - ../
+      - '..\'
+      - ..%2f
+      - ..%5c
+      - '%2e%2e/'
+      - '%2e%2e%2f'
+      - '%2e%2e%5c'
+      - ..%252f
+      - '%252e%252e%252f'
+  sensitive:
+    message|contains:
+      - etc/passwd
+      - etc/shadow
+      - proc/self/environ
+      - windows/win.ini
+      - boot.ini
+      - wp-config.php
+      - id_rsa
+      - web.config
+      - .env
+  condition: web and traversal and sensitive
+falsepositives:
+  - A downloaded archive whose name contains both a traversal token and one of these filenames
+level: high

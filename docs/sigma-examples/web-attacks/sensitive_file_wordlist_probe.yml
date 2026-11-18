@@ -1,0 +1,65 @@
+# Wordlist hits against files operators do not publish, plus the user agents of path brute-forcers.
+# Paths are the ones Watchpost already treats as scan paths, narrowed where the short form is noisy.
+title: Sensitive File Wordlist Probe Against Web Server
+id: 2c6d9e81-4a15-4f73-b8e0-1d7a5c3f90b6
+status: experimental
+description: |
+  A web client requested a sensitive file that shows up in public wordlists, or identified itself as
+  gobuster, ffuf, dirbuster, feroxbuster, or wfuzz. A hit is discovery, not proof the file existed.
+  Each matching event is evidence; Watchpost groups them per source IP.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1595/003/
+tags:
+  - attack.reconnaissance
+  - attack.t1595.003
+logsource:
+  category: webserver
+detection:
+  web:
+    event.action:
+      - web_request
+      - web_scan
+      - web_error
+  paths:
+    message|contains:
+      - /.env
+      - /.git/
+      - /.svn/
+      - /.aws/
+      - /.htpasswd
+      - /.htaccess
+      - /.ds_store
+      - /wp-login.php
+      - /wp-config.php
+      - /xmlrpc.php
+      - /phpmyadmin
+      - /pma/
+      - /adminer.php
+      - /actuator/env
+      - /actuator/heapdump
+      - /server-status
+      - /server-info
+      - /vendor/phpunit
+      - /cgi-bin/
+      - /elmah.axd
+      - /debug/default/view
+      - /telescope/requests
+      - /manager/html
+      - /etc/passwd
+      - /etc/shadow
+      - /id_rsa
+  tools:
+    message|contains:
+      - gobuster
+      - ffuf/
+      - dirbuster
+      - feroxbuster
+      - wfuzz/
+  condition: web and (paths or tools)
+falsepositives:
+  - A WordPress site whose real login page is requested by a browser
+  - An application that legitimately serves a path under /cgi-bin/
+  - A status page whose URL contains /server-status
+level: medium

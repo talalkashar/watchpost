@@ -1,0 +1,38 @@
+# CVE-2021-44228 and the common obfuscations that still show up in web logs. Matching is a literal
+# substring, so each encoding is written out. ${jndi: is not a decode step.
+title: Log4Shell JNDI Lookup In Web Request
+id: 6a1c8f35-9e42-4b70-8d26-5f0a3c7e1b94
+status: experimental
+description: |
+  A web request carries a Log4j JNDI lookup (${jndi:...), including the lower-case and ${::-j}
+  obfuscations and the percent-encoded forms that appear when the payload sits in a query string.
+  Each matching event is evidence; Watchpost groups them per source IP.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1190/
+  - https://nvd.nist.gov/vuln/detail/CVE-2021-44228
+tags:
+  - attack.initial_access
+  - attack.t1190
+logsource:
+  category: webserver
+detection:
+  web:
+    event.action:
+      - web_request
+      - web_scan
+      - web_error
+  jndi:
+    message|contains:
+      - '${jndi:'
+      - '${${::-j}'
+      - '${${lower:j}'
+      - '${${upper:j}'
+      - '%24%7bjndi:'
+      - '%24%7b%6a%6e%64%69%3a'
+      - '$%7bjndi:'
+  condition: web and jndi
+falsepositives:
+  - A security write-up whose URL still contains a JNDI lookup string
+level: critical

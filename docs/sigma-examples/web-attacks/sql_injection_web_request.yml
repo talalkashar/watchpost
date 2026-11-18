@@ -1,0 +1,47 @@
+# SQL injection in the request line. Access logs keep the raw path, so both plain and percent-encoded
+# forms are listed. The engine has no decode modifier and refuses regular expressions.
+title: SQL Injection Payload In Web Request
+id: 91e0b4d7-5c28-4a6f-9d13-8b2f6e0a4c59
+status: experimental
+description: |
+  A web request line carries a SQL injection payload: UNION SELECT, a tautology such as OR 1=1,
+  information_schema, a time-based function, or a file-read or file-write function.
+  Each matching event is evidence; Watchpost groups them per source IP.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1190/
+tags:
+  - attack.initial_access
+  - attack.t1190
+logsource:
+  category: webserver
+detection:
+  web:
+    event.action:
+      - web_request
+      - web_scan
+      - web_error
+  payload:
+    message|contains:
+      - union select
+      - union%20select
+      - union+select
+      - union all select
+      - information_schema
+      - or 1=1
+      - or%201=1
+      - or+1=1
+      - or%201%3d1
+      - pg_sleep(
+      - waitfor delay
+      - benchmark(
+      - extractvalue(
+      - updatexml(
+      - into outfile
+      - load_file(
+  condition: web and payload
+falsepositives:
+  - A search box whose query text really contains the words union select or or 1=1
+  - A tutorial page that is fetched with the payload still in the query string
+level: high
