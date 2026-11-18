@@ -19,8 +19,9 @@ _REDACTIONS = [
                 r"(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;&]+)"), r"\1\2[REDACTED]"),
     # Watchpost ingest tokens
     (re.compile(r"\bwp_[A-Za-z0-9_-]{16,}"), "wp_[REDACTED]"),
-    # JSON "password": "..."
-    (re.compile(r'(?i)("(?:password|passwd|secret|token|api_key)"\s*:\s*)"[^"]*"'), r'\1"[REDACTED]"'),
+    # JSON "password": "...". An escaped quote is still inside the value.
+    (re.compile(r'(?i)("(?:password|passwd|secret|token|api_key)"\s*:\s*)'
+                r'"(?:\\.|[^"\\])*"'), r'\1"[REDACTED]"'),
 ]
 
 

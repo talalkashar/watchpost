@@ -251,6 +251,24 @@ class RedactionTests(unittest.TestCase):
                 self.assertNotIn("abc123", out)
                 self.assertNotIn("abcdefghijklmnop", out)
 
+    def test_json_escaped_quote_does_not_leave_the_rest_of_the_secret(self):
+        # The value is a\"supersecret. Stopping at the first quote would keep supersecret.
+        text = '{"password": "a\\"supersecret", "user": "alice"}'
+        self.assertEqual(redact(text), '{"password": "[REDACTED]", "user": "alice"}')
+        self.assertEqual(redact('{"password" : "a\\"b\\"c"}'), '{"password" : "[REDACTED]"}')
+        self.assertEqual(redact('{"password": ""}'), '{"password": "[REDACTED]"}')
+        for key in ("passwd", "secret", "token", "api_key", "Password"):
+            with self.subTest(key=key):
+                raw = '{"%s": "a\\"supersecret"}' % key
+                self.assertNotIn("supersecret", redact(raw))
+                self.assertIn('"[REDACTED]"', redact(raw))
+
+    def test_escaped_json_secret_is_redacted_in_the_stored_message(self):
+        secret = '{"password": "a\\"supersecret"}'
+        event = normalize_record({"ts": "2026-09-15T10:00:00Z", "message": secret}, "api", NOW)
+        self.assertEqual(event["message"], '{"password": "[REDACTED]"}')
+        self.assertNotIn("supersecret", event["message"])
+
 
 if __name__ == "__main__":
     unittest.main()
