@@ -79,6 +79,37 @@ class OtherRuleTests(unittest.TestCase):
         # A success *before* the failures is not "after failures".
         self.assertEqual(rules.success_after_failures(make([ok(0, user="d")] + [fail(10 + i, user="d") for i in range(5)]), p), [])
 
+    def test_success_after_failures_merges_user_spellings(self):
+        p = params("success_after_failures")
+        # Three plus two: neither spelling reaches five, so keeping one list misses the login.
+        split = make(
+            [fail(i * 10, user="Alice") for i in range(3)]
+            + [fail(30 + i * 10, user="alice") for i in range(2)]
+            + [ok(80, user="ALICE")]
+        )
+        found = rules.success_after_failures(split, p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "alice|203.0.113.1")
+        self.assertEqual(found[0]["event_ids"], [1, 2, 3, 4, 5, 6])
+        self.assertIn("5 failed", found[0]["explanation"])
+        # A spelling that already meets the threshold still keeps the other spelling's failures.
+        both = make(
+            [fail(i * 10, user="Alice") for i in range(5)]
+            + [fail(50 + i * 10, user="alice") for i in range(2)]
+            + [ok(80, user="Alice")]
+        )
+        found = rules.success_after_failures(both, p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["event_ids"], list(range(1, 9)))
+        self.assertIn("7 failed", found[0]["explanation"])
+        # Four across both spellings stays under the threshold.
+        short = make(
+            [fail(i, user="Alice") for i in range(2)]
+            + [fail(10 + i, user="alice") for i in range(2)]
+            + [ok(20, user="alice")]
+        )
+        self.assertEqual(rules.success_after_failures(short, p), [])
+
     def test_off_hours(self):
         p = params("off_hours_privileged_login")
         night = datetime(2026, 9, 15, 3, 0, tzinfo=timezone.utc)

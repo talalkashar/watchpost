@@ -432,8 +432,9 @@ def account_repeated_failures(events, params):
 
 def success_after_failures(events, params):
     needed, window = params["failures"], params["window_seconds"]
-    failures = _group(_filtered(events, params, "auth_failure"), "user")
-    failures = {u.lower(): v for u, v in failures.items()}
+    # One list per lowercase account. A dict of exact spellings drops every
+    # spelling but the last, so a success can miss failures that still count.
+    failures = _group_users(_filtered(events, params, "auth_failure"))
     findings = []
     for success in _filtered(events, params, LOGIN_SUCCESS_TYPES):
         user = (success.get("user") or "").lower()
