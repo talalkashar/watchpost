@@ -4,7 +4,7 @@ import json
 import sqlite3
 
 from .db import audit, now_iso, transaction
-from .queries import QueryError
+from .queries import QueryError, catalog_name
 
 ViewError = QueryError
 
@@ -20,22 +20,30 @@ def _payload(data):
     name = data.get("name")
     if not isinstance(name, str) or not (1 <= len(name.strip()) <= 80):
         raise ViewError("name must be 1-80 characters")
-    visibility = data.get("visibility")
-    if visibility not in VISIBILITIES:
+    # ASCII case folds onto the catalog spelling (`Private` stores `private`, `High` stores `high`).
+    # `info` is not a dashboard severity. `High` with `high` is still a duplicate. Panel ids stay exact.
+    visibility = catalog_name(data.get("visibility"), VISIBILITIES)
+    if visibility is None:
         raise ViewError("visibility must be private or shared")
     filters = data.get("filters")
     if not isinstance(filters, dict) or set(filters) != {"severities"}:
         raise ViewError("filters must contain only severities")
     severities = filters["severities"]
-    if not isinstance(severities, list) or not severities \
-            or any(value not in SEVERITIES for value in severities) \
-            or len(set(severities)) != len(severities):
+    folded = []
+    if isinstance(severities, list):
+        for value in severities:
+            level = catalog_name(value, SEVERITIES)
+            if level is None or level in folded:
+                folded = []
+                break
+            folded.append(level)
+    if not folded:
         raise ViewError("severities must be a non-empty list of unique known severities")
     layout = data.get("layout")
     if not isinstance(layout, list) or not layout or any(value not in PANELS for value in layout) \
             or len(set(layout)) != len(layout):
         raise ViewError("layout must be a non-empty list of unique dashboard panels")
-    return name.strip(), visibility, {"severities": severities}, layout
+    return name.strip(), visibility, {"severities": folded}, layout
 
 
 def _row(row):
