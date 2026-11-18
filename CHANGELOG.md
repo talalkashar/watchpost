@@ -6,6 +6,8 @@ All bundled data is synthetic. PR numbers refer to https://github.com/talalkasha
 
 ### Fixed
 
+- Viewer masking folds usernames on ASCII letters only. `Alice` and `alice` stay one pseudonym. `ÉRIN` and `érin` stay two, and a viewer named `érin` no longer sees `ÉRIN` in clear. The 10,000-name cap still counts those as two and still fails closed. Public addresses stay visible and internal addresses stay masked.
+
 - With `SIEM_TRUST_PROXY=1`, the rate-limit client IP is the last entry of exactly one `X-Forwarded-For` header on a loopback connection. A second header is not used, so a client-supplied line cannot choose the key. A value that is not an address stays the peer address. One header `192.0.2.1, 203.0.113.7` still uses `203.0.113.7`.
 
 - Asset host matching folds ASCII letters only, the same fold as entity hosts. An asset named `Érin-host` no longer matches events on `érin-host`, so one host does not take the other's criticality. `WEB01` still matches `web01`. Addresses stay the form already stored.
