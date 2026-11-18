@@ -458,10 +458,14 @@ def metrics(conn, hours=24):
         "dispositions": by("SELECT disposition, COUNT(*) AS count FROM alerts WHERE disposition IS NOT NULL"
                            " GROUP BY disposition"),
         "mean_time_to_resolve_minutes": round(mttr, 1) if mttr is not None else None,
+        # Addresses stay the stored spelling. Accounts fold ASCII case with SQLite lower(),
+        # the same fold hunt user groups use. Alice and alice are one row named alice.
+        # Érin and érin stay two rows.
         "top_failure_ips": by("SELECT src_ip, COUNT(*) AS count FROM events WHERE event_type = 'auth_failure'"
                               " AND src_ip IS NOT NULL GROUP BY src_ip ORDER BY count DESC LIMIT 5"),
-        "top_failure_users": by("SELECT user, COUNT(*) AS count FROM events WHERE event_type = 'auth_failure'"
-                                " AND user IS NOT NULL GROUP BY user ORDER BY count DESC LIMIT 5"),
+        "top_failure_users": by(
+            "SELECT lower(user) AS user, COUNT(*) AS count FROM events WHERE event_type = 'auth_failure'"
+            " AND user IS NOT NULL GROUP BY lower(user) ORDER BY count DESC LIMIT 5"),
         "events_by_type": by("SELECT event_type, COUNT(*) AS count FROM events GROUP BY event_type"
                              " ORDER BY count DESC"),
         "activity_last_24h_of_data": histogram,

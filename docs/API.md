@@ -152,7 +152,7 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 | `GET /api/attack/navigator.json` | viewer | The same coverage as a MITRE ATT&CK Navigator layer, colored by level and scored by alert count |
 | `GET /api/entities?kind=&limit=` | viewer | Riskiest entities (`kind` is `user`, `src_ip`, or `host`; `limit` 1–100, default 10), each with its score and the alerts that contribute to it. A user or host `value` is the ASCII-folded key (`Erin` and `WEB01` are `erin` and `web01`). `Érin` and `érin` stay two rows |
 | `GET /api/entities/{kind}/{value}` | viewer | One entity (value percent-encoded): score breakdown, alerts, incidents, recent events, and `alerts_by_day` (UTC day of each alert's newest evidence event for this entity, zeros filled, newest 31 days; `omitted` counts alerts older than that). A `src_ip` path is the address form ingest stores, so `2001:DB8::1` matches `2001:db8::1` and `value` is that form. Anything that is not one address is 400. A user or host path folds ASCII case onto that same key, so `Erin`, `ERIN`, and `erin` are one account and the returned `value` is `erin`. `Érin` and `érin` stay two accounts |
-| `GET /api/metrics?hours=24` | viewer | Counts, severity/rule breakdowns, MTTR, and `window_scope`. `hours` filters only `events_ingested_window`. `top_failure_ips`, `top_failure_users`, and `events_by_type` count every stored event. See [the metrics window](#get-apimetrics-window) |
+| `GET /api/metrics?hours=24` | viewer | Counts, severity/rule breakdowns, MTTR, and `window_scope`. `hours` filters only `events_ingested_window`. `top_failure_ips`, `top_failure_users`, and `events_by_type` count every stored event. `top_failure_users` groups with SQLite `lower()` (ASCII letters only): `Alice`, `alice`, and `ALICE` are one row named `alice`. `Érin` and `érin` stay two rows. `top_failure_ips` groups the stored address and does not fold it. See [the metrics window](#get-apimetrics-window) |
 
 ### `GET /api/metrics` window
 
@@ -161,6 +161,8 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 `window_scope.honors_hours` is `events_ingested_window` only. That count is events whose `ingested_at` falls in the last `hours` hours.
 
 `window_scope.all_stored_events` is `events_total`, `synthetic_events`, `top_failure_ips`, `top_failure_users`, and `events_by_type`. Those count every stored event. A failed login older than `hours` still appears in `top_failure_ips` and `top_failure_users`, and its type still appears in `events_by_type`.
+
+`top_failure_users` groups the account with SQLite `lower()`, which folds ASCII letters only, the same fold hunt user groups use. `Alice`, `alice`, and `ALICE` are one row whose `user` is `alice`. `Érin` and `érin` stay two rows. `top_failure_ips` groups `src_ip` as stored. `2001:DB8::1` and `2001:db8::1` stay two addresses. A success is not a failure row.
 
 `window_scope.newest_event_24h` is `activity_last_24h_of_data`: the 24 hours ending at the newest stored event, not the `hours` window. Alert counts, mean time to resolve, dispositions, false-positive rates, and open-alert aging read the current alerts table. `omitted_metrics` still names time to detect and dwell time.
 
