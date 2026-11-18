@@ -39,6 +39,7 @@ BOARD_LIMIT = 60
 RECENT_LIMIT = 60
 # Metrics failure lists are this many groups, most failures first.
 # top_failure_ips orders by count, then src_ip.
+# top_failure_users orders by count, then the folded user.
 # top_failure_ips_omitted and top_failure_users_omitted are how many groups were past that cap.
 TOP_FAILURE_LIMIT = 5
 # Metrics alerts_by_rule is this many rule ids, most alerts first, then rule_id.
@@ -558,12 +559,13 @@ def metrics(conn, hours=24):
     # Addresses stay the stored spelling. Equal counts keep the earlier src_ip.
     # Accounts fold ASCII case with SQLite lower(),
     # the same fold hunt user groups use. Alice and alice are one row named alice.
-    # Érin and érin stay two rows. Each list is the busiest TOP_FAILURE_LIMIT groups.
+    # Érin and érin stay two rows. Equal counts keep the earlier folded name.
+    # Each list is the busiest TOP_FAILURE_LIMIT groups.
     top_ips = by("SELECT src_ip, COUNT(*) AS count FROM events WHERE event_type = 'auth_failure'"
                  " AND src_ip IS NOT NULL GROUP BY src_ip ORDER BY count DESC, src_ip"
                  f" LIMIT {TOP_FAILURE_LIMIT}")
     top_users = by("SELECT lower(user) AS user, COUNT(*) AS count FROM events WHERE event_type = 'auth_failure'"
-                   " AND user IS NOT NULL GROUP BY lower(user) ORDER BY count DESC"
+                   " AND user IS NOT NULL GROUP BY lower(user) ORDER BY count DESC, lower(user)"
                    f" LIMIT {TOP_FAILURE_LIMIT}")
     ips_omitted = one("SELECT COUNT(DISTINCT src_ip) FROM events WHERE event_type = 'auth_failure'"
                       " AND src_ip IS NOT NULL") - len(top_ips)
