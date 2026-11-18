@@ -45,6 +45,22 @@ def catalog_name(value, names):
     return None
 
 
+def catalog_pieces(value, names, message):
+    """Comma-separated names folded onto catalog spellings.
+
+    `Open` is `open` and `High` is `high`. Spaces around a piece are ignored.
+    A blank piece or an unknown name is QueryError(message). The returned
+    spellings are what a filter binds, so a stored lookalike is not a match.
+    """
+    pieces = []
+    for part in value.split(","):
+        name = catalog_name(part.strip(), names)
+        if name is None:
+            raise QueryError(message)
+        pieces.append(name)
+    return pieces
+
+
 def canonical_ip(value, field):
     """The address form ingest stores (`str(ipaddress.ip_address)`).
 
@@ -176,18 +192,17 @@ def get_event(conn, event_id):
 def list_alerts(conn, params):
     where, args = [], []
     if params.get("status"):
-        # One status or a comma list. Spaces around a name are ignored, as on severity.
-        # A blank piece is invalid, same as an unknown name.
-        statuses = [part.strip() for part in params["status"].split(",")]
-        if not statuses or not set(statuses) <= set(ALERT_STATUSES):
-            raise QueryError(f"status must be from {', '.join(ALERT_STATUSES)}")
+        # One status or a comma list. Spaces around a name are ignored.
+        # ASCII case folds onto the catalog spelling (`Open` binds `open`). A blank piece is invalid.
+        statuses = catalog_pieces(
+            params["status"], ALERT_STATUSES,
+            f"status must be from {', '.join(ALERT_STATUSES)}")
         where.append(f"status IN ({','.join('?' for _ in statuses)})")
         args += statuses
     if params.get("severity"):
-        # One level or a comma list (critical,high). A blank piece is invalid, same as an unknown name.
-        levels = [part.strip() for part in params["severity"].split(",")]
-        if not levels or not set(levels) <= set(SEVERITIES):
-            raise QueryError("invalid severity")
+        # One level or a comma list (critical,high). Same fold (`High` binds `high`).
+        # A blank piece is invalid, same as an unknown name.
+        levels = catalog_pieces(params["severity"], SEVERITIES, "invalid severity")
         where.append(f"severity IN ({','.join('?' for _ in levels)})")
         args += levels
     if params.get("rule_id"):

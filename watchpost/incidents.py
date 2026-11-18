@@ -6,7 +6,7 @@ from . import assets, attack, correlate, improve, search_rules, sigma, simulate
 from .db import audit, now_iso, row_to_dict, transaction
 from .engine import load_rules
 from .normalize import SEVERITIES
-from .queries import EVENT_FIELDS, QueryError, _int, alert_row
+from .queries import EVENT_FIELDS, QueryError, _int, alert_row, catalog_pieces
 
 INCIDENT_STATUSES = ("open", "investigating", "resolved")
 # Incident detail returns this many distinct evidence events, earliest first. The rest are events_omitted.
@@ -57,19 +57,17 @@ def top_techniques(conn, incident_ids):
 def list_incidents(conn, params):
     where, args = [], []
     if params.get("status"):
-        # One status or a comma list. Spaces around a name are ignored, as on severity.
-        # A blank piece is invalid, same as an unknown name.
-        statuses = [part.strip() for part in params["status"].split(",")]
-        if not statuses or not set(statuses) <= set(INCIDENT_STATUSES):
-            raise QueryError(f"status must be from {', '.join(INCIDENT_STATUSES)}")
+        # One status or a comma list. Spaces around a name are ignored.
+        # ASCII case folds onto the catalog spelling (`Open` binds `open`). A blank piece is invalid.
+        statuses = catalog_pieces(
+            params["status"], INCIDENT_STATUSES,
+            f"status must be from {', '.join(INCIDENT_STATUSES)}")
         where.append(f"status IN ({','.join('?' for _ in statuses)})")
         args += statuses
     if params.get("severity"):
         # One level or a comma list (critical,high), the same rule as the alert queue.
-        # A blank piece is invalid, same as an unknown name.
-        levels = [part.strip() for part in params["severity"].split(",")]
-        if not levels or not set(levels) <= set(SEVERITIES):
-            raise QueryError("invalid severity")
+        # Same fold (`High` binds `high`). A blank piece is invalid, same as an unknown name.
+        levels = catalog_pieces(params["severity"], SEVERITIES, "invalid severity")
         where.append(f"severity IN ({','.join('?' for _ in levels)})")
         args += levels
     limit = _int(params.get("limit"), "limit", 100, 1, 500)
