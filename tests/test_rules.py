@@ -70,9 +70,9 @@ class BruteForceTests(unittest.TestCase):
             jose, params("brute_force_ip", ignore_users=["josé"])), [])
         self.assertTrue(rules.covers(
             "ignore_users", {rules.list_entry("ignore_users", "josé")}, {"user": "josé"}))
-        # Those two lists are the only ones on the ASCII fold.
-        self.assertEqual(rules.list_entry("sanctioned_services", ".ÉXAMPLE.com"), "éxample.com")
-        self.assertEqual(rules.list_entry("logging_actions", "Éxport"), "éxport")
+        # Service and action lists use the same ASCII fold. É stays É.
+        self.assertEqual(rules.list_entry("sanctioned_services", ".ÉXAMPLE.com"), "Éxample.com")
+        self.assertEqual(rules.list_entry("logging_actions", "Éxport"), "Éxport")
         self.assertTrue(rules.covers(
             "logging_actions", {rules.list_entry("logging_actions", "Éxport")},
             {"message": "Éxport on cloudtrail.amazonaws.com"}))
@@ -82,7 +82,9 @@ class BruteForceTests(unittest.TestCase):
         self.assertIn("`Alice`, `alice`, and `ALICE` are one account", text)
         self.assertIn("`érin` does not match `ÉRIN`", text)
         self.assertIn("`josé` still matches `josé`", text)
-        self.assertIn("Sanctioned service names and logging actions still fold the whole string", text)
+        self.assertIn("`mail.example` matches `MAIL.EXAMPLE` and a subdomain of that entry", text)
+        self.assertIn("`érin.example` does not match `Érin.example`", text)
+        self.assertIn("`GÉT` does not match `gét`", text)
 
     def test_ignore_ips_matches_stored_address_form(self):
         # Ingest stores str(ipaddress.ip_address), so a mixed-case or expanded entry must still ignore.
@@ -724,7 +726,7 @@ class UnsanctionedAccountFoldTests(unittest.TestCase):
     """unsanctioned_cloud_service keys the account with the ASCII fold.
 
     Alice, alice, and ALICE stay one finding. ÉRIN and érin stay two findings on
-    the same service. Sanctioned-service matching still folds the whole name.
+    the same service. A sanctioned name folds ASCII letters only.
     The title shows the account as logged.
     """
 
@@ -755,16 +757,72 @@ class UnsanctionedAccountFoldTests(unittest.TestCase):
         self.assertEqual(same[0]["event_ids"], [1, 2])
         self.assertIn("ÉRIN", same[0]["title"])
 
-    def test_sanctioned_service_still_folds_the_whole_name(self):
+    def test_sanctioned_service_folds_ascii_letters_only(self):
+        # É stays, so .ÉXAMPLE.com does not sanction éxample.com.
         p = params("unsanctioned_cloud_service", sanctioned_services=[".ÉXAMPLE.com"])
-        quiet = rules.unsanctioned_cloud_service(make([_cloud(0, "ÉRIN", "éxample.com")]), p)
+        found = rules.unsanctioned_cloud_service(make([_cloud(0, "ÉRIN", "éxample.com")]), p)
+        self.assertEqual([f["group_key"] for f in found], ["Érin|éxample.com"])
+        quiet = rules.unsanctioned_cloud_service(make([
+            _cloud(0, "ÉRIN", "MAIL.EXAMPLE"),
+            _cloud(30, "ÉRIN", "files.mail.example"),
+        ]), params("unsanctioned_cloud_service", sanctioned_services=["MAIL.EXAMPLE"]))
         self.assertEqual(quiet, [])
-        found = rules.unsanctioned_cloud_service(make([_cloud(0, "érin", "other.example")]), p)
-        self.assertEqual([f["group_key"] for f in found], ["érin|other.example"])
+        other = rules.unsanctioned_cloud_service(make([_cloud(0, "érin", "other.example")]), p)
+        self.assertEqual([f["group_key"] for f in other], ["érin|other.example"])
         self.assertEqual(rules.unsanctioned_cloud_service(make([
             ev(0, "cloud_data_access", None, "10.0.1.40",
                message="UploadFile on personal-drive.example (x)"),
         ]), params("unsanctioned_cloud_service")), [])
+
+
+class ServiceActionAsciiFoldTests(unittest.TestCase):
+    """Sanctioned services and logging actions fold ASCII letters only.
+
+    mail.example matches MAIL.EXAMPLE and a subdomain. érin.example does not
+    match Érin.example. Get matches get. Gét matches gét because only ASCII G
+    differs. GÉT stays apart from gét. str.lower() is not used.
+    """
+
+    def test_service_and_action_lists_fold_ascii_letters_only(self):
+        mail = {rules.list_entry("sanctioned_services", ".MAIL.EXAMPLE")}
+        self.assertEqual(mail, {"mail.example"})
+        self.assertTrue(rules.covers(
+            "sanctioned_services", mail, {"message": "Get on mail.example (x)"}))
+        self.assertTrue(rules.covers(
+            "sanctioned_services", mail, {"message": "Get on a.MAIL.EXAMPLE (x)"}))
+        self.assertEqual(rules._service({"message": "Get on MAIL.EXAMPLE (x)"}), "mail.example")
+        accent = {rules.list_entry("sanctioned_services", "Érin.example")}
+        self.assertEqual(accent, {"Érin.example"})
+        self.assertFalse(rules.covers(
+            "sanctioned_services", accent, {"message": "Put on érin.example (x)"}))
+        self.assertEqual(rules._service({"message": "Put on érin.example (x)"}), "érin.example")
+        self.assertNotEqual(rules._service({"message": "Put on Érin.example."}), "érin.example")
+
+        get = {rules.list_entry("logging_actions", "Get")}
+        self.assertEqual(get, {"get"})
+        self.assertTrue(rules.covers(
+            "logging_actions", get, {"message": "get on cloudtrail.amazonaws.com"}))
+        self.assertTrue(rules.covers(
+            "logging_actions", get, {"message": "GET on cloudtrail.amazonaws.com (AccessDenied)"}))
+        # Gét and gét differ only by ASCII G, so they are one action.
+        folded = {rules.list_entry("logging_actions", "Gét")}
+        self.assertEqual(folded, {"gét"})
+        self.assertTrue(rules.covers(
+            "logging_actions", folded, {"message": "gét on cloudtrail.amazonaws.com"}))
+        # É does not fold. GÉT is gÉt, not gét. The title still shows the action as logged.
+        apart = {rules.list_entry("logging_actions", "GÉT")}
+        self.assertEqual(apart, {"gÉt"})
+        self.assertFalse(rules.covers(
+            "logging_actions", apart, {"message": "gét on cloudtrail.amazonaws.com"}))
+        self.assertTrue(rules.covers(
+            "logging_actions", apart, {"message": "GÉT on cloudtrail.amazonaws.com"}))
+        found = rules.cloud_logging_disabled(make([
+            trail(0, "get", user="svc-x"),
+            trail(30, "GÉT", user="svc-x"),
+        ]), params("cloud_logging_disabled", logging_actions=["Get"]))
+        self.assertEqual([f["event_ids"] for f in found], [[1]])
+        self.assertIn("get", found[0]["explanation"])
+        self.assertNotIn("GÉT", found[0]["explanation"])
 
 
 NIGHT = datetime(2026, 9, 15, 3, 0, tzinfo=timezone.utc)

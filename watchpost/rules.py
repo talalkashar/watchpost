@@ -325,8 +325,14 @@ def list_entry(param, value):
     if param in _USER_LISTS:
         # ASCII letters only. érin does not match ÉRIN, the same split entity keys keep.
         return _ascii_fold(value)
-    # Sanctioned services and logging actions still fold the whole string.
-    return value.lower().lstrip(".") if param == "sanctioned_services" else value.lower()
+    if param == "sanctioned_services":
+        # ASCII letters only, the same fold as user lists. Not str.lower().
+        # érin.example does not match Érin.example. A leading dot is not part of the name.
+        return _ascii_fold(value).lstrip(".")
+    if param == "logging_actions":
+        # ASCII letters only. Get matches get. GÉT does not match gét. Not str.lower().
+        return _ascii_fold(value)
+    return value.lower()
 
 
 def covers(param, entries, event):
@@ -338,7 +344,8 @@ def covers(param, entries, event):
         service = _service(event)
         return bool(service) and any(service == s or service.endswith("." + s) for s in entries)
     if param == "logging_actions":
-        return (_action(event) or "").lower() in entries
+        # ASCII letters only, the same fold list_entry used on the entry. Not str.lower().
+        return _ascii_fold(_action(event) or "") in entries
     if param in _USER_LISTS:
         return _ascii_fold(event.get("user") or "") in entries
     return (event.get("user") or "").lower() in entries
@@ -753,7 +760,8 @@ def data_exfil_volume(events, params):
 def _service(event):
     """The cloud service named by an '<action> on <service>' message, or None. Never guessed."""
     _, found, rest = (event.get("message") or "").partition(" on ")
-    name = rest.split()[0].strip(".,;()").lower() if found and rest.split() else ""
+    # ASCII letters only, the same fold as the sanctioned list. Not str.lower().
+    name = _ascii_fold(rest.split()[0].strip(".,;()")) if found and rest.split() else ""
     return name if "." in name else None
 
 
