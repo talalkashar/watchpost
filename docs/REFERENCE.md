@@ -523,7 +523,7 @@ Send `{"value": 0}` the same way to turn it off. A viewer with masking on gets `
 
 | Form | Example | Meaning |
 |---|---|---|
-| `field:value` | `user:alice` | Exact match (user and host names ignore ASCII case, as in event search and the asset inventory) |
+| `field:value` | `user:alice` | Exact match (user, host, and source ignore ASCII case; grouping by source stays the stored spelling) |
 | `field:prefix*` | `host:web*` | Starts with; unquoted values only |
 | `field:"quoted"` | `user:"svc backup"` | Literal value; spaces and `*` are not special, `\"` escapes a quote |
 | word or `"phrase"` | `"invalid password"` | Message contains (`%` and `_` are literal) |

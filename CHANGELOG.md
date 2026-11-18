@@ -6,6 +6,8 @@ All bundled data is synthetic. PR numbers refer to https://github.com/talalkasha
 
 ### Fixed
 
+- Event search and hunt match `source` case-insensitively (ASCII). `source:Demo` and `GET /api/events?source=demo` return a row stored as `demo`. A prefix already folded ASCII. Grouping by source stays exact. The lookup uses `idx_events_source_nocase`.
+
 - A missing static file (404) and a non-GET on a static path (405) send `Cache-Control: no-store`. A static file that exists stays `no-cache`.
 
 - Hunt and event search bind a complete IP in the form ingest stores, so `src_ip:2001:DB8::1` and `GET /api/events?ip=2001:DB8::1` match a row stored as `2001:db8::1`. A trailing `*` stays a text prefix. Anything that is neither a prefix nor one address is 400.

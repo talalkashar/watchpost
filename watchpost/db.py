@@ -53,6 +53,9 @@ CREATE INDEX IF NOT EXISTS idx_events_ingested ON events(ingested_at);
 CREATE INDEX IF NOT EXISTS idx_events_synthetic ON events(synthetic);
 -- 10.0: log source health reads each (source, host) pair's arrivals, newest first (watchpost/sources.py).
 CREATE INDEX IF NOT EXISTS idx_events_source_host ON events(source, host, ingested_at);
+-- Source equality compares with COLLATE NOCASE (ASCII), the same way host does. Grouping by source
+-- stays exact and still reads the stored spelling. A source prefix uses this index too.
+CREATE INDEX IF NOT EXISTS idx_events_source_nocase ON events(source COLLATE NOCASE, ts);
 
 CREATE TABLE IF NOT EXISTS ingest_batches (
     id TEXT PRIMARY KEY,

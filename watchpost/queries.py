@@ -85,7 +85,8 @@ def search_events(conn, params):
                 where.append(f"{column} LIKE ? ESCAPE '\\'")
                 args.append(_escape_like(params[field][:-1]) + "%")
             else:
-                where.append(f"{column} = ? COLLATE NOCASE" if field in ("user", "host") else f"{column} = ?")
+                where.append(f"{column} = ? COLLATE NOCASE"
+                             if field in ("user", "host", "source") else f"{column} = ?")
                 args.append(params[field])
     if params.get("ip"):
         # Equality only. A trailing * is a hunt prefix, not an address, so it is 400 here.

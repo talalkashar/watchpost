@@ -9,8 +9,8 @@ The filter is matched in Python over the event dicts the engine already scans (e
 with the hunt's SQL semantics: same fields and value checks, a trailing `*` on an unquoted value is a prefix
 match, message terms are "contains", NOT keeps events missing the field, and a bytes term uses the
 same >=, >, <=, < or = comparison as the hunt. Comparisons fold case the way SQLite does
-(ASCII only): user and host equality, every prefix match and message contains ignore ASCII case;
-other equality is exact. `src_ip`, `dest_ip`, and `ip` equality use the address form ingest stores;
+(ASCII only): user, host, and source equality, every prefix match and message contains ignore ASCII case;
+other equality is exact. Grouping by source stays exact. `src_ip`, `dest_ip`, and `ip` equality use the address form ingest stores;
 a prefix stays the typed text. tests/test_search_rules.py cross-checks this matcher against
 hunt.compile_query in SQL.
 
@@ -135,7 +135,7 @@ def _predicate(term):
     if field in ("src_ip", "dest_ip"):
         address = canonical_ip(value, field)
         return lambda e: e.get(column) == address
-    if field in ("user", "host"):  # COLLATE NOCASE, ASCII only, same as the asset inventory's host names
+    if field in ("user", "host", "source"):  # COLLATE NOCASE, ASCII only. Grouping by source stays exact.
         folded = _fold(value)
         return lambda e: isinstance(e.get(column), str) and _fold(e[column]) == folded
     return lambda e: e.get(column) == value

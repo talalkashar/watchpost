@@ -122,7 +122,7 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 | Param | Meaning |
 |---|---|
 | `start`, `end` | ISO timestamps (inclusive) |
-| `source`, `host`, `user`, `batch_id` | Exact match (`user` and `host` ignore ASCII case, the same way the asset inventory matches a host name); a trailing `*` makes it a prefix match |
+| `source`, `host`, `user`, `batch_id` | Exact match (`user`, `host`, and `source` ignore ASCII case; grouping by source stays the stored spelling); a trailing `*` makes it a prefix match |
 | `ip` | Matches `src_ip` or `dest_ip`. A complete address is the form ingest stores (`2001:DB8::1` matches `2001:db8::1`). Anything that is not one address is 400 |
 | `event_type` | One normalized type |
 | `severity` | Comma list, or a single level with `severity_mode=min` for "at least". Spaces around each name are ignored. A blank or unknown piece is 400 |

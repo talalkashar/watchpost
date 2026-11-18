@@ -99,9 +99,12 @@ class MatcherCrossCheckTests(unittest.TestCase):
         self.assertFalse(match({"user": "alicex"}))
         # NOCASE folds ASCII only, as SQLite does.
         self.assertFalse(search_rules.matcher(search_rules.parse_filter("user:émile")[1])({"user": "Émile"}))
-        # Host names fold ASCII case, like user and the asset inventory. Other text equality stays exact.
+        # Host and source fold ASCII case. Other text equality stays exact.
         self.assertTrue(search_rules.matcher(search_rules.parse_filter("host:WEB01")[1])({"host": "web01"}))
-        self.assertFalse(search_rules.matcher(search_rules.parse_filter("source:LAB")[1])({"source": "lab"}))
+        self.assertTrue(search_rules.matcher(search_rules.parse_filter("source:LAB")[1])({"source": "lab"}))
+        # outcome is refused in a detection rule, so the term is built here. Equality stays exact.
+        outcome = [{"field": "outcome", "value": "Failure", "negate": False, "quoted": False}]
+        self.assertFalse(search_rules.matcher(outcome)({"outcome": "failure"}))
         self.assertTrue(search_rules.matcher(search_rules.parse_filter("host:WEB*")[1])({"host": "web01"}))
         # NOT keeps events that lack the field.
         self.assertTrue(search_rules.matcher(search_rules.parse_filter("NOT host:web*")[1])({"host": None}))
