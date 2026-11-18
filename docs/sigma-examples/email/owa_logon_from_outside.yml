@@ -1,0 +1,41 @@
+# Successful Outlook on the web sign-in from outside the private ranges.
+# A request that only fetches /owa/ static files does not match. Logsource is not a filter.
+title: Outlook Web Access Logon From Outside
+id: 134c14b8-b6ee-4c18-9f91-5966fb984fcb
+status: experimental
+description: |
+  A successful sign-in whose message names Outlook Web Access, Outlook Web App, Outlook on the web,
+  or an /owa/ path, from an address outside the private ranges. Outlook on the web is an external
+  remote service into the mailbox. The same sign-in from a private address does not match, and
+  neither does a successful sign-in that is not webmail.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1133/
+tags:
+  - attack.initial_access
+  - attack.t1133
+logsource:
+  category: authentication
+  product: exchange
+detection:
+  logon:
+    event.action: auth_success
+    message|contains:
+      - '/owa/'
+      - 'Outlook Web Access'
+      - 'Outlook Web App'
+      - 'Outlook on the web'
+  internal:
+    SourceIp|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+      - 'fc00::/7'
+      - 'fe80::/10'
+      - '::1/128'
+  condition: logon and not internal
+falsepositives:
+  - Staff reading mail in Outlook on the web from home or while traveling
+level: medium
