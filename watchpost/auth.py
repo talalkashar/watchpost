@@ -188,14 +188,25 @@ def _start_session(conn, user, ttl_seconds, detail=None):
     return token, csrf, {"username": user["username"], "role": user["role"]}
 
 
+# Same cap as create-user. A longer value is never passed to PBKDF2.
+PASSWORD_MAX_LEN = 256
+_TIMING_PASSWORD = "dummy-password-for-timing"
+
+
+def _password_is_login_shaped(password):
+    return isinstance(password, str) and len(password) <= PASSWORD_MAX_LEN
+
+
 def _reject_unknown_login(conn, password):
     """Same work and response as a missing account, so a bad length is not a distinct failure.
 
-    The dummy hash keeps this path about as slow as a real password check.
+    The dummy hash stays the short fixed string. A password that is not a string, or is longer
+    than 256 characters, is not hashed: the timing check uses that short string instead.
     """
     global _DUMMY_HASH
-    _DUMMY_HASH = _DUMMY_HASH or hash_password("dummy-password-for-timing")
-    verify_password(str(password), _DUMMY_HASH)
+    _DUMMY_HASH = _DUMMY_HASH or hash_password(_TIMING_PASSWORD)
+    checked = password if _password_is_login_shaped(password) else _TIMING_PASSWORD
+    verify_password(checked, _DUMMY_HASH)
     audit(conn, "anonymous", "login_failed", None, {"reason": "unknown user"})
     raise AuthError("invalid username or password")
 
@@ -208,7 +219,12 @@ def login(conn, username, password, ttl_seconds):
 
     Usernames are 3–32 characters. A value outside that is rejected before the lookup and is not sliced,
     so a longer string cannot match a stored prefix.
+
+    A password that is not a string, or is longer than 256 characters, is rejected before the lookup
+    and before any hash of that value. The response matches an unknown account.
     """
+    if not _password_is_login_shaped(password):
+        _reject_unknown_login(conn, password)
     if not isinstance(username, str) or not (3 <= len(username) <= 32):
         _reject_unknown_login(conn, password)
     user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
@@ -217,7 +233,7 @@ def login(conn, username, password, ttl_seconds):
     if user["disabled"]:
         raise AuthError("invalid username or password")
     _check_not_locked(conn, user)
-    if not verify_password(str(password), user["pw_hash"]):
+    if not verify_password(password, user["pw_hash"]):
         _record_failure(conn, user)
         raise AuthError("invalid username or password")
     if user["totp_secret"]:
