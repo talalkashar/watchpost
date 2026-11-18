@@ -158,6 +158,20 @@ def _value(text, pos, field):
     return value, quoted, pos
 
 
+def _digit_int(value):
+    """int(value) when it is a digit string, else None.
+
+    str.isdigit() is also true for non-decimal digits such as ², and int()
+    rejects those. A bad port or top N must stay a hunt error.
+    """
+    if isinstance(value, str) and value.isdigit():
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
 def bytes_bound(value):
     """(operator, integer) for a bytes term. The operator is one of >=, >, <=, <, =."""
     match = _BYTES_CMP.fullmatch(value) if isinstance(value, str) else None
@@ -214,9 +228,10 @@ def _term_sql(term, now):
         text = prefix if prefix else value  # a trailing * on a word adds nothing to "contains"
         return "message LIKE ? ESCAPE '\\'", ["%" + _escape_like(text) + "%"], f'message contains "{text}"'
     if kind == "port":
-        if not value.isdigit() or int(value) > 65535:
+        port = _digit_int(value)
+        if port is None or port > 65535:
             raise HuntError("dest_port must be an integer between 0 and 65535")
-        return "dest_port = ?", [int(value)], f"dest_port = {int(value)}"
+        return "dest_port = ?", [port], f"dest_port = {port}"
     if kind == "bytes":
         op, number = bytes_bound(value)
         return f"{column} {op} ?", [number], f"{field} {op} {number}"
@@ -392,8 +407,8 @@ def parse_stage(text):
         words = [t for t in rest if t != ","]
         limit = TOP_DEFAULT
         if len(words) == 2 and words[0].isdigit():
-            limit = int(words[0])
-            if not 1 <= limit <= TOP_MAX:
+            limit = _digit_int(words[0])
+            if limit is None or not 1 <= limit <= TOP_MAX:
                 raise HuntError(f"top N must be between 1 and {TOP_MAX}")
             words = words[1:]
         if len(words) != 1 or words[0].isdigit():
