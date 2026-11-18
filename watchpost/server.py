@@ -1084,10 +1084,36 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
+    def _unframed_post_message(self):
+        """A POST body is framed only by Content-Length.
+
+        Chunked encoding is not read. A missing length is not an empty body.
+        Either one leaves unread bytes that a keep-alive socket would take as
+        the next request.
+        """
+        if self.command != "POST":
+            return None
+        if self.headers.get("Transfer-Encoding") is not None:
+            return "Transfer-Encoding is not supported"
+        if self.headers.get("Content-Length") is None:
+            return "Content-Length is required"
+        return None
+
+    def _reject_unframed_post(self):
+        message = self._unframed_post_message()
+        if message is None:
+            return False
+        self.close_connection = True
+        self._send(400, {"error": message},
+                   extra_headers={"Cache-Control": "no-store", "Connection": "close"})
+        return True
+
     def _read_body(self):
+        message = self._unframed_post_message()
+        if message is not None:
+            self.close_connection = True
+            raise ApiError(400, message)
         length = self.headers.get("Content-Length")
-        if length is None:
-            return b""
         try:
             length = int(length)
         except ValueError:
@@ -1133,6 +1159,8 @@ class Handler(BaseHTTPRequestHandler):
     def _handle(self):
         parsed = urlparse(self.path)
         if self._rate_limited(parsed.path):
+            return
+        if self._reject_unframed_post():
             return
         if not parsed.path.startswith("/api/"):
             return self._static(parsed.path)
