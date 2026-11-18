@@ -43,7 +43,6 @@ function setSvgChildren(group, inner) {
   const wrap = svgNode(`<svg xmlns="http://www.w3.org/2000/svg">${inner}</svg>`);
   group.replaceChildren(...(wrap.childNodes ? [...wrap.childNodes] : []));
 }
-const clock = (ts) => (ts ? String(ts).slice(11, 19) : "--:--:--");
 const shortTime = (ts) => (ts ? String(ts).slice(11, 16) : "");
 function ago(ts) {
   if (!ts) return "—";
@@ -513,7 +512,7 @@ const Live = {
 const Dash = {
   mounted: false, data: null, coverage: { state: "loading" }, details: null,
   queue: [], feedCount: 0, paused: false, live: new Map(), mapSize: null, timers: {}, observer: null,
-  views: [], currentView: null, severities: DASH_FILTERS.all, layout: DASH_LAYOUTS.full,
+  views: [], currentView: null, severities: DASH_FILTERS.all, layout: DASH_LAYOUTS.full, queueSort: "severity",
 
   mount() {
     this.unmount();
@@ -537,7 +536,8 @@ const Dash = {
           el("span", {}, el("i", { class: "dot volume" }), "event volume"))),
       panel("p-attackers", "Top attacker IPs", [el("span", { class: "muted" }, "by evidence events")], el("div", { class: "chartbox", id: "atk-chart" })),
       panel("p-attack", "MITRE ATT&CK coverage", [el("span", { class: "muted", id: "attack-meta" }), el("a", { href: "/api/attack/navigator.json", download: "watchpost-navigator-layer.json", title: "MITRE ATT&CK Navigator layer (JSON) colored by evidence level" }, "Export Navigator layer")], el("div", { class: "chartbox", id: "attack-chart", tabindex: "0", role: "region", "aria-label": "ATT&CK technique matrix" }), el("div", { class: "heat-legend", id: "attack-legend" })),
-      panel("p-board", "Incident board", [el("span", { id: "board-meta" })], el("div", { class: "board", id: "board" })),
+      panel("p-board", "Incident board", [el("span", { id: "board-meta" })],
+        el("div", { class: "board", id: "board", "data-kbd-list": "board" })),
       panel("p-rules", "Top rules", [el("span", { class: "muted" }, "alerts all time")], el("div", { class: "chartbox", id: "rules-chart" })),
       panel("p-health", "Health", [el("a", { href: "#health", class: "muted" }, "details →")], el("div", { id: "health-body" })),
       panel("p-entities", "Riskiest entities", [el("span", { class: "muted" }, "alert weight, decayed by age")], el("div", { id: "ent-list" })),
@@ -798,7 +798,7 @@ const Dash = {
       el("b", { class: "ms-n" }, String(a.events)));
     side.replaceChildren(
       el("div", { class: "ms-h" }, "Busiest arcs"),
-      ...(summary.arcs.length ? summary.arcs.map(arcRow) : [el("div", { class: "muted" }, "No external arcs yet")]));
+      ...(summary.arcs.length ? summary.arcs.map(arcRow) : [el("div", { class: "muted" }, "No external arcs yet. They appear when a source IP has a geo entry.")]));
   },
   pulse(e) {
     const svg = $("#map svg");
@@ -823,7 +823,7 @@ const Dash = {
     const feed = $("#feed");
     if (!feed) return;
     feed.replaceChildren(...(events.length ? events.slice(0, FEED_MAX).map((e) => this.feedRow(e, false))
-      : [el("p", { class: "empty-note" }, "No events received yet.")]));
+      : [el("p", { class: "empty-note" }, "No events received yet. Ingest a log or load demo data to start the stream.")]));
     this.feedCount = events.length || 1;
   },
   enqueue(events) {
@@ -865,7 +865,7 @@ const Dash = {
       e.src_ip && target ? el("span", { class: "arrow" }, "→") : null,
       target ? el("span", { class: "fu" }, target) : null) : null;
     return el("div", { class: `fr sev-${s}${fresh ? " new" : ""}`, title: msg },
-      el("span", { class: "ft" }, clock(e.ts)),
+      relTime(e.ts, "ft"),
       sevTag(s),
       el("span", { class: "fy" }, el("span", { class: "fn" }, e.event_type)),
       el("span", { class: "fd" }, route, msg ? el("span", { class: "fm" }, msg) : null));
@@ -873,9 +873,10 @@ const Dash = {
   alertRow(a) {
     const feed = $("#feed");
     if (!feed) return;
-    const row = el("a", { class: `fr alert-row sev-${sevOf(a.severity)} new`, href: `#alerts/${a.id}` },
-      el("span", { class: "ft" }, clock(a.last_seen)), sevTag(a.severity),
-      el("span", { class: "fy" }, el("span", { class: "fn" }, a.title)),
+    const row = el("a", { class: `fr alert-row sev-${sevOf(a.severity)} new`, href: `#alerts/${a.id}`,
+      title: [a.rule_id, a.status, exactTime(a.last_seen)].filter(Boolean).join(" · ") },
+      relTime(a.last_seen, "ft"), sevTag(a.severity),
+      el("span", { class: "fy" }, el("span", { class: "fn" }, a.title), a.status ? statusPill(a.status) : null),
       el("span", { class: "fd" }, el("span", { class: "fm" }, a.rule_id)));
     feed.prepend(row);
     const p = $("#p-feed");
@@ -913,14 +914,14 @@ const Dash = {
         subCls: loc === null ? "unknown" : "",
         title: `${a.ip}: ${a.events} evidence events in ${a.alerts} alerts (${a.open_alerts} open)${loc && loc.city ? ` · ${loc.city}` : ""}` };
     });
-    if (!rows.length) { box.replaceChildren(el("p", { class: "empty-note" }, "No attacker IPs in alert evidence yet.")); return; }
+    if (!rows.length) { box.replaceChildren(el("p", { class: "empty-note" }, "No attacker IPs in alert evidence yet. They appear once an alert cites a source IP.")); return; }
     mountSvg(box, WPCharts.hbars(rows, { w: this.width("#atk-chart"), rowH: 26, labelW: 140, label: `top attacker IPs by evidence events: ${rows.map((r) => `${r.label} ${r.value}`).join(", ")}` }));
   },
   renderRules() {
     const box = $("#rules-chart");
     if (!box) return;
     const rows = this.data.top_rules.map((r) => ({ label: r.name || r.rule_id, sub: `${r.rule_id} · ${r.open} open`, value: r.alerts, cls: sevOf(r.severity) }));
-    if (!rows.length) { box.replaceChildren(el("p", { class: "empty-note" }, "No rule has fired yet.")); return; }
+    if (!rows.length) { box.replaceChildren(el("p", { class: "empty-note" }, "No rule has fired yet. Run detection or load demo data.")); return; }
     // The rules column is a third of the board. A side label cannot hold these names, so the
     // name sits on its own line and the bar uses the full width under it.
     const shown = rows.slice(0, 7);
@@ -936,7 +937,7 @@ const Dash = {
     const box = $("#ent-list");
     if (!box) return;
     const rows = this.data.risky_entities || [];
-    if (!rows.length) { box.replaceChildren(el("p", { class: "empty-note" }, "No entity has a counted alert yet.")); return; }
+    if (!rows.length) { box.replaceChildren(el("p", { class: "empty-note" }, "No entity has a counted alert yet. They appear after the first counted alert.")); return; }
     box.replaceChildren(...rows.map((r) => el("div", { class: "erow", title: `${r.alerts} counted alert(s), ${r.open_alerts} open` },
       sevTag(r.max_severity), el("span", { class: "tag" }, ENTITY_KINDS[r.kind] || r.kind), entityLink(r.kind, r.value),
       el("b", {}, r.score))));
@@ -1005,10 +1006,18 @@ const Dash = {
   renderBoard() {
     const box = $("#board");
     if (!box) return;
-    box.replaceChildren(...incidentBoard(Live.incidents, this.data ? this.data.alerts : [], 5));
+    const sort = this.queueSort === "time" ? "time" : "severity";
+    const inc = Live.incidents;
+    const columns = incidentBoard(inc, this.data ? this.data.alerts : [], 5, sort);
+    box.replaceChildren(...columns);
+    if (!box.querySelector("a.bcard")) {
+      box.prepend(el("p", { class: "empty-note", style: { flex: "1 0 100%", margin: "0 0 8px" } }, boardEmptyCopy(inc)));
+    }
     const meta = $("#board-meta");
-    meta.replaceChildren(Live.incidents.state === "ok" ? el("a", { href: "#incidents", class: "muted" }, "all incidents →")
-      : chip(Live.incidents.state === "loading" ? "LOADING" : "INCIDENTS PENDING · SHOWING ALERTS", "pendingchip"));
+    meta.replaceChildren(
+      boardSortSelect(sort, (mode) => { this.queueSort = mode; this.renderBoard(); }),
+      inc.state === "ok" ? el("a", { href: "#incidents", class: "muted" }, "all incidents →")
+        : chip(inc.state === "loading" ? "LOADING" : "INCIDENTS PENDING · SHOWING ALERTS", "pendingchip"));
   },
 
   // --- health ---
@@ -1033,8 +1042,50 @@ const Dash = {
   },
 };
 
+// Severity: highest first, newest inside that level. Time: newest first, then severity.
+// Same order on the dashboard board and the incidents page.
+function queueOrder(mode) {
+  const sev = (x, y) => SEV_RANK[sevOf(y.sev)] - SEV_RANK[sevOf(x.sev)];
+  const newestFirst = (x, y) => String(y.time || "").localeCompare(String(x.time || ""));
+  if (mode === "time") return (x, y) => newestFirst(x, y) || sev(x, y);
+  return (x, y) => sev(x, y) || newestFirst(x, y);
+}
+function exactTime(ts) {
+  if (!ts) return "";
+  if (typeof fmtTime === "function") return fmtTime(ts);
+  return String(ts).replace("T", " ").replace(/\.\d+Z$/, "Z");
+}
+// Relative stamp. The title is the exact timestamp, so a hover answers "when".
+function relTime(ts, cls) {
+  const exact = exactTime(ts);
+  return el("time", { class: cls || "muted", datetime: ts || "", title: exact || null }, ago(ts));
+}
+function statusPill(s) {
+  const name = String(s || "open").toLowerCase();
+  return el("b", { class: `pill st-${name}` }, name);
+}
+function columnEmpty(name) {
+  if (name === "open") return "No open items. New alerts land here.";
+  if (name === "investigating") return "Nothing in progress. Open a card and start investigating.";
+  return "Nothing resolved yet. Close an item from its page when the work is done.";
+}
+function boardEmptyCopy(inc) {
+  if (inc && inc.state === "ok") {
+    return "No incidents yet. Alerts that share an IP, account, or host within 30 minutes group into one. Triage them from Alerts.";
+  }
+  return "No alerts on the board yet. Ingest a log or load demo data, then work the queue from Alerts.";
+}
+function boardSortSelect(current, onPick) {
+  return el("span", { class: "row" },
+    el("label", {}, "Sort",
+      el("select", { "aria-label": "Sort board by severity or time", onchange: (ev) => onPick(ev.target.value) },
+        el("option", { value: "severity", selected: current !== "time" }, "Severity"),
+        el("option", { value: "time", selected: current === "time" }, "Time"))));
+}
+
 // Board columns shared by the dashboard panel and the incidents page.
-function incidentBoard(inc, alerts, perColumn) {
+// j/k and Enter come from app.js: the board carries data-kbd-list and each card is a.bcard.
+function incidentBoard(inc, alerts, perColumn, sortMode) {
   const cols = { open: [], investigating: [], resolved: [] };
   if (inc.state === "ok") {
     for (const i of inc.list) cols[boardColumn(i.status)].push({
@@ -1047,19 +1098,19 @@ function incidentBoard(inc, alerts, perColumn) {
       meta: `${a.event_count} events · ${a.rule_id}`, tags: [],
     });
   }
-  const order = (x, y) => SEV_RANK[sevOf(y.sev)] - SEV_RANK[sevOf(x.sev)] || String(y.time).localeCompare(String(x.time));
+  const order = queueOrder(sortMode);
   return Object.entries(cols).map(([name, items]) => {
     items.sort(order);
     return el("div", { class: `bcol bc-${name}` },
       el("div", { class: "bh" }, el("span", {}, name[0].toUpperCase() + name.slice(1)), el("b", {}, items.length)),
       ...items.slice(0, perColumn).map((c) => el("a", { class: `bcard sev-${sevOf(c.sev)}`, href: c.href },
         el("div", { class: "bt" }, c.title),
-        el("div", { class: "bm" }, sevTag(c.sev), el("span", {}, c.meta), el("span", { class: "muted" }, ago(c.time))),
+        el("div", { class: "bm" }, sevTag(c.sev), statusPill(name), el("span", {}, c.meta), relTime(c.time)),
         c.tags.length ? el("div", { class: "btags" }, ...c.tags.map((t) => (t.kind === "tech"
           ? el("span", { class: "tag tech", title: techniqueTagTitle(t) }, t.id)
           : el("span", { class: "tag" }, t.text)))) : null)),
       items.length > perColumn ? el("div", { class: "muted bmore" }, `+${items.length - perColumn} more`) : null,
-      !items.length ? el("div", { class: "muted bmore" }, "—") : null);
+      !items.length ? el("div", { class: "muted bmore" }, columnEmpty(name)) : null);
   });
 }
 
@@ -1073,11 +1124,13 @@ async function incidentsView() {
   await Live.refreshIncidents();
   const inc = Live.incidents;
   const alerts = inc.state === "ok" ? [] : await api("/api/alerts?limit=200");
+  const sort = Dash.queueSort === "time" ? "time" : "severity";
   render(
     el("div", { class: "page-head" }, el("h1", {}, "Incidents"),
-      inc.state === "ok" ? null : chip("INCIDENTS PENDING · SHOWING ALERTS", "pendingchip")),
+      inc.state === "ok" ? null : chip("INCIDENTS PENDING · SHOWING ALERTS", "pendingchip"),
+      boardSortSelect(sort, (mode) => { Dash.queueSort = mode; incidentsView(); })),
     inc.state !== "ok" ? el("p", { class: "muted" }, inc.state === "error" ? inc.error
       : "Alerts become incidents once the correlation engine ships (GET /api/incidents). Until then this board groups alerts by status.") : null,
-    el("div", { class: "board big", "data-kbd-list": "incidents" }, ...incidentBoard(inc, alerts, 50)));
+    el("div", { class: "board big", "data-kbd-list": "incidents" }, ...incidentBoard(inc, alerts, 50, sort)));
   restoreSelection(`[data-kbd-list] a.bcard[href="#incidents/${state.restore}"]`);
 }
