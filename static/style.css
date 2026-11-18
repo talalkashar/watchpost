@@ -262,11 +262,22 @@ dialog::backdrop { background: rgb(0 0 0 / .72); backdrop-filter: blur(2px); }
 #p-attack .pb { display: flex; flex-direction: column; }
 #p-attack .chartbox { height: auto; flex: none; }
 #attack-chart { overflow-x: auto; }
-#p-board { grid-column: 1 / 17; grid-row: 4 / 7; min-height: 250px; }
-#p-rules { grid-column: 17 / 25; grid-row: 4; overflow: visible; }
-#p-health { grid-column: 17 / 25; grid-row: 5; overflow: visible; }
+#p-board { grid-column: 1 / -1; }
+#p-rules, #p-health, #p-entities { grid-column: span 8; align-self: stretch; }
+#p-rules, #p-health { overflow: visible; }
 #p-rules .chartbox { height: auto; }
-#p-entities { grid-column: 17 / 25; grid-row: 6; }
+@media (min-width: 1101px) {
+  #ent-list:has(.erow:nth-child(5)), #health-body:has(.hrow2:nth-child(5)) {
+    display: grid; height: 100%; align-content: stretch;
+  }
+  #health-body .hrow2 { align-content: center; }
+  #health-body .runs { align-self: end; }
+  /* Saved views omit panels. Let the selected panels flow into adjacent cells. */
+  #soc:has(> .panel[hidden]) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  #soc:has(> .panel[hidden]) > .panel { grid-column: auto; grid-row: auto; }
+  #soc:has(> .panel[hidden]) > #p-feed { height: 340px; }
+  #soc:has(> #p-map[hidden]) > #p-feed { height: 216px; }
+}
 
 .panel { display: flex; flex-direction: column; min-width: 0; background: var(--panel);
   border: 1px solid rgb(255 255 255 / .099); border-radius: 10px; position: relative; overflow: hidden;
@@ -440,6 +451,17 @@ dialog::backdrop { background: rgb(0 0 0 / .72); backdrop-filter: blur(2px); }
 .board.big { height: auto; }
 .board.big .bcol { min-height: 280px; }
 
+/* On the dashboard each populated status gets a row of cards. Empty statuses
+   keep their label and count in the footer without reserving a card lane. */
+#board { flex-flow: row wrap; height: auto; gap: 8px 18px; align-items: start; }
+#board .bcol { flex: 1 0 100%; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
+  gap: 6px; border: 0; background: none; padding: 0; }
+#board .bh { grid-column: 1 / -1; justify-content: start; }
+#board .bmore { grid-column: 1 / -1; text-align: start; }
+#board .bcol:not(:has(.bcard)) { flex: none; order: 1; }
+#board .bcol:not(:has(.bcard)) .bh { border: 0; padding: 2px 0; }
+#board .bcol:not(:has(.bcard)) .bmore { display: none; }
+
 /* health panel: name and latency on the first line, the check message wraps under them */
 .hrow2 { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; column-gap: 8px; row-gap: 1px; align-items: center; font-size: 12px; padding: 6px 0 5px;
   border-bottom: 1px solid rgb(255 255 255 / .048); }
@@ -512,8 +534,8 @@ kbd { font: 600 10.5px var(--mono); padding: 0 5px; border: 1px solid var(--line
   .strip-end { gap: 8px; padding: 0 8px; }
 }
 @media (max-width: 1100px) {
-  .soc > .panel { grid-column: 1 / 25; grid-row: auto; }
-  #p-timeline { grid-column: 1 / 13; } #p-attackers { grid-column: 13 / 25; }
+  #soc > .panel { grid-column: 1 / -1; grid-row: auto; }
+  #soc > #p-timeline { grid-column: 1 / 13; } #soc > #p-attackers { grid-column: 13 / 25; }
   #p-feed { height: 360px; }
 }
 @media (max-width: 760px) {
@@ -567,6 +589,12 @@ kbd { font: 600 10.5px var(--mono); padding: 0 5px; border: 1px solid var(--line
 }
 /* 390px is the phone width this console is checked at. The four lead KPIs share two equal columns. */
 @media (max-width: 390px) {
+  /* Stored and Health share a stable row while the checks arrive. The
+     connection row also has room for both badges from the first paint. */
+  .strip > .t-health { flex: 1 0 calc(100% - 85px); min-height: 58px; }
+  .strip > .t-story { padding-block: 4px; min-width: 0; }
+  .strip-end { flex: 1 0 auto; min-height: 48px; justify-content: space-between; }
+  .strip > .t-story[hidden] + .strip-end .stack { flex-direction: row; align-items: center; }
   .strip-kpis {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
