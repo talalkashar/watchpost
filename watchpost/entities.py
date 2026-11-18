@@ -32,6 +32,9 @@ _ALERT_FIELDS = "id, rule_id, severity, base_severity, severity_note, title, sta
 _DAY_BARS = 31
 # Entity detail returns this many events, newest by ts, then id. The rest are recent_events_omitted.
 RECENT_EVENTS_LIMIT = 50
+# Alerts and incidents on that page, newest by last_seen, then id. The rest are alerts_omitted
+# and incidents_omitted. The score and contributions still use every alert.
+RELATED_LIMIT = 50
 
 
 def _anchor(conn):
@@ -185,6 +188,9 @@ def get_entity(conn, kind, value):
     that is not one address is 400. A user or host path is the ASCII-folded key.
     `recent_events` is the newest RECENT_EVENTS_LIMIT matching events. `recent_events_omitted`
     is how many matching events were past that cap. `event_count` stays the full count.
+    `alerts` and `incidents` are the newest RELATED_LIMIT by last_seen, then id.
+    `alerts_omitted` and `incidents_omitted` are how many were past that cap.
+    The score and contributions still include every alert. A false positive or benign close stays weight 0.
     """
     if kind not in KINDS:
         raise QueryError("entity kind not found", 404)
@@ -198,10 +204,14 @@ def get_entity(conn, kind, value):
     alerts = [dict(r) for r in conn.execute(
         f"SELECT {_ALERT_FIELDS} FROM alerts WHERE id IN ({marks}) ORDER BY last_seen DESC, id DESC", alert_ids)]
     contributions = sorted((_contribution(a, anchor) for a in alerts), key=lambda c: (-c["weight"], c["alert_id"]))
+    alerts_omitted = max(0, len(alerts) - RELATED_LIMIT)
+    alerts = alerts[:RELATED_LIMIT]
     incidents = [dict(r) for r in conn.execute(
         "SELECT DISTINCT i.id, i.title, i.severity, i.status, i.first_seen, i.last_seen, i.alert_count, i.synthetic"
         f" FROM incidents i JOIN incident_alerts ia ON ia.incident_id = i.id WHERE ia.alert_id IN ({marks})"
         " ORDER BY i.last_seen DESC, i.id DESC", alert_ids)]
+    incidents_omitted = max(0, len(incidents) - RELATED_LIMIT)
+    incidents = incidents[:RELATED_LIMIT]
     seen = conn.execute(f"SELECT MIN(e.ts) AS first_seen, MAX(e.ts) AS last_seen, COUNT(*) AS event_count,"
                         f" MAX(e.synthetic) AS synthetic FROM events e WHERE {match}", (value,)).fetchone()
     fields = ", ".join("e." + c.strip() for c in EVENT_FIELDS.split(","))
@@ -212,7 +222,8 @@ def get_entity(conn, kind, value):
         "kind": kind, "value": value, "score": _score(contributions), "anchor": anchor,
         "half_life_hours": HALF_LIFE_HOURS, "severity_weights": SEVERITY_WEIGHTS,
         "excluded_dispositions": list(EXCLUDED_DISPOSITIONS), "contributions": contributions,
-        "alerts": alerts, "incidents": incidents, "recent_events": recent,
+        "alerts": alerts, "alerts_omitted": alerts_omitted, "incidents": incidents,
+        "incidents_omitted": incidents_omitted, "recent_events": recent,
         "recent_events_omitted": seen["event_count"] - len(recent),
         "alerts_by_day": _alerts_by_day(conn, kind, value),
         "first_seen": seen["first_seen"], "last_seen": seen["last_seen"], "event_count": seen["event_count"],
