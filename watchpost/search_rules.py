@@ -9,8 +9,10 @@ The filter is matched in Python over the event dicts the engine already scans (e
 with the hunt's SQL semantics: same fields and value checks, a trailing `*` on an unquoted value is a prefix
 match, message terms are "contains", NOT keeps events missing the field, and a bytes term uses the
 same >=, >, <=, < or = comparison as the hunt. Comparisons fold case the way SQLite does
-(ASCII only): user, host, source, and outcome equality, every prefix match and message contains ignore ASCII case;
-other equality is exact. Grouping by source and outcome stays exact. `src_ip`, `dest_ip`, and `ip` equality use the address form ingest stores;
+(ASCII only): user, host, source, and outcome equality, every prefix match and message contains ignore ASCII case.
+`event_type` and `severity` fold ASCII case and bind the catalog spelling (`Auth_Failure` is `auth_failure`).
+Other equality is exact. Grouping by source, outcome, event_type, and severity stays the stored spelling.
+`src_ip`, `dest_ip`, and `ip` equality use the address form ingest stores;
 a prefix stays the typed text. tests/test_search_rules.py cross-checks this matcher against
 hunt.compile_query in SQL.
 
@@ -30,7 +32,7 @@ from datetime import timedelta
 from . import attack
 from . import hunt
 from . import sigma
-from .queries import canonical_ip
+from .queries import canonical_ip, catalog_name
 from .db import iso, parse_iso
 from .normalize import EventError, parse_timestamp
 
@@ -135,6 +137,10 @@ def _predicate(term):
     if field in ("src_ip", "dest_ip"):
         address = canonical_ip(value, field)
         return lambda e: e.get(column) == address
+    if kind == "enum":
+        # Catalog spelling, same bound value as hunt SQL. A stored lookalike stays unmatched.
+        name = catalog_name(value, hunt.ENUMS[field])
+        return lambda e: e.get(column) == name
     # COLLATE NOCASE, ASCII only. Grouping by source and outcome stays exact.
     if field in ("user", "host", "source", "outcome"):
         folded = _fold(value)

@@ -7,6 +7,9 @@ from datetime import timedelta
 from .db import audit, iso, now_iso, parse_iso, row_to_dict, transaction, utcnow
 from .normalize import EVENT_TYPES, SEVERITIES, EventError, parse_timestamp
 
+# A-Z only. SQLite NOCASE folds the same letters; É and é stay apart.
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
 ALERT_STATUSES = ("open", "investigating", "resolved")
 DISPOSITIONS = ("true_positive", "false_positive", "benign")
 # OFFSET makes SQLite visit every skipped row. Past this, walk newer events with since_id.
@@ -21,6 +24,21 @@ class QueryError(ValueError):
     def __init__(self, message, status=400):
         super().__init__(message)
         self.status = status
+
+
+def catalog_name(value, names):
+    """The catalog spelling when `value` matches one name by ASCII case, else None.
+
+    `Auth_Failure` is `auth_failure`. A non-ASCII lookalike is not a match.
+    `names` is the catalog (the stored spellings).
+    """
+    if not isinstance(value, str):
+        return None
+    folded = value.translate(_ASCII_FOLD)
+    for name in names:
+        if name.translate(_ASCII_FOLD) == folded:
+            return name
+    return None
 
 
 def canonical_ip(value, field):
@@ -66,19 +84,25 @@ def search_events(conn, params):
         args.append(_ts(params["end"], "end"))
     if params.get("severity"):
         # One level or a comma list. Spaces around a name are ignored, as on alerts and incidents.
-        # A blank piece is invalid, same as an unknown name.
-        levels = [part.strip() for part in params["severity"].split(",")]
-        if not levels or not set(levels) <= set(SEVERITIES):
-            raise QueryError(f"severity must be from {', '.join(SEVERITIES)}")
+        # ASCII case folds onto the catalog spelling (`High` binds `high`). A blank piece is invalid,
+        # same as an unknown name.
+        levels = []
+        for part in params["severity"].split(","):
+            name = catalog_name(part.strip(), SEVERITIES)
+            if name is None:
+                raise QueryError(f"severity must be from {', '.join(SEVERITIES)}")
+            levels.append(name)
         if params.get("severity_mode") == "min" and len(levels) == 1:
             levels = SEVERITIES[SEVERITIES.index(levels[0]):]
         where.append(f"severity IN ({','.join('?' for _ in levels)})")
         args += levels
     if params.get("event_type"):
-        if params["event_type"] not in EVENT_TYPES:
+        # Same fold. The bound value is the catalog spelling, so a stored `Auth_Failure` stays out.
+        name = catalog_name(params["event_type"], EVENT_TYPES)
+        if name is None:
             raise QueryError(f"event_type must be one of {', '.join(sorted(EVENT_TYPES))}")
         where.append("event_type = ?")
-        args.append(params["event_type"])
+        args.append(name)
     for field, column in (("source", "source"), ("host", "host"), ("user", "user"),
                           ("outcome", "outcome"), ("batch_id", "batch_id")):
         if params.get(field):

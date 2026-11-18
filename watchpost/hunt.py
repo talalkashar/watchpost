@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 
 from .db import audit, iso, now_iso, transaction, utcnow
 from .normalize import EVENT_TYPES, MAX_BYTES, SEVERITIES, EventError, parse_timestamp
-from .queries import QueryError, _escape_like, canonical_ip, event_offset, page_events
+from .queries import QueryError, _escape_like, canonical_ip, catalog_name, event_offset, page_events
 
 # Same 400/404/409 handling in the server as every other query error.
 HuntError = QueryError
@@ -228,8 +228,12 @@ def _term_sql(term, now):
     if field in ("src_ip", "dest_ip"):
         address = canonical_ip(value, field)
         return f"{column} = ?", [address], f"{field} = {address}"
-    if kind == "enum" and value not in ENUMS[field]:
-        raise HuntError(f"{field} must be one of {', '.join(ENUMS[field])}")
+    if kind == "enum":
+        # Fold ASCII case and bind the catalog spelling. Grouping by the field stays exact.
+        name = catalog_name(value, ENUMS[field])
+        if name is None:
+            raise HuntError(f"{field} must be one of {', '.join(ENUMS[field])}")
+        return f"{column} = ?", [name], f"{field} = {name}"
     # Same matching as the Events filter: account, host, source, and outcome compare
     # case-insensitively (ASCII, like SQLite NOCASE). Grouping by source and outcome stays exact.
     collate = " COLLATE NOCASE" if field in ("user", "host", "source", "outcome") else ""
