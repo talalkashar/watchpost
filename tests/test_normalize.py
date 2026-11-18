@@ -94,6 +94,47 @@ class NormalizeRecordTests(unittest.TestCase):
         from pathlib import Path
         return (Path(__file__).resolve().parent.parent / "docs" / name).read_text()
 
+    def test_severity_folds_ascii_letters_only(self):
+        # HIGH stays high. A dotted capital I is not rewritten into high.
+        cases = (
+            ("HIGH", "high"),
+            ("High", "high"),
+            ("  CRITICAL  ", "critical"),
+            ("Low", "low"),
+            ("MEDIUM", "medium"),
+            ("Info", "info"),
+        )
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                event = normalize_record(
+                    {"ts": "2026-09-15T10:00:00Z", "severity": raw, "message": "labelled synthetic"},
+                    "api", NOW)
+                self.assertEqual(event["severity"], expected)
+        self.assertEqual(
+            normalize_record({"ts": "2026-09-15T10:00:00Z", "level": "HIGH"}, "api", NOW)["severity"],
+            "high")
+        dotted = "H\u0130GH"
+        with self.assertRaises(EventError) as caught:
+            normalize_record({"ts": "2026-09-15T10:00:00Z", "severity": dotted}, "api", NOW)
+        message = str(caught.exception)
+        self.assertEqual(message, "severity must be one of info, low, medium, high, critical")
+        self.assertNotIn("\u0307", message)
+        self.assertNotIn("h\u0130gh", message)
+        self.assertNotIn("severity 'high'", message)
+        events, rejections = parse_payload(
+            '{"ts":"2026-09-15T10:00:00Z","severity":"HIGH"}\n'
+            '{"ts":"2026-09-15T10:00:00Z","severity":"H\u0130GH"}\n',
+            "jsonl", "api", now=NOW)
+        self.assertEqual([event["severity"] for event in events], ["high"])
+        self.assertEqual(rejections[0]["reason"], message)
+        self.assertNotIn("\u0307", rejections[0]["reason"])
+        source = inspect.getsource(normalize.normalize_record)
+        self.assertNotIn(".lower(", source)
+        self.assertNotIn(".casefold(", source)
+        for text in (self._docs("API.md"), self._docs("REFERENCE.md")):
+            self.assertIn("`HIGH` is `high`", text)
+            self.assertIn("`H\u0130GH` stays the severity error and is not `high`", text)
+
     def test_rejections(self):
         cases = [
             ({}, "missing timestamp"),

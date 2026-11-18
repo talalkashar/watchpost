@@ -251,7 +251,8 @@ def normalize_record(record, default_source, now=None):
     severity = _pick(record, "severity")
     if severity is None:
         severity = DEFAULT_SEVERITY.get(event_type, "info")
-    severity = str(severity).strip().lower()
+    # ASCII letters only. HİGH stays the catalog error and is not high.
+    severity = str(severity).strip().translate(_ASCII_FOLD)
     if severity not in SEVERITIES:
         raise EventError(f"severity must be one of {', '.join(SEVERITIES)}")
 

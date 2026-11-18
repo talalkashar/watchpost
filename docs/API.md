@@ -69,7 +69,7 @@ Accepted fields (aliases in parentheses):
 | `dest_port` | `destination_port`, `dst_port`, `dport` | Integer 0–65535 (firewall events) |
 | `bytes` | `bytes_out`, `bytes_sent`, `sent_bytes`, `out_bytes` | Non-negative integer (outbound volume) |
 | `host` | `hostname`, `Computer`, `device`, `host.name` | |
-| `severity` | `level` | `info`, `low`, `medium`, `high`, or `critical`; defaults by type |
+| `severity` | `level` | `info`, `low`, `medium`, `high`, or `critical`; defaults by type. ASCII letters fold, so `HIGH` is `high`. `HİGH` stays the severity error and is not `high` |
 | `outcome`, `message`, `source` | | Secrets like `password=` are redacted before storage |
 
 Event types: `auth_failure`, `auth_success`, `account_lockout`, `user_created`, `privilege_use`, `process_start`,
