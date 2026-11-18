@@ -61,10 +61,13 @@ def list_incidents(conn, params):
         where.append(f"status IN ({','.join('?' for _ in statuses)})")
         args += statuses
     if params.get("severity"):
-        if params["severity"] not in SEVERITIES:
+        # One level or a comma list (critical,high), the same rule as the alert queue.
+        # A blank piece is invalid, same as an unknown name.
+        levels = [part.strip() for part in params["severity"].split(",")]
+        if not levels or not set(levels) <= set(SEVERITIES):
             raise QueryError("invalid severity")
-        where.append("severity = ?")
-        args.append(params["severity"])
+        where.append(f"severity IN ({','.join('?' for _ in levels)})")
+        args += levels
     limit = _int(params.get("limit"), "limit", 100, 1, 500)
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     rows = conn.execute(f"SELECT * FROM incidents{clause} ORDER BY status = 'resolved', {_SEVERITY_ORDER},"

@@ -504,6 +504,45 @@ process.stdout.write(JSON.stringify(out));
         self.assertIn(".ms-row .ms-city", css)
 
 
+class MapRedrawTests(unittest.TestCase):
+    """A dashboard refresh replaces arcs and city marks and leaves the land-dot layer alone."""
+
+    def setUp(self):
+        self.source = (STATIC / "dashboard.js").read_text()
+
+    def method(self, name, until):
+        start = self.source.index(f"\n  {name}() {{")
+        end = self.source.index(f"\n  {until}")
+        self.assertLess(start, end)
+        return self.source[start:end]
+
+    def test_land_layer_rebuilds_only_when_the_box_size_changes(self):
+        body = self.method("renderMap", "sources()")
+        gate = body.index("if (this.mapSize !== size)")
+        rebuild = body.index("mountSvg(box, WPMap.baseMap(")
+        stored = body.index("this.mapSize = size")
+        marks = body.index("this.renderMarks()")
+        self.assertLess(gate, rebuild)
+        self.assertLess(rebuild, stored)
+        self.assertLess(stored, marks)
+        self.assertEqual(body.count("baseMap"), 1)
+        self.assertEqual(body.count("mountSvg"), 1)
+        self.assertNotIn("landDots", body)
+
+    def test_marks_replace_arcs_and_cities_not_the_land_group(self):
+        body = self.method("renderMarks", "pulse(e)")
+        self.assertIn('setSvgChildren(svg.querySelector("g.arcs"), arcs)', body)
+        self.assertIn('setSvgChildren(svg.querySelector("g.marks"), marks)', body)
+        for banned in ("baseMap", "mountSvg", "landDots", 'g.land', 'querySelector("g.land")'):
+            self.assertNotIn(banned, body)
+
+    def test_redraw_updates_the_map_through_that_guard(self):
+        body = self.method("redraw", "async loadViews")
+        self.assertIn("this.renderMap()", body)
+        self.assertNotIn("baseMap", body)
+        self.assertNotIn("mountSvg", body)
+
+
 class CoverageChipTests(unittest.TestCase):
     """Layouts that hide the matrix still state validated, mapped, disabled, and gap counts."""
 

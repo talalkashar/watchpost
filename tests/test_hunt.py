@@ -257,7 +257,9 @@ class HuntApiTests(ServerTestCase):
                 self.assertIn(message, data["error"])
         self.assertEqual(analyst.post("/api/hunt/saved", {"name": "dup", "query": "user:a"})[0], 201)
         status, data, _ = analyst.post("/api/hunt/saved", {"name": "DUP", "query": "user:b"})
-        self.assertEqual((status, "already exists" in data["error"]), (409, True))
+        self.assertEqual(status, 409, data)
+        self.assertIn("'dup'", data["error"])
+        self.assertNotIn("DUP", data["error"])
         self.assertEqual(len(self.audit_actions("saved_search_created")), 1)
 
     def test_only_the_owner_or_an_admin_deletes(self):
@@ -280,6 +282,51 @@ class HuntApiTests(ServerTestCase):
             columns = [r[1] for r in db.execute("PRAGMA table_info(saved_searches)")]
         self.assertEqual(columns, ["id", "name", "query", "description", "owner", "created_at"])
         self.assertEqual(self.client("analyst").post("/api/hunt/saved", {"name": "after", "query": "user:a"})[0], 201)
+
+
+class SavedSearchNameTests(unittest.TestCase):
+    """A name that differs only by case is the stored row, answered 409, never a unique-constraint 500."""
+
+    def setUp(self):
+        self.conn = connect(":memory:")
+        init_schema(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_case_only_difference_names_the_stored_row(self):
+        hunt.save_search(self.conn, {"name": "dup", "query": "user:a"}, "analyst")
+        for variant in ("DUP", "dup"):
+            with self.subTest(variant=variant):
+                with self.assertRaises(hunt.HuntError) as caught:
+                    hunt.save_search(self.conn, {"name": variant, "query": "user:b"}, "analyst")
+                self.assertEqual(caught.exception.status, 409)
+                self.assertEqual(str(caught.exception), "a saved search named 'dup' already exists")
+        self.assertEqual([row["name"] for row in self.conn.execute("SELECT name FROM saved_searches")], ["dup"])
+
+    def test_unique_conflict_names_the_stored_row(self):
+        hunt.save_search(self.conn, {"name": "dup", "query": "user:a"}, "analyst")
+        real = self.conn.execute
+        skipped = {"done": False}
+
+        def execute(sql, params=()):
+            # The lookup misses once, so the insert hits UNIQUE COLLATE NOCASE.
+            if not skipped["done"] and sql == "SELECT name FROM saved_searches WHERE name = ? COLLATE NOCASE":
+                skipped["done"] = True
+                return real("SELECT name FROM saved_searches WHERE 0")
+            return real(sql, params)
+
+        self.conn.execute = execute
+        with self.assertRaises(hunt.HuntError) as caught:
+            hunt.save_search(self.conn, {"name": "DUP", "query": "user:b"}, "analyst")
+        self.assertEqual(caught.exception.status, 409)
+        self.assertEqual(str(caught.exception), "a saved search named 'dup' already exists")
+        self.assertTrue(skipped["done"])
+        self.conn.execute = real
+        self.assertEqual([row["name"] for row in self.conn.execute("SELECT name FROM saved_searches")], ["dup"])
+        created = self.conn.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'saved_search_created'").fetchone()[0]
+        self.assertEqual(created, 1)
 
 
 # (label, query, hits on the full synthetic demo). Dated on the previous weekday, so last:7d matches.

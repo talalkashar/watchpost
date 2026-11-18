@@ -130,6 +130,8 @@ body:not(.authed) #view:empty { display: none; }
 .narrow { max-width: 420px; margin: 40px auto; }
 .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
 .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+#alert-filter { flex: 1 0 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; }
+#alert-filter-reset { margin-left: auto; }
 .split { display: grid; gap: 14px; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
 @media (max-width: 900px) { .split { grid-template-columns: minmax(0, 1fr); } }
 .page-head { display: flex; align-items: baseline; gap: 12px; }

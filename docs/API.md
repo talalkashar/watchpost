@@ -1,6 +1,6 @@
 # Watchpost API
 
-Base URL: `http://127.0.0.1:8080`. All request and response bodies are JSON unless noted otherwise. Errors come back as `{"error": "..."}`.
+Base URL: `http://127.0.0.1:8080`. All request and response bodies are JSON unless noted otherwise. Errors come back as `{"error": "..."}`. A 4xx from the API and the generic 500 send `Cache-Control: no-store`, the same as a successful `/api` response, because the message can repeat a request value. A query string may name each key once. A repeated key (`severity=low&severity=critical`) is 400 `repeated query key 'severity'`. Where an endpoint accepts several values, send them as one comma list.
 
 ## Authentication
 
@@ -135,22 +135,88 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 |---|---|---|
 | `GET /api/events/{id}` | viewer | Includes the redacted `raw` record and linked alerts |
 | `GET /api/events/{id}/ecs` | viewer | The event as an ECS-shaped document (field mapping for export; see the README, "ECS field mapping") |
-| `GET /api/hunt?q=&limit=&offset=` | viewer | Runs a hunt query (syntax in the README, "Hunting"). Returns the event-search page plus `query` and `terms` (`[{field, value, negate, text}]`, how each term was read). Bad syntax or an unknown field is 400 with the reason |
+| `GET /api/hunt?q=&limit=&offset=` | viewer | Runs a hunt query (syntax in the README, "Hunting"). Returns the event-search page plus `query` and `terms` (`[{field, value, negate, text}]`, how each term was read). Bad syntax or an unknown field is 400 with the reason. A `bytes:` term is one of `>=`, `>`, `<=`, `<`, `=` and an integer (`bytes:>=1000000`); the number is a bound parameter, and any other value is 400 listing those operators. Grouping by `bytes` is refused. |
 | `GET /api/hunt/saved` | viewer | Saved searches: `[{id, name, query, description, owner, created_at}]` by name |
 | `POST /api/hunt/saved` | analyst | `{name (≤ 80), query, description? (≤ 300)}`; the query must parse. 409 on a duplicate name (case-insensitive). Audited as `saved_search_created` |
 | `POST /api/hunt/saved/{id}/delete` | analyst | Owner or admin only (403 otherwise). Audited as `saved_search_deleted` |
-| `GET /api/alerts?status=open,investigating&severity=&rule_id=&limit=` | viewer | Sorted by active first, then severity, then recency |
+| `GET /api/alerts?status=open&severity=critical,high&rule_id=&limit=` | viewer | `status` and `severity` each take one value or a comma list. The console opens on open critical and high. Sorted by active first, then severity, then recency |
 | `GET /api/alerts/{id}` | viewer | Adds `rule`, `evidence`, `timeline` (events involving the same IPs or users, ±30 min), `notes`, `activity`. Every alert also carries `base_severity` (the rule's), `assets` (matched inventory entries, see [Asset inventory](#asset-inventory)), and `severity_note` |
 | `POST /api/alerts/{id}/notes` | analyst | `{body}` (≤ 5000 chars) |
 | `POST /api/alerts/{id}/status` | analyst | `{status: open\|investigating\|resolved, disposition?, note?}`. `resolved` requires `disposition` (`true_positive`, `false_positive`, or `benign`); reopening clears it |
-| `GET /api/incidents?status=open,investigating&severity=&limit=` | viewer | Correlated incidents: `title`, `severity`, `status`, `first_seen`, `last_seen`, `entities` (`{src_ip, user, host}` lists), `stages` (ATT&CK tactics in kill-chain order), `top_technique` (`{id, name, tactic}` or null — the earliest mapped technique, same order as the coverage matrix; id breaks ties), `alert_count`, `synthetic`. Active first, then severity, then recency |
+| `GET /api/incidents?status=open,investigating&severity=critical,high&limit=` | viewer | `status` and `severity` each take one value or a comma list. Correlated incidents: `title`, `severity`, `status`, `first_seen`, `last_seen`, `entities` (`{src_ip, user, host}` lists), `stages` (ATT&CK tactics in kill-chain order), `top_technique` (`{id, name, tactic}` or null — the earliest mapped technique, same order as the coverage matrix; id breaks ties), `alert_count`, `synthetic`. Active first, then severity, then recency |
 | `GET /api/incidents/{id}` | viewer | Adds `alerts` (each with `techniques`), `events` (evidence, each with `alert_ids`), `timeline` (one entry per alert with tactics and technique ids), `techniques`, `techniques_by_tactic`, `escalated`, `correlation_rule` (plain sentence: shared source IP, account, or host within the correlation window, 30 minutes by default), `assets` (inventory entries behind the incident's hosts and addresses). 404 if missing |
 | `POST /api/incidents/{id}/status` | analyst | `{status: open\|investigating\|resolved, note?}`; audited as `incident_status_changed` |
+| `GET /api/incidents/{id}/case.json` | viewer | Chronological case record. `techniques` lists each rule technique with `level` (`validated`, `mapped`, `disabled`, or `gap`), the same grade as coverage. `mapped` is not proof. Audited as `case_exported` |
+| `GET /api/incidents/{id}/case.md` | viewer | The same record as Markdown. The technique table prints the evidence level, and says mapped is not proof |
 | `GET /api/attack/coverage` | viewer | `{tactics, techniques: [{id, name, tactic, level, scenarios, rules: [{id, name, enabled, hits, verdict, lookalikes_fired, proves}], hits, covered, why}], summary, levels, level_meaning}` over the built-in ATT&CK subset. `level` is `validated`, `mapped`, `disabled`, or `gap` (see the README, "ATT&CK coverage"); `covered` is true only for `validated`. `why` is a one-line reason when `level` is `mapped`, otherwise null. `hits` counts alerts from the mapped rules; `summary.levels` counts techniques per level |
 | `GET /api/attack/navigator.json` | viewer | The same coverage as a MITRE ATT&CK Navigator layer, colored by level and scored by alert count |
 | `GET /api/entities?kind=&limit=` | viewer | Riskiest entities (`kind` is `user`, `src_ip`, or `host`; `limit` 1–100, default 10), each with its score and the alerts that contribute to it |
 | `GET /api/entities/{kind}/{value}` | viewer | One entity (value percent-encoded): score breakdown, alerts, incidents, recent events, and `alerts_by_day` (UTC day of each alert's newest evidence event for this entity, zeros filled, newest 31 days; `omitted` counts alerts older than that) |
 | `GET /api/metrics?hours=24` | viewer | Counts, severity/rule breakdowns, MTTR, top failing IPs/users, and a 24-hour histogram ending at the newest event |
+
+### `GET /api/attack/coverage` example
+
+`covered` is true only when the technique is validated on a labeled scenario, not merely because a rule is enabled. `level` is `validated`, `mapped`, `disabled`, or `gap`. A mapped technique can still list an enabled rule and a non-zero `hits` count; those hits are alerts, not proof. This example is two techniques from the labeled synthetic catalog (the `tactics` array is omitted). `summary.covered` counts `validated` only.
+
+```json
+{
+  "levels": ["validated", "mapped", "disabled", "gap"],
+  "level_meaning": {
+    "validated": "An enabled rule detects a labeled synthetic attack that exercises this technique.",
+    "mapped": "An enabled rule maps here, but no labeled scenario proves it detects this technique. Not counted as covered."
+  },
+  "summary": {
+    "techniques": 2,
+    "covered": 1,
+    "with_hits": 2,
+    "levels": {"validated": 1, "mapped": 1, "disabled": 0, "gap": 0}
+  },
+  "techniques": [
+    {
+      "id": "T1110.003",
+      "name": "Brute Force: Password Spraying",
+      "tactic": "Credential Access",
+      "level": "validated",
+      "scenarios": ["password_spray"],
+      "hits": 1,
+      "covered": true,
+      "why": null,
+      "rules": [
+        {
+          "id": "password_spray",
+          "name": "Password spraying across many accounts",
+          "enabled": true,
+          "hits": 1,
+          "verdict": "quiet",
+          "lookalikes_fired": [],
+          "proves": ["password_spray"]
+        }
+      ]
+    },
+    {
+      "id": "T1190",
+      "name": "Exploit Public-Facing Application",
+      "tactic": "Initial Access",
+      "level": "mapped",
+      "scenarios": [],
+      "hits": 4,
+      "covered": false,
+      "why": "web_scanner detects web_scan, which probes and injects but never exploits.",
+      "rules": [
+        {
+          "id": "web_scanner",
+          "name": "Web vulnerability scanning from one IP",
+          "enabled": true,
+          "hits": 4,
+          "verdict": "quiet",
+          "lookalikes_fired": [],
+          "proves": []
+        }
+      ]
+    }
+  ]
+}
+```
 
 ## Reports
 
@@ -168,7 +234,7 @@ viewers included (since 2.0 / F; before that, analyst and admin only). Each down
 Both formats carry the same sections: header (id, severity, status, first/last seen, generation time), summary,
 kill-chain stages (incidents only), entities (IPs, accounts, hosts), assets (inventory entries with criticality and
 sensitive-data tags; each alert also shows its asset weighting when it changed the severity), MITRE ATT&CK techniques grouped
-by tactic, a merged timeline (evidence events marked), each alert with its explanation and up to 25 evidence events,
+by tactic with the coverage evidence level on each one (the report says mapped is not proof; only validated is a labeled scenario), a merged timeline (evidence events marked), each alert with its explanation and up to 25 evidence events,
 analyst notes, and recommended actions keyed by technique (generic actions when no technique is mapped).
 Reports built from synthetic data open with a "SYNTHETIC DATA" banner and repeat it in the PDF page footer.
 Log-derived text is escaped in Markdown so it cannot inject tables, links, or HTML.

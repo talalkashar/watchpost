@@ -10,11 +10,11 @@
 
 **[Live demo](https://watchpost-nxxu.onrender.com)** · read-only login `viewer` / `watchpost-viewer-demo` (free tier: the first load can take a minute) · [Full reference](docs/REFERENCE.md)
 
-![Watchpost SOC dashboard showing synthetic public demo data](docs/screenshots/01-dashboard-1117.jpg)
+![Watchpost SOC dashboard on labeled synthetic data, with the ATT&CK legend: validated, mapped, disabled, and gap](docs/screenshots/01-dashboard-1117.jpg)
 
 | Incident board | Alerts and correlated incidents |
 |---|---|
-| ![Incidents with synthetic public demo data](docs/screenshots/02-incidents-1117.jpg) | ![Alerts with synthetic public demo data](docs/screenshots/03-alerts-1117.jpg) |
+| ![Incidents on labeled synthetic data, with the earliest technique id on each card](docs/screenshots/02-incidents-1117.jpg) | ![Alerts on labeled synthetic data, filtered to open critical and high](docs/screenshots/03-alerts-1117.jpg) |
 
 ## What it does
 

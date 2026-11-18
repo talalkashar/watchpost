@@ -2,8 +2,9 @@
 
 import json
 
-from . import __version__, incidents
+from . import __version__, attack, incidents
 from .db import now_iso
+from .report import LEVEL_NOTE as _LEVEL_NOTE
 from .report import md as _md
 
 
@@ -57,12 +58,26 @@ def build(conn, incident_id):
     for sequence, item in enumerate(timeline, 1):
         item["sequence"] = sequence
 
+    graded = {row["id"]: row["level"] for row in incidents.coverage(conn)["techniques"]}
+    techniques = []
+    for technique in incident["techniques"]:
+        # A technique the catalog does not grade is still only a name on a rule, so it stays mapped.
+        level = graded.get(technique["id"], "mapped")
+        if level not in attack.LEVELS:
+            level = "mapped"
+        techniques.append({
+            "id": technique["id"], "name": technique.get("name") or "",
+            "tactic": technique.get("tactic") or "", "level": level,
+            "alert_ids": list(technique.get("alert_ids") or []),
+        })
+
     return {
         "format": "watchpost-incident-case", "format_version": 1, "generator": f"Watchpost {__version__}",
         "generated_at": now_iso(), "id": incident["id"], "title": incident["title"],
         "severity": incident["severity"], "status": incident["status"], "assignee": incident["assignee"],
         "synthetic": bool(incident["synthetic"]), "first_seen": incident["first_seen"],
         "last_seen": incident["last_seen"], "entities": incident["entities"], "stages": incident["stages"],
+        "techniques": techniques,
         "alerts": [{key: alert.get(key) for key in
                     ("id", "rule_id", "title", "severity", "status", "disposition", "assignee", "first_seen",
                      "last_seen", "event_count")} for alert in incident["alerts"]],
@@ -102,7 +117,18 @@ def to_markdown_bytes(case):
              f"- **Status:** {_md(case['status'])}", f"- **Severity:** {_md(case['severity'])}",
              f"- **Assignee:** {_md(case['assignee'])}", f"- **First seen:** {_md(case['first_seen'])}",
              f"- **Last seen:** {_md(case['last_seen'])}", f"- **Generated:** {_md(case['generated_at'])}", "",
-             "## Chronological timeline", "", "| # | Time | Activity | Detail |", "|---:|---|---|---|"]
+             "## ATT&CK techniques", "", _LEVEL_NOTE, ""]
+    techniques = case.get("techniques") or []
+    if techniques:
+        lines += ["| Technique | Name | Tactic | Evidence level | Alerts |", "|---|---|---|---|---|"]
+        for technique in techniques:
+            alerts = ", ".join(f"#{alert_id}" for alert_id in technique.get("alert_ids") or []) or "-"
+            lines.append("| " + " | ".join(_md(value) for value in (
+                technique.get("id"), technique.get("name"), technique.get("tactic"),
+                technique.get("level"), alerts)) + " |")
+    else:
+        lines.append("No ATT&CK technique is recorded for the rules on this incident.")
+    lines += ["", "## Chronological timeline", "", "| # | Time | Activity | Detail |", "|---:|---|---|---|"]
     for item in case["timeline"]:
         label, detail = _timeline_detail(item)
         lines.append(f"| {item['sequence']} | {_md(item['ts'])} | {_md(label)} | {_md(detail)} |")

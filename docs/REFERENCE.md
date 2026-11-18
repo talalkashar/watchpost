@@ -12,11 +12,11 @@ It uses only the Python standard library (3.10+). No packages to install, no pai
 
 **Live demo:** https://watchpost-nxxu.onrender.com (read-only login `viewer` / `watchpost-viewer-demo`; free tier, first load may take a minute).
 
-![Watchpost SOC dashboard](screenshots/01-dashboard.png)
+![Watchpost SOC dashboard on labeled synthetic data, with the ATT&CK legend: validated, mapped, disabled, and gap](screenshots/01-dashboard-1117.jpg)
 
 | Incident board | Alerts and correlated incidents |
 |---|---|
-| ![Incidents](screenshots/02-incidents.png) | ![Alerts](screenshots/03-alerts.png) |
+| ![Incidents on labeled synthetic data, with the earliest technique id on each card](screenshots/02-incidents-1117.jpg) | ![Alerts on labeled synthetic data, filtered to open critical and high](screenshots/03-alerts-1117.jpg) |
 
 ## What's new in 5.0
 
@@ -68,7 +68,7 @@ Left for a contributor's pull requests ([issue #8](https://github.com/talalkasha
 |---|---|
 | **A · Correlation and MITRE ATT&CK** | Parsers for nginx/Apache access logs, firewall/VPN, CloudTrail-style cloud audit, and host sudo/process events. Six new rules (eleven in total), each mapped to techniques from a static 17-technique ATT&CK subset. Alerts that share an IP, account, or host are correlated into **incidents** with kill-chain stages, and severity is escalated at 3+ tactics. Adds `GET /api/attack/coverage`. |
 | **B · SOC dashboard** | A dark command-center view with a status strip, an attacker map (inline SVG, **synthetic geo** only), a live event stream over **Server-Sent Events** (`/api/stream`, with a polling fallback), alerts over time, top attacker IPs, an ATT&CK heat matrix, an incident board, and health. No JS libraries. |
-| **D · Incident reports** | One-click **Markdown and PDF** reports for incidents and alerts, with a timeline, entities, techniques by tactic, evidence, notes, and recommended actions per technique. The PDF writer is hand-written PDF 1.4. |
+| **D · Incident reports** | One-click **Markdown and PDF** reports for incidents and alerts, with a timeline, entities, techniques by tactic and evidence level, evidence, notes, and recommended actions per technique. Mapped is not proof. The PDF writer is hand-written PDF 1.4. |
 | **E · Live ingestion** | A UDP/TCP **syslog listener** (RFC 3164/5424) and `scripts/shipper.py`, a file tailer that posts to the ingest API with a token. See [docs/LIVE_INGEST.md](LIVE_INGEST.md). |
 | **F · Demo kit** | A read-only **viewer** role that the server enforces on every route, with a public demo account from `SIEM_VIEWER_PASSWORD`. **Per-IP rate limiting** (strict on login). A **`deploy/`** kit for Debian 12: a hardened systemd unit, an idempotent installer, and Caddy or nginx HTTPS. A LinkedIn kit and demo script. |
 | **G · Asset modeling** | An **asset inventory** (Admin → Asset inventory) gives hosts a weight of importance (`low` to `critical`) and tags the systems that process **sensitive data** (`pii`, `pci`, `phi`, `credentials`, `financial`, `confidential`). Alerts whose evidence touches a high or critical asset, or a sensitive-data system, are raised one or two severity levels, with the rule's own severity and the reason kept on the alert; incidents and reports inherit the weighting. Changing the inventory re-weighs open alerts at once. Adds `GET/POST /api/assets`. Built by Juan Carlos Munera (PR #9); edits that could lower severity now go through two-person review (see [Asset inventory review](#asset-inventory-review)). |
@@ -196,7 +196,7 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | `watchpost/syslog_listener.py` | Optional UDP/TCP syslog receiver (RFC 3164, RFC 5424, RFC 6587 framing). Runs each line through the auth.log parser, falls back to a generic `syslog` event with severity from PRI, and batches into the engine every 2 seconds. Reports itself as the `syslog` health component. |
 | `scripts/shipper.py` | Stdlib-only file tailer for Linux boxes: batches new lines to `/api/ingest/upload` with an ingest token, with backoff, rotation handling, and a position file. |
 | `watchpost/simulate.py` | Labeled synthetic scenarios and a CLI that sends only to loopback unless you explicitly allow otherwise. |
-| `watchpost/report.py` | Incident and alert reports: one model (summary, timeline, entities, alerts with evidence, ATT&CK techniques by tactic, notes, recommended actions) rendered as Markdown or PDF. |
+| `watchpost/report.py` | Incident and alert reports: one model (summary, timeline, entities, alerts with evidence, ATT&CK techniques by tactic with evidence level, notes, recommended actions) rendered as Markdown or PDF. |
 | `watchpost/pdfwriter.py` | Minimal hand-written PDF 1.4 writer (Helvetica, wrapping, tables, page breaks, xref). |
 | `watchpost/server.py` | `http.server` routing, security headers (CSP, frame denial, nosniff), CSRF checks, body limits, and the static UI. |
 
@@ -268,8 +268,10 @@ An incident detail page links to a chronological case export in JSON and Markdow
 and `.md` (viewer and above) combine the incident creation and alert-membership
 times, every linked evidence event, alert assignments and status transitions, analyst notes, and incident status
 changes and their notes. Entries carry a stable `sequence` after timestamp ordering. The JSON also includes the
-current incident and alert summaries; the Markdown is a portable timeline table. Each download is audited as
-`case_exported`.
+current incident and alert summaries, and each ATT&CK technique with its evidence level (`validated`, `mapped`,
+`disabled`, or `gap`, the same grade as coverage). The Markdown timeline is preceded by that technique table.
+Only `validated` is described as proved; `mapped` means an enabled rule names the technique and is not proof.
+Each download is audited as `case_exported`.
 
 The case is assembled from existing append-only activity, note, membership, evidence, and tamper-evident audit
 records; it creates no parallel case database. Viewer masking is applied to the structured case model before
@@ -528,8 +530,9 @@ Send `{"value": 0}` the same way to turn it off. A viewer with masking on gets `
 | `NOT term` or `-term` | `NOT src_ip:10.0.0.5` | Excludes; events with no value in that field are kept |
 | `last:` | `last:15m`, `last:24h`, `last:7d` | Window up to now, at most 365 days |
 | `since:` / `until:` | `since:2026-10-01 until:2026-10-02T06:00Z` | ISO times, UTC unless an offset is given |
+| `bytes:opN` | `bytes:>=1000000` | Byte count on the event. `op` is `>=`, `>`, `<=`, `<` or `=`, and `N` is an integer from 0 to 1000000000000000. The number is a bound parameter. Events with no byte count do not match. Any other `bytes:` value is an error that lists those operators. |
 
-Fields: `user`, `host`, `source`, `outcome`, `src_ip`, `dest_ip`, `ip` (source or destination), `batch_id`, `event_type`, `severity`, `dest_port`, `synthetic` (`0`/`1`), `message`. An unknown field is an error that lists these. Queries are capped at 500 characters and 20 terms, and results page and sort like event search (newest first, up to 1000 per page).
+Fields: `user`, `host`, `source`, `outcome`, `src_ip`, `dest_ip`, `ip` (source or destination), `batch_id`, `event_type`, `severity`, `dest_port`, `bytes` (a comparison, not an exact token), `synthetic` (`0`/`1`), `message`. An unknown field is an error that lists these. Queries are capped at 500 characters and 20 terms, and results page and sort like event search (newest first, up to 1000 per page).
 
 ```
 user:alice event_type:auth_failure NOT src_ip:10.0.0.5 host:web* "invalid password" last:24h
@@ -552,7 +555,7 @@ Caps and rules:
 - `stats` returns at most 1000 groups, and `top` at most N values. The response says `"truncated": true` when there were more.
 - Groups compare values exactly, so `by user` lists `Alice` and `alice` separately even though the `user:` filter ignores case. A pivot on either one shows both.
 - `timechart` covers the query's time window (`last:`, `since:`, `until:`), or the first to last matching event when there is none, and draws at most 500 buckets. A larger range is refused with the bucket count and a hint to narrow the time range or use a wider span, rather than silently trimmed. `last:24h` works with every span, `last:7d` needs `1h` or wider.
-- Group-by and `dc()` fields come from the same whitelist as filter terms: any of them except `message` (free text), `ip` (use `src_ip` or `dest_ip`) and the time filters, each refused with the reason. Events with no value in a `by` field are left out of `stats` and `top` groups, but still count toward `top`'s percent.
+- Group-by and `dc()` fields come from the same whitelist as filter terms: any of them except `message` (free text), `ip` (use `src_ip` or `dest_ip`), `bytes` (a numeric comparison, not a group) and the time filters, each refused with the reason. Events with no value in a `by` field are left out of `stats` and `top` groups, but still count toward `top`'s percent.
 - Only one stage. A second `|`, an unknown command, an unknown aggregate, or a field name that is not on the whitelist is a 400 that lists what is supported. Field names in the stage become SQL only through the whitelist, and values stay bound parameters.
 - A `|` starts the stage only at the start of a word. Inside a quoted value (`"a | b"`) or an unquoted word (`host:a|b`) it is part of the value.
 

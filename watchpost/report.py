@@ -15,6 +15,10 @@ from .queries import QueryError, get_alert
 SEVERITY_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 SYNTHETIC_BANNER = ("SYNTHETIC DATA: this report was generated from simulated events for demonstration. "
                     "It does not describe a real intrusion.")
+# Same sentence as the incident case export. "mapped" is a rule name, not a proved detection.
+LEVEL_NOTE = ("Evidence level is the labeled-scenario grade. "
+              "Only validated means a scenario proved the technique. "
+              "mapped means an enabled rule names it and is not proof.")
 EVIDENCE_PER_ALERT = 25
 TIMELINE_LIMIT = 200
 
@@ -96,6 +100,24 @@ def rule_techniques(conn, rule_id):
             result.append({"id": str(item["id"]), "name": item.get("name") or "",
                            "tactic": item.get("tactic") or "Unmapped tactic"})
     return result
+
+
+def evidence_level(graded, technique_id):
+    """Coverage grade for a technique named on a report. Unknown or ungraded stays mapped."""
+    level = graded.get(technique_id, "mapped")
+    return level if level in attack.LEVELS else "mapped"
+
+
+def _stamp_levels(conn, model):
+    """Copy each technique's coverage grade onto the tactic groups and the member alerts."""
+    graded = {row["id"]: row["level"] for row in incidents.coverage(conn)["techniques"]}
+    for items in model["techniques_by_tactic"].values():
+        for technique in items:
+            technique["level"] = evidence_level(graded, technique["id"])
+    for alert in model["alerts"]:
+        for technique in alert.get("techniques") or []:
+            technique["level"] = evidence_level(graded, technique["id"])
+    return model
 
 
 def actions_for(techniques):
@@ -194,7 +216,7 @@ def build_from_alert(conn, alert_id):
     model = _assemble(conn, "alert", alert["id"], alert["title"], [alert], {})
     model["status"] = alert["status"] + (f" ({alert['disposition']})" if alert.get("disposition") else "")
     model["summary"] = _summary(model)
-    return model
+    return _stamp_levels(conn, model)
 
 
 def build(conn, incident_id):
@@ -224,7 +246,7 @@ def build(conn, incident_id):
     model["techniques_by_tactic"] = by_tactic or model["techniques_by_tactic"]
     model["actions"] = actions_for([t for items in model["techniques_by_tactic"].values() for t in items])
     model["summary"] = _summary(model)
-    return model
+    return _stamp_levels(conn, model)
 
 
 # --- Renderers -----------------------------------------------------------------------------
@@ -251,6 +273,18 @@ def _alert_refs(t):
     return f" (alert{'s' if len(ids) > 1 else ''} " + ", ".join(f"#{i}" for i in ids) + ")" if ids else ""
 
 
+def _technique_phrase(t):
+    """Technique id, name, and evidence level. A missing level is mapped, which is not proof."""
+    raw = f"{t['id']} {t.get('name') or ''}".strip()
+    return f"{raw} ({t.get('level') or 'mapped'})"
+
+
+def _technique_list(techniques):
+    if not techniques:
+        return "none"
+    return ", ".join(_technique_phrase(t) for t in techniques)
+
+
 def to_markdown(m):
     label = "Incident" if m["kind"] == "incident" else "Alert"
     out = [f"# {label} report: {md(m['title'])}", ""]
@@ -272,11 +306,10 @@ def to_markdown(m):
                           for a in m["assets"]])
     else:
         out.append("No inventoried asset is involved.")
-    out += ["", "## MITRE ATT&CK techniques", ""]
+    out += ["", "## MITRE ATT&CK techniques", "", LEVEL_NOTE, ""]
     if m["techniques_by_tactic"]:
         for tactic, items in m["techniques_by_tactic"].items():
-            out.append(f"- **{md(tactic)}:** " + ", ".join(f"{md(t['id'])} {md(t['name'])}".strip() + _alert_refs(t)
-                                                          for t in items))
+            out.append(f"- **{md(tactic)}:** " + ", ".join(md(_technique_phrase(t)) + _alert_refs(t) for t in items))
     else:
         out.append("No ATT&CK mapping is recorded for the rules involved.")
     out += ["", "## Timeline", ""]
@@ -285,12 +318,11 @@ def to_markdown(m):
                        "yes" if e["is_evidence"] else "", e.get("message")] for e in m["timeline"]])
     out += ["", "## Alerts and evidence", ""]
     for a in m["alerts"]:
-        techs = ", ".join(t["id"] for t in a["techniques"]) or "none"
         out += [f"### Alert #{a['id']}: {md(a['title'])}", "",
                 f"- **Rule:** `{md(a['rule_id'])}` v{a['rule_version']} · **Severity:** {md(a['severity'])} · "
                 f"**Status:** {md(a['status'])}" + (f" ({md(a['disposition'])})" if a["disposition"] else ""),
                 f"- **Window:** {md(a['first_seen'])} to {md(a['last_seen'])} · **Events:** {a['event_count']}",
-                f"- **Techniques:** {md(techs)}"]
+                f"- **Techniques:** {md(_technique_list(a['techniques']))}"]
         if a.get("severity_note") and a.get("base_severity") and a["base_severity"] != a["severity"]:
             out.append(f"- **Asset weighting:** rule severity {md(a['base_severity'])}; {md(a['severity_note'])}")
         out += ["", f"**Why it fired:** {md(a['explanation'])}", ""]
@@ -344,11 +376,13 @@ def to_pdf_bytes(m):
     else:
         doc.text("No inventoried asset is involved.")
     doc.heading("MITRE ATT&CK techniques")
+    doc.text(LEVEL_NOTE, size=9)
     if m["techniques_by_tactic"]:
-        doc.table(["Tactic", "Technique", "Name", "Alerts"],
-                  [[tactic, t["id"], t["name"], ", ".join(f"#{i}" for i in t.get("alert_ids") or []) or "-"]
+        doc.table(["Tactic", "Technique", "Name", "Evidence level", "Alerts"],
+                  [[tactic, t["id"], t["name"], t.get("level") or "mapped",
+                    ", ".join(f"#{i}" for i in t.get("alert_ids") or []) or "-"]
                    for tactic, items in m["techniques_by_tactic"].items() for t in items],
-                  widths=[2, 1, 3.4, 1], size=9)
+                  widths=[1.6, 1.05, 2.55, 1.3, 0.9], size=9)
     else:
         doc.text("No ATT&CK mapping is recorded for the rules involved.")
     doc.heading("Timeline")
@@ -361,7 +395,7 @@ def to_pdf_bytes(m):
         doc.text(f"Alert #{a['id']}: {a['title']}", size=11, bold=True)
         doc.text(f"Rule {a['rule_id']} v{a['rule_version']} | severity {a['severity']} | status {a['status']}"
                  + (f" ({a['disposition']})" if a["disposition"] else "") + f" | {a['event_count']} events | "
-                 f"techniques: {', '.join(t['id'] for t in a['techniques']) or 'none'}", size=9)
+                 f"techniques: {_technique_list(a['techniques'])}", size=9)
         if a.get("severity_note") and a.get("base_severity") and a["base_severity"] != a["severity"]:
             doc.text(f"Asset weighting: rule severity {a['base_severity']}; {a['severity_note']}", size=9, indent=8)
         doc.text("Why it fired: " + (a["explanation"] or ""), size=9, indent=8)

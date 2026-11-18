@@ -6,6 +6,10 @@ All bundled data is synthetic. PR numbers refer to https://github.com/talalkasha
 
 ### Fixed
 
+- Alert and incident Markdown and PDF reports list each ATT&CK technique with its evidence level. Mapped means a rule names the technique and is not proof; only validated is a labeled scenario.
+
+- Incident case Markdown lists each ATT&CK technique with its evidence level. Mapped means a rule names the technique and is not proof; only validated is a labeled scenario.
+
 - Coverage detail: each mapped-only technique states why it is not validated. With the default rules, T1190 is probed but never exploited, T1595.001 sweeps one host rather than IP blocks, and T1048 is cloud storage reads with no exfiltration channel.
 
 - Dashboard ATT&CK matrix: every catalog technique is drawn, empty tactics stay on the kill chain, and cells are colored by evidence level. A mapped technique is no longer painted as a gap, and Initial Access is no longer clipped at four rows.

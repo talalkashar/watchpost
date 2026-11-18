@@ -402,20 +402,73 @@ const slaBadge = (list) => (list && list.length ? el("span", { class: "pill sev-
   `SLA: ${list.join(" + ")} overdue`) : null);
 
 // ---------- alerts ----------
+// First visit shows the working queue. "all" is an explicit clear so a reset does not fall back to the default.
+const ALERT_QUEUE_DEFAULT = "status=open&severity=critical,high";
+const ALERT_QUEUE_ALL = "all";
+const ALERT_STATUS_WORDS = {
+  open: "open",
+  investigating: "investigating",
+  resolved: "resolved",
+  "open,investigating": "active",
+};
+
+function alertQueueSaved() {
+  try { return sessionStorage.getItem("alertFilter"); } catch { return null; }
+}
+
+function storeAlertFilter(value) {
+  try { sessionStorage.setItem("alertFilter", value); } catch { /* ignore */ }
+}
+
+function alertQueueParams(saved) {
+  if (saved == null || saved === "") return new URLSearchParams(ALERT_QUEUE_DEFAULT);
+  if (saved === ALERT_QUEUE_ALL) return new URLSearchParams();
+  return new URLSearchParams(saved);
+}
+
+function alertQueueLabel(params) {
+  const status = params.get("status") || "";
+  const severity = params.get("severity") || "";
+  const rule = params.get("rule_id") || "";
+  if (!status && !severity && !rule) return "Showing all alerts";
+  if (status === "open" && severity === "critical,high" && !rule) return "Showing open critical and high";
+  const statusWord = ALERT_STATUS_WORDS[status] || status.split(",").filter(Boolean).join(", ");
+  const sevs = severity.split(",").map((part) => part.trim()).filter(Boolean);
+  const bits = [];
+  if (statusWord) bits.push(statusWord);
+  if (sevs.length) bits.push(sevs.join(", "));
+  if (rule) bits.push(`rule ${rule}`);
+  return `Showing ${bits.join(" ")}`;
+}
+
+function alertQueueCanReset(params) {
+  return Boolean(params.get("status") || params.get("severity") || params.get("rule_id"));
+}
+
 async function alerts() {
-  const params = new URLSearchParams(sessionStorage.getItem("alertFilter") || "status=open,investigating");
+  const params = alertQueueParams(alertQueueSaved());
+  const filterNote = el("p", { id: "alert-filter", class: "muted" }, alertQueueLabel(params));
+  if (alertQueueCanReset(params)) {
+    filterNote.append(el("button", { type: "button", id: "alert-filter-reset", class: "ghost" }, "Reset"));
+  }
   const form = el("form", { class: "row card" },
+    filterNote,
     el("label", {}, "Status", el("select", { name: "status" },
       [["open,investigating", "Active"], ["open", "Open"], ["investigating", "Investigating"], ["resolved", "Resolved"], ["", "All"]]
         .map(([v, t]) => el("option", { value: v, selected: params.get("status") === v || (!params.get("status") && v === "") }, t)))),
     el("label", {}, "Severity", el("select", { name: "severity" },
-      ["", "critical", "high", "medium", "low"].map((v) => el("option", { value: v, selected: params.get("severity") === v }, v || "Any")))),
+      [["critical,high", "Critical and high"], ["critical", "Critical"], ["high", "High"], ["medium", "Medium"], ["low", "Low"], ["", "Any"]]
+        .map(([v, t]) => el("option", { value: v, selected: (params.get("severity") || "") === v }, t)))),
     el("button", { type: "submit" }, "Filter"));
   form.addEventListener("submit", (ev) => {
     ev.preventDefault();
     const p = new URLSearchParams();
     for (const [k, v] of new FormData(form)) if (v) p.set(k, v);
-    try { sessionStorage.setItem("alertFilter", p.toString()); } catch { /* ignore */ }
+    storeAlertFilter(p.toString() || ALERT_QUEUE_ALL);
+    guarded(alerts);
+  });
+  filterNote.querySelector("#alert-filter-reset")?.addEventListener("click", () => {
+    storeAlertFilter(ALERT_QUEUE_ALL);
     guarded(alerts);
   });
   const [list, incidents] = await Promise.all([api(`/api/alerts?${params}`), api("/api/incidents?status=open,investigating")]);

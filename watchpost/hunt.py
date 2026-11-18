@@ -17,10 +17,11 @@ A `|` starts the stage only at the start of a word; inside a quoted value or an 
 """
 
 import re
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from .db import audit, iso, now_iso, transaction, utcnow
-from .normalize import EVENT_TYPES, SEVERITIES, EventError, parse_timestamp
+from .normalize import EVENT_TYPES, MAX_BYTES, SEVERITIES, EventError, parse_timestamp
 from .queries import QueryError, _escape_like, page_events
 
 # Same 400/404/409 handling in the server as every other query error.
@@ -36,13 +37,18 @@ FIELDS = {
     "outcome": ("text", "outcome"), "src_ip": ("text", "src_ip"), "dest_ip": ("text", "dest_ip"),
     "batch_id": ("text", "batch_id"), "ip": ("ip", None),
     "event_type": ("enum", "event_type"), "severity": ("enum", "severity"),
-    "dest_port": ("port", "dest_port"), "synthetic": ("flag", "synthetic"), "message": ("message", "message"),
+    "dest_port": ("port", "dest_port"), "bytes": ("bytes", "bytes"),
+    "synthetic": ("flag", "synthetic"), "message": ("message", "message"),
     "last": ("time", None), "since": ("time", None), "until": ("time", None),
 }
 ENUMS = {"event_type": sorted(EVENT_TYPES), "severity": SEVERITIES}
 FLAGS = {"1": 1, "true": 1, "0": 0, "false": 0}
 LAST_UNITS = {"m": 1, "h": 60, "d": 1440}
 LAST_MAX_MINUTES = 365 * 1440
+
+# bytes:>=N (and >, <=, <, =). The operator is chosen from this tuple; the integer is a bound parameter.
+BYTES_OPS = (">=", ">", "<=", "<", "=")
+_BYTES_CMP = re.compile(r"(>=|<=|>|<|=)(0|[1-9]\d*)\Z")
 
 _FIELD = re.compile(r"([A-Za-z_]+):")
 _LAST = re.compile(r"(\d{1,6})([mhd])")
@@ -146,6 +152,34 @@ def _value(text, pos, field):
     return value, quoted, pos
 
 
+def bytes_bound(value):
+    """(operator, integer) for a bytes term. The operator is one of >=, >, <=, <, =."""
+    match = _BYTES_CMP.fullmatch(value) if isinstance(value, str) else None
+    number = int(match.group(2)) if match else None
+    if number is None or number > MAX_BYTES:
+        raise HuntError(
+            "bytes must be one of >=, >, <=, < or = followed by an integer from 0 to "
+            f"{MAX_BYTES}, such as bytes:>=1000000")
+    return match.group(1), number
+
+
+def bytes_matches(count, op, number):
+    """True when a stored byte count satisfies one comparison. A missing count does not match."""
+    if op not in BYTES_OPS:
+        raise HuntError("bytes must be one of >=, >, <=, < or =")
+    if isinstance(count, bool) or not isinstance(count, int):
+        return False
+    if op == ">=":
+        return count >= number
+    if op == ">":
+        return count > number
+    if op == "<=":
+        return count <= number
+    if op == "<":
+        return count < number
+    return count == number
+
+
 def _term_sql(term, now):
     """(sql, args, text) for one term. Column names come from FIELDS, values only from args."""
     field, value = term["field"], term["value"]
@@ -174,6 +208,9 @@ def _term_sql(term, now):
         if not value.isdigit() or int(value) > 65535:
             raise HuntError("dest_port must be an integer between 0 and 65535")
         return "dest_port = ?", [int(value)], f"dest_port = {int(value)}"
+    if kind == "bytes":
+        op, number = bytes_bound(value)
+        return f"{column} {op} ?", [number], f"{field} {op} {number}"
     if kind == "flag":
         if value.lower() not in FLAGS:
             raise HuntError("synthetic must be 0, 1, true or false")
@@ -262,6 +299,9 @@ def _group_field(name):
         raise HuntError(f"{field} is a time filter, not a field; use timechart to count events over time")
     if kind == "ip":
         raise HuntError("ip means src_ip or dest_ip; group by src_ip or dest_ip instead")
+    if kind == "bytes":
+        raise HuntError("bytes is compared with >=, >, <=, < or =, not grouped; "
+                        f"group by one of {', '.join(GROUPABLE)}")
     return field, column
 
 
@@ -451,6 +491,17 @@ def list_saved(conn):
         "SELECT id, name, query, description, owner, created_at FROM saved_searches ORDER BY name COLLATE NOCASE")]
 
 
+def _stored_saved_name(conn, name):
+    """The saved spelling of `name`. The unique index is COLLATE NOCASE, so `Dup` and `dup` are one row."""
+    row = conn.execute(
+        "SELECT name FROM saved_searches WHERE name = ? COLLATE NOCASE", (name,)).fetchone()
+    return None if row is None else row["name"]
+
+
+def _name_taken(stored):
+    raise HuntError(f"a saved search named {stored!r} already exists", 409)
+
+
 def save_search(conn, data, actor):
     name = _text(data.get("name"), "name", NAME_MAX, required=True)
     query = data.get("query")
@@ -460,10 +511,16 @@ def save_search(conn, data, actor):
     compile_query(query)  # a saved search must run (this checks a pipeline stage too)
     description = _text(data.get("description"), "description", DESCRIPTION_MAX)
     with transaction(conn):
-        if conn.execute("SELECT 1 FROM saved_searches WHERE name = ?", (name,)).fetchone():
-            raise HuntError(f"a saved search named {name!r} already exists", 409)
-        cur = conn.execute("INSERT INTO saved_searches(name, query, description, owner, created_at)"
-                           " VALUES (?, ?, ?, ?, ?)", (name, query, description, actor, now_iso()))
+        stored = _stored_saved_name(conn, name)
+        if stored is not None:
+            _name_taken(stored)
+        try:
+            cur = conn.execute("INSERT INTO saved_searches(name, query, description, owner, created_at)"
+                               " VALUES (?, ?, ?, ?, ?)", (name, query, description, actor, now_iso()))
+        except sqlite3.IntegrityError:
+            # A concurrent insert can pass the lookup and still hit UNIQUE COLLATE NOCASE.
+            stored = _stored_saved_name(conn, name)
+            _name_taken(stored if stored is not None else name)
         audit(conn, actor, "saved_search_created", name, {"id": cur.lastrowid, "query": query})
     return dict(conn.execute("SELECT id, name, query, description, owner, created_at FROM saved_searches"
                              " WHERE id = ?", (cur.lastrowid,)).fetchone())

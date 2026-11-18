@@ -7,8 +7,9 @@
 
 The filter is matched in Python over the event dicts the engine already scans (engine.RULE_EVENT_FIELDS),
 with the hunt's SQL semantics: same fields and value checks, a trailing `*` on an unquoted value is a prefix
-match, message terms are "contains", NOT keeps events missing the field, and comparisons fold case the way
-SQLite does (ASCII only): user equality, every prefix match and message contains ignore ASCII case; other
+match, message terms are "contains", NOT keeps events missing the field, and a bytes term uses the
+same >=, >, <=, < or = comparison as the hunt. Comparisons fold case the way SQLite does
+(ASCII only): user equality, every prefix match and message contains ignore ASCII case; other
 equality is exact. tests/test_search_rules.py cross-checks this matcher against hunt.compile_query in SQL.
 
 Hunt fields the engine does not load (outcome, severity, batch_id) are refused, and so are time terms: the
@@ -113,6 +114,9 @@ def _predicate(term):
     if kind == "port":
         port = int(value)
         return lambda e: e.get("dest_port") == port
+    if kind == "bytes":
+        op, number = hunt.bytes_bound(value)
+        return lambda e, op=op, number=number: hunt.bytes_matches(e.get("bytes"), op, number)
     if kind == "flag":
         flag = hunt.FLAGS[value.lower()]
         return lambda e: e.get("synthetic") == flag

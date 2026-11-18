@@ -32,6 +32,19 @@ class ApiError(Exception):
         self.status = status
 
 
+def query_params(raw):
+    """One value per query key. A repeated key is a 400 that names it.
+
+    parse_qs keeps every value, and taking the first would hide the rest
+    (severity=low&severity=critical would filter as low).
+    """
+    pairs = parse_qs(raw)
+    for key, values in pairs.items():
+        if len(values) > 1:
+            raise ApiError(400, f"repeated query key '{key}'")
+    return {key: values[0] for key, values in pairs.items()}
+
+
 class Download:
     """A non-JSON response body sent as a file attachment.
 
@@ -1115,12 +1128,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not parsed.path.startswith("/api/"):
             return self._static(parsed.path)
-        self.query = {k: v[0] for k, v in parse_qs(parsed.query).items()}
         self.status = 200
         self.set_cookie = None
         self.conn = None
         self.masker = None
         try:
+            self.query = query_params(parsed.query)
             for method, pattern, fn, role, csrf in ROUTES:
                 match = pattern.match(parsed.path)
                 if match and method == self.command:
@@ -1161,15 +1174,20 @@ class Handler(BaseHTTPRequestHandler):
             self._send_error(getattr(exc, "status", 400), str(exc))
         except Exception as exc:
             record_error(self.conn, "api", exc, guidance=f"Unhandled error on {self.command} {parsed.path}")
-            self._send(500, {"error": "internal error; it has been recorded on the Health page"})
+            self._send(500, {"error": "internal error; it has been recorded on the Health page"},
+                       extra_headers={"Cache-Control": "no-store"})
         finally:
             if self.conn is not None:
                 self.conn.close()
 
     def _send_error(self, status, message):
-        """Errors echo request values, and a viewer's pivot has already resolved to the real value: mask them."""
+        """Errors echo request values, and a viewer's pivot has already resolved to the real value: mask them.
+
+        no-store matches a successful /api response so a shared cache cannot keep that echo.
+        """
         payload = {"error": message}
-        self._send(status, self.masker.mask(payload) if self.masker is not None else payload)
+        self._send(status, self.masker.mask(payload) if self.masker is not None else payload,
+                   extra_headers={"Cache-Control": "no-store"})
 
     def _download_body(self, download):
         if download.render is not None:
