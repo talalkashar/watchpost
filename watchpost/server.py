@@ -289,6 +289,28 @@ def detection_run(req):
 
 # Ingestion ---------------------------------------------------------------------------
 
+# ASCII letters only, the same fold as COLLATE NOCASE. Not str.lower().
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def _synthetic_flag(value):
+    """One present synthetic flag: the hunt set, folded on ASCII letters.
+
+    JSON true/false and the integers 0 and 1 are those words. Any other
+    present value is 400. The caller treats an absent flag as not synthetic.
+    """
+    if isinstance(value, str):
+        folded = value.translate(_ASCII_FOLD)
+    elif isinstance(value, int) and value in (0, 1):
+        # bool is an int, so True is 1. str(True) is "True", then the ASCII fold.
+        folded = str(value).translate(_ASCII_FOLD)
+    else:
+        folded = None
+    if folded not in hunt.FLAGS:
+        raise ApiError(400, "synthetic must be 0, 1, true or false")
+    return bool(hunt.FLAGS[folded])
+
+
 def _ingest(req, text, fmt, source, synthetic, year=None):
     try:
         source = validate_source(source)
@@ -312,7 +334,10 @@ def _ingest(req, text, fmt, source, synthetic, year=None):
 
 @route("POST", "/api/ingest", role="ingest", csrf=True)
 def ingest_json(req):
-    """Body: a single event object, an array, or {"source": ..., "synthetic": bool, "events": [...]}."""
+    """Body: one event, an array, or {"source", "synthetic", "events"}.
+
+    synthetic, when present, is 0, 1, true, or false (ASCII case).
+    """
     try:
         data = json.loads(req.body or b"null")
     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -320,14 +345,15 @@ def ingest_json(req):
     source, synthetic = "api", False
     if isinstance(data, dict) and "events" in data:
         source = data.get("source") or source
-        synthetic = data.get("synthetic") is True
+        if "synthetic" in data:
+            synthetic = _synthetic_flag(data["synthetic"])
         data = data["events"]
     return _ingest(req, json.dumps(data), "json", source, synthetic)
 
 
 @route("POST", "/api/ingest/upload", role="ingest", csrf=True)
 def ingest_upload(req):
-    """Raw file body. Query: format=auto|json|jsonl|csv|authlog, source=name, synthetic=1, year=YYYY."""
+    """Raw file body. Query: format, source, synthetic=0|1|true|false, year=YYYY."""
     try:
         text = req.body.decode("utf-8")
     except UnicodeDecodeError:
@@ -338,7 +364,22 @@ def ingest_upload(req):
     if year is not None and not (year.isdigit() and 2000 <= int(year) <= 2100):
         raise ApiError(400, "year must be between 2000 and 2100")
     return _ingest(req, text, req.query.get("format", "auto"), req.query.get("source", "upload"),
-                   req.query.get("synthetic") == "1", int(year) if year else None)
+                   _upload_synthetic(req), int(year) if year else None)
+
+
+def _upload_synthetic(req):
+    """The upload query flag. A blank `synthetic=` is present, not absent.
+
+    parse_qs drops a blank value, so that key never reaches req.query.
+    """
+    if "synthetic" in req.query:
+        return _synthetic_flag(req.query["synthetic"])
+    values = parse_qs(urlparse(req.path).query, keep_blank_values=True).get("synthetic")
+    if not values:
+        return False
+    if len(values) > 1:
+        raise ApiError(400, "repeated query key 'synthetic'")
+    return _synthetic_flag(values[0])
 
 
 @route("GET", "/api/ingest/batches")
