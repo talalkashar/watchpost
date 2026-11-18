@@ -154,6 +154,70 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 | `GET /api/entities/{kind}/{value}` | viewer | One entity (value percent-encoded): score breakdown, alerts, incidents, recent events, and `alerts_by_day` (UTC day of each alert's newest evidence event for this entity, zeros filled, newest 31 days; `omitted` counts alerts older than that) |
 | `GET /api/metrics?hours=24` | viewer | Counts, severity/rule breakdowns, MTTR, top failing IPs/users, and a 24-hour histogram ending at the newest event |
 
+### `GET /api/attack/coverage` example
+
+`covered` is true only when the technique is validated on a labeled scenario, not merely because a rule is enabled. `level` is `validated`, `mapped`, `disabled`, or `gap`. A mapped technique can still list an enabled rule and a non-zero `hits` count; those hits are alerts, not proof. This example is two techniques from the labeled synthetic catalog (the `tactics` array is omitted). `summary.covered` counts `validated` only.
+
+```json
+{
+  "levels": ["validated", "mapped", "disabled", "gap"],
+  "level_meaning": {
+    "validated": "An enabled rule detects a labeled synthetic attack that exercises this technique.",
+    "mapped": "An enabled rule maps here, but no labeled scenario proves it detects this technique. Not counted as covered."
+  },
+  "summary": {
+    "techniques": 2,
+    "covered": 1,
+    "with_hits": 2,
+    "levels": {"validated": 1, "mapped": 1, "disabled": 0, "gap": 0}
+  },
+  "techniques": [
+    {
+      "id": "T1110.003",
+      "name": "Brute Force: Password Spraying",
+      "tactic": "Credential Access",
+      "level": "validated",
+      "scenarios": ["password_spray"],
+      "hits": 1,
+      "covered": true,
+      "why": null,
+      "rules": [
+        {
+          "id": "password_spray",
+          "name": "Password spraying across many accounts",
+          "enabled": true,
+          "hits": 1,
+          "verdict": "quiet",
+          "lookalikes_fired": [],
+          "proves": ["password_spray"]
+        }
+      ]
+    },
+    {
+      "id": "T1190",
+      "name": "Exploit Public-Facing Application",
+      "tactic": "Initial Access",
+      "level": "mapped",
+      "scenarios": [],
+      "hits": 4,
+      "covered": false,
+      "why": "web_scanner detects web_scan, which probes and injects but never exploits.",
+      "rules": [
+        {
+          "id": "web_scanner",
+          "name": "Web vulnerability scanning from one IP",
+          "enabled": true,
+          "hits": 4,
+          "verdict": "quiet",
+          "lookalikes_fired": [],
+          "proves": []
+        }
+      ]
+    }
+  ]
+}
+```
+
 ## Reports
 
 Incident and alert reports are downloads (`Content-Disposition: attachment`), not JSON. Any signed-in role,
