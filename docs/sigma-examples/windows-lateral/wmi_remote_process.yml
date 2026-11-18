@@ -1,0 +1,40 @@
+# Remote WMI process creation: wmic /node process call create, or the Win32_Process Create method.
+# Local inventory queries such as "wmic os get caption" do not match.
+title: Windows WMI Remote Process Creation
+id: 4b577444-5e45-475a-9e9d-fd17247d63ec
+status: experimental
+description: |
+  A process creating another process on a remote Windows host through WMI: wmic.exe with /node
+  and process call create, or Invoke-CimMethod / Invoke-WmiMethod against Win32_Process.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1047/
+tags:
+  - attack.lateral_movement
+  - attack.t1047
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  wmi_wmic:
+    event.action: process_start
+    message|contains|all:
+      - wmic.exe
+      - '/node:'
+      - 'process call create'
+  wmi_cim:
+    event.action: process_start
+    message|contains|all:
+      - Invoke-CimMethod
+      - Win32_Process
+      - Create
+  wmi_method:
+    event.action: process_start
+    message|contains|all:
+      - Invoke-WmiMethod
+      - Win32_Process
+  condition: 1 of wmi_*
+falsepositives:
+  - An inventory or deployment tool that creates a process on managed hosts through WMI
+level: high
