@@ -95,20 +95,57 @@ def list_incidents(conn, params):
     return items, total - len(items)
 
 
-def linked_alerts(conn, incident_id):
-    """Every alert on the incident, earliest first_seen then id, with its rule name and techniques.
+def _rules_by_id(conn):
+    return {r["id"]: r for r in load_rules(conn, enabled_only=False)}
 
-    Case export and the incident report use this full list. Incident detail pages the same order.
-    """
-    rules = {r["id"]: r for r in load_rules(conn, enabled_only=False)}
-    alerts = [alert_row(r) for r in conn.execute(
-        "SELECT a.* FROM alerts a JOIN incident_alerts ia ON ia.alert_id = a.id WHERE ia.incident_id = ?"
-        " ORDER BY a.first_seen, a.id", (incident_id,))]
+
+def _attach_rules(alerts, rules):
     for alert in alerts:
         rule = rules.get(alert["rule_id"]) or {}
         alert["rule_name"] = rule.get("name", alert["rule_id"])
         alert["techniques"] = rule.get("techniques", [])
     return alerts
+
+
+def linked_alerts(conn, incident_id):
+    """Every alert on the incident, earliest first_seen then id, with its rule name and techniques.
+
+    Case export and the incident report use this full list. Incident detail pages the same
+    order with SQL LIMIT and does not load this list.
+    """
+    alerts = [alert_row(r) for r in conn.execute(
+        "SELECT a.* FROM alerts a JOIN incident_alerts ia ON ia.alert_id = a.id WHERE ia.incident_id = ?"
+        " ORDER BY a.first_seen, a.id", (incident_id,))]
+    return _attach_rules(alerts, _rules_by_id(conn))
+
+
+def _paged_alerts(conn, incident_id, rules):
+    """The earliest INCIDENT_ALERT_LIMIT linked alerts. The rest stay out of this list."""
+    alerts = [alert_row(r) for r in conn.execute(
+        "SELECT a.* FROM alerts a JOIN incident_alerts ia ON ia.alert_id = a.id"
+        " WHERE ia.incident_id = ? ORDER BY a.first_seen, a.id LIMIT ?",
+        (incident_id, INCIDENT_ALERT_LIMIT))]
+    return _attach_rules(alerts, rules)
+
+
+def _technique_index(conn, incident_id, rules):
+    """Techniques on every linked alert. Alert ids stay in first_seen, then id order.
+
+    The second value is how many linked alerts that scan saw, including ones past the page.
+    """
+    techniques = {}
+    total = 0
+    rows = conn.execute(
+        "SELECT a.id, a.rule_id FROM alerts a JOIN incident_alerts ia ON ia.alert_id = a.id"
+        " WHERE ia.incident_id = ? ORDER BY a.first_seen, a.id",
+        (incident_id,))
+    for row in rows:
+        total += 1
+        rule = rules.get(row["rule_id"]) or {}
+        for technique in rule.get("techniques", []):
+            techniques.setdefault(
+                technique["id"], {**technique, "alert_ids": []})["alert_ids"].append(row["id"])
+    return techniques, total
 
 
 def evidence_dest_ips(conn, incident_id):
@@ -131,12 +168,9 @@ def get_incident(conn, incident_id):
         raise QueryError("incident not found", 404)
     incident = _incident(row)
 
-    alerts = linked_alerts(conn, incident_id)
-    techniques = {}
-    for alert in alerts:
-        for t in alert["techniques"]:
-            techniques.setdefault(t["id"], {**t, "alert_ids": []})["alert_ids"].append(alert["id"])
-    shown = alerts[:INCIDENT_ALERT_LIMIT]
+    rules = _rules_by_id(conn)
+    shown = _paged_alerts(conn, incident_id, rules)
+    techniques, alert_total = _technique_index(conn, incident_id, rules)
 
     event_alerts = {}
     for r in conn.execute("SELECT ae.event_id, ae.alert_id FROM alert_events ae JOIN incident_alerts ia"
@@ -156,7 +190,7 @@ def get_incident(conn, incident_id):
 
     ordered = sorted(techniques.values(), key=lambda t: (attack.tactic_rank(t["tactic"]), t["id"]))
     incident["alerts"] = shown
-    incident["alerts_omitted"] = len(alerts) - len(shown)
+    incident["alerts_omitted"] = alert_total - len(shown)
     incident["events"] = events
     incident["events_omitted"] = event_total - len(events)
     incident["timeline"] = [{

@@ -159,7 +159,49 @@ class IncidentAlertsOmittedTests(unittest.TestCase):
             text)
         reference = REFERENCE.read_text()
         self.assertIn("earliest 200 linked alerts", reference)
+        self.assertIn("That page is `ORDER BY a.first_seen, a.id LIMIT`", reference)
+        self.assertIn("not from the page", reference)
         self.assertIn("case export and the incident report still list every linked alert", reference)
+        row = next(line for line in text.splitlines() if line.startswith("| `GET /api/incidents/{id}`"))
+        self.assertIn("The alert page is `ORDER BY a.first_seen, a.id LIMIT`", row)
+        self.assertIn("Technique `alert_ids` still name every linked alert", row)
+
+    def test_the_page_query_uses_limit_and_techniques_read_every_link(self):
+        # Two alerts both fit on the page. The page statement is still LIMIT, and the
+        # technique statement has no LIMIT, so an alert past the page is still read.
+        late_id = add_alert(self.conn, "data_exfil_volume", LATER)
+        early_id = add_alert(self.conn, "web_scanner", EARLY)
+        incident_id = add_incident(self.conn, [late_id, early_id])
+        calls = []
+        real = self.conn.execute
+
+        def execute(sql, params=()):
+            calls.append((" ".join(sql.split()), params))
+            return real(sql, params)
+
+        self.conn.execute = execute
+        try:
+            detail = get_incident(self.conn, incident_id)
+        finally:
+            self.conn.execute = real
+
+        pages = [call for call in calls if call[0].startswith("SELECT a.*")]
+        self.assertEqual(len(pages), 1)
+        self.assertIn("ORDER BY a.first_seen, a.id LIMIT ?", pages[0][0])
+        self.assertEqual(pages[0][1], (incident_id, INCIDENT_ALERT_LIMIT))
+        links = [call for call in calls if call[0].startswith("SELECT a.id, a.rule_id")]
+        self.assertEqual(len(links), 1)
+        self.assertNotIn("LIMIT", links[0][0])
+        self.assertIn("ORDER BY a.first_seen, a.id", links[0][0])
+        self.assertEqual(links[0][1], (incident_id,))
+        self.assertEqual([row["id"] for row in detail["alerts"]], [early_id, late_id])
+        self.assertEqual(detail["alerts_omitted"], 0)
+        exfil = next(row for row in detail["techniques"] if row["id"] == "T1048")
+        self.assertEqual(exfil["alert_ids"], [late_id])
+        access = next(row for row in detail["techniques"] if row["id"] == "T1190")
+        self.assertEqual(access["alert_ids"], [early_id])
+        source = Path(__file__).resolve().parent.parent.joinpath("watchpost", "incidents.py").read_text()
+        self.assertNotIn("alerts[:INCIDENT_ALERT_LIMIT]", source)
 
 
 class IncidentAlertsOmittedApiTests(ServerTestCase):
