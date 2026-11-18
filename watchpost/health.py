@@ -7,14 +7,17 @@ import os
 import shutil
 import sqlite3
 import sys
+import threading
 import time
-from datetime import timedelta
+from datetime import timedelta, timezone
 from pathlib import Path
 
-from .db import iso, now_iso, utcnow
+from .db import iso, now_iso, parse_iso, utcnow
 from .diagnostics import describe_exception
 
 STATUS_ORDER = {"ok": 0, "degraded": 1, "failing": 2}
+_BUILTIN_CHECKS = frozenset({"storage", "ingestion", "detection", "dependencies"})
+_CHECKS_LOCK = threading.Lock()
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 LOW_DISK_BYTES = 100 * 1024 * 1024
 
@@ -55,16 +58,37 @@ _COMPONENT_CHECKS = {}
 
 
 def register_check(name, fn):
-    _COMPONENT_CHECKS[name] = fn
+    with _CHECKS_LOCK:
+        _COMPONENT_CHECKS[name] = fn
 
 
 def unregister_check(name, fn=None):
-    if fn is None or _COMPONENT_CHECKS.get(name) == fn:
-        _COMPONENT_CHECKS.pop(name, None)
+    with _CHECKS_LOCK:
+        current = _COMPONENT_CHECKS.get(name)
+        if fn is None or current is fn:
+            _COMPONENT_CHECKS.pop(name, None)
 
 
 def _component_checks():
-    return [_check(name, fn) for name, fn in list(_COMPONENT_CHECKS.items())]
+    with _CHECKS_LOCK:
+        registered = list(_COMPONENT_CHECKS.items())
+    # Run outside the lock so a check can register another one without deadlocking.
+    return [
+        _check(name, fn) for name, fn in registered if name not in _BUILTIN_CHECKS
+    ]
+
+
+def _coerce_status(check):
+    """Keep an unknown status from crashing the report or looking healthy."""
+    status = check.get("status")
+    if status in STATUS_ORDER:
+        return check
+    message = check.get("message") or ""
+    check["status"] = "failing"
+    check["message"] = f"health check returned unknown status {status!r}: {message}"
+    if not check.get("guidance"):
+        check["guidance"] = "The check must return ok, degraded, or failing."
+    return check
 
 
 def _check(name, fn, *args):
@@ -75,29 +99,56 @@ def _check(name, fn, *args):
         status, details = "failing", {}
         message = f"health check raised {describe_exception(exc)}"
         guidance = "The check itself could not run; the component is most likely unavailable. See error details."
-    return {
+    return _coerce_status({
         "name": name, "status": status, "message": message, "guidance": guidance,
         "means": status_means(name),
         "details": details, "latency_ms": round((time.perf_counter() - started) * 1000, 1),
-    }
+    })
+
+
+def _db_file(db_path):
+    # A symlinked SIEM_DB lives on the target volume. SQLite puts the WAL beside that file.
+    return Path(db_path).resolve()
+
+
+def _started_at(value):
+    # Compare instants, not text. "2026-06-01T11:55:00Z" sorts after a millisecond cutoff
+    # ("Z" > ".") and would hide a stuck run.
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = parse_iso(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def check_storage(conn, db_path):
-    quick = conn.execute("PRAGMA quick_check").fetchone()[0]
+    row = conn.execute("PRAGMA quick_check").fetchone()
+    quick = row[0] if row is not None else None
     if quick != "ok":
-        return ("failing", f"database integrity check failed: {quick[:120]}",
+        shown = "no result" if quick is None else str(quick)[:120]
+        return ("failing", f"database integrity check failed: {shown}",
                 "Stop the app, back up the database file, and restore from a known-good copy.", {})
+    written = now_iso()
     conn.execute("BEGIN IMMEDIATE")
     try:
-        conn.execute("INSERT OR REPLACE INTO health_probe(id, written_at) VALUES (1, ?)", (now_iso(),))
-        conn.execute("SELECT written_at FROM health_probe WHERE id = 1").fetchone()
+        conn.execute("INSERT OR REPLACE INTO health_probe(id, written_at) VALUES (1, ?)", (written,))
+        probed = conn.execute("SELECT written_at FROM health_probe WHERE id = 1").fetchone()
+        probe_ok = probed is not None and probed[0] == written
     finally:
         conn.execute("ROLLBACK")
+    if not probe_ok:
+        return ("failing", "database read probe did not return the row just written",
+                "Stop the app, back up the database file, and restore from a known-good copy.", {})
     details = {"events": conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]}
     if db_path != ":memory:":
-        free = shutil.disk_usage(Path(db_path).parent).free
-        details["free_disk_mb"] = round(free / 1024 / 1024)
-        details["db_size_mb"] = round(Path(db_path).stat().st_size / 1024 / 1024, 2)
+        db_file = _db_file(db_path)
+        free = shutil.disk_usage(db_file.parent).free
+        details["free_disk_mb"] = free // (1024 * 1024)
+        details["db_size_mb"] = round(db_file.stat().st_size / 1024 / 1024, 2)
         if free < LOW_DISK_BYTES:
             return ("degraded", "less than 100 MB of disk space left",
                     "Free disk space or move SIEM_DB to a larger volume before ingestion starts failing.",
@@ -117,19 +168,26 @@ def check_ingestion(conn):
     ).fetchone()[0]
     details = {"batches_24h": row["batches"], "received_24h": row["received"],
                "rejected_24h": row["rejected"], "server_errors_24h": errors, "last_batch_at": last_ever}
-    if last_ever is None:
-        return ("ok", "no data ingested yet", "Load demo data or POST events to /api/ingest to get started.",
-                details)
-    reject_rate = row["rejected"] / row["received"] if row["received"] else 0
-    details["reject_rate_24h"] = round(reject_rate, 3)
+    received = row["received"] or 0
+    rejected = row["rejected"] or 0
+    # received == 0 with rejections is a 100% reject rate, not a clean window.
+    sample = received if received > 0 else rejected
+    reject_rate = rejected / sample if sample else 0
+    if last_ever is not None:
+        details["reject_rate_24h"] = round(reject_rate, 3)
     if errors:
         return ("degraded", f"{errors} ingestion request(s) failed server-side in the last 24h",
                 "Open the Errors list on the Health page for the failure type, then resubmit affected batches.",
                 details)
-    if row["received"] >= 20 and reject_rate > 0.25:
+    if last_ever is None:
+        return ("ok", "no data ingested yet", "Load demo data or POST events to /api/ingest to get started.",
+                details)
+    if sample >= 20 and reject_rate > 0.25:
         return ("degraded", f"{reject_rate:.0%} of records were rejected in the last 24h",
                 "Review rejection reasons under Ingest > Recent batches; usually a wrong format or bad timestamps.",
                 details)
+    if row["batches"] == 0:
+        return "ok", "no batches in the last 24h", None, details
     return "ok", "ingestion is accepting events", None, details
 
 
@@ -149,21 +207,32 @@ def check_detection(conn):
         "last_successful_run_at": last_ok["finished_at"] if last_ok else None,
         "unprocessed_failed_batches": failed_batches,
     }
+    running_now = False
+    if last is not None and last["status"] == "failed":
+        error = last["error"] or "no error was recorded"
+        return ("failing", f"last detection run failed: {error}",
+                "Fix the cause shown (usually a rule configuration problem) and use 'Run detection' on the "
+                "Health page. Stored events are kept and will be processed on the next successful run.",
+                details)
+    if last is not None and last["status"] == "running":
+        started = _started_at(last["started_at"])
+        restart = "The process may have crashed mid-run. Restart the app and run detection again."
+        if started is None:
+            return ("degraded", "a detection run is marked running but its start time cannot be read",
+                    restart, details)
+        # Exactly 5 minutes is still recent. Only an earlier start is stuck.
+        if started < utcnow() - timedelta(minutes=5):
+            return ("degraded", "a detection run has been running for more than 5 minutes",
+                    restart, details)
+        running_now = True
     if enabled == 0:
         return ("degraded", "no detection rules are enabled",
                 "Enable at least one rule through a reviewed change request on the Rules page.", details)
     if last is None:
         return "ok", "detection has not run yet (no data)", None, details
-    if last["status"] == "failed":
-        return ("failing", f"last detection run failed: {last['error']}",
-                "Fix the cause shown (usually a rule configuration problem) and use 'Run detection' on the "
-                "Health page. Stored events are kept and will be processed on the next successful run.",
-                details)
-    if last["status"] == "running":
-        started = last["started_at"]
-        if started < iso(utcnow() - timedelta(minutes=5)):
-            return ("degraded", "a detection run has been running for more than 5 minutes",
-                    "The process may have crashed mid-run. Restart the app and run detection again.", details)
+    if last["status"] not in ("ok", "running"):
+        return ("degraded", f"the last detection run ended with an unexpected status: {last['status']}",
+                "Use 'Run detection' on the Health page. Stored events are kept.", details)
     if last["correlation"] == "failed":
         return ("degraded", "the last run stored its alerts but could not group them into incidents",
                 "Alerts are unaffected. See recent errors (component 'correlation'), fix the cause, and use "
@@ -171,6 +240,8 @@ def check_detection(conn):
     if failed_batches:
         return ("degraded", f"{failed_batches} batch(es) were ingested while detection was failing",
                 "Use 'Run detection' to process them now that detection is healthy.", details)
+    if running_now:
+        return "ok", "a detection run is in progress", None, details
     return "ok", "last detection run succeeded", None, details
 
 
@@ -187,8 +258,10 @@ def check_dependencies(db_path):
         problems.append("SQLite 3.35+ is required")
     if not details["static_assets"]:
         problems.append("web UI files are missing from static/")
-    if db_path != ":memory:" and not os.access(Path(db_path).parent, os.W_OK):
-        problems.append("the database directory is not writable")
+    if db_path != ":memory:":
+        parent = _db_file(db_path).parent
+        if not parent.is_dir() or not os.access(parent, os.W_OK):
+            problems.append("the database directory is not writable")
     if problems:
         status = "failing" if any("required" in p or "writable" in p for p in problems) else "degraded"
         return (status, "; ".join(problems),
@@ -220,5 +293,7 @@ def run_health_checks(open_conn, db_path):
         ]
     finally:
         conn.close()
-    overall = max((c["status"] for c in checks), key=STATUS_ORDER.get)
+    for check in checks:
+        _coerce_status(check)
+    overall = max((c["status"] for c in checks), key=STATUS_ORDER.__getitem__)
     return {"status": overall, "checked_at": now_iso(), "checks": checks}
