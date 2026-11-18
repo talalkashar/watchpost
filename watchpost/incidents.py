@@ -9,6 +9,8 @@ from .normalize import SEVERITIES
 from .queries import EVENT_FIELDS, QueryError, _int, alert_row
 
 INCIDENT_STATUSES = ("open", "investigating", "resolved")
+# Incident detail returns this many distinct evidence events, earliest first. The rest are events_omitted.
+INCIDENT_EVENT_LIMIT = 1000
 _SEVERITY_ORDER = ("CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 "
                    "WHEN 'low' THEN 3 ELSE 4 END")
 
@@ -110,11 +112,18 @@ def get_incident(conn, incident_id):
     events = [{**dict(r), "alert_ids": sorted(event_alerts.get(r["id"], []))} for r in conn.execute(
         f"SELECT DISTINCT {fields} FROM events e JOIN alert_events ae ON ae.event_id = e.id"
         " JOIN incident_alerts ia ON ia.alert_id = ae.alert_id WHERE ia.incident_id = ?"
-        " ORDER BY e.ts, e.id LIMIT 1000", (incident_id,))]
+        " ORDER BY e.ts, e.id LIMIT ?", (incident_id, INCIDENT_EVENT_LIMIT))]
+    # Same join as the page. A second alert link is still one event. A link whose event is gone is not a row.
+    event_total = conn.execute(
+        "SELECT COUNT(DISTINCT e.id) AS n FROM events e"
+        " JOIN alert_events ae ON ae.event_id = e.id"
+        " JOIN incident_alerts ia ON ia.alert_id = ae.alert_id WHERE ia.incident_id = ?",
+        (incident_id,)).fetchone()["n"]
 
     ordered = sorted(techniques.values(), key=lambda t: (attack.tactic_rank(t["tactic"]), t["id"]))
     incident["alerts"] = alerts
     incident["events"] = events
+    incident["events_omitted"] = event_total - len(events)
     incident["timeline"] = [{
         "ts": a["first_seen"], "last_seen": a["last_seen"], "alert_id": a["id"], "rule_id": a["rule_id"],
         "title": a["title"], "severity": a["severity"], "status": a["status"],
