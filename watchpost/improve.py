@@ -863,11 +863,25 @@ def review_change(conn, change_id, decision, reviewer, note="", digest=None, ack
 
 # --- Tuning exceptions and the noise lab ------------------------------------------------
 
-def list_suppressions(conn):
-    """Every approved tuning exception, newest first; `active` is false once it has expired or been revoked."""
+def _suppression_row(row, now):
+    """One approved exception. `active` is false once it has expired or been revoked."""
+    item = dict(row)
+    item["active"] = item["expires_at"] > now and item["revoked_at"] is None
+    return item
+
+
+def list_suppressions(conn, limit=100):
+    """Approved tuning exceptions, newest id first, and how many the limit left out.
+
+    The second value is 0 when the list fits. A later created_at on a lower
+    id is the one left out. `active` is false once expired or revoked.
+    Callers that return the bare array send that count as X-Watchpost-Omitted.
+    """
     now = now_iso()
-    return [{**dict(r), "active": r["expires_at"] > now and r["revoked_at"] is None}
-            for r in conn.execute("SELECT * FROM suppressions ORDER BY id DESC")]
+    total = conn.execute("SELECT COUNT(*) FROM suppressions").fetchone()[0]
+    rows = [_suppression_row(r, now) for r in conn.execute(
+        "SELECT * FROM suppressions ORDER BY id DESC LIMIT ?", (limit,))]
+    return rows, total - len(rows)
 
 
 def revoke_suppression(conn, suppression_id, actor):
@@ -884,7 +898,9 @@ def revoke_suppression(conn, suppression_id, actor):
                      (now_iso(), actor, suppression_id))
         audit(conn, actor, "suppression_revoked", row["rule_id"],
               {"id": suppression_id, "group_key": row["group_key"], "change_request": row["change_request_id"]})
-    return next(s for s in list_suppressions(conn) if s["id"] == suppression_id)
+    # The revoked row may sit past the list cap. Read it back on its own.
+    stored = conn.execute("SELECT * FROM suppressions WHERE id = ?", (suppression_id,)).fetchone()
+    return _suppression_row(stored, now_iso())
 
 
 def list_rule_suppression_windows(conn):

@@ -36,6 +36,8 @@ AUDIT_LIMIT = 200
 BATCH_LIMIT = 50
 # Change requests, newest by id. A status filter counts only that status.
 CHANGES_LIMIT = 100
+# Approved tuning exceptions, newest by id. `active` stays on each row.
+SUPPRESSIONS_LIMIT = 100
 # Evaluation history, newest by id.
 EVALUATIONS_LIMIT = 20
 OMITTED_HEADER = "X-Watchpost-Omitted"
@@ -868,7 +870,9 @@ def suppression_propose(req, rule_id):
 
 @route("GET", "/api/suppressions")
 def suppressions(req):
-    return improve.list_suppressions(req.conn)
+    rows, omitted = improve.list_suppressions(req.conn, SUPPRESSIONS_LIMIT)
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", r"/api/rules/([a-z_]+)/suppression-windows", role="analyst")
