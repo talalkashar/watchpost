@@ -1,9 +1,10 @@
 """The dashboard alert board says how many alerts the cap dropped.
 
-The rows stay not-resolved first, then severity, then last_seen. A newer low
-alert is the one left out when 60 open critical alerts fill the board. A
-resolved critical sorts after that low alert. A list that fits, including an
-empty table, returns board_omitted 0.
+The rows stay not-resolved first, then severity, then last_seen, then id
+descending. A newer low alert is the one left out when 60 open critical
+alerts fill the board. Two alerts that share those three keep the newer id.
+A resolved critical sorts after that low alert. A list that fits, including
+an empty table, returns board_omitted 0.
 """
 
 import sqlite3
@@ -82,6 +83,31 @@ class BoardOmittedTests(unittest.TestCase):
         self.assertEqual(omitted, 0)
         self.assertEqual(titles, ["crit-new", "invest-old", "crit-old", LOW, RESOLVED])
 
+    def test_equal_status_severity_and_last_seen_keep_the_newer_id(self):
+        # The lowest id is inserted first and given a later created_at. Order is id, not that stamp.
+        stamp = "2026-06-01T00:00:00.000Z"
+        add_alert(self.conn, "early", last_seen=stamp)
+        for i in range(BOARD_LIMIT):
+            add_alert(self.conn, f"kept-{i:02d}", last_seen=stamp)
+        self.conn.execute(
+            "UPDATE alerts SET created_at = ? WHERE title = 'early'",
+            ("2026-12-01T00:00:00.000Z",))
+        omitted, titles = self.board()
+        self.assertEqual(omitted, 1)
+        self.assertEqual(len(titles), BOARD_LIMIT)
+        self.assertEqual(titles[0], f"kept-{BOARD_LIMIT - 1:02d}")
+        self.assertEqual(titles[-1], "kept-00")
+        self.assertNotIn("early", titles)
+        ids = [row["id"] for row in dashboard(self.conn)["alerts"]]
+        self.assertEqual(ids, list(range(BOARD_LIMIT + 1, 1, -1)))
+
+    def test_a_newer_last_seen_still_outranks_a_higher_id(self):
+        add_alert(self.conn, "newer", last_seen="2026-06-01T00:00:00.000Z")
+        add_alert(self.conn, "older", last_seen="2026-01-01T00:00:00.000Z")
+        omitted, titles = self.board()
+        self.assertEqual(omitted, 0)
+        self.assertEqual(titles, ["newer", "older"])
+
     def test_a_short_list_and_an_exact_cap_return_zero(self):
         self.assertEqual(self.board(), (0, []))
         add_alert(self.conn, "only")
@@ -98,7 +124,7 @@ class BoardOmittedTests(unittest.TestCase):
             "`board_omitted` is how many alerts were past that cap"
             " (0 when there are 60 or fewer)",
             api)
-        self.assertIn("not resolved first, then severity, then last_seen", api)
+        self.assertIn("not resolved first, then severity, then last_seen, then `id` descending", api)
         self.assertIn("the first 60", api)
 
 
@@ -117,6 +143,20 @@ class BoardOmittedApiTests(ServerTestCase):
         self.assertNotIn(LOW, [row["title"] for row in body["alerts"]])
         self.assertEqual(body["alerts"][0]["title"], f"crit-{BOARD_LIMIT - 1:02d}")
         self.assertTrue(all(row["severity"] == "critical" for row in body["alerts"]))
+
+    def test_equal_keys_keep_the_newer_id(self):
+        stamp = "2026-06-01T00:00:00.000Z"
+        with sqlite3.connect(self.db_path) as db:
+            add_alert(db, "early", last_seen=stamp)
+            for i in range(BOARD_LIMIT):
+                add_alert(db, f"kept-{i:02d}", last_seen=stamp)
+        status, body, _headers = self.client("viewer").get("/api/dashboard")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["board_omitted"], 1)
+        titles = [row["title"] for row in body["alerts"]]
+        self.assertEqual(titles[0], f"kept-{BOARD_LIMIT - 1:02d}")
+        self.assertEqual(titles[-1], "kept-00")
+        self.assertNotIn("early", titles)
 
     def test_an_empty_dashboard_and_a_rejected_request(self):
         viewer = self.client("viewer")
