@@ -424,7 +424,8 @@ def detect_format(text):
 
 def parse_payload(text, fmt, default_source, year=None, now=None, max_events=20000):
     """Return (events, rejections). Rejections are [{"index": n, "reason": str}]."""
-    fmt = (fmt or "auto").lower()
+    # ASCII letters only. JSON is json. A dotted capital I is not json.
+    fmt = (fmt or "auto").translate(_ASCII_FOLD)
     if fmt == "auto":
         fmt = detect_format(text)
     if fmt not in FORMATS:

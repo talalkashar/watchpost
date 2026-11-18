@@ -224,6 +224,38 @@ class PayloadTests(unittest.TestCase):
         with self.assertRaisesRegex(EventError, "unsupported"):
             parse_payload("x", "xml", "x", now=NOW)
 
+    def test_format_folds_ascii_letters_only(self):
+        # JSON stays json. A dotted capital I is not rewritten into json.
+        json_body = '[{"ts":"2026-09-15T10:00:00Z","message":"labelled synthetic"}]'
+        csv_body = "ts,message\n2026-09-15T10:00:00Z,labelled synthetic\n"
+        weblog = ('203.0.113.80 - - [15/Sep/2026:10:00:00 +0000] "GET / HTTP/1.1" '
+                  '200 162 "-" "Mozilla/5.0"\n')
+        cases = (("JSON", json_body), ("Csv", csv_body), ("WebLog", weblog))
+        for fmt, body in cases:
+            with self.subTest(fmt=fmt):
+                events, rejections = parse_payload(body, fmt, "upload", now=NOW)
+                self.assertEqual(len(events), 1)
+                self.assertEqual(rejections, [])
+        events, rejections = parse_payload(json_body, "Auto", "upload", now=NOW)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(rejections, [])
+        dotted = "js\u0130n"
+        with self.assertRaises(EventError) as caught:
+            parse_payload(json_body, dotted, "upload", now=NOW)
+        message = str(caught.exception)
+        self.assertEqual(message, "unsupported format 'js\u0130n'")
+        self.assertNotIn("\u0307", message)
+        self.assertNotIn("'json'", message)
+        self.assertNotEqual(message, "unsupported format 'json'")
+        source = inspect.getsource(parse_payload)
+        self.assertNotIn(".lower(", source)
+        self.assertNotIn(".casefold(", source)
+        for text in (NormalizeRecordTests._docs("API.md"), NormalizeRecordTests._docs("REFERENCE.md")):
+            self.assertIn("`JSON` is `json`", text)
+            self.assertIn("`Csv` is `csv`", text)
+            self.assertIn("`WebLog` is `weblog`", text)
+            self.assertIn("`js\u0130n` stays the unsupported-format error and is not `json`", text)
+
 
 class WebLogTests(unittest.TestCase):
     LINE = '203.0.113.80 - - [15/Sep/2026:10:00:00 +0000] "GET {path} HTTP/1.1" {status} 162 "-" "{agent}"'
