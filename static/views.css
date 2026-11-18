@@ -867,58 +867,92 @@ body[data-view="ingest"] form.card li code { color: #fff; font-size: 12px; }
 
 /* ---------- sign-in ---------- */
 body:not(.authed) {
-  background-color: #050505;
-  background-image:
-    radial-gradient(ellipse 68% 46% at 50% 12%, rgb(255 255 255 / .063), transparent 62%),
-    radial-gradient(circle at 1px 1px, rgb(255 255 255 / .02) 1px, transparent 0);
-  background-size: auto, 24px 24px;
+  background: radial-gradient(ellipse 450px 370px at 50% 46%, #202222, #101111 58%, #050505);
 }
-body:not(.authed) main {
-  min-height: 100vh;
-  max-width: none;
-  margin: 0;
-  display: grid;
-  place-items: center;
-  padding: 28px 16px;
-}
+body:not(.authed) main { padding-inline: 24px; }
 body:not(.authed) #view { display: none; }
 .login {
-  width: min(420px, 100%);
-  margin: 0;
-  padding: 28px 28px 22px;
-  border-radius: 16px;
-  position: relative;
-  background: linear-gradient(180deg, rgb(20 20 20 / .96), rgb(10 10 10 / .98));
-  border: 1px solid rgb(255 255 255 / .099);
-  box-shadow: 0 0 0 1px rgb(0 0 0 / .4), 0 28px 70px rgb(0 0 0 / .48), 0 0 70px rgb(255 255 255 / .023);
+  width: min(368px, 100%);
+  padding: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
 }
-.login::before {
-  content: "";
-  position: absolute;
-  left: 28px;
-  right: 28px;
-  top: 0;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgb(255 255 255 / .383), transparent);
+.login-brand {
+  flex-direction: column;
+  gap: 18px;
+  margin-bottom: 6px;
 }
-.login-brand { margin-bottom: 22px; }
-.login-brand .logo { width: 40px; height: 40px; }
-.login-brand b { font-size: 15px; letter-spacing: .2em; }
-.login label { font-size: 12.5px; color: var(--ink-2); }
+.login-brand .logo {
+  width: 60px;
+  height: 60px;
+  padding: 13px;
+  border: 1px solid #515353;
+  border-radius: 17px;
+  background: linear-gradient(145deg, #393c3c, #1f2121 56%, #171818);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / .13), 0 6px 20px rgb(0 0 0 / .28);
+  stroke: #f2f3ef;
+}
+.login-brand b {
+  font-size: 27px;
+  font-weight: 650;
+  line-height: 1.2;
+  letter-spacing: .045em;
+}
+.login h1 {
+  margin: 0 0 28px;
+  color: #bdc0be;
+  font-size: 18px;
+  font-weight: 500;
+  text-align: center;
+}
+.login label { gap: 7px; margin-bottom: 16px; color: #d6d8d6; font-size: 14px; }
 .login input {
-  min-height: 42px;
-  border-radius: 8px;
-  padding: 8px 12px;
-  background: #080808;
+  width: 100%;
+  min-height: 48px;
+  padding: 10px 14px;
+  border: 1px solid #646765;
+  border-radius: 12px;
+  background: #111212;
+  font-size: 16px;
 }
 .login form button[type="submit"] {
-  min-height: 44px;
-  border-radius: 8px;
+  min-height: 48px;
   margin-top: 6px;
-  font-size: 14px;
+  border: 1px solid #676b68;
+  border-radius: 12px;
+  background: linear-gradient(#424644, #303231);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / .1);
+  color: #fafbf9;
+  font-weight: 600;
 }
-.login .muted,
-.login > .muted { font-size: 12.5px; line-height: 1.5; margin: 14px 0 0; }
+.login form button[type="submit"]:hover { filter: brightness(1.14); }
+.login form button[type="submit"]:active { filter: brightness(.95); }
+.login #mfa-form > p:first-child { margin: 0 0 18px; color: #c3c6c3; text-align: center; }
+.login form button.ghost {
+  display: block;
+  min-height: 44px;
+  margin: 6px auto 0;
+  border-color: transparent;
+}
+.login :is(input, button, a):focus-visible { outline: 2px solid #edeeea; outline-offset: 3px; }
+.login .error { margin: 12px 0 0; color: #ffb6af; }
+.login .error:empty { min-height: 0; margin: 0; }
+.login-footer { margin-top: 18px; text-align: center; }
+.login .credit {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  margin: 0;
+  color: #a4a7a4;
+  font-size: 12px;
+}
+.login .credit:hover { color: #f2f3f0; }
+@media (prefers-reduced-motion: no-preference) {
+  .login form button[type="submit"] { transition: filter 150ms ease-out; }
+  .login.load-intro { animation: login-appear 240ms ease-out both; }
+  @keyframes login-appear { from { opacity: 0; } to { opacity: 1; } }
+}
 
 dialog {
   border-radius: 14px;
