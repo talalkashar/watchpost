@@ -298,7 +298,8 @@ class EngineExfilExceptionTests(unittest.TestCase):
         self.allow(30)
         self.assertEqual(self.ingest(self.night(4))["alerts_created"], 1)   # no history yet
         self.assertEqual(self.ingest(self.night(3))["alerts_created"], 0)   # baseline keeps it quiet
-        sup = improve.list_suppressions(self.conn)[0]
+        rows, _omitted = improve.list_suppressions(self.conn)
+        sup = rows[0]
         revoked = improve.revoke_suppression(self.conn, sup["id"], "admin")
         self.assertEqual((revoked["active"], revoked["revoked_by"]), (False, "admin"))
         self.assertGreater(revoked["expires_at"], iso(utcnow() + timedelta(days=29)))  # expiry is left as history
@@ -520,7 +521,7 @@ class EngineSuppressionTests(unittest.TestCase):
         init_schema(conn)
         engine.seed_rules(conn)
         self.assertEqual(engine.run_detection(conn)["alerts_suppressed"], 0)
-        self.assertEqual(improve.list_suppressions(conn), [])
+        self.assertEqual(improve.list_suppressions(conn)[0], [])
 
     def test_3_0_suppressions_table_gains_the_revoke_columns(self):
         conn = connect(":memory:")
@@ -534,7 +535,7 @@ class EngineSuppressionTests(unittest.TestCase):
             (iso(utcnow() + timedelta(days=1)), iso(utcnow())))
         init_schema(conn)
         self.assertEqual(engine.active_suppressions(conn), {("brute_force_ip", "10.0.50.5")})
-        self.assertIsNone(improve.list_suppressions(conn)[0]["revoked_at"])
+        self.assertIsNone(improve.list_suppressions(conn)[0][0]["revoked_at"])
 
 
 class NoiseLabApiTests(ServerTestCase):

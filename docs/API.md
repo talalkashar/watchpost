@@ -318,7 +318,7 @@ Asset fields: `id`, `name`, `kind` (`server`, `workstation`, `network`, `cloud`,
 | `POST /api/rules/{id}/proposals` | analyst | `{params?: {...partial}, enabled?: bool, reason}`; validated, then scored against scenarios |
 | `POST /api/rules/suggestions` | analyst | Generates proposals from false-positive feedback (deduplicated) |
 | `POST /api/rules/{id}/suppressions` | analyst | `{group_key, days (1–90), reason}`: proposes a tuning exception; nothing is suppressed until an admin approves it |
-| `GET /api/suppressions` | viewer | Approved tuning exceptions, newest first, with `active` false once expired or revoked |
+| `GET /api/suppressions` | viewer | Approved tuning exceptions, newest by `id`, at most 100, with `active` false once expired or revoked. The body stays a bare array. `X-Watchpost-Omitted` is how many exceptions were past that cap (0 when the list fits) |
 | `POST /api/suppressions/{id}/revoke` | admin | Ends an exception early; audited as `suppression_revoked` |
 | `POST /api/rules/{id}/suppression-windows` | analyst | `{starts_at, expires_at, reason}` proposes a reviewed, rule-wide pause of at most 30 days; approval must acknowledge labeled detection loss |
 | `GET /api/rule-suppression-windows` | viewer | Approved rule-wide windows, including `upcoming`, `active`, `expired`, and `ended` history |
