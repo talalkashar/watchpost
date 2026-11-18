@@ -140,6 +140,43 @@ class RuleTests(unittest.TestCase):
         ended_early = {**window, "end": StatusTests.last + 600}
         self.assertEqual(len(run(events, now=now, maintenance=[ended_early])), 1)
 
+    def test_ascii_case_is_one_stream_and_the_title_stays_as_logged(self):
+        times = StatusTests.times
+        # The later spelling keeps the same cadence. Split keys would call the early spelling silent.
+        extra = steady(130, 60, start=times[-1] + 60)
+        events = [arrival(i, t, "demo", "web01") for i, t in enumerate(times, start=1)]
+        n = len(events)
+        events += [arrival(n + j + 1, t, "Demo", "WEB01") for j, t in enumerate(extra)]
+        now = extra[-1] + 30
+        self.assertEqual(run(events, now=now), [])
+        self.assertEqual(len(run(events[:n], now=now)), 1)
+        # One spelling, already silent: the key folds and the title keeps the logged names.
+        upper = [arrival(i, t, "Demo", "WEB01") for i, t in enumerate(times, start=1)]
+        found = run(upper, now=times[-1] + 2 * 3600)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "demo|web01")
+        self.assertIn("Demo on WEB01", found[0]["title"])
+        # Non-ASCII case stays two streams, so the earlier spelling is the silence.
+        accent = [arrival(i, t, "démo", "Érin-host") for i, t in enumerate(times, start=1)]
+        accent += [arrival(n + j + 1, t, "DÉMO", "érin-host") for j, t in enumerate(extra)]
+        found = run(accent, now=now)
+        self.assertEqual([f["group_key"] for f in found], ["démo|Érin-host"])
+
+    def test_maintenance_window_folds_ascii_case(self):
+        times = StatusTests.times
+        now = times[-1] + 3 * 3600
+        window = {"source": "demo", "host": "web01", "start": times[-1], "end": now + 60}
+        upper = [arrival(i, t, "Demo", "WEB01") for i, t in enumerate(times, start=1)]
+        self.assertEqual(run(upper, now=now, maintenance=[window]), [])
+        lower = [arrival(i, t, "demo", "web01") for i, t in enumerate(times, start=1)]
+        stored_upper = {**window, "source": "DEMO", "host": "WEB01"}
+        self.assertEqual(run(lower, now=now, maintenance=[stored_upper]), [])
+        accent = [arrival(i, t, "démo", "Érin-host") for i, t in enumerate(times, start=1)]
+        other = {**window, "source": "démo", "host": "érin-host"}
+        self.assertEqual(len(run(accent, now=now, maintenance=[other])), 1)
+        same = {**window, "source": "démo", "host": "Érin-host"}
+        self.assertEqual(run(accent, now=now, maintenance=[same]), [])
+
 
 class EngineTests(unittest.TestCase):
     """The rule in a real detection run: wall clock, arrivals by ingested_at, one alert per silence."""
@@ -199,6 +236,38 @@ class EngineTests(unittest.TestCase):
         health = {(r["source"], r["host"]): r for r in sources.inventory(self.conn)["sources"]}
         self.assertEqual(health[("fw", "fw01")]["status"], "healthy")
         self.assertIsNotNone(health[("fw", "fw01")]["maintenance"])
+
+    def test_ascii_case_is_one_source_and_a_window_covers_it(self):
+        now = utcnow()
+        arrivals = [now - timedelta(hours=6) + timedelta(minutes=i) for i in range(180)]
+        for i, when in enumerate(arrivals):
+            self.store("Demo" if i % 2 else "demo", "WEB01" if i % 2 else "web01", [when])
+        engine.run_detection(self.conn)
+        self.assertEqual([a["group_key"] for a in self.alerts()], ["demo|web01"])
+        self.assertIn("Demo on WEB01", self.alerts()[0]["title"])
+        health = sources.inventory(self.conn)["sources"]
+        self.assertEqual([(r["source"], r["host"], r["status"], r["events"]) for r in health],
+                         [("demo", "web01", "silent", 180)])
+        # A window stored as the other spelling excuses the same stream.
+        self.conn.execute("DELETE FROM alerts")
+        self.conn.execute(
+            "INSERT INTO maintenance_windows(source, host, starts_at, ends_at, reason, proposed_by, approved_by,"
+            " created_at) VALUES ('demo', 'web01', ?, ?, 'firmware upgrade', 'a', 'b', ?)",
+            (iso(now - timedelta(hours=4)), iso(now + timedelta(hours=1)), iso(now)))
+        engine.run_detection(self.conn)
+        self.assertEqual(self.alerts(), [])
+        row = sources.inventory(self.conn)["sources"][0]
+        self.assertEqual((row["source"], row["host"], row["status"]), ("demo", "web01", "healthy"))
+        self.assertIsNotNone(row["maintenance"])
+
+    def test_non_ascii_case_stays_two_sources(self):
+        now = utcnow()
+        arrivals = [now - timedelta(hours=6) + timedelta(minutes=i) for i in range(180)]
+        self.store("démo", "Érin-host", arrivals)
+        self.store("DÉMO", "érin-host", arrivals)
+        rows = sources.inventory(self.conn)["sources"]
+        self.assertEqual(sorted((r["source"], r["host"]) for r in rows),
+                         [("dÉmo", "érin-host"), ("démo", "Érin-host")])
 
     def test_replayed_old_data_is_one_arrival_and_learning(self):
         # Demo data is dated yesterday but arrives in one upload: no cadence, no alert.
