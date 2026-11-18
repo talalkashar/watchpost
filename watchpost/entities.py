@@ -46,19 +46,52 @@ def _anchor(conn):
                         " UNION ALL SELECT MAX(last_seen) FROM alerts)").fetchone()[0]
 
 
-def _contribution(alert, anchor):
-    """One alert's share of a score. Not counted (weight 0) when closed as false positive or benign."""
+def _share(alert, anchor):
+    """Counted flag and weight for one alert. A false positive or benign close is not counted.
+
+    The weight is the same number a contribution row stores. Callers that only rank an
+    entity use this and do not build that row.
+    """
     base = SEVERITY_WEIGHTS.get(alert["severity"], 0)
     age_hours = max(0.0, (parse_iso(anchor) - parse_iso(alert["last_seen"])).total_seconds() / 3600)
     decay = 0.5 ** (age_hours / HALF_LIFE_HOURS)
     counted = alert["disposition"] not in EXCLUDED_DISPOSITIONS
+    weight = round(base * decay, 2) if counted else 0.0
+    return counted, weight, base, age_hours, decay
+
+
+def _contribution(alert, anchor):
+    """One alert's share of a score. Not counted (weight 0) when closed as false positive or benign."""
+    counted, weight, base, age_hours, decay = _share(alert, anchor)
     return {"alert_id": alert["id"], "rule_id": alert["rule_id"], "title": alert["title"],
             "severity": alert["severity"],
             # Asset weight enters through severity: an alert on a critical or sensitive asset was raised before scoring.
             "base_severity": alert["base_severity"] or alert["severity"], "asset_note": alert["severity_note"],
             "status": alert["status"], "disposition": alert["disposition"],
             "last_seen": alert["last_seen"], "base_weight": base, "age_hours": round(age_hours, 1),
-            "decay": round(decay, 3), "weight": round(base * decay, 2) if counted else 0.0, "counted": counted}
+            "decay": round(decay, 3), "weight": weight, "counted": counted}
+
+
+def _ranked_score(alert_ids, alerts, anchor):
+    """Score from counted weights, or None when nothing counts.
+
+    Weights are sorted the same way as contribution rows (weight descending, then
+    alert id) before the sum, so the rounded total matches `_score`. The pairs are
+    dropped before the next entity. This does not build a contribution list.
+    """
+    pairs = []
+    for alert_id in alert_ids:
+        alert = alerts.get(alert_id)
+        if alert is None:
+            continue
+        counted, weight, _, _, _ = _share(alert, anchor)
+        if not counted:
+            continue
+        pairs.append((weight, alert_id))
+    if not pairs:
+        return None
+    pairs.sort(key=lambda pair: (-pair[0], pair[1]))
+    return round(sum(weight for weight, _ in pairs), 2)
 
 
 def _score(contributions):
@@ -163,6 +196,10 @@ def list_entities(conn, params):
     Ties keep `kind`, then `value`. `entities_omitted` is how many scored
     entities were past that cap. A list that fits returns 0. A false positive
     or benign close is not scored, so it is not part of that count.
+
+    Each returned row still lists the alerts that make its score. Those
+    contribution lists are built after the cap, for the returned rows only.
+    An entity past the cap is scored from weights and does not keep a list.
     """
     kind = params.get("kind")
     if kind:
@@ -176,26 +213,38 @@ def list_entities(conn, params):
     alerts = {r["id"]: dict(r) for r in conn.execute(
         f"SELECT {_ALERT_FIELDS} FROM alerts WHERE {clause}", bound)}
     walk, walk_bound = _scoreable_disposition("a.disposition")
-    rows = []
-    for (entity_kind, value), alert_ids in _entity_alerts(
-            conn, f" JOIN alerts a ON a.id = ae.alert_id WHERE {walk}", walk_bound).items():
+    found = _entity_alerts(conn, f" JOIN alerts a ON a.id = ae.alert_id WHERE {walk}", walk_bound)
+    ranked = []
+    for (entity_kind, value), alert_ids in found.items():
         if kind and entity_kind != kind:
             continue
-        parts = [c for c in (_contribution(alerts[i], anchor) for i in alert_ids if i in alerts) if c["counted"]]
-        if not parts:
+        score = _ranked_score(alert_ids, alerts, anchor)
+        if score is None:
             continue
+        ranked.append((score, entity_kind, value))
+    ranked.sort(key=lambda row: (-row[0], row[1], row[2]))
+    page = ranked[:limit]
+    omitted = len(ranked) - len(page)
+    # Drop id sets for entities the cap leaves out before any contribution row is built.
+    keep = {(entity_kind, value) for _, entity_kind, value in page}
+    for key in list(found):
+        if key not in keep:
+            del found[key]
+    del ranked
+    shown = []
+    for _, entity_kind, value in page:
+        parts = [c for c in (_contribution(alerts[i], anchor) for i in found[(entity_kind, value)] if i in alerts)
+                 if c["counted"]]
         parts.sort(key=lambda c: (-c["weight"], c["alert_id"]))
-        rows.append({
+        shown.append({
             "kind": entity_kind, "value": value, "score": _score(parts), "alerts": len(parts),
             "open_alerts": sum(c["status"] != "resolved" for c in parts),
             "max_severity": max((c["severity"] for c in parts), key=lambda s: _SEVERITY_RANK.get(s, 0)),
             "last_seen": max(c["last_seen"] for c in parts), "contributions": parts,
         })
-    rows.sort(key=lambda r: (-r["score"], r["kind"], r["value"]))
-    shown = rows[:limit]
     return {"anchor": anchor, "half_life_hours": HALF_LIFE_HOURS, "severity_weights": SEVERITY_WEIGHTS,
             "excluded_dispositions": list(EXCLUDED_DISPOSITIONS), "entities": shown,
-            "entities_omitted": len(rows) - len(shown)}
+            "entities_omitted": omitted}
 
 
 def _entity_incidents(conn, alert_ids):
