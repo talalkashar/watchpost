@@ -234,9 +234,10 @@ def _term_sql(term, now):
         if name is None:
             raise HuntError(f"{field} must be one of {', '.join(ENUMS[field])}")
         return f"{column} = ?", [name], f"{field} = {name}"
-    # Same matching as the Events filter: account, host, source, and outcome compare
-    # case-insensitively (ASCII, like SQLite NOCASE). Grouping by source and outcome stays exact.
-    collate = " COLLATE NOCASE" if field in ("user", "host", "source", "outcome") else ""
+    # Same matching as the Events filter: account, host, source, outcome, and batch_id
+    # compare case-insensitively (ASCII, like SQLite NOCASE). Grouping by source, outcome,
+    # and batch_id stays exact.
+    collate = " COLLATE NOCASE" if field in ("user", "host", "source", "outcome", "batch_id") else ""
     return f"{column} = ?{collate}", [value], f"{field} = {value}"
 
 
