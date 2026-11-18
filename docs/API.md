@@ -263,7 +263,7 @@ Errors are JSON: unknown alert → 404 `alert not found`; unknown incident → 4
 ## Asset inventory
 
 Assets give hosts a weight of importance and tag the systems that process sensitive data. Detection matches each
-alert's evidence events to the inventory by `host` name (case-insensitive) and by `dest_ip`/`src_ip` against an
+alert's evidence events to the inventory by `host` name (ASCII case only, the same fold as entity hosts: `WEB01` matches `web01`, and `Érin-host` stays apart from `érin-host`) and by `dest_ip`/`src_ip` against an
 asset's `addresses`, then raises the alert's severity:
 
 | Matched asset | Levels added |
