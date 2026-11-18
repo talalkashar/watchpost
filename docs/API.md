@@ -149,7 +149,7 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 | `GET /api/attack/coverage` | viewer | `{tactics, techniques: [{id, name, tactic, level, scenarios, rules: [{id, name, enabled, hits, verdict, lookalikes_fired, proves}], hits, covered, why}], summary, levels, level_meaning}` over the built-in ATT&CK subset. `level` is `validated`, `mapped`, `disabled`, or `gap` (see the README, "ATT&CK coverage"); `covered` is true only for `validated`. `why` is a one-line reason when `level` is `mapped`, otherwise null. `hits` counts alerts from the mapped rules; `summary.levels` counts techniques per level |
 | `GET /api/attack/navigator.json` | viewer | The same coverage as a MITRE ATT&CK Navigator layer, colored by level and scored by alert count |
 | `GET /api/entities?kind=&limit=` | viewer | Riskiest entities (`kind` is `user`, `src_ip`, or `host`; `limit` 1–100, default 10), each with its score and the alerts that contribute to it |
-| `GET /api/entities/{kind}/{value}` | viewer | One entity (value percent-encoded): score breakdown, alerts, incidents, and recent events |
+| `GET /api/entities/{kind}/{value}` | viewer | One entity (value percent-encoded): score breakdown, alerts, incidents, recent events, and `alerts_by_day` (UTC day of each alert's newest evidence event for this entity, zeros filled, newest 31 days; `omitted` counts alerts older than that) |
 | `GET /api/metrics?hours=24` | viewer | Counts, severity/rule breakdowns, MTTR, top failing IPs/users, and a 24-hour histogram ending at the newest event |
 
 ## Reports

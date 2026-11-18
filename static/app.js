@@ -594,6 +594,65 @@ async function incidentDetail(id) {
   );
 }
 
+// One bar per UTC day of this entity's stored events. Counts come from the server
+// (newest evidence event that names the entity), so the page only draws them.
+function entityAlertBars(series) {
+  const days = Array.isArray(series && series.days) ? series.days : [];
+  const bars = days.map((d) => ({
+    day: String(d.day || ""),
+    count: Math.max(0, Number(d.count) || 0),
+  })).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d.day));
+  const max = Math.max(1, ...bars.map((b) => b.count));
+  const total = bars.reduce((n, b) => n + b.count, 0);
+  const omitted = Math.max(0, Number(series && series.omitted) || 0);
+  const start = bars.length ? bars[0].day : "";
+  const end = bars.length ? bars[bars.length - 1].day : "";
+  const span = start === end ? start : `${start} to ${end}`;
+  const older = omitted
+    ? ` ${omitted} older ${omitted === 1 ? "alert is" : "alerts are"} outside this window.`
+    : "";
+  return {
+    empty: bars.length === 0,
+    label: bars.length
+      ? `Alerts by day, event time, ${span}: ${bars.map((b) => `${b.day} ${b.count}`).join(", ")}`
+      : "No stored events for this entity.",
+    note: bars.length
+      ? `${total} ${total === 1 ? "alert" : "alerts"} across ${bars.length} ${bars.length === 1 ? "day" : "days"}, ${span}.${older}`
+      : "No stored events for this entity.",
+    bars: bars.map((b) => ({ day: b.day, count: b.count, share: b.count / max })),
+  };
+}
+
+function entityDayChart(series) {
+  const model = entityAlertBars(series);
+  const head = [
+    el("h2", {}, "Alerts by day"),
+    el("p", { class: "muted" }, "Each alert counts on the UTC day of its newest stored event for this entity."),
+    el("p", { class: "muted", id: "entity-day-note" }, model.note),
+  ];
+  if (model.empty) return el("div", { id: "entity-days" }, head);
+  const W = 520, H = 84, labelH = 16, top = 4, n = model.bars.length;
+  const slot = W / n, inner = H - labelH - top;
+  const round = (v) => (Math.round(v * 100) / 100).toString();
+  const marks = model.bars.map((b, i) => {
+    const h = b.count ? Math.max(2, b.share * inner) : 1;
+    return svgEl("rect", {
+      class: b.count ? "f-accent" : "empty",
+      x: round(i * slot + 1), y: round(top + inner - h),
+      width: round(Math.max(1, slot - 2)), height: round(h),
+    }, svgEl("title", {}, `${b.day}: ${b.count}`));
+  });
+  const axis = [
+    svgEl("text", { class: "tick", x: 0, y: H - 2 }, model.bars[0].day.slice(5)),
+    n > 1 ? svgEl("text", { class: "tick", x: W, y: H - 2, "text-anchor": "end" }, model.bars[n - 1].day.slice(5)) : null,
+  ];
+  return el("div", { id: "entity-days" }, head,
+    svgEl("svg", {
+      class: "chart bars day-chart", viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": model.label,
+    }, marks, axis),
+    el("ul", { class: "sr-only" }, model.bars.map((b) => el("li", {}, `${b.day}: ${b.count}`))));
+}
+
 // ---------- entity page ----------
 async function entityDetail(kind, value) {
   if (!Object.hasOwn(ENTITY_KINDS, kind)) throw new Error("Unknown entity kind");
@@ -609,7 +668,8 @@ async function entityDetail(kind, value) {
       el("p", {}, huntLink(e.kind, e.value, `Hunt this ${ENTITY_KINDS[e.kind].toLowerCase()} (last 7 days)`)),
       el("div", { class: "kpis" },
         kpi(e.score, "Risk score"), kpi(counted.length, "Alerts counted"), kpi(e.incidents.length, "Incidents"),
-        kpi(e.event_count.toLocaleString(), "Events"), kpi(fmtTime(e.first_seen), "First seen"), kpi(fmtTime(e.last_seen), "Last seen"))),
+        kpi(e.event_count.toLocaleString(), "Events"), kpi(fmtTime(e.first_seen), "First seen"), kpi(fmtTime(e.last_seen), "Last seen")),
+      entityDayChart(e.alerts_by_day)),
     el("div", { class: "card" }, el("h2", {}, "Why this score"),
       el("p", { class: "muted" }, `Each alert whose evidence includes this ${ENTITY_KINDS[e.kind].toLowerCase()} adds its severity weight (${weights}), halved for every ${e.half_life_hours} hours between the alert and the newest event in the data (${fmtTime(e.anchor)}). Alerts closed as ${e.excluded_dispositions.map((d) => d.replace("_", " ")).join(" or ")} add nothing. The weights below sum to the score.`),
       table(["Alert", "Severity", "Status", "Last seen", "Base weight", "Age (h)", "Decay", "Weight"],

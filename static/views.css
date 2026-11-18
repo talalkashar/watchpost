@@ -536,6 +536,9 @@ body[data-view="entity"] .kpi .l {
   letter-spacing: var(--track);
   text-transform: uppercase;
 }
+body[data-view="entity"] #entity-days { margin-top: 16px; }
+body[data-view="entity"] #entity-days h2 { margin: 0 0 4px; font-size: 14px; }
+body[data-view="entity"] .day-chart { width: 100%; max-width: 520px; height: 84px; }
 body[data-view="overview"] .kpis .kpi:first-child {
   background: linear-gradient(180deg, rgb(255 255 255 / .05), var(--panel) 70%);
   border-color: var(--line-2);
