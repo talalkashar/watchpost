@@ -1,0 +1,30 @@
+# Local account persistence (T1136.001). useradd or usermod forced to UID 0, not a normal useradd.
+title: Linux UID Zero Local Account Creation
+id: e2b75c14-8d09-4a63-b7f1-5c8e1a4d6b90
+status: experimental
+description: |
+  useradd or usermod was invoked with -u 0, which creates or converts a local account into
+  another UID 0 identity. A normal useradd without -u 0 does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1136/001/
+tags:
+  - attack.persistence
+  - attack.t1136.001
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection_useradd:
+    message|contains|all:
+      - 'useradd'
+      - '-u 0'
+  selection_usermod:
+    message|contains|all:
+      - 'usermod'
+      - '-u 0'
+  condition: 1 of selection_*
+falsepositives:
+  - Rare recovery work that intentionally creates a second UID 0 account
+level: critical

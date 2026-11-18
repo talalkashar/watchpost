@@ -1,0 +1,34 @@
+# Systemd service persistence (T1543.002). Matches unit-file paths, not systemctl status/cat/show.
+title: Linux Systemd Service Unit Persistence
+id: a3f8c2d1-6e40-4b97-8a15-2d9c7e4b0f63
+status: experimental
+description: |
+  A command wrote or referenced a unit path under the system or user systemd directories.
+  Read-only systemctl status, cat, and show lines are excluded.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1543/002/
+tags:
+  - attack.persistence
+  - attack.privilege_escalation
+  - attack.t1543.002
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection:
+    message|contains:
+      - '/etc/systemd/system/'
+      - '/usr/lib/systemd/system/'
+      - '/lib/systemd/system/'
+      - '.config/systemd/user/'
+  filter_read:
+    message|contains:
+      - 'systemctl status'
+      - 'systemctl cat'
+      - 'systemctl show'
+  condition: selection and not filter_read
+falsepositives:
+  - Package installers and administrators adding a reviewed unit under /etc/systemd/system
+level: high
