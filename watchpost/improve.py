@@ -181,20 +181,37 @@ def list_rule_history(conn, rule_id, limit=50):
 # --- Analyst feedback -> rule performance ---------------------------------------------
 
 def rule_performance(conn):
-    perf = {}
-    for rule in load_rules(conn, enabled_only=False):
-        row = conn.execute(
-            "SELECT COUNT(*) AS total,"
-            " SUM(status = 'open') AS open, SUM(status = 'investigating') AS investigating,"
-            " SUM(status = 'resolved') AS resolved,"
-            " SUM(disposition = 'true_positive') AS tp, SUM(disposition = 'false_positive') AS fp,"
-            " SUM(disposition = 'benign') AS benign"
-            " FROM alerts WHERE rule_id = ?", (rule["id"],)
-        ).fetchone()
-        stats = {k: row[k] or 0 for k in row.keys()}
+    """Alert counts for every rule, from one GROUP BY rule_id.
+
+    A rule with no alerts is still present, with those counts at 0 and
+    precision None. A resolved alert with no disposition counts as resolved
+    and not as tp, fp, or benign. Precision is tp / (tp + fp), or None when
+    neither is set. Benign is not part of that ratio. An alert whose rule_id
+    is not in the catalog is not a key.
+    """
+    rows = conn.execute(
+        "SELECT rule_id, COUNT(*) AS total,"
+        " SUM(status = 'open') AS open,"
+        " SUM(status = 'investigating') AS investigating,"
+        " SUM(status = 'resolved') AS resolved,"
+        " SUM(disposition = 'true_positive') AS tp,"
+        " SUM(disposition = 'false_positive') AS fp,"
+        " SUM(disposition = 'benign') AS benign"
+        " FROM alerts GROUP BY rule_id"
+    ).fetchall()
+    counted = {}
+    for row in rows:
+        stats = {k: row[k] or 0 for k in (
+            "total", "open", "investigating", "resolved", "tp", "fp", "benign")}
         labeled = stats["tp"] + stats["fp"]
         stats["precision"] = round(stats["tp"] / labeled, 3) if labeled else None
-        perf[rule["id"]] = stats
+        counted[row["rule_id"]] = stats
+    perf = {}
+    for rule in load_rules(conn, enabled_only=False):
+        perf[rule["id"]] = counted.get(rule["id"]) or {
+            "total": 0, "open": 0, "investigating": 0, "resolved": 0,
+            "tp": 0, "fp": 0, "benign": 0, "precision": None,
+        }
     return perf
 
 
