@@ -553,7 +553,9 @@ def metrics(conn, hours=24):
     one = lambda sql, *a: conn.execute(sql, a).fetchone()[0]
     by = lambda sql, *a: [dict(r) for r in conn.execute(sql, a)]
 
-    # Anchor the activity histogram to the newest event so demo data (dated yesterday) is visible.
+    # 24 clock-hour buckets ending at the hour after the newest event ts, so demo
+    # data dated yesterday still shows. A missing hour stays 0 in that place.
+    # The count is ts, not ingested_at. failures is auth_failure only. No events is [].
     latest = one("SELECT MAX(ts) FROM events")
     histogram = []
     if latest:
@@ -561,8 +563,8 @@ def metrics(conn, hours=24):
         start = end - timedelta(hours=24)
         rows = conn.execute(
             "SELECT substr(ts, 1, 13) AS hour, COUNT(*) AS events,"
-            " SUM(event_type = 'auth_failure') AS failures FROM events WHERE ts >= ? AND ts < ?"
-            " GROUP BY hour", (iso(start), iso(end))).fetchall()
+            " SUM(event_type = 'auth_failure') AS failures FROM events"
+            " WHERE ts >= ? AND ts < ? GROUP BY hour", (iso(start), iso(end))).fetchall()
         counts = {r["hour"]: r for r in rows}
         for i in range(24):
             key = iso(start + timedelta(hours=i))[:13]

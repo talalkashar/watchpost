@@ -182,7 +182,7 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 
 `time_to_resolve_by_severity` reads alerts that have `resolved_at`. Rows are severity rank descending, then `severity`: `critical`, `high`, `medium`, `low`, then `info`. A name outside that catalog shares rank 0 with `info` and sorts by `severity` (`alert`, then `info`, then `urgent`). A severity with no resolved alert is not a row. `mean_minutes` and `max_minutes` are rounded to one decimal. An empty set is an empty list.
 
-`window_scope.newest_event_24h` is `activity_last_24h_of_data`: the 24 hours ending at the newest stored event, not the `hours` window. Alert counts, mean time to resolve, dispositions, false-positive rates, and open-alert aging read the current alerts table. `omitted_metrics` still names time to detect and dwell time.
+`window_scope.newest_event_24h` is `activity_last_24h_of_data`: 24 hourly buckets anchored on the newest event `ts`, filled with 0, not the `hours` window. An event in the newest hour is the last bucket. An hour with no events stays 0 in that place. The count is `ts`, not `ingested_at`. An event 25 hours before that newest hour is not a bucket and is not a count. An empty events table is `[]`. `failures` counts `auth_failure` only. Alert counts, mean time to resolve, dispositions, false-positive rates, and open-alert aging read the current alerts table. `omitted_metrics` still names time to detect and dwell time.
 
 `window_scope.note` says the same thing in one sentence: `hours` filters `events_ingested_window` by `ingested_at`, and `top_failure_ips`, `top_failure_users`, and `events_by_type` count every stored event.
 
