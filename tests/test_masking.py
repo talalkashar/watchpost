@@ -113,6 +113,23 @@ class PureMaskerTests(unittest.TestCase):
         self.assertEqual(out["reviewed_by"], self.m.user("analyst"))
         self.assertEqual(out["note"], "Analyst notes from analyst")
 
+    def test_ascii_case_only_keeps_accented_names_apart(self):
+        masker = masking.Masker(b"k" * 32, ["ÉRIN", "érin", "Alice"], self_name="érin")
+        accented = masker.text("ÉRIN called from 10.9.9.9 and 203.0.113.50")
+        self.assertNotIn("ÉRIN", accented)
+        self.assertIn("203.0.113.50", accented)
+        self.assertRegex(accented, r"internal-[0-9a-f]{8}")
+        self.assertNotEqual(masker.user("ÉRIN"), masker.user("érin"))
+        self.assertEqual(masker.text("érin"), "érin")  # the viewer's own name
+        self.assertEqual(masker.mask({"user": "érin"})["user"], "érin")
+        self.assertEqual(masker.mask({"user": "ÉRIN"})["user"], masker.user("ÉRIN"))
+        self.assertEqual(masker.user("Alice"), masker.user("alice"))
+        self.assertEqual(masker.user("ALICE"), masker.user("alice"))
+        self.assertEqual(masker.text("Alice and ALICE"), f"{masker.user('alice')} and {masker.user('alice')}")
+        own = masking.Masker(b"k" * 32, ["Alice", "alice", "dave"], self_name="alice")
+        self.assertEqual(own.mask({"user": "Alice", "note": "alice called dave"})["user"], "Alice")
+        self.assertEqual(own.text("alice called dave"), "alice called " + own.user("dave"))
+
 
 class MaskingKeyTests(unittest.TestCase):
     def setUp(self):
@@ -136,6 +153,30 @@ class MaskingKeyTests(unittest.TestCase):
         self.assertNotIn(b"first-audit-key", masking.key(k1))  # derived, not the audit key itself
         for c in (a, b, k1, k2):
             c.close()
+
+
+class AsciiFoldCandidateTests(unittest.TestCase):
+    def test_accented_names_count_separately_toward_the_limit(self):
+        """str.lower() would collapse these two and the cap would no longer see them."""
+        conn = connect(":memory:")
+        init_schema(conn)
+        self.addCleanup(conn.close)
+        conn.execute("INSERT INTO settings(key, value, updated_at, updated_by)"
+                     " VALUES ('viewer_masking', '1', '2026-01-01T00:00:00Z', 'test')")
+        for name in ("ÉRIN", "érin"):
+            conn.execute(
+                "INSERT INTO events(ts, ingested_at, source, event_type, severity, user, synthetic)"
+                " VALUES ('2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'test', 'auth_success', 'low', ?, 1)",
+                (name,))
+        conn.commit()
+        viewer = {"role": "viewer", "username": "viewer"}
+        with mock.patch.object(masking, "CANDIDATE_LIMIT", 1):
+            with self.assertRaises(masking.Unavailable):
+                masking.for_user(conn, viewer)
+        masker = masking.for_user(conn, viewer)
+        self.assertNotEqual(masker.user("ÉRIN"), masker.user("érin"))
+        self.assertEqual(masker.user("ÉRIN"), masker.user("Érin"))
+        self.assertEqual(set(masker.names), {"Érin", "érin"})
 
 
 class MaskingServerTests(ServerTestCase):
@@ -437,6 +478,61 @@ class MaskingServerTests(ServerTestCase):
         rule = next(r for r in json.loads(body)["rules"] if r["id"] == rule_id)
         self.assertRegex(rule["params"]["ignore_users"][0], PSEUDO_USER)
         self.assertRegex(rule["params"]["ignore_ips"][0], PSEUDO_IP)
+
+    def test_viewer_named_erin_does_not_unmask_the_other_account(self):
+        """ASCII fold only. A viewer named érin still sees ÉRIN as a pseudonym, and Alice stays one name."""
+        db = sqlite3.connect(self.db_path)
+        with db:
+            rows = (
+                ("ÉRIN", "marker-upper ÉRIN via 10.9.9.9 from 192.0.2.214", "192.0.2.214"),
+                ("érin", "marker-lower érin via 10.9.9.8 from 192.0.2.215", "192.0.2.215"),
+                ("Alice", "marker-alice-a Alice at the desk", "192.0.2.216"),
+                ("alice", "marker-alice-b alice at the desk", "192.0.2.217"),
+            )
+            db.executemany(
+                "INSERT INTO events(ts, ingested_at, source, event_type, severity, user, message, src_ip, synthetic)"
+                " VALUES ('2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'test', 'auth_success', 'low', ?, ?, ?, 1)",
+                rows)
+        db.close()
+        conn = connect(self.db_path)
+        create_user(conn, "érin", "viewer-erin-password", "viewer")
+        create_user(conn, "alice", "viewer-alice-password", "viewer")
+        conn.close()
+        set_masking(self, 1)
+
+        accented = self.client()
+        self.assertEqual(accented.login("érin", "viewer-erin-password")[0], 200)
+        self.assertEqual(accented.get("/api/auth/me")[1]["user"]["username"], "érin")
+        upper = accented.get("/api/events?q=marker-upper")[1]["events"][0]
+        lower = accented.get("/api/events?q=marker-lower")[1]["events"][0]
+        self.assertEqual(lower["user"], "érin")
+        self.assertIn("érin", lower["message"])
+        self.assertRegex(upper["user"], PSEUDO_USER)
+        self.assertNotIn("ÉRIN", upper["message"])
+        self.assertIn("192.0.2.214", upper["message"])
+        self.assertRegex(upper["message"], PSEUDO_IP)
+        self.assertNotIn("10.9.9.9", json.dumps(upper))
+        pivoted = accented.get("/api/events?user=" + quote(upper["user"]))[1]
+        self.assertEqual(pivoted["total"], 1)
+        self.assertEqual(pivoted["events"][0]["src_ip"], "192.0.2.214")
+
+        own = self.client()
+        self.assertEqual(own.login("alice", "viewer-alice-password")[0], 200)
+        alice = own.get("/api/events?q=marker-alice-a")[1]["events"][0]
+        alice_two = own.get("/api/events?q=marker-alice-b")[1]["events"][0]
+        self.assertEqual(alice["user"], "Alice")
+        self.assertEqual(alice_two["user"], "alice")
+        self.assertNotRegex(alice["user"], PSEUDO_USER)
+
+        other = self.viewer.get("/api/events?q=marker-upper")[1]["events"][0]
+        other_lower = self.viewer.get("/api/events?q=marker-lower")[1]["events"][0]
+        one = self.viewer.get("/api/events?q=marker-alice-a")[1]["events"][0]
+        two = self.viewer.get("/api/events?q=marker-alice-b")[1]["events"][0]
+        self.assertNotEqual(other["user"], other_lower["user"])
+        self.assertEqual(one["user"], two["user"])
+        self.assertNotIn("ÉRIN", other["message"])
+        self.assertNotIn("érin", other_lower["message"])
+        self.assertIn("192.0.2.215", other_lower["message"])
 
 
 if __name__ == "__main__":

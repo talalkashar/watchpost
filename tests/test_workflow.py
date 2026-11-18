@@ -424,12 +424,16 @@ class ChangeEvidenceTests(ServerTestCase):
         self.assertEqual(status, 201, data)
         alert = analyst.get("/api/alerts?rule_id=brute_force_ip&status=open")[1][0]
         analyst.post(f"/api/alerts/{alert['id']}/status", {"status": "resolved", "disposition": "true_positive"})
-        # Python lowercases the non-ASCII capital, so the rule would skip these events for either spelling.
-        for names in (["\u00e1dmin"], ["\u00c1DMIN"], ["someone", "\u00e1dmin", "\u00c1dmin"]):
+        # ASCII case still hides the confirmed alert. ádmin is not Ádmin.
+        for names in (["\u00c1DMIN"], ["someone", "\u00e1dmin", "\u00c1dmin"]):
             with self.subTest(names=names):
                 status, data, _ = self.propose(analyst, "brute_force_ip", ignore_users=names)
                 self.assertEqual(status, 400, data)
                 self.assertIn("true positive", data["error"])
+        status, change, _ = self.propose(analyst, "brute_force_ip", ignore_users=["\u00e1dmin"])
+        self.assertEqual(status, 201, change)
+        self.assertEqual([(x["param"], x["value"]) for x in change["evaluation"]["ignore_additions"]],
+                         [("ignore_users", "\u00e1dmin")])
         # Spellings that fold to one name are one addition, not two.
         change = self.propose(analyst, "brute_force_ip", ignore_users=["Bob", "bob", "BOB"])[1]
         self.assertEqual([(x["param"], x["value"]) for x in change["evaluation"]["ignore_additions"]],

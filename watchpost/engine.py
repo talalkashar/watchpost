@@ -57,6 +57,10 @@ def load_rules(conn, enabled_only=True):
 
 # --- Ingestion ------------------------------------------------------------------
 
+# The response and the stored batch errors slice keep this many rejection reasons.
+REJECTION_LIMIT = 100
+
+
 def store_batch(conn, events, rejections, source, fmt, submitted_by, synthetic=False):
     """Persist a batch atomically and return its id. Detection is run separately."""
     batch_id = uuid.uuid4().hex
@@ -71,19 +75,21 @@ def store_batch(conn, events, rejections, source, fmt, submitted_by, synthetic=F
             "INSERT INTO ingest_batches(id, created_at, source, format, received, accepted, rejected,"
             " errors, synthetic, submitted_by, detection_status) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (batch_id, now, source, fmt, len(events) + len(rejections), len(events), len(rejections),
-             json.dumps(rejections[:100]), int(synthetic), submitted_by, "pending"),
+             json.dumps(rejections[:REJECTION_LIMIT]), int(synthetic), submitted_by, "pending"),
         )
     return batch_id
 
 
 def ingest(conn, events, rejections, source, fmt, submitted_by, synthetic=False):
     batch_id = store_batch(conn, events, rejections, source, fmt, submitted_by, synthetic)
+    shown = rejections[:REJECTION_LIMIT]
     result = {
         "batch_id": batch_id,
         "received": len(events) + len(rejections),
         "accepted": len(events),
         "rejected": len(rejections),
-        "rejections": rejections[:100],
+        "rejections": shown,
+        "rejections_omitted": len(rejections) - len(shown),
     }
     _publish_events(conn, batch_id, len(events), synthetic)
     if not events:
@@ -361,7 +367,7 @@ def _candidate_alerts(conn):
         alert = alerts[row["alert_id"]]
         for kind in correlate_mod.ENTITY_TYPES:
             if row[kind]:
-                value = row[kind].lower() if kind == "user" else row[kind]
+                value = correlate_mod.entity_key(kind, row[kind])
                 alert["entities"][kind].add(value)
                 alert["sightings"].add((kind, value, row["ts"]))
     tactics = {r["id"]: [t["tactic"] for t in r["techniques"]] for r in load_rules(conn, enabled_only=False)}
@@ -415,6 +421,8 @@ def correlate_alerts(conn, window_seconds=correlate_mod.DEFAULT_WINDOW_SECONDS):
 # --- Live stream (SSE) ------------------------------------------------------------
 
 STREAM_EVENT_LIMIT = 50
+# Alerts and incidents published for one detection run, newest by id. The rest are omitted on health.
+STREAM_DETECTION_LIMIT = 100
 STREAM_EVENT_FIELDS = ("id, ts, source, host, event_type, outcome, severity, user, src_ip, dest_ip, message,"
                        " synthetic")
 STREAM_ALERT_FIELDS = ("id, rule_id, severity, title, status, group_key, first_seen, last_seen, event_count,"
@@ -426,34 +434,65 @@ def _publish_events(conn, batch_id, count, synthetic):
     if not count or not stream.BROKER.active():
         return
     try:
-        rows = conn.execute(f"SELECT {STREAM_EVENT_FIELDS} FROM events WHERE batch_id = ?"
-                            " ORDER BY ts DESC, id DESC LIMIT ?", (batch_id, STREAM_EVENT_LIMIT))
-        stream.BROKER.publish("event", {"batch_id": batch_id, "count": count, "synthetic": bool(synthetic),
-                                        "events": [dict(r) for r in rows]})
+        rows = [dict(r) for r in conn.execute(
+            f"SELECT {STREAM_EVENT_FIELDS} FROM events WHERE batch_id = ?"
+            " ORDER BY ts DESC, id DESC LIMIT ?", (batch_id, STREAM_EVENT_LIMIT))]
+        stream.BROKER.publish("event", {
+            "batch_id": batch_id, "count": count, "synthetic": bool(synthetic),
+            "events": rows, "events_omitted": count - len(rows),
+        })
     except Exception as exc:  # the stream is best-effort; storage already succeeded
         record_error(conn, "stream", exc, guidance="Live dashboard updates may lag; reload the dashboard.")
 
 
+def _touched_since(conn, table, columns, started):
+    """Rows of `table` with updated_at >= started: the newest limit by id, then id order.
+
+    Returns (rows, omitted). `omitted` is 0 when that set fits in STREAM_DETECTION_LIMIT.
+    """
+    total = conn.execute(
+        f"SELECT COUNT(*) FROM {table} WHERE updated_at >= ?", (started,)).fetchone()[0]
+    rows = [dict(r) for r in conn.execute(
+        f"SELECT {columns} FROM {table} WHERE updated_at >= ? ORDER BY id DESC LIMIT ?",
+        (started, STREAM_DETECTION_LIMIT))]
+    rows.reverse()
+    return rows, total - len(rows)
+
+
 def _publish_detection(conn, started, summary):
-    """Publish alerts (and incidents, once that table exists) touched by this run, plus detection health."""
+    """Publish the newest alerts and incidents this run touched, plus detection health.
+
+    At most STREAM_DETECTION_LIMIT of each, still in id order. A failing run publishes
+    neither, and both omitted counts are 0. Never fails the detection run.
+    """
     if not stream.BROKER.active():
         return
     try:
         failed = summary["status"] != "ok"
-        stream.BROKER.publish("health", {"partial": True, "checks": {"detection": "failing" if failed else "ok"},
-                                         "error": summary.get("error")})
+        if failed:
+            alerts, alerts_omitted = [], 0
+            incidents, incidents_omitted = [], 0
+        else:
+            alerts, alerts_omitted = _touched_since(conn, "alerts", STREAM_ALERT_FIELDS, started)
+            for alert in alerts:
+                alert["change"] = "created" if alert["created_at"] >= started else "updated"
+            has_incidents = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'incidents'").fetchone()
+            if has_incidents:
+                incidents, incidents_omitted = _touched_since(conn, "incidents", "*", started)
+            else:
+                incidents, incidents_omitted = [], 0
+        stream.BROKER.publish("health", {
+            "partial": True, "checks": {"detection": "failing" if failed else "ok"},
+            "error": summary.get("error"),
+            "alerts_omitted": alerts_omitted, "incidents_omitted": incidents_omitted,
+        })
         if failed:
             return
-        for row in conn.execute(f"SELECT {STREAM_ALERT_FIELDS} FROM alerts WHERE updated_at >= ? ORDER BY id",
-                                (started,)):
-            alert = dict(row)
-            alert["change"] = "created" if alert["created_at"] >= started else "updated"
+        for alert in alerts:
             stream.BROKER.publish("alert", alert)
-        has_incidents = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'incidents'").fetchone()
-        if has_incidents:
-            for row in conn.execute("SELECT * FROM incidents WHERE updated_at >= ? ORDER BY id", (started,)):
-                stream.BROKER.publish("incident", dict(row))
+        for incident in incidents:
+            stream.BROKER.publish("incident", incident)
     except Exception as exc:
         record_error(conn, "stream", exc, guidance="Live dashboard updates may lag; reload the dashboard.")
 

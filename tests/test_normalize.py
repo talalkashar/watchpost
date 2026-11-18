@@ -2,7 +2,8 @@ import json
 import unittest
 from datetime import datetime, timezone
 
-from watchpost.diagnostics import redact
+from watchpost.db import connect, init_schema
+from watchpost.diagnostics import record_error, redact
 from watchpost.normalize import (EventError, MAX_LEN, normalize_authlog_line, normalize_record,
                                  normalize_weblog_line, parse_payload)
 
@@ -262,6 +263,43 @@ class RedactionTests(unittest.TestCase):
                 raw = '{"%s": "a\\"supersecret"}' % key
                 self.assertNotIn("supersecret", redact(raw))
                 self.assertIn('"[REDACTED]"', redact(raw))
+
+    def test_json_keys_use_the_same_secret_names_as_key_value(self):
+        # Quoted JSON only named password, passwd, secret, token, and api_key.
+        # api-key, authorization, and session stayed in the message and the error log.
+        sample = "hunter2value"
+        keys = ("pwd", "api-key", "apikey", "api_key", "authorization", "cookie", "session",
+                "API-KEY", "Session")
+        for key in keys:
+            with self.subTest(key=key):
+                raw = '{"%s": "a\\"%s", "user": "alice"}' % (key, sample)
+                out = redact(raw)
+                self.assertNotIn(sample, out)
+                self.assertEqual(out, '{"%s": "[REDACTED]", "user": "alice"}' % key)
+        self.assertIn(sample, redact('{"session_id": "%s"}' % sample))
+
+        message = ('{"api-key": "%s", "authorization": "Bearer %s", '
+                   '"session": "a\\"%s", "user": "alice"}') % (sample, sample, sample)
+        event = normalize_record({"ts": "2026-09-15T10:00:00Z", "message": message}, "api", NOW)
+        self.assertNotIn(sample, event["message"])
+        self.assertIn('"user": "alice"', event["message"])
+        # A top-level key is real JSON in the stored raw record.
+        top = normalize_record({"ts": "2026-09-15T10:00:00Z", "message": "line",
+                                "api-key": sample, "authorization": sample, "session": sample},
+                               "api", NOW)
+        self.assertNotIn(sample, top["raw"])
+        self.assertIn('"api-key": "[REDACTED]"', top["raw"])
+        self.assertIn('"authorization": "[REDACTED]"', top["raw"])
+        self.assertIn('"session": "[REDACTED]"', top["raw"])
+
+        conn = connect(":memory:")
+        init_schema(conn)
+        self.addCleanup(conn.close)
+        stored = record_error(conn, "ingest", message)
+        self.assertNotIn(sample, stored)
+        logged = conn.execute("SELECT message FROM error_log").fetchone()[0]
+        self.assertNotIn(sample, logged)
+        self.assertIn("[REDACTED]", logged)
 
     def test_escaped_json_secret_is_redacted_in_the_stored_message(self):
         secret = '{"password": "a\\"supersecret"}'

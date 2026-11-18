@@ -1,6 +1,7 @@
 import json
 import unittest
 from datetime import timedelta
+from pathlib import Path
 
 from watchpost import correlate, engine
 from watchpost.db import connect, init_schema, iso, utcnow
@@ -81,6 +82,19 @@ class CorrelateTests(unittest.TestCase):
         self.assertEqual([(g["incident_id"], g["alert_ids"], g["new_alert_ids"]) for g in groups],
                          [(7, [1, 3], [3]), (9, [2], [])])
 
+    def test_summary_folds_hosts_that_differ_only_by_case(self):
+        # ASCII letters only. WEB01 and web01 are one host; a non-ASCII case change is not.
+        folded = correlate.summarize([
+            instant(1, 0, host="WEB01", ip="203.0.113.5"),
+            instant(2, 5, host="web01", user="Erin"),
+            instant(3, 10, host="Db01", user="erin"),
+        ])
+        self.assertEqual(folded["entities"]["host"], ["db01", "web01"])
+        self.assertEqual(folded["entities"]["user"], ["erin"])
+        self.assertEqual(folded["entities"]["src_ip"], ["203.0.113.5"])
+        # The title keeps the first three entities, so the folded host spelling is what it prints.
+        self.assertEqual(folded["title"], "Related alerts: 203.0.113.5, erin, db01")
+
     def test_summary_escalates_on_three_tactics(self):
         base = [{**alert(1, 0, ip="203.0.113.5"), "tactics": ["Credential Access"], "synthetic": 1},
                 {**alert(2, 5, ip="203.0.113.5", user="frank", severity="high"),
@@ -112,6 +126,60 @@ class CorrelateTests(unittest.TestCase):
         self.assertFalse(correlate.should_open([alert(1, 0)]))
         self.assertTrue(correlate.should_open([alert(1, 0, severity="critical")]))
         self.assertTrue(correlate.should_open([alert(1, 0), alert(2, 1)]))
+
+    def test_ascii_fold_keeps_accented_names_apart(self):
+        # ÉRIN and érin are two accounts. Erin and erin are one. The same split for hosts.
+        apart = correlate.correlate([instant(1, 0, user="ÉRIN"), instant(2, 5, user="érin")],
+                                    window_seconds=600)
+        self.assertEqual([g["alert_ids"] for g in apart], [[1], [2]])
+        joined = correlate.correlate([instant(1, 0, user="ERIN", host="WEB01"),
+                                      instant(2, 5, user="erin", host="web01")], window_seconds=600)
+        self.assertEqual([g["alert_ids"] for g in joined], [[1, 2]])
+        hosts = correlate.correlate([instant(1, 0, host="Érin-host"), instant(2, 5, host="érin-host")],
+                                    window_seconds=600)
+        self.assertEqual([g["alert_ids"] for g in hosts], [[1], [2]])
+        # A source IP is the stored address, so these two spellings do not share a key.
+        ips = correlate.correlate([instant(1, 0, ip="2001:DB8::1"), instant(2, 5, ip="2001:db8::1")],
+                                  window_seconds=600)
+        self.assertEqual([g["alert_ids"] for g in ips], [[1], [2]])
+
+    def test_sightings_fold_ascii_only(self):
+        def seen(aid, kind, value):
+            field = "ip" if kind == "src_ip" else kind
+            row = instant(aid, aid * 60, **{field: value})
+            row["sightings"] = [(kind, value, row["first_seen"])]
+            return row
+
+        self.assertEqual(len(correlate.correlate([seen(1, "user", "ÉRIN"), seen(2, "user", "érin")],
+                                                 window_seconds=600)), 2)
+        self.assertEqual(len(correlate.correlate([seen(1, "user", "ERIN"), seen(2, "user", "erin")],
+                                                 window_seconds=600)), 1)
+        self.assertEqual(len(correlate.correlate([seen(1, "host", "Érin-host"), seen(2, "host", "érin-host")],
+                                                 window_seconds=600)), 2)
+        self.assertEqual(len(correlate.correlate([seen(1, "src_ip", "2001:DB8::1"),
+                                                  seen(2, "src_ip", "2001:db8::1")],
+                                                 window_seconds=600)), 2)
+
+    def test_summary_stores_the_ascii_fold(self):
+        folded = correlate.summarize([
+            instant(1, 0, user="ÉRIN", host="Érin-host", ip="2001:DB8::1"),
+            instant(2, 5, user="érin", host="érin-host", ip="2001:db8::1"),
+            instant(3, 10, user="ERIN", host="WEB01"),
+            instant(4, 15, user="erin", host="web01"),
+        ])
+        # ASCII letters inside the name still fold, so ÉRIN is stored as Érin. É itself does not.
+        self.assertEqual(folded["entities"]["user"], ["erin", "Érin", "érin"])
+        self.assertEqual(folded["entities"]["host"], ["web01", "Érin-host", "érin-host"])
+        self.assertEqual(folded["entities"]["src_ip"], ["2001:DB8::1", "2001:db8::1"])
+
+    def test_the_docs_name_the_ascii_fold(self):
+        root = Path(__file__).resolve().parent.parent
+        api = (root / "docs" / "API.md").read_text()
+        reference = (root / "docs" / "REFERENCE.md").read_text()
+        self.assertIn("`ÉRIN` and `érin` stay two accounts", api)
+        self.assertIn("a source IP stays the stored address", api)
+        self.assertIn("`Érin-host` and `érin-host` stay two hosts", reference)
+        self.assertIn("Source IPs stay the stored address", reference)
 
 
 class EngineCorrelationTests(unittest.TestCase):
@@ -178,6 +246,61 @@ class EngineCorrelationTests(unittest.TestCase):
         self.assertEqual(incidents[0]["alert_count"], 4)
         self.assertIn("Exfiltration", json.loads(incidents[0]["stages"]))
         self.assertEqual({i for _, i in links}, {incident["id"]})
+
+    def test_stored_incident_folds_host_case(self):
+        records = self.intrusion()
+        for record in records:
+            if record["event_type"] == "auth_failure" and record.get("user") == "frank":
+                record["host"] = "WEB01"
+            elif record["event_type"] == "privilege_escalation":
+                record["host"] = "web01"
+        self.ingest(records)
+        incidents, _ = self.incidents()
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(json.loads(incidents[0]["entities"])["host"], ["web01"])
+        self.assertNotIn("WEB01", incidents[0]["title"])
+        engine.run_detection(self.conn, trigger="rerun")
+        again, _ = self.incidents()
+        self.assertEqual(json.loads(again[0]["entities"])["host"], ["web01"])
+
+    def test_stored_incident_folds_ascii_case_only(self):
+        # One critical alert per spelling. ASCII twins share an incident; accented twins do not.
+        def add(user=None, host=None, src_ip=None):
+            ts = self.at(0)
+            event_id = self.conn.execute(
+                "INSERT INTO events(ts, ingested_at, source, host, event_type, severity, user, src_ip, synthetic)"
+                " VALUES (?,?,?,?,?,?,?,?,1)",
+                (ts, ts, "test", host, "auth_failure", "low", user, src_ip)).lastrowid
+            alert_id = self.conn.execute(
+                "INSERT INTO alerts(rule_id, rule_version, group_key, severity, title, explanation, status,"
+                " first_seen, last_seen, event_count, synthetic, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ("brute_force_ip", 1, f"k{event_id}", "critical", "why", "why", "open",
+                 ts, ts, 1, 1, ts, ts)).lastrowid
+            self.conn.execute("INSERT INTO alert_events(alert_id, event_id) VALUES (?,?)", (alert_id, event_id))
+
+        add(user="ÉRIN")
+        add(user="érin")
+        add(user="ERIN")
+        add(user="erin")
+        add(host="Érin-host")
+        add(host="érin-host")
+        add(host="WEB01")
+        add(host="web01")
+        add(src_ip="2001:DB8::1")
+        engine.correlate_alerts(self.conn)
+        rows = [json.loads(r[0]) for r in self.conn.execute("SELECT entities FROM incidents ORDER BY id")]
+        self.assertEqual(len(rows), 7)
+        users = sorted(u for row in rows for u in row["user"])
+        hosts = sorted(h for row in rows for h in row["host"])
+        ips = sorted(ip for row in rows for ip in row["src_ip"])
+        self.assertEqual(users, ["erin", "Érin", "érin"])
+        self.assertEqual(hosts, ["web01", "Érin-host", "érin-host"])
+        self.assertEqual(ips, ["2001:DB8::1"])
+        again = engine.correlate_alerts(self.conn)
+        self.assertEqual(again, {"incidents_created": 0, "incidents_updated": 0})
+        stored = [json.loads(r[0]) for r in self.conn.execute("SELECT entities FROM incidents ORDER BY id")]
+        self.assertEqual(stored, rows)
 
     def test_resolved_incident_is_not_reopened(self):
         self.ingest(self.intrusion())

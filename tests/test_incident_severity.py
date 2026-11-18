@@ -36,7 +36,8 @@ class IncidentSeverityFilterTests(unittest.TestCase):
         add_incident(self.conn, 6, "info", "open", 6)
 
     def ids(self, **params):
-        return [row["id"] for row in list_incidents(self.conn, params)]
+        rows, _omitted = list_incidents(self.conn, params)
+        return [row["id"] for row in rows]
 
     def test_a_comma_list_returns_those_severities(self):
         self.assertEqual(self.ids(severity="critical,high"), [1, 2, 5])

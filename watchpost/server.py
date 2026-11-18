@@ -24,6 +24,17 @@ from .health import STATIC_DIR, run_health_checks
 from .normalize import EventError, parse_payload, validate_source
 
 SESSION_COOKIE = "wp_session"
+# The request line is decoded as iso-8859-1, so this count is the query's wire bytes.
+# A longer string is refused before parse_qs. Field limits (a hunt query is 500 characters) still apply under it.
+MAX_QUERY_BYTES = 8192
+# Health details returns this many error_log rows, newest by id. The rest are recent_errors_omitted.
+RECENT_ERRORS_LIMIT = 20
+# Health details returns this many detection runs, newest by id. The rest are recent_detection_runs_omitted.
+RECENT_RUNS_LIMIT = 10
+# These two stay bare arrays. The rows past the cap are X-Watchpost-Omitted.
+AUDIT_LIMIT = 200
+BATCH_LIMIT = 50
+OMITTED_HEADER = "X-Watchpost-Omitted"
 
 
 class ApiError(Exception):
@@ -35,9 +46,14 @@ class ApiError(Exception):
 def query_params(raw):
     """One value per query key. A repeated key is a 400 that names it.
 
+    A query longer than MAX_QUERY_BYTES is 414 before parse_qs. The hunt
+    check (500 characters) runs only after this returns.
+
     parse_qs keeps every value, and taking the first would hide the rest
     (severity=low&severity=critical would filter as low).
     """
+    if len(raw) > MAX_QUERY_BYTES:
+        raise ApiError(414, f"query string exceeds {MAX_QUERY_BYTES} bytes")
     pairs = parse_qs(raw)
     for key, values in pairs.items():
         if len(values) > 1:
@@ -196,13 +212,33 @@ def health_summary(req):
             "checks": {c["name"]: c["status"] for c in report["checks"]}}
 
 
+def _newest(conn, count_sql, rows_sql, limit):
+    """The newest `limit` rows, and how many the cap left out (0 when the table fits)."""
+    total = conn.execute(count_sql).fetchone()[0]
+    rows = [dict(r) for r in conn.execute(rows_sql, (limit,))]
+    return rows, total - len(rows)
+
+
+def _set_omitted(req, omitted):
+    """A bare-array response cannot grow a field. The count rides in this header."""
+    req.extra_headers[OMITTED_HEADER] = str(omitted)
+
+
 @route("GET", "/api/health/details")
 def health_details(req):
     report = run_health_checks(lambda: connect(req.app.config.db_path), req.app.config.db_path)
-    report["recent_errors"] = [dict(r) for r in req.conn.execute(
-        "SELECT created_at, component, message, guidance FROM error_log ORDER BY id DESC LIMIT 20")]
-    report["recent_detection_runs"] = [dict(r) for r in req.conn.execute(
-        "SELECT * FROM detection_runs ORDER BY id DESC LIMIT 10")]
+    errors, errors_omitted = _newest(
+        req.conn, "SELECT COUNT(*) FROM error_log",
+        "SELECT created_at, component, message, guidance FROM error_log ORDER BY id DESC LIMIT ?",
+        RECENT_ERRORS_LIMIT)
+    runs, runs_omitted = _newest(
+        req.conn, "SELECT COUNT(*) FROM detection_runs",
+        "SELECT * FROM detection_runs ORDER BY id DESC LIMIT ?",
+        RECENT_RUNS_LIMIT)
+    report["recent_errors"] = errors
+    report["recent_errors_omitted"] = errors_omitted
+    report["recent_detection_runs"] = runs
+    report["recent_detection_runs_omitted"] = runs_omitted
     return report
 
 
@@ -294,8 +330,12 @@ def ingest_upload(req):
 
 @route("GET", "/api/ingest/batches")
 def batches(req):
-    rows = req.conn.execute("SELECT * FROM ingest_batches ORDER BY created_at DESC LIMIT 50")
-    return [row_to_dict(r, ["errors"]) for r in rows]
+    total = req.conn.execute("SELECT COUNT(*) FROM ingest_batches").fetchone()[0]
+    rows = req.conn.execute(
+        "SELECT * FROM ingest_batches ORDER BY created_at DESC LIMIT ?", (BATCH_LIMIT,))
+    shown = [row_to_dict(r, ["errors"]) for r in rows]
+    _set_omitted(req, total - len(shown))
+    return shown
 
 
 @route("POST", "/api/demo/load", role="admin")
@@ -462,7 +502,9 @@ def event_ecs(req, event_id):
 @route("GET", "/api/alerts")
 def alerts(req):
     now = utcnow()
-    return [{**a, "sla_breach": triage.pending_breaches(a, now)} for a in queries.list_alerts(req.conn, req.query)]
+    rows, omitted = queries.list_alerts(req.conn, req.query)
+    _set_omitted(req, omitted)
+    return [{**a, "sla_breach": triage.pending_breaches(a, now)} for a in rows]
 
 
 @route("GET", r"/api/alerts/(\d+)")
@@ -492,7 +534,9 @@ def alert_assign(req, alert_id):
 
 @route("GET", "/api/incidents")
 def incident_list(req):
-    return incidents.list_incidents(req.conn, req.query)
+    rows, omitted = incidents.list_incidents(req.conn, req.query)
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("GET", r"/api/incidents/(\d+)")
@@ -1024,7 +1068,11 @@ def user_mfa_reset(req, username):
 
 @route("GET", "/api/audit", role="admin")
 def audit_log(req):
-    return [dict(r) for r in req.conn.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT 200")]
+    rows, omitted = _newest(
+        req.conn, "SELECT COUNT(*) FROM audit_log",
+        "SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", AUDIT_LIMIT)
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("GET", "/api/audit/verify", role="admin")
@@ -1076,15 +1124,54 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
+    def _content_length(self):
+        """The single Content-Length as an int, or an error string.
+
+        A POST is framed only by one header whose value is one token of ASCII
+        digits. Two headers, a comma list, or any other token is not a length:
+        the first header must not be trusted and the body must not be read.
+        """
+        if self.headers.get("Transfer-Encoding") is not None:
+            return "Transfer-Encoding is not supported"
+        lengths = self.headers.get_all("Content-Length") or []
+        if not lengths:
+            return "Content-Length is required"
+        token = lengths[0].strip()
+        if len(lengths) != 1 or not token.isascii() or not token.isdigit():
+            return "invalid Content-Length"
+        return int(token)
+
+    def _unframed_post_message(self):
+        """A POST body is framed only by one integer Content-Length.
+
+        Chunked encoding is not read. A missing length is not an empty body.
+        A second Content-Length, or a value that is not one ASCII integer
+        token, is not a length either. Any of these leaves unread bytes that
+        a keep-alive socket would take as the next request.
+        """
+        if self.command != "POST":
+            return None
+        length = self._content_length()
+        if isinstance(length, str):
+            return length
+        return None
+
+    def _reject_unframed_post(self):
+        message = self._unframed_post_message()
+        if message is None:
+            return False
+        self.close_connection = True
+        self._send(400, {"error": message},
+                   extra_headers={"Cache-Control": "no-store", "Connection": "close"})
+        return True
+
     def _read_body(self):
-        length = self.headers.get("Content-Length")
-        if length is None:
-            return b""
-        try:
-            length = int(length)
-        except ValueError:
-            raise ApiError(400, "invalid Content-Length")
-        if length < 0 or length > self.app.config.max_upload_bytes:
+        message = self._unframed_post_message()
+        if message is not None:
+            self.close_connection = True
+            raise ApiError(400, message)
+        length = self._content_length()
+        if length > self.app.config.max_upload_bytes:
             raise ApiError(413, f"request body exceeds {self.app.config.max_upload_bytes} bytes")
         return self.rfile.read(length)
 
@@ -1094,17 +1181,22 @@ class Handler(BaseHTTPRequestHandler):
         return morsel.value if morsel else None
 
     def _client_ip(self):
-        """The peer address, or with SIEM_TRUST_PROXY=1 and a loopback peer, the last X-Forwarded-For entry.
+        """The peer address, or the last entry of exactly one X-Forwarded-For header.
 
-        The last entry is the one the local proxy wrote itself; earlier entries are client-supplied.
+        With SIEM_TRUST_PROXY=1 and a loopback peer, one header is the line the local
+        proxy wrote. Its last comma-separated entry is the client. Two headers mean a
+        client-supplied line arrived as well, so neither is used. A value that is not
+        an address stays the peer address.
         """
         ip = self.client_address[0]
         if self.app.config.trust_proxy and ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
-            forwarded = self.headers.get("X-Forwarded-For", "").split(",")[-1].strip()
-            try:
-                return str(ipaddress.ip_address(forwarded))
-            except ValueError:
-                pass
+            forwarded = self.headers.get_all("X-Forwarded-For") or []
+            if len(forwarded) == 1:
+                candidate = forwarded[0].split(",")[-1].strip()
+                try:
+                    return str(ipaddress.ip_address(candidate))
+                except ValueError:
+                    pass
         return ip
 
     def _rate_limited(self, path):
@@ -1126,10 +1218,13 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if self._rate_limited(parsed.path):
             return
+        if self._reject_unframed_post():
+            return
         if not parsed.path.startswith("/api/"):
             return self._static(parsed.path)
         self.status = 200
         self.set_cookie = None
+        self.extra_headers = {}
         self.conn = None
         self.masker = None
         try:
@@ -1159,6 +1254,7 @@ class Handler(BaseHTTPRequestHandler):
             if result is STREAM_RESPONSE:
                 return self._stream()
             headers = {"Cache-Control": "no-store"}
+            headers.update(self.extra_headers)
             if self.set_cookie is not None:
                 headers["Set-Cookie"] = self._cookie_header(self.set_cookie)
             if isinstance(result, Download):
@@ -1299,12 +1395,14 @@ class Handler(BaseHTTPRequestHandler):
         return "; ".join(parts)
 
     def _static(self, path):
+        """A file that exists is no-cache. A missing path or a non-GET is no-store, like an API error."""
         if self.command != "GET":
-            return self._send(405, {"error": "method not allowed"})
+            return self._send(405, {"error": "method not allowed"},
+                              extra_headers={"Cache-Control": "no-store"})
         name = "index.html" if path in ("", "/") else path.lstrip("/")
         target = (STATIC_DIR / name).resolve()
         if STATIC_DIR.resolve() not in target.parents or not target.is_file():
-            return self._send(404, b"not found", "text/plain")
+            return self._send(404, b"not found", "text/plain", {"Cache-Control": "no-store"})
         ctype = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         if ctype.startswith("text/") or ctype.endswith("javascript"):
             ctype += "; charset=utf-8"

@@ -234,6 +234,46 @@ class CompileTests(unittest.TestCase):
         self.assertFalse(sigma.matches(c["params"], {"event_type": "auth_success", "user": "root", "src_ip": "203.0.113.5"}))
 
 
+class SigmaGroupKeyTests(unittest.TestCase):
+    def test_host_and_user_keys_fold_ascii_only(self):
+        params = compiled("  sel:\n    message: hit\n  condition: sel\n")
+        # The matcher still casefolds the whole string. Grouping does not.
+        folded = compiled("  sel:\n    user: érin\n  condition: sel\n")
+        self.assertTrue(sigma.matches(folded, {"user": "ÉRIN"}))
+        self.assertTrue(sigma.matches(folded, {"user": "érin"}))
+
+        def event(i, **fields):
+            return {"id": i, "ts": "2026-09-15T12:00:00+00:00", "message": "hit", **fields}
+
+        events = [
+            event(1, host="WEB01"),
+            event(2, host="web01"),
+            event(3, host="Érin-host"),
+            event(4, host="érin-host"),
+            event(5, user="Alice"),
+            event(6, user="alice"),
+            event(7, user="ALICE"),
+            event(8, user="ÉRIN"),
+            event(9, user="érin"),
+            event(10, src_ip="2001:DB8::1", host="WEB01", user="Alice"),
+            event(11, src_ip="2001:db8::1", host="web01", user="alice"),
+            event(12, src_ip="", host="WEB01"),
+            event(13),
+        ]
+        findings = sigma.run(events, params)
+        found = {f["group_key"]: f["event_ids"] for f in findings}
+        self.assertEqual(found["web01"], [1, 2, 12])
+        self.assertEqual(found["Érin-host"], [3])
+        self.assertEqual(found["érin-host"], [4])
+        self.assertEqual(found["alice"], [5, 6, 7])
+        self.assertEqual(found["Érin"], [8])
+        self.assertEqual(found["érin"], [9])
+        self.assertEqual(found["2001:DB8::1"], [10])
+        self.assertEqual(found["2001:db8::1"], [11])
+        self.assertEqual(found["unknown"], [13])
+        self.assertIn("for web01", next(f["title"] for f in findings if f["group_key"] == "web01"))
+
+
 WEB_RULE = rule_yaml("  sel:\n    event_type: web_request\n    message|contains: /cgi-bin/.%2e/\n  condition: sel\n",
                      title="Path Traversal Probe")
 WEB_ID = "sigma_path_traversal_probe"

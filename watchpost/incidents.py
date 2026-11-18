@@ -6,9 +6,11 @@ from . import assets, attack, correlate, improve, search_rules, sigma, simulate
 from .db import audit, now_iso, row_to_dict, transaction
 from .engine import load_rules
 from .normalize import SEVERITIES
-from .queries import EVENT_FIELDS, QueryError, _int, alert_row
+from .queries import EVENT_FIELDS, QueryError, _int, alert_row, catalog_pieces
 
 INCIDENT_STATUSES = ("open", "investigating", "resolved")
+# Incident detail returns this many distinct evidence events, earliest first. The rest are events_omitted.
+INCIDENT_EVENT_LIMIT = 1000
 _SEVERITY_ORDER = ("CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 "
                    "WHEN 'low' THEN 3 ELSE 4 END")
 
@@ -53,23 +55,30 @@ def top_techniques(conn, incident_ids):
 
 
 def list_incidents(conn, params):
+    """Matching incidents, and how many the limit left out.
+
+    Rows stay not-resolved first, then severity, then last_seen. The second
+    value is 0 when every match fits. Callers that return the bare array send
+    that count as X-Watchpost-Omitted.
+    """
     where, args = [], []
     if params.get("status"):
-        statuses = params["status"].split(",")
-        if not set(statuses) <= set(INCIDENT_STATUSES):
-            raise QueryError(f"status must be from {', '.join(INCIDENT_STATUSES)}")
+        # One status or a comma list. Spaces around a name are ignored.
+        # ASCII case folds onto the catalog spelling (`Open` binds `open`). A blank piece is invalid.
+        statuses = catalog_pieces(
+            params["status"], INCIDENT_STATUSES,
+            f"status must be from {', '.join(INCIDENT_STATUSES)}")
         where.append(f"status IN ({','.join('?' for _ in statuses)})")
         args += statuses
     if params.get("severity"):
         # One level or a comma list (critical,high), the same rule as the alert queue.
-        # A blank piece is invalid, same as an unknown name.
-        levels = [part.strip() for part in params["severity"].split(",")]
-        if not levels or not set(levels) <= set(SEVERITIES):
-            raise QueryError("invalid severity")
+        # Same fold (`High` binds `high`). A blank piece is invalid, same as an unknown name.
+        levels = catalog_pieces(params["severity"], SEVERITIES, "invalid severity")
         where.append(f"severity IN ({','.join('?' for _ in levels)})")
         args += levels
     limit = _int(params.get("limit"), "limit", 100, 1, 500)
     clause = (" WHERE " + " AND ".join(where)) if where else ""
+    total = conn.execute(f"SELECT COUNT(*) FROM incidents{clause}", args).fetchone()[0]
     rows = conn.execute(f"SELECT * FROM incidents{clause} ORDER BY status = 'resolved', {_SEVERITY_ORDER},"
                         f" last_seen DESC LIMIT ?", args + [limit])
     items = [_incident(r) for r in rows]
@@ -79,7 +88,7 @@ def list_incidents(conn, params):
     for item in items:
         item["top_technique"] = tops.get(item["id"])
         item["correlation_rule"] = sentence
-    return items
+    return items, total - len(items)
 
 
 def get_incident(conn, incident_id):
@@ -108,11 +117,18 @@ def get_incident(conn, incident_id):
     events = [{**dict(r), "alert_ids": sorted(event_alerts.get(r["id"], []))} for r in conn.execute(
         f"SELECT DISTINCT {fields} FROM events e JOIN alert_events ae ON ae.event_id = e.id"
         " JOIN incident_alerts ia ON ia.alert_id = ae.alert_id WHERE ia.incident_id = ?"
-        " ORDER BY e.ts, e.id LIMIT 1000", (incident_id,))]
+        " ORDER BY e.ts, e.id LIMIT ?", (incident_id, INCIDENT_EVENT_LIMIT))]
+    # Same join as the page. A second alert link is still one event. A link whose event is gone is not a row.
+    event_total = conn.execute(
+        "SELECT COUNT(DISTINCT e.id) AS n FROM events e"
+        " JOIN alert_events ae ON ae.event_id = e.id"
+        " JOIN incident_alerts ia ON ia.alert_id = ae.alert_id WHERE ia.incident_id = ?",
+        (incident_id,)).fetchone()["n"]
 
     ordered = sorted(techniques.values(), key=lambda t: (attack.tactic_rank(t["tactic"]), t["id"]))
     incident["alerts"] = alerts
     incident["events"] = events
+    incident["events_omitted"] = event_total - len(events)
     incident["timeline"] = [{
         "ts": a["first_seen"], "last_seen": a["last_seen"], "alert_id": a["id"], "rule_id": a["rule_id"],
         "title": a["title"], "severity": a["severity"], "status": a["status"],

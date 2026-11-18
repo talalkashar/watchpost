@@ -19,8 +19,26 @@ from .db import parse_iso
 
 DEFAULT_WINDOW_SECONDS = 1800
 ENTITY_TYPES = ("src_ip", "user", "host")
+# Account and host keys fold these letters only, the same fold as COLLATE NOCASE and entity pages.
+# str.lower() would also fold É, so ÉRIN and érin would share the key érin.
+LOWER_ENTITY_TYPES = frozenset({"user", "host"})
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 SEVERITY_ORDER = ["info", "low", "medium", "high", "critical"]
 ESCALATION_TACTICS = 3
+
+
+def entity_key(kind, value):
+    """The correlation key for one entity value.
+
+    Accounts and hosts fold ASCII letters only. Erin, ERIN, and erin are one
+    account `erin`, and WEB01 and web01 are one host `web01`. ÉRIN and érin
+    stay apart, and so do Érin-host and érin-host. A source IP stays the stored
+    address.
+    """
+    text = str(value)
+    if kind in LOWER_ENTITY_TYPES:
+        return text.translate(_ASCII_FOLD)
+    return text
 
 
 def rule_summary(window_seconds=DEFAULT_WINDOW_SECONDS):
@@ -86,12 +104,12 @@ def correlate(alerts, window_seconds=DEFAULT_WINDOW_SECONDS):
         if a.get("sightings"):
             for kind, value, ts in a["sightings"]:
                 t = _epoch(ts)
-                by_entity[(kind, str(value).lower())].append((t, t, a))
+                by_entity[(kind, entity_key(kind, value))].append((t, t, a))
         else:
             start, end = _epoch(a["first_seen"]), _epoch(a["last_seen"])
             for kind in ENTITY_TYPES:
                 for value in (a.get("entities") or {}).get(kind) or []:
-                    by_entity[(kind, str(value).lower())].append((start, end, a))
+                    by_entity[(kind, entity_key(kind, value))].append((start, end, a))
     never = float("inf")
     edges = set()
     for points in by_entity.values():
@@ -143,7 +161,7 @@ def summarize(alerts):
     escalated = len(stages) >= ESCALATION_TACTICS
     if escalated:
         severity = _bump(severity)
-    entities = {kind: sorted({str(v) if kind != "user" else str(v).lower()
+    entities = {kind: sorted({entity_key(kind, v)
                               for a in alerts for v in (a.get("entities") or {}).get(kind) or []})
                 for kind in ENTITY_TYPES}
     who = (entities["src_ip"] + entities["user"] + entities["host"])[:3]

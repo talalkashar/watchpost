@@ -1,16 +1,47 @@
 """Read-side queries and analyst workflow operations."""
 
-from datetime import timedelta
-
+import ipaddress
 import json
+from datetime import timedelta
 
 from .db import audit, iso, now_iso, parse_iso, row_to_dict, transaction, utcnow
 from .normalize import EVENT_TYPES, SEVERITIES, EventError, parse_timestamp
 
+# A-Z only. SQLite NOCASE folds the same letters; É and é stay apart.
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
 ALERT_STATUSES = ("open", "investigating", "resolved")
 DISPOSITIONS = ("true_positive", "false_positive", "benign")
+# OFFSET makes SQLite visit every skipped row. Past this, walk newer events with since_id.
+MAX_EVENT_OFFSET = 10_000
 # A longer needle used to be sliced, so it matched messages that lacked the rest.
 MAX_SEARCH_Q = 200
+# Alert detail returns this many evidence events, earliest first. The rest are evidence_omitted.
+EVIDENCE_LIMIT = 500
+# Related timeline returns this many events, earliest in the window. The rest are timeline_omitted.
+TIMELINE_LIMIT = 300
+# Alert detail returns this many notes and this many activity rows, newest by id.
+# Each list stays in id order. The older rows are notes_omitted and activity_omitted.
+NOTE_LIMIT = 100
+ACTIVITY_LIMIT = 100
+# Dashboard attacker list is this many source IPs, most alerts then most events.
+# attackers_omitted is how many source IPs on alerts were past that cap.
+ATTACKER_LIMIT = 40
+# Dashboard top rules is this many rule ids, most alerts first.
+# rules_omitted is how many rule ids on alerts were past that cap.
+TOP_RULE_LIMIT = 10
+# Dashboard alert board is this many alerts. Not resolved first, then severity,
+# then last_seen. board_omitted is how many alerts were past that cap.
+BOARD_LIMIT = 60
+# Dashboard recent events are this many, newest by ts, then id.
+# recent_events_omitted is how many stored events were past that cap.
+RECENT_LIMIT = 60
+# Metrics failure lists are this many groups, most failures first.
+# top_failure_ips_omitted and top_failure_users_omitted are how many groups were past that cap.
+TOP_FAILURE_LIMIT = 5
+_ATTACKER_FROM = (
+    " FROM alerts a JOIN alert_events ae ON ae.alert_id = a.id"
+    " JOIN events e ON e.id = ae.event_id WHERE e.src_ip IS NOT NULL")
 EVENT_FIELDS = "id, ts, ingested_at, source, host, event_type, outcome, severity, user, src_ip, dest_ip, dest_port, " \
                "bytes, message, synthetic, batch_id"
 
@@ -19,6 +50,51 @@ class QueryError(ValueError):
     def __init__(self, message, status=400):
         super().__init__(message)
         self.status = status
+
+
+def catalog_name(value, names):
+    """The catalog spelling when `value` matches one name by ASCII case, else None.
+
+    `Auth_Failure` is `auth_failure`. A non-ASCII lookalike is not a match.
+    `names` is the catalog (the stored spellings).
+    """
+    if not isinstance(value, str):
+        return None
+    folded = value.translate(_ASCII_FOLD)
+    for name in names:
+        if name.translate(_ASCII_FOLD) == folded:
+            return name
+    return None
+
+
+def catalog_pieces(value, names, message):
+    """Comma-separated names folded onto catalog spellings.
+
+    `Open` is `open` and `High` is `high`. Spaces around a piece are ignored.
+    A blank piece or an unknown name is QueryError(message). The returned
+    spellings are what a filter binds, so a stored lookalike is not a match.
+    """
+    pieces = []
+    for part in value.split(","):
+        name = catalog_name(part.strip(), names)
+        if name is None:
+            raise QueryError(message)
+        pieces.append(name)
+    return pieces
+
+
+def canonical_ip(value, field):
+    """The address form ingest stores (`str(ipaddress.ip_address)`).
+
+    A complete address binds as that form, so `2001:DB8::1` matches a row stored as `2001:db8::1`.
+    A prefix is not passed here. Anything else is 400.
+    """
+    if isinstance(value, str):
+        try:
+            return str(ipaddress.ip_address(value))
+        except ValueError:
+            pass
+    raise QueryError(f"{field} must be a valid IP address")
 
 
 def _int(value, name, default, low, high):
@@ -49,29 +125,41 @@ def search_events(conn, params):
         where.append("ts <= ?")
         args.append(_ts(params["end"], "end"))
     if params.get("severity"):
-        levels = params["severity"].split(",")
-        if not set(levels) <= set(SEVERITIES):
-            raise QueryError(f"severity must be from {', '.join(SEVERITIES)}")
+        # One level or a comma list. Spaces around a name are ignored, as on alerts and incidents.
+        # ASCII case folds onto the catalog spelling (`High` binds `high`). A blank piece is invalid,
+        # same as an unknown name.
+        levels = []
+        for part in params["severity"].split(","):
+            name = catalog_name(part.strip(), SEVERITIES)
+            if name is None:
+                raise QueryError(f"severity must be from {', '.join(SEVERITIES)}")
+            levels.append(name)
         if params.get("severity_mode") == "min" and len(levels) == 1:
             levels = SEVERITIES[SEVERITIES.index(levels[0]):]
         where.append(f"severity IN ({','.join('?' for _ in levels)})")
         args += levels
     if params.get("event_type"):
-        if params["event_type"] not in EVENT_TYPES:
+        # Same fold. The bound value is the catalog spelling, so a stored `Auth_Failure` stays out.
+        name = catalog_name(params["event_type"], EVENT_TYPES)
+        if name is None:
             raise QueryError(f"event_type must be one of {', '.join(sorted(EVENT_TYPES))}")
         where.append("event_type = ?")
-        args.append(params["event_type"])
-    for field, column in (("source", "source"), ("host", "host"), ("user", "user"), ("batch_id", "batch_id")):
+        args.append(name)
+    for field, column in (("source", "source"), ("host", "host"), ("user", "user"),
+                          ("outcome", "outcome"), ("batch_id", "batch_id")):
         if params.get(field):
             if params[field].endswith("*"):
                 where.append(f"{column} LIKE ? ESCAPE '\\'")
                 args.append(_escape_like(params[field][:-1]) + "%")
             else:
-                where.append(f"{column} = ? COLLATE NOCASE" if field in ("user", "host") else f"{column} = ?")
+                where.append(f"{column} = ? COLLATE NOCASE"
+                             if field in ("user", "host", "source", "outcome") else f"{column} = ?")
                 args.append(params[field])
     if params.get("ip"):
+        # Equality only. A trailing * is a hunt prefix, not an address, so it is 400 here.
+        address = canonical_ip(params["ip"], "ip")
         where.append("(src_ip = ? OR dest_ip = ?)")
-        args += [params["ip"], params["ip"]]
+        args += [address, address]
     if params.get("q"):
         needle = params["q"]
         if not isinstance(needle, str) or len(needle) > MAX_SEARCH_Q:
@@ -89,10 +177,15 @@ def search_events(conn, params):
     return page_events(conn, where, args, params, newest_stored_first=since_id is not None)
 
 
+def event_offset(params):
+    """Page offset for event search and hunt. Above MAX_EVENT_OFFSET is a 400 naming that maximum."""
+    return _int(params.get("offset"), "offset", 0, 0, MAX_EVENT_OFFSET)
+
+
 def page_events(conn, where, args, params, newest_stored_first=False):
     """One page of events matching parameterized WHERE fragments (shared by event search and hunting)."""
     limit = _int(params.get("limit"), "limit", 100, 1, 1000)
-    offset = _int(params.get("offset"), "offset", 0, 0, 10_000_000)
+    offset = event_offset(params)
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     total = conn.execute(f"SELECT COUNT(*) FROM events{clause}", args).fetchone()[0]
     rows = conn.execute(
@@ -119,18 +212,25 @@ def get_event(conn, event_id):
 
 
 def list_alerts(conn, params):
+    """Matching alerts, and how many the limit left out.
+
+    Rows stay not-resolved first, then severity, then last_seen. The second
+    value is 0 when every match fits. Callers that return the bare array send
+    that count as X-Watchpost-Omitted.
+    """
     where, args = [], []
     if params.get("status"):
-        statuses = params["status"].split(",")
-        if not set(statuses) <= set(ALERT_STATUSES):
-            raise QueryError(f"status must be from {', '.join(ALERT_STATUSES)}")
+        # One status or a comma list. Spaces around a name are ignored.
+        # ASCII case folds onto the catalog spelling (`Open` binds `open`). A blank piece is invalid.
+        statuses = catalog_pieces(
+            params["status"], ALERT_STATUSES,
+            f"status must be from {', '.join(ALERT_STATUSES)}")
         where.append(f"status IN ({','.join('?' for _ in statuses)})")
         args += statuses
     if params.get("severity"):
-        # One level or a comma list (critical,high). A blank piece is invalid, same as an unknown name.
-        levels = [part.strip() for part in params["severity"].split(",")]
-        if not levels or not set(levels) <= set(SEVERITIES):
-            raise QueryError("invalid severity")
+        # One level or a comma list (critical,high). Same fold (`High` binds `high`).
+        # A blank piece is invalid, same as an unknown name.
+        levels = catalog_pieces(params["severity"], SEVERITIES, "invalid severity")
         where.append(f"severity IN ({','.join('?' for _ in levels)})")
         args += levels
     if params.get("rule_id"):
@@ -138,11 +238,13 @@ def list_alerts(conn, params):
         args.append(params["rule_id"])
     limit = _int(params.get("limit"), "limit", 100, 1, 500)
     clause = (" WHERE " + " AND ".join(where)) if where else ""
+    total = conn.execute(f"SELECT COUNT(*) FROM alerts{clause}", args).fetchone()[0]
     order = ("CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 "
              "WHEN 'low' THEN 3 ELSE 4 END, last_seen DESC")
     rows = conn.execute(f"SELECT * FROM alerts{clause} ORDER BY status = 'resolved', {order} LIMIT ?",
                         args + [limit])
-    return [alert_row(r) for r in rows]
+    shown = [alert_row(r) for r in rows]
+    return shown, total - len(shown)
 
 
 def alert_row(row):
@@ -161,26 +263,54 @@ def get_alert(conn, alert_id):
                                              " WHERE id = ?", (alert["rule_id"],)).fetchone(), ["techniques"])
     alert["evidence"] = [dict(r) for r in conn.execute(
         f"SELECT {', '.join('e.' + c.strip() for c in EVENT_FIELDS.split(','))} FROM events e"
-        " JOIN alert_events ae ON ae.event_id = e.id WHERE ae.alert_id = ? ORDER BY e.ts, e.id LIMIT 500",
-        (alert_id,))]
-    alert["notes"] = [dict(r) for r in conn.execute(
-        "SELECT * FROM alert_notes WHERE alert_id = ? ORDER BY id", (alert_id,))]
-    alert["activity"] = [dict(r) for r in conn.execute(
-        "SELECT * FROM alert_activity WHERE alert_id = ? ORDER BY id", (alert_id,))]
+        " JOIN alert_events ae ON ae.event_id = e.id WHERE ae.alert_id = ?"
+        " ORDER BY e.ts, e.id LIMIT ?",
+        (alert_id, EVIDENCE_LIMIT))]
+    # Count the same join the page returns. A stored event_count, or a link whose event is gone, is not a row.
+    total = conn.execute(
+        "SELECT COUNT(*) AS n FROM events e"
+        " JOIN alert_events ae ON ae.event_id = e.id WHERE ae.alert_id = ?",
+        (alert_id,)).fetchone()["n"]
+    alert["evidence_omitted"] = total - len(alert["evidence"])
+    # Newest by id, then id order in the response. A later created_at on a lower id is still the older row.
+    alert["notes"], alert["notes_omitted"] = _newest_by_id(conn, "alert_notes", alert_id, NOTE_LIMIT)
+    alert["activity"], alert["activity_omitted"] = _newest_by_id(
+        conn, "alert_activity", alert_id, ACTIVITY_LIMIT)
     alert["timeline"] = related_timeline(conn, alert)
     return alert
 
 
-def related_timeline(conn, alert, pad_minutes=30):
-    """All events touching the alert's IPs or users, from 30 minutes before to 30 after.
+def _newest_by_id(conn, table, alert_id, limit):
+    """The newest `limit` rows for this alert (highest id), returned in id order.
 
-    User names match with COLLATE NOCASE (ASCII only), the same way event search does.
-    Source IPs stay an exact match. Shows context the rule did not use: e.g. what the
-    attacking IP did after a successful login.
+    The second value is how many older rows were left out (0 when the table fits).
+    `table` is a fixed name in this module, never a request value.
+    """
+    total = conn.execute(
+        f"SELECT COUNT(*) AS n FROM {table} WHERE alert_id = ?", (alert_id,)).fetchone()["n"]
+    rows = [dict(r) for r in conn.execute(
+        f"SELECT * FROM (SELECT * FROM {table} WHERE alert_id = ? ORDER BY id DESC LIMIT ?)"
+        " ORDER BY id",
+        (alert_id, limit))]
+    return rows, total - len(rows)
+
+
+def related_timeline(conn, alert, pad_minutes=30):
+    """Events touching the alert's IPs, users, or hosts, from pad_minutes before to pad_minutes after.
+
+    Returns the earliest TIMELINE_LIMIT rows in ts, id order. Sets alert["timeline_omitted"]
+    to how many matching events were past that cap (0 when the window has that many or fewer).
+    An event outside the window is not a row and is not omitted.
+
+    User names and hosts match with COLLATE NOCASE (ASCII only), the same way event search does.
+    Source IPs stay an exact match. Shows context the rule did not use: e.g. what else happened
+    on the host, or what the attacking IP did after a successful login.
     """
     ips = {e["src_ip"] for e in alert["evidence"] if e["src_ip"]}
     users = {e["user"] for e in alert["evidence"] if e["user"]}
-    if not ips and not users:
+    hosts = {e["host"] for e in alert["evidence"] if e.get("host")}
+    if not ips and not users and not hosts:
+        alert["timeline_omitted"] = 0
         return []
     start = iso(parse_iso(alert["first_seen"]) - timedelta(minutes=pad_minutes))
     end = iso(parse_iso(alert["last_seen"]) + timedelta(minutes=pad_minutes))
@@ -191,13 +321,22 @@ def related_timeline(conn, alert, pad_minutes=30):
     if users:
         clauses.append(f"user COLLATE NOCASE IN ({','.join('?' for _ in users)})")
         args += sorted(users)
+    if hosts:
+        clauses.append(f"host COLLATE NOCASE IN ({','.join('?' for _ in hosts)})")
+        args += sorted(hosts)
     evidence_ids = {e["id"] for e in alert["evidence"]}
+    where_sql = f"ts BETWEEN ? AND ? AND ({' OR '.join(clauses)})"
+    bound = [start, end] + args
+    total = conn.execute(
+        f"SELECT COUNT(*) AS n FROM events WHERE {where_sql}", bound).fetchone()["n"]
     rows = conn.execute(
         f"SELECT id, ts, source, host, event_type, severity, user, src_ip, message FROM events"
-        f" WHERE ts BETWEEN ? AND ? AND ({' OR '.join(clauses)}) ORDER BY ts, id LIMIT 300",
-        [start, end] + args,
+        f" WHERE {where_sql} ORDER BY ts, id LIMIT {TIMELINE_LIMIT}",
+        bound,
     )
-    return [{**dict(r), "is_evidence": r["id"] in evidence_ids} for r in rows]
+    result = [{**dict(r), "is_evidence": r["id"] in evidence_ids} for r in rows]
+    alert["timeline_omitted"] = total - len(result)
+    return result
 
 
 def add_note(conn, alert_id, author, body):
@@ -221,9 +360,14 @@ def add_note(conn, alert_id, author, body):
 def update_status(conn, alert_id, actor, status, disposition=None, note=None):
     if status not in ALERT_STATUSES:
         raise QueryError(f"status must be one of {', '.join(ALERT_STATUSES)}")
-    if status == "resolved" and disposition not in DISPOSITIONS:
-        raise QueryError(f"resolving requires a disposition: {', '.join(DISPOSITIONS)}")
-    if status != "resolved" and disposition is not None:
+    if status == "resolved":
+        # False_Positive stores false_positive. A blank, a missing value, and a
+        # non-ASCII lookalike stay the same error. Status is not folded.
+        folded = catalog_name(disposition, DISPOSITIONS)
+        if folded is None:
+            raise QueryError(f"resolving requires a disposition: {', '.join(DISPOSITIONS)}")
+        disposition = folded
+    elif disposition is not None:
         raise QueryError("disposition can only be set when resolving")
     with transaction(conn):
         alert = conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone()
@@ -284,6 +428,19 @@ OMITTED_METRICS = [
     {"metric": "dwell_time", "reason": "First malicious event to resolution. It starts from the same replayed"
                                        " event timestamps, so it would be inflated by the replay offset."},
 ]
+# `window_hours` is not the scope of the whole payload. Only events_ingested_window
+# filters on it. The event breakdowns count every stored row, so a client cannot
+# read a 24-hour window into top_failure_ips, top_failure_users, or events_by_type.
+METRICS_HONORS_HOURS = ("events_ingested_window",)
+METRICS_ALL_STORED_EVENTS = ("events_total", "synthetic_events", "top_failure_ips",
+                             "top_failure_users", "events_by_type")
+METRICS_NEWEST_24H = ("activity_last_24h_of_data",)
+METRICS_WINDOW_NOTE = (
+    "hours filters events_ingested_window by ingested_at. "
+    "top_failure_ips, top_failure_users, and events_by_type count every stored event. "
+    "activity_last_24h_of_data is the 24 hours ending at the newest event, not this window. "
+    "Alert counts are the current alerts table."
+)
 
 
 def metrics(conn, hours=24):
@@ -331,8 +488,27 @@ def metrics(conn, hours=24):
     aging = {"buckets": [{"label": label, "count": sum(low <= a < high for a in ages)}
                          for label, low, high in AGING_BUCKETS],
              "oldest_minutes": round(max(ages), 1) if ages else None}
+    # Addresses stay the stored spelling. Accounts fold ASCII case with SQLite lower(),
+    # the same fold hunt user groups use. Alice and alice are one row named alice.
+    # Érin and érin stay two rows. Each list is the busiest TOP_FAILURE_LIMIT groups.
+    top_ips = by("SELECT src_ip, COUNT(*) AS count FROM events WHERE event_type = 'auth_failure'"
+                 " AND src_ip IS NOT NULL GROUP BY src_ip ORDER BY count DESC"
+                 f" LIMIT {TOP_FAILURE_LIMIT}")
+    top_users = by("SELECT lower(user) AS user, COUNT(*) AS count FROM events WHERE event_type = 'auth_failure'"
+                   " AND user IS NOT NULL GROUP BY lower(user) ORDER BY count DESC"
+                   f" LIMIT {TOP_FAILURE_LIMIT}")
+    ips_omitted = one("SELECT COUNT(DISTINCT src_ip) FROM events WHERE event_type = 'auth_failure'"
+                      " AND src_ip IS NOT NULL") - len(top_ips)
+    users_omitted = one("SELECT COUNT(DISTINCT lower(user)) FROM events WHERE event_type = 'auth_failure'"
+                        " AND user IS NOT NULL") - len(top_users)
     return {
         "window_hours": hours,
+        "window_scope": {
+            "honors_hours": list(METRICS_HONORS_HOURS),
+            "all_stored_events": list(METRICS_ALL_STORED_EVENTS),
+            "newest_event_24h": list(METRICS_NEWEST_24H),
+            "note": METRICS_WINDOW_NOTE,
+        },
         "events_total": one("SELECT COUNT(*) FROM events"),
         "events_ingested_window": one("SELECT COUNT(*) FROM events WHERE ingested_at >= ?", since),
         "synthetic_events": one("SELECT COUNT(*) FROM events WHERE synthetic = 1"),
@@ -345,10 +521,10 @@ def metrics(conn, hours=24):
         "dispositions": by("SELECT disposition, COUNT(*) AS count FROM alerts WHERE disposition IS NOT NULL"
                            " GROUP BY disposition"),
         "mean_time_to_resolve_minutes": round(mttr, 1) if mttr is not None else None,
-        "top_failure_ips": by("SELECT src_ip, COUNT(*) AS count FROM events WHERE event_type = 'auth_failure'"
-                              " AND src_ip IS NOT NULL GROUP BY src_ip ORDER BY count DESC LIMIT 5"),
-        "top_failure_users": by("SELECT user, COUNT(*) AS count FROM events WHERE event_type = 'auth_failure'"
-                                " AND user IS NOT NULL GROUP BY user ORDER BY count DESC LIMIT 5"),
+        "top_failure_ips": top_ips,
+        "top_failure_ips_omitted": ips_omitted,
+        "top_failure_users": top_users,
+        "top_failure_users_omitted": users_omitted,
         "events_by_type": by("SELECT event_type, COUNT(*) AS count FROM events GROUP BY event_type"
                              " ORDER BY count DESC"),
         "activity_last_24h_of_data": histogram,
@@ -422,23 +598,28 @@ def dashboard(conn):
         f"SELECT e.src_ip AS ip, COUNT(DISTINCT e.id) AS events, COUNT(DISTINCT a.id) AS alerts,"
         f" MAX(MAX({sev_events}), MAX({sev_alerts})) AS sev_rank, MAX(e.ts) AS last_seen,"
         f" SUM(a.status != 'resolved') AS open_alerts"
-        f" FROM alerts a JOIN alert_events ae ON ae.alert_id = a.id JOIN events e ON e.id = ae.event_id"
-        f" WHERE e.src_ip IS NOT NULL GROUP BY e.src_ip ORDER BY alerts DESC, events DESC LIMIT 40")]
+        f"{_ATTACKER_FROM} GROUP BY e.src_ip ORDER BY alerts DESC, events DESC LIMIT {ATTACKER_LIMIT}")]
     for a in attackers:
         del a["sev_rank"]
+    attackers_omitted = one(f"SELECT COUNT(DISTINCT e.src_ip){_ATTACKER_FROM}") - len(attackers)
 
     top_rules = [dict(r) for r in conn.execute(
         "SELECT a.rule_id, r.name, r.severity, COUNT(*) AS alerts, SUM(a.status != 'resolved') AS open"
-        " FROM alerts a LEFT JOIN rules r ON r.id = a.rule_id GROUP BY a.rule_id ORDER BY alerts DESC LIMIT 10")]
+        " FROM alerts a LEFT JOIN rules r ON r.id = a.rule_id GROUP BY a.rule_id"
+        f" ORDER BY alerts DESC LIMIT {TOP_RULE_LIMIT}")]
+    rules_omitted = one("SELECT COUNT(DISTINCT rule_id) FROM alerts") - len(top_rules)
     board = [dict(r) for r in conn.execute(
         "SELECT id, rule_id, severity, title, status, group_key, first_seen, last_seen, event_count, synthetic,"
         " assignee FROM alerts ORDER BY status = 'resolved', "
-        + SEVERITY_RANK_SQL.format(col="severity") + " DESC, last_seen DESC LIMIT 60")]
+        + SEVERITY_RANK_SQL.format(col="severity")
+        + f" DESC, last_seen DESC LIMIT {BOARD_LIMIT}")]
+    board_omitted = one("SELECT COUNT(*) FROM alerts") - len(board)
     recent = [dict(r) for r in conn.execute(
-        f"SELECT {EVENT_FIELDS} FROM events ORDER BY ts DESC, id DESC LIMIT 60")]
+        f"SELECT {EVENT_FIELDS} FROM events ORDER BY ts DESC, id DESC LIMIT {RECENT_LIMIT}")]
+    events_total = one("SELECT COUNT(*) FROM events")
     return {
         "generated_at": now_iso(),
-        "events_total": one("SELECT COUNT(*) FROM events"),
+        "events_total": events_total,
         "synthetic_events": one("SELECT COUNT(*) FROM events WHERE synthetic = 1"),
         "alerts_open": one("SELECT COUNT(*) FROM alerts WHERE status = 'open'"),
         "alerts_investigating": one("SELECT COUNT(*) FROM alerts WHERE status = 'investigating'"),
@@ -448,7 +629,11 @@ def dashboard(conn):
         "events_per_minute": epm,
         "alert_timeline": _alert_timeline(conn),
         "attackers": attackers,
+        "attackers_omitted": attackers_omitted,
         "top_rules": top_rules,
+        "rules_omitted": rules_omitted,
         "alerts": board,
+        "board_omitted": board_omitted,
         "recent_events": recent,
+        "recent_events_omitted": events_total - len(recent),
     }

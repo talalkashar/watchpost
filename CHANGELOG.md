@@ -6,6 +6,24 @@ All bundled data is synthetic. PR numbers refer to https://github.com/talalkasha
 
 ### Fixed
 
+- A promoted saved search groups `user` with the ASCII fold the `user:` filter uses. `Alice`, `alice`, and `ALICE` stay one key. `ÉRIN` and `érin` stay two keys and no longer trip a threshold together. The finding key is the folded spelling. A host group stays the stored spelling, so `WEB01` and `web01` stay two groups.
+
+- Viewer masking folds usernames on ASCII letters only. `Alice` and `alice` stay one pseudonym. `ÉRIN` and `érin` stay two, and a viewer named `érin` no longer sees `ÉRIN` in clear. The 10,000-name cap still counts those as two and still fails closed. Public addresses stay visible and internal addresses stay masked.
+
+- With `SIEM_TRUST_PROXY=1`, the rate-limit client IP is the last entry of exactly one `X-Forwarded-For` header on a loopback connection. A second header is not used, so a client-supplied line cannot choose the key. A value that is not an address stays the peer address. One header `192.0.2.1, 203.0.113.7` still uses `203.0.113.7`.
+
+- Asset host matching folds ASCII letters only, the same fold as entity hosts. An asset named `Érin-host` no longer matches events on `érin-host`, so one host does not take the other's criticality. `WEB01` still matches `web01`. Addresses stay the form already stored.
+
+- Alert related timeline also matches the evidence host, case-insensitively for ASCII. An event on `web01` in the window is included when the evidence host is `WEB01`, even with a different user and source IP. `Érin-host` and `érin-host` stay apart. Source IP matches stay exact.
+
+- Event search and hunt match `outcome` case-insensitively (ASCII). `outcome:failure` and `GET /api/events?outcome=Failure` return a row stored as `failure`. A prefix already folded ASCII. Grouping by outcome stays exact. The lookup uses `idx_events_outcome_nocase`.
+
+- Event search and hunt match `source` case-insensitively (ASCII). `source:Demo` and `GET /api/events?source=demo` return a row stored as `demo`. A prefix already folded ASCII. Grouping by source stays exact. The lookup uses `idx_events_source_nocase`.
+
+- A missing static file (404) and a non-GET on a static path (405) send `Cache-Control: no-store`. A static file that exists stays `no-cache`.
+
+- Hunt and event search bind a complete IP in the form ingest stores, so `src_ip:2001:DB8::1` and `GET /api/events?ip=2001:DB8::1` match a row stored as `2001:db8::1`. A trailing `*` stays a text prefix. Anything that is neither a prefix nor one address is 400.
+
 - Alert related timeline matches `user` case-insensitively (ASCII, like event search). Evidence stored as `Alice` includes events stored as `alice`. Source IP matches stay exact.
 
 - Event search and hunt match `host` case-insensitively (ASCII, like the asset inventory). `WEB01` and `web01` are one host in `host=` and `host:`. Grouping by host stays exact. The lookup uses `idx_events_host_nocase`.

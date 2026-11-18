@@ -103,7 +103,7 @@ def generate(n, seed, days=7, users=2000, hosts=200, internal_ips=3000, now=None
 
 def fake_request(app, query=None, body=b""):
     return SimpleNamespace(app=app, conn=app.conn(), query=query or {}, body=body, status=200,
-                           user={"username": "admin", "role": "admin"})
+                           user={"username": "admin", "role": "admin"}, extra_headers={})
 
 
 def ingest_in_process(app, events, batch):

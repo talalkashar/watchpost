@@ -1,6 +1,6 @@
 # Watchpost API
 
-Base URL: `http://127.0.0.1:8080`. All request and response bodies are JSON unless noted otherwise. Errors come back as `{"error": "..."}`. A 4xx from the API and the generic 500 send `Cache-Control: no-store`, the same as a successful `/api` response, because the message can repeat a request value. A query string may name each key once. A repeated key (`severity=low&severity=critical`) is 400 `repeated query key 'severity'`. Where an endpoint accepts several values, send them as one comma list.
+Base URL: `http://127.0.0.1:8080`. All request and response bodies are JSON unless noted otherwise. Errors come back as `{"error": "..."}`. A 4xx from the API and the generic 500 send `Cache-Control: no-store`, the same as a successful `/api` response, because the message can repeat a request value. A missing static file is 404 `not found` (`text/plain`) and a non-GET on a static path is 405 `{"error": "method not allowed"}`. Both send `Cache-Control: no-store`. A static file that exists stays `Cache-Control: no-cache`. A query string may name each key once. A repeated key (`severity=low&severity=critical`) is 400 `repeated query key 'severity'`. A query string longer than 8192 bytes is 414 `query string exceeds 8192 bytes`, before the parameters are parsed. A POST with `Transfer-Encoding` set, or with no `Content-Length`, is 400 (`Transfer-Encoding is not supported`, or `Content-Length is required` when that header is the one missing) and the connection closes. The body is not read. A POST whose `Content-Length` appears twice, or whose value is not one token of ASCII digits (`4, 2`, `abc`), is 400 `invalid Content-Length`. That response also closes the connection, and the body is not read. `Content-Length: 0` is an empty body. Where an endpoint accepts several values, send them as one comma list.
 
 ## Authentication
 
@@ -35,7 +35,8 @@ An empty bucket answers **429** before authentication, with a `Retry-After: <sec
 `{"error": "too many login attempts; retry in 6 s", "retry_after": 6}` (or `too many requests`). The two buckets are
 independent, so a client locked out of login can still load the page. `SIEM_RATE_LIMIT=0` turns limiting off. The
 client IP is the TCP peer. With `SIEM_TRUST_PROXY=1` and a loopback peer (a local reverse proxy), it is the **last**
-`X-Forwarded-For` entry, the one the proxy wrote, so client-supplied entries earlier in the header are ignored.
+comma-separated entry of the one `X-Forwarded-For` header, the line the proxy wrote. Earlier entries in that header
+are ignored. Two `X-Forwarded-For` headers, or a value that is not an address, stay the peer address.
 Account lockout is separate: it is per account, also answers 429, and has no `Retry-After`.
 
 ```bash
@@ -45,7 +46,7 @@ curl -c jar -H 'Content-Type: application/json' -d '{"username":"analyst","passw
 
 | Endpoint | Role | Notes |
 |---|---|---|
-| `POST /api/auth/login` | public | `{username, password}` |
+| `POST /api/auth/login` | public | `{username, password}`. A username that is not 3–32 characters is the same 401 `invalid username or password` as an unknown account. Login does not truncate it. A password that is not a string, or is longer than 256 characters, is that same 401. Login does not hash that value and does not look up the account. A disabled account is that same 401. Login checks the stored hash, does not increment `failed_logins`, and does not lock the account. The body does not say the account is disabled. |
 | `POST /api/auth/logout` | any | |
 | `GET /api/auth/me` | any | current user and CSRF token |
 
@@ -83,9 +84,12 @@ Response:
 ```json
 {"batch_id": "…", "received": 3, "accepted": 2, "rejected": 1,
  "rejections": [{"index": 2, "reason": "src_ip is not a valid IP address"}],
+ "rejections_omitted": 0,
  "detection": {"run_id": 7, "status": "ok", "events_scanned": 40, "alerts_created": 1, "alerts_updated": 0,
                "correlation": {"status": "ok", "incidents_created": 1, "incidents_updated": 0}}}
 ```
+
+`rejections` is the first 100 reasons. `rejections_omitted` is `rejected` minus that array (0 when every reason is listed). The stored batch `errors` field is that same first 100, not the full list.
 
 Status codes: **201** all accepted · **207** some rejected · **422** none accepted · **400** malformed body or bad source name · **413** body too large · **415** wrong content type · **401/403** auth · **429** rate limited (see Rate limiting).
 If `detection.status` is `"failed"`, the events **were stored**. Fix the cause, then run `POST /api/detection/run`.
@@ -109,7 +113,7 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 
 | Endpoint | Role | Notes |
 |---|---|---|
-| `GET /api/ingest/batches` | viewer | Last 50 batches, with up to 100 rejection reasons each |
+| `GET /api/ingest/batches` | viewer | Last 50 batches by `created_at`, with up to 100 rejection reasons each. The body stays a bare array. `X-Watchpost-Omitted` is how many batches were past that cap (0 when the table fits) |
 | `POST /api/detection/run` | analyst | Full rescan; processes any backlog |
 | `GET /api/demo/scenarios` | viewer | Labeled synthetic scenarios |
 | `POST /api/demo/load` | admin | `{seed?, force?}`: loads every scenario (409 if already loaded) |
@@ -122,37 +126,53 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 | Param | Meaning |
 |---|---|
 | `start`, `end` | ISO timestamps (inclusive) |
-| `source`, `host`, `user`, `batch_id` | Exact match (`user` and `host` ignore ASCII case, the same way the asset inventory matches a host name); a trailing `*` makes it a prefix match |
-| `ip` | Matches `src_ip` or `dest_ip` |
-| `event_type` | One normalized type |
-| `severity` | Comma list, or a single level with `severity_mode=min` for "at least" |
+| `source`, `host`, `user`, `outcome`, `batch_id` | Exact match (`user`, `host`, `source`, and `outcome` ignore ASCII case; grouping by source and outcome stays the stored spelling); a trailing `*` makes it a prefix match |
+| `ip` | Matches `src_ip` or `dest_ip`. A complete address is the form ingest stores (`2001:DB8::1` matches `2001:db8::1`). Anything that is not one address is 400 |
+| `event_type` | One normalized type. ASCII case folds onto the catalog spelling (`Auth_Failure` binds `auth_failure`). An unknown name is 400 listing the catalog. Grouping by `event_type` stays the stored spelling |
+| `severity` | Comma list, or a single level with `severity_mode=min` for "at least". Spaces around each name are ignored. ASCII case folds onto the catalog spelling (`High` binds `high`). A blank or unknown piece is 400 listing the catalog. Grouping by `severity` stays the stored spelling |
 | `q` | Substring of `message` (`%` and `_` are literal), at most 200 characters. A longer value is 400 naming that maximum |
 | `synthetic` | `0` or `1` |
-| `limit` (1–1000, default 100), `offset` | Paging; response includes `total` |
-| `since_id` | Only events stored after that event id, newest stored first (ignores event time). Used by the dashboard's polling fallback |
+| `limit` (1–1000, default 100), `offset` (0–10000, default 0) | Paging; response includes `total`. An offset above 10000 is 400 naming that maximum |
+| `since_id` | Only events stored after that event id, newest stored first (ignores event time). This is how to walk newer events; it does not skip rows with `offset`. Used by the dashboard's polling fallback |
 
 | Endpoint | Role | Notes |
 |---|---|---|
 | `GET /api/events/{id}` | viewer | Includes the redacted `raw` record and linked alerts |
 | `GET /api/events/{id}/ecs` | viewer | The event as an ECS-shaped document (field mapping for export; see the README, "ECS field mapping") |
-| `GET /api/hunt?q=&limit=&offset=` | viewer | Runs a hunt query (syntax in the README, "Hunting"). Returns the event-search page plus `query` and `terms` (`[{field, value, negate, text}]`, how each term was read). A `| top` result includes `total` (matched events) and `missing` (how many of those lack the grouped field). Each percent is that value's share of `total`, so the shown percents can sum under 100. A `| timechart` with no rows, or with every bucket count 0, also returns `note` (`No events match <query> in <span> buckets.`); the rows stay as they are, and a chart with a count above 0 omits `note`. Bad syntax or an unknown field is 400 with the reason. A `bytes:` term is one of `>=`, `>`, `<=`, `<`, `=` and an integer (`bytes:>=1000000`); the number is a bound parameter, and any other value is 400 listing those operators. Grouping by `bytes` is refused. |
+| `GET /api/hunt?q=&limit=&offset=` | viewer | Runs a hunt query (syntax in the README, "Hunting"). `offset` above 10000 is 400 naming that maximum, including when a pipeline stage does not page. Returns the event-search page plus `query` and `terms` (`[{field, value, negate, text}]`, how each term was read). A `| top` result includes `total` (matched events) and `missing` (how many of those lack the grouped field). Each percent is that value's share of `total`, so the shown percents can sum under 100. A `| timechart` returns `series_omitted`, how many distinct non-null series were past the 5 drawn series (0 when every series is drawn, including a chart with no `by`). The rest stay in `other`, `truncated` stays false, and the filled buckets do not change. A `| timechart` with no rows, or with every bucket count 0, also returns `note` (`No events match <query> in <span> buckets.`); the rows stay as they are, and a chart with a count above 0 omits `note`. Bad syntax or an unknown field is 400 with the reason. A `bytes:` term is one of `>=`, `>`, `<=`, `<`, `=` and an integer (`bytes:>=1000000`); the number is a bound parameter, and any other value is 400 listing those operators. Grouping by `bytes` is refused. |
 | `GET /api/hunt/saved` | viewer | Saved searches: `[{id, name, query, description, owner, created_at}]` by name |
 | `POST /api/hunt/saved` | analyst | `{name (≤ 80), query, description? (≤ 300)}`; the query must parse. 409 on a duplicate name (case-insensitive). Audited as `saved_search_created` |
 | `POST /api/hunt/saved/{id}/delete` | analyst | Owner or admin only (403 otherwise). Audited as `saved_search_deleted` |
-| `GET /api/alerts?status=open&severity=critical,high&rule_id=&limit=` | viewer | `status` and `severity` each take one value or a comma list. The console opens on open critical and high. Sorted by active first, then severity, then recency |
-| `GET /api/alerts/{id}` | viewer | Adds `rule`, `evidence`, `timeline` (events involving the same source IPs or users, ±30 min; user names match case-insensitively for ASCII, the same way event search does, and source IPs stay exact), `notes`, `activity`. Every alert also carries `base_severity` (the rule's), `assets` (matched inventory entries, see [Asset inventory](#asset-inventory)), and `severity_note` |
+| `GET /api/alerts?status=open&severity=critical,high&rule_id=&limit=` | viewer | `status` and `severity` each take one value or a comma list. Spaces around each name are ignored. ASCII case folds onto the catalog spelling (`Open` is `open`, `High` is `high`). A blank or unknown piece is 400. The console opens on open critical and high. Sorted by active first, then severity, then recency. `limit` is 1–500, default 100. The body stays a bare array. `X-Watchpost-Omitted` is how many matched alerts were past that cap (0 when the list fits) |
+| `GET /api/alerts/{id}` | viewer | Adds `rule`, `evidence` (the first 500 evidence events in `ts, id` order), `evidence_omitted` (how many evidence events were past that cap; 0 when the alert has 500 or fewer), `timeline` (the first 300 events involving the same source IPs, users, or hosts, ±30 min, in `ts, id` order; user names and hosts match case-insensitively for ASCII, the same way event search does, and source IPs stay exact), `timeline_omitted` (how many matching events were past that cap; 0 when the window has 300 or fewer), `notes` (the newest 100 by `id`, returned in `id` order), `notes_omitted` (how many older notes were left out; 0 when the alert has 100 or fewer), `activity` (the newest 100 by `id`, returned in `id` order), `activity_omitted` (how many older activity rows were left out; 0 when the alert has 100 or fewer). A note body is still at most 5000 characters. Every alert also carries `base_severity` (the rule's), `assets` (matched inventory entries, see [Asset inventory](#asset-inventory)), and `severity_note` |
 | `POST /api/alerts/{id}/notes` | analyst | `{body}` (≤ 5000 chars) |
-| `POST /api/alerts/{id}/status` | analyst | `{status: open\|investigating\|resolved, disposition?, note?}`. `resolved` requires `disposition` (`true_positive`, `false_positive`, or `benign`); reopening clears it |
-| `GET /api/incidents?status=open,investigating&severity=critical,high&limit=` | viewer | `status` and `severity` each take one value or a comma list. Correlated incidents: `title`, `severity`, `status`, `first_seen`, `last_seen`, `entities` (`{src_ip, user, host}` lists), `stages` (ATT&CK tactics in kill-chain order), `top_technique` (`{id, name, tactic}` or null — the earliest mapped technique, same order as the coverage matrix; id breaks ties), `correlation_rule` (the same plain sentence as the incident detail: shared source IP, account, or host within the correlation window, 30 minutes by default), `alert_count`, `synthetic`. Active first, then severity, then recency |
-| `GET /api/incidents/{id}` | viewer | Adds `alerts` (each with `techniques`), `events` (evidence, each with `alert_ids`), `timeline` (one entry per alert with tactics and technique ids), `techniques`, `techniques_by_tactic`, `escalated`, the same `correlation_rule` as the list, `assets` (inventory entries behind the incident's hosts and addresses). 404 if missing |
+| `POST /api/alerts/{id}/status` | analyst | `{status: open\|investigating\|resolved, disposition?, note?}`. `resolved` requires `disposition` (`true_positive`, `false_positive`, or `benign`). ASCII case folds onto that spelling (`False_Positive` stores `false_positive`, `Benign` stores `benign`). A blank, a missing disposition, and a non-ASCII lookalike stay that 400. `Open` stays 400. Reopening clears the disposition |
+| `GET /api/incidents?status=open,investigating&severity=critical,high&limit=` | viewer | `status` and `severity` each take one value or a comma list. Spaces around each name are ignored. ASCII case folds onto the catalog spelling (`Open` is `open`, `High` is `high`). A blank or unknown piece is 400. Correlated incidents: `title`, `severity`, `status`, `first_seen`, `last_seen`, `entities` (`{src_ip, user, host}` lists; `user` and `host` fold ASCII letters only, so `WEB01` and `web01` are one host `web01`, and `ÉRIN` and `érin` stay two accounts; a source IP stays the stored address), `stages` (ATT&CK tactics in kill-chain order), `top_technique` (`{id, name, tactic}` or null — the earliest mapped technique, same order as the coverage matrix; id breaks ties), `correlation_rule` (the same plain sentence as the incident detail: shared source IP, account, or host within the correlation window, 30 minutes by default), `alert_count`, `synthetic`. Active first, then severity, then recency. `limit` is 1–500, default 100. The body stays a bare array. `X-Watchpost-Omitted` is how many matched incidents were past that cap (0 when the list fits) |
+| `GET /api/incidents/{id}` | viewer | Adds `alerts` (each with `techniques`), `events` (the first 1000 distinct evidence events in `ts, id` order, each with `alert_ids`; an event on two alerts is one row), `events_omitted` (how many distinct evidence events were past that cap; 0 when the incident has 1000 or fewer), `timeline` (one entry per alert with tactics and technique ids), `techniques`, `techniques_by_tactic`, `escalated`, the same `correlation_rule` as the list, `assets` (inventory entries behind the incident's hosts and addresses). 404 if missing |
 | `POST /api/incidents/{id}/status` | analyst | `{status: open\|investigating\|resolved, note?}`; audited as `incident_status_changed` |
 | `GET /api/incidents/{id}/case.json` | viewer | Chronological case record. `techniques` lists each rule technique with `level` (`validated`, `mapped`, `disabled`, or `gap`), the same grade as coverage. `mapped` is not proof. Audited as `case_exported` |
 | `GET /api/incidents/{id}/case.md` | viewer | The same record as Markdown. The technique table prints the evidence level, and says mapped is not proof |
 | `GET /api/attack/coverage` | viewer | `{tactics, techniques: [{id, name, tactic, level, scenarios, rules: [{id, name, enabled, hits, verdict, lookalikes_fired, proves}], hits, covered, why}], summary, levels, level_meaning}` over the built-in ATT&CK subset. `level` is `validated`, `mapped`, `disabled`, or `gap` (see the README, "ATT&CK coverage"); `covered` is true only for `validated`. `why` is a one-line reason when `level` is `mapped`, otherwise null. `hits` counts alerts from the mapped rules; `summary.levels` counts techniques per level |
 | `GET /api/attack/navigator.json` | viewer | The same coverage as a MITRE ATT&CK Navigator layer, colored by level and scored by alert count |
-| `GET /api/entities?kind=&limit=` | viewer | Riskiest entities (`kind` is `user`, `src_ip`, or `host`; `limit` 1–100, default 10), each with its score and the alerts that contribute to it |
-| `GET /api/entities/{kind}/{value}` | viewer | One entity (value percent-encoded): score breakdown, alerts, incidents, recent events, and `alerts_by_day` (UTC day of each alert's newest evidence event for this entity, zeros filled, newest 31 days; `omitted` counts alerts older than that) |
-| `GET /api/metrics?hours=24` | viewer | Counts, severity/rule breakdowns, MTTR, top failing IPs/users, and a 24-hour histogram ending at the newest event |
+| `GET /api/entities?kind=&limit=` | viewer | Riskiest entities (`kind` is `user`, `src_ip`, or `host`; `limit` 1–100, default 10). ASCII case folds onto that spelling (`User`, `HOST`, and `SRC_IP` are those three). An unknown kind is 400 naming the three. An empty `kind` lists every kind. Each row has its score and the alerts that contribute to it. A user or host `value` is the ASCII-folded key (`Erin` and `WEB01` are `erin` and `web01`). `Érin` and `érin` stay two rows. `entities` is the highest scores, at most `limit` (ties keep `kind`, then `value`). `entities_omitted` is how many scored entities were past that cap (0 when the scored list fits). A false positive or benign close is not scored and is not part of that count |
+| `GET /api/entities/{kind}/{value}` | viewer | One entity (value percent-encoded; `{kind}` stays `user`, `src_ip`, or `host`, and `User` is not a path): score breakdown, `alerts` (the newest 50 by `last_seen`, then `id`), `alerts_omitted` (how many of this entity's alerts were past that cap; 0 when there are 50 or fewer), `incidents` (the newest 50 by `last_seen`, then `id`), `incidents_omitted` (how many were past that cap; 0 when there are 50 or fewer), `recent_events` (the newest 50 matching events by `ts`, then `id`), `recent_events_omitted` (how many matching events were past that cap; 0 when the entity has 50 or fewer; `event_count` stays the full count), and `alerts_by_day` (UTC day of each alert's newest evidence event for this entity, zeros filled, newest 31 days; `omitted` counts alerts older than that). The score and `contributions` still include every alert. A false positive or benign close stays weight 0. A `src_ip` path is the address form ingest stores, so `2001:DB8::1` matches `2001:db8::1` and `value` is that form. Anything that is not one address is 400. A user or host path folds ASCII case onto that same key, so `Erin`, `ERIN`, and `erin` are one account and the returned `value` is `erin`. `Érin` and `érin` stay two accounts |
+| `GET /api/metrics?hours=24` | viewer | Counts, severity/rule breakdowns, MTTR, and `window_scope`. `hours` filters only `events_ingested_window`. `top_failure_ips`, `top_failure_users`, and `events_by_type` count every stored event. `top_failure_users` groups with SQLite `lower()` (ASCII letters only): `Alice`, `alice`, and `ALICE` are one row named `alice`. `Érin` and `érin` stay two rows. `top_failure_ips` groups the stored address and does not fold it. Each failure list is the 5 groups with the most failures. `top_failure_ips_omitted` and `top_failure_users_omitted` are how many groups were past that cap (0 when there are 5 or fewer). A success is not a group, and a missing address or account is not a group. See [the metrics window](#get-apimetrics-window) |
+
+### `GET /api/metrics` window
+
+`hours` is an integer from 1 to 2160 (90 days), default 24. `window_hours` repeats that value. It does not scope the rest of the payload.
+
+`window_scope.honors_hours` is `events_ingested_window` only. That count is events whose `ingested_at` falls in the last `hours` hours.
+
+`window_scope.all_stored_events` is `events_total`, `synthetic_events`, `top_failure_ips`, `top_failure_users`, and `events_by_type`. Those count every stored event. A failed login older than `hours` still appears in `top_failure_ips` and `top_failure_users`, and its type still appears in `events_by_type`.
+
+`top_failure_users` groups the account with SQLite `lower()`, which folds ASCII letters only, the same fold hunt user groups use. `Alice`, `alice`, and `ALICE` are one row whose `user` is `alice`. `Érin` and `érin` stay two rows. `top_failure_ips` groups the stored address. `2001:DB8::1` and `2001:db8::1` stay two addresses. A success is not a failure row.
+
+`top_failure_ips` and `top_failure_users` are the 5 groups with the most failures. `top_failure_ips_omitted` and `top_failure_users_omitted` are how many groups were past that cap (0 when there are 5 or fewer). A success is not a group. A missing address or account is not a group. The user fold and the stored address stay as they are.
+
+`window_scope.newest_event_24h` is `activity_last_24h_of_data`: the 24 hours ending at the newest stored event, not the `hours` window. Alert counts, mean time to resolve, dispositions, false-positive rates, and open-alert aging read the current alerts table. `omitted_metrics` still names time to detect and dwell time.
+
+`window_scope.note` says the same thing in one sentence: `hours` filters `events_ingested_window` by `ingested_at`, and `top_failure_ips`, `top_failure_users`, and `events_by_type` count every stored event.
 
 ### `GET /api/attack/coverage` example
 
@@ -234,7 +254,7 @@ viewers included (since 2.0 / F; before that, analyst and admin only). Each down
 Both formats carry the same sections: header (id, severity, status, first/last seen, generation time), summary,
 kill-chain stages (incidents only), entities (IPs, accounts, hosts), assets (inventory entries with criticality and
 sensitive-data tags; each alert also shows its asset weighting when it changed the severity), MITRE ATT&CK techniques grouped
-by tactic with the coverage evidence level on each one (the report says mapped is not proof; only validated is a labeled scenario), a merged timeline (evidence events marked), each alert with its explanation and up to 25 evidence events,
+by tactic with the coverage evidence level on each one (the report says mapped is not proof; only validated is a labeled scenario), a merged timeline (the first 200 events by `ts`, then `id`; one row per event even when two alerts share it; evidence events marked; `timeline_omitted` is how many merged events were past that cap, and 0 when the timeline fits; Markdown and PDF name that count when it is not 0), each alert with its explanation and up to 25 evidence events,
 analyst notes, and recommended actions keyed by technique (generic actions when no technique is mapped).
 Reports built from synthetic data open with a "SYNTHETIC DATA" banner and repeat it in the PDF page footer.
 Log-derived text is escaped in Markdown so it cannot inject tables, links, or HTML.
@@ -249,7 +269,7 @@ Errors are JSON: unknown alert → 404 `alert not found`; unknown incident → 4
 ## Asset inventory
 
 Assets give hosts a weight of importance and tag the systems that process sensitive data. Detection matches each
-alert's evidence events to the inventory by `host` name (case-insensitive) and by `dest_ip`/`src_ip` against an
+alert's evidence events to the inventory by `host` name (ASCII case only, the same fold as entity hosts: `WEB01` matches `web01`, and `Érin-host` stays apart from `érin-host`) and by `dest_ip`/`src_ip` against an
 asset's `addresses`, then raises the alert's severity:
 
 | Matched asset | Levels added |
@@ -310,11 +330,14 @@ Asset fields: `id`, `name`, `kind` (`server`, `workstation`, `network`, `cloud`,
 | `POST /api/changes/{id}/review` | admin | `{decision: approve\|reject, note, evidence_digest?, acknowledge_detection_loss?}`. Approval must send the `evidence_digest` of the evidence the reviewer was shown; if the evidence changed, nothing is applied and the answer is 409. A rule change that loses a labeled detection also needs `acknowledge_detection_loss: true`. Self-review → 403; already reviewed → 409 |
 | `GET /api/evaluations` / `POST /api/evaluations` | viewer / analyst | Evaluation history / run one now |
 
+A `rule_update` that sets `grouping` includes `grouping_preview`. It scans the newest 10000 events by `id`. `events_omitted` is how many stored events were past that cap (0 when the table has 10000 or fewer). `capped` is true only when `events_omitted` is not 0. `before` and `after` each keep the first 20 sorted `group_keys`. `group_keys_omitted` is how many keys were past that cap (0 when the set fits).
+
 ## SOC dashboard and live stream
 
 | Endpoint | Role | Notes |
 |---|---|---|
-| `GET /api/dashboard` | viewer | One read for the dashboard: counts (`events_total`, `synthetic_events`, `alerts_open`, `alerts_investigating`, `alerts_critical_open`, `alerts_total`), `events_per_minute` (60 one-minute buckets by ingest time, ending now), `alert_timeline` (`bucket_minutes` 60 or 5, and 24 `bins` of `{start, critical, high, medium, low, events}` by event time, ending at the newest alert; 5-minute buckets when all recent alerts fall in the last 2 hours), `attackers` (source IPs in alert evidence: `{ip, events, alerts, open_alerts, max_severity, last_seen}`, top 40), `top_rules`, `alerts` (up to 60, for the board), `recent_events` (60 newest by event time, no `raw`) |
+| `GET /api/dashboard` | viewer | One read for the dashboard: counts (`events_total`, `synthetic_events`, `alerts_open`, `alerts_investigating`, `alerts_critical_open`, `alerts_total`), `events_per_minute` (60 one-minute buckets by ingest time, ending now), `alert_timeline` (`bucket_minutes` 60 or 5, and 24 `bins` of `{start, critical, high, medium, low, events}` by event time, ending at the newest alert; 5-minute buckets when all recent alerts fall in the last 2 hours), `attackers` (source IPs in alert evidence: `{ip, events, alerts, open_alerts, max_severity, last_seen}`, the top 40 by alerts, then events). `attackers_omitted` is how many source IPs on alerts were past that cap (0 when there are 40 or fewer). An event that is not alert evidence is not a source IP in that count. `top_rules` (`{rule_id, name, severity, alerts, open}`, the top 10 by alerts). `rules_omitted` is how many rule ids on alerts were past that cap (0 when there are 10 or fewer). A rule with no alerts is not in that count. `alerts` (the board: not resolved first, then severity, then last_seen, the first 60). `board_omitted` is how many alerts were past that cap (0 when there are 60 or fewer). `recent_events` (the newest 60 by `ts`, then `id`, no `raw`). `recent_events_omitted` is how many stored events were past that cap (0 when there are 60 or fewer). `events_total` stays the full count |
+| `POST /api/dashboard/views` | analyst | `{name (1–80), visibility: private\|shared, filters: {severities}, layout}`. A name that differs only by ASCII case from one this owner already saved is 409 naming the stored row (`you already have a dashboard view named 'dup'` when `dup` is stored), including when the insert loses that race. Another owner's view of that name is not a conflict. `POST /api/dashboard/views/{id}` updates that owner's view the same way |
 | `GET /api/geo?ips=a,b,c` | viewer | Up to 200 IPs. `{label: "synthetic geo", ips: {ip: {city, lat, lon, synthetic: true, internal} \| null}}`. Only RFC 5737 documentation ranges (fictional cities) and RFC 1918 ranges (internal sites) have entries; every other address is `null` ("unknown") and is never guessed. 400 on an invalid address |
 | `GET /api/stream` | viewer | Server-Sent Events (`text/event-stream`), see below |
 
@@ -325,10 +348,10 @@ Session cookie required (EventSource sends it). One thread per connection; at mo
 | `event` | When | `data` |
 |---|---|---|
 | `hello` | on connect | `{version, user, heartbeat_seconds}` |
-| `health` | on connect (full), after each detection run (partial) | `{partial: false, status, checked_at, checks: {name: status}}` or `{partial: true, checks: {detection: ok\|failing}, error}` |
-| `event` | after a batch is stored | `{batch_id, count, synthetic, events: [...]}`: the newest 50 events of the batch (no `raw`) |
-| `alert` | after detection, per alert created or extended | alert row fields plus `change: created\|updated` |
-| `incident` | after detection, per incident touched (once the `incidents` table exists) | the incident row |
+| `health` | on connect (full), after each detection run (partial) | `{partial: false, status, checked_at, checks: {name: status}}` or `{partial: true, checks: {detection: ok\|failing}, error, alerts_omitted, incidents_omitted}`. `alerts_omitted` is how many alerts this run touched past the newest 100 by `id` (0 when the run fits, and 0 on a failing run). `incidents_omitted` is the same count for incidents |
+| `event` | after a batch is stored | `{batch_id, count, synthetic, events: [...], events_omitted}`: the newest 50 events of the batch (no `raw`). `events_omitted` is `count` minus the events array (0 when the batch fits). The events stay the newest 50 by `ts`, then `id` |
+| `alert` | after detection, per alert created or extended | the newest 100 alerts this run touched, by `id`, frames still in `id` order. Each frame keeps the alert row fields plus `change: created\|updated` |
+| `incident` | after detection, per incident touched (once the `incidents` table exists) | the newest 100 incidents this run touched, by `id`, frames still in `id` order. Each frame keeps the incident row |
 | `heartbeat` | every 15 s without other traffic | `{ts, subscribers}` |
 | `resync` | the client fell behind (its 500-message queue overflowed) | `{reason}`: refetch `/api/dashboard` |
 
@@ -341,10 +364,10 @@ The dashboard also reads `GET /api/incidents`, `GET /api/attack/coverage`, and `
 | Endpoint | Role | Notes |
 |---|---|---|
 | `GET /api/health` | public | `{status, checks: {name: status}}`; HTTP 503 when failing. `checks` includes `syslog` while the listener is enabled and always includes `storyline` |
-| `GET /api/health/details` | viewer | Full checks with guidance, a `means` sentence (what failing or degraded means on this demo), recent redacted errors, recent detection runs |
+| `GET /api/health/details` | viewer | Full checks with guidance, a `means` sentence (what failing or degraded means on this demo). `recent_errors` is the newest 20 `error_log` rows by `id`. `recent_errors_omitted` is how many were past that cap (0 when the table fits). `recent_detection_runs` is the newest 10 detection runs by `id`. `recent_detection_runs_omitted` is how many were past that cap (0 when the table fits) |
 | `GET /api/tokens` / `POST /api/tokens` | admin | `{name}` → `{token}` (shown once; only a SHA-256 hash is stored) |
 | `POST /api/tokens/{id}/revoke` | admin | |
-| `GET /api/audit` | admin | Last 200 audit entries |
+| `GET /api/audit` | admin | Last 200 audit entries by `id`. The body stays a bare array. `X-Watchpost-Omitted` is how many entries were past that cap (0 when the table fits) |
 | `GET /api/audit/verify` | admin | Walks the audit hash chain: `{ok, status (verified\|partial\|broken), entries, keyed, head, chain_started, legacy, first_break}` (README, "Tamper-evident audit log") |
 
 ## Attack storyline (synthetic demo)

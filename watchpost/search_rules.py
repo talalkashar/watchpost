@@ -9,8 +9,14 @@ The filter is matched in Python over the event dicts the engine already scans (e
 with the hunt's SQL semantics: same fields and value checks, a trailing `*` on an unquoted value is a prefix
 match, message terms are "contains", NOT keeps events missing the field, and a bytes term uses the
 same >=, >, <=, < or = comparison as the hunt. Comparisons fold case the way SQLite does
-(ASCII only): user and host equality, every prefix match and message contains ignore ASCII case;
-other equality is exact. tests/test_search_rules.py cross-checks this matcher against hunt.compile_query in SQL.
+(ASCII only): user, host, source, and outcome equality, every prefix match and message contains ignore ASCII case.
+`event_type` and `severity` fold ASCII case and bind the catalog spelling (`Auth_Failure` is `auth_failure`).
+Other equality is exact. Grouping by user folds ASCII letters only, the same fold as the user: filter,
+so Alice and alice share a key and ÉRIN stays apart from érin. Grouping by host, source, outcome,
+event_type, and severity stays the stored spelling.
+`src_ip`, `dest_ip`, and `ip` equality use the address form ingest stores;
+a prefix stays the typed text. tests/test_search_rules.py cross-checks this matcher against
+hunt.compile_query in SQL.
 
 Hunt fields the engine does not load (outcome, severity, batch_id) are refused, and so are time terms: the
 window replaces them. The rule's params are the compiled definition; only `threshold` and `window_seconds`
@@ -28,6 +34,7 @@ from datetime import timedelta
 from . import attack
 from . import hunt
 from . import sigma
+from .queries import canonical_ip, catalog_name
 from .db import iso, parse_iso
 from .normalize import EventError, parse_timestamp
 
@@ -124,11 +131,20 @@ def _predicate(term):
         if prefix is not None:
             p = _fold(prefix)
             return lambda e: _starts(e.get("src_ip"), p) or _starts(e.get("dest_ip"), p)
-        return lambda e: e.get("src_ip") == value or e.get("dest_ip") == value
+        address = canonical_ip(value, field)
+        return lambda e: e.get("src_ip") == address or e.get("dest_ip") == address
     if prefix is not None:
         p = _fold(prefix)
         return lambda e: _starts(e.get(column), p)
-    if field in ("user", "host"):  # COLLATE NOCASE, ASCII only, same as the asset inventory's host names
+    if field in ("src_ip", "dest_ip"):
+        address = canonical_ip(value, field)
+        return lambda e: e.get(column) == address
+    if kind == "enum":
+        # Catalog spelling, same bound value as hunt SQL. A stored lookalike stays unmatched.
+        name = catalog_name(value, hunt.ENUMS[field])
+        return lambda e: e.get(column) == name
+    # COLLATE NOCASE, ASCII only. Grouping by source and outcome stays exact.
+    if field in ("user", "host", "source", "outcome"):
         folded = _fold(value)
         return lambda e: isinstance(e.get(column), str) and _fold(e[column]) == folded
     return lambda e: e.get(column) == value
@@ -243,9 +259,9 @@ def run(events, params):
     for e in events:
         key = e.get(column)
         if key is not None and key != "" and match(e):
-            # Accounts group case-insensitively, as the user: filter matches them (and entities.py keys them):
-            # otherwise "alice", "Alice" and "ALICE" would each stay under the threshold.
-            groups[str(key).lower() if params["group_by"] == "user" else str(key)].append(e)
+            # Accounts group with the ASCII fold the user: filter uses. Alice and alice share a key;
+            # ÉRIN and érin stay two keys. Other fields stay the stored spelling.
+            groups[_fold(str(key)) if params["group_by"] == "user" else str(key)].append(e)
     findings = []
     for key, group in groups.items():
         group.sort(key=lambda e: (rules_mod._epoch(e), e["id"]))

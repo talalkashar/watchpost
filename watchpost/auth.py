@@ -188,24 +188,67 @@ def _start_session(conn, user, ttl_seconds, detail=None):
     return token, csrf, {"username": user["username"], "role": user["role"]}
 
 
+# Same cap as create-user. A longer value is never passed to PBKDF2.
+PASSWORD_MAX_LEN = 256
+_TIMING_PASSWORD = "dummy-password-for-timing"
+
+
+def _password_is_login_shaped(password):
+    return isinstance(password, str) and len(password) <= PASSWORD_MAX_LEN
+
+
+def _reject_unknown_login(conn, password):
+    """Same work and response as a missing account, so a bad length is not a distinct failure.
+
+    The dummy hash stays the short fixed string. A password that is not a string, or is longer
+    than 256 characters, is not hashed: the timing check uses that short string instead.
+    """
+    global _DUMMY_HASH
+    _DUMMY_HASH = _DUMMY_HASH or hash_password(_TIMING_PASSWORD)
+    checked = password if _password_is_login_shaped(password) else _TIMING_PASSWORD
+    verify_password(checked, _DUMMY_HASH)
+    audit(conn, "anonymous", "login_failed", None, {"reason": "unknown user"})
+    raise AuthError("invalid username or password")
+
+
+def _reject_disabled_login(conn, user, password):
+    """Check the stored hash, then the same 401 as a wrong password.
+
+    Returning before verify_password was faster than a wrong password and wrote no
+    audit row. failed_logins is not incremented and the account is not locked.
+    The error text does not say the account is disabled.
+    """
+    verify_password(password, user["pw_hash"])
+    audit(conn, user["username"], "login_failed", None, {"reason": "disabled"})
+    raise AuthError("invalid username or password")
+
+
 def login(conn, username, password, ttl_seconds):
     """Check the password. Returns (token, csrf, user), or an MfaChallenge when the account has TOTP enrolled.
 
     For an enrolled account the password step does not reset the failure count: only a correct code does,
     so knowing the password does not buy unlimited code guesses.
+
+    Usernames are 3–32 characters. A value outside that is rejected before the lookup and is not sliced,
+    so a longer string cannot match a stored prefix.
+
+    A password that is not a string, or is longer than 256 characters, is rejected before the lookup
+    and before any hash of that value. The response matches an unknown account.
+
+    A disabled account still checks the stored hash, then returns that same 401. It does not
+    increment failed_logins and it does not lock. The error text does not say the account is disabled.
     """
-    global _DUMMY_HASH
-    user = conn.execute("SELECT * FROM users WHERE username = ?", (str(username)[:64],)).fetchone()
+    if not _password_is_login_shaped(password):
+        _reject_unknown_login(conn, password)
+    if not isinstance(username, str) or not (3 <= len(username) <= 32):
+        _reject_unknown_login(conn, password)
+    user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     if user is None:
-        # Spend comparable time so response timing does not reveal valid usernames.
-        _DUMMY_HASH = _DUMMY_HASH or hash_password("dummy-password-for-timing")
-        verify_password(str(password), _DUMMY_HASH)
-        audit(conn, "anonymous", "login_failed", None, {"reason": "unknown user"})
-        raise AuthError("invalid username or password")
+        _reject_unknown_login(conn, password)
     if user["disabled"]:
-        raise AuthError("invalid username or password")
+        _reject_disabled_login(conn, user, password)
     _check_not_locked(conn, user)
-    if not verify_password(str(password), user["pw_hash"]):
+    if not verify_password(password, user["pw_hash"]):
         _record_failure(conn, user)
         raise AuthError("invalid username or password")
     if user["totp_secret"]:

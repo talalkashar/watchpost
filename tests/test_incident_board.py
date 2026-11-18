@@ -65,7 +65,8 @@ class TopTechniqueTests(unittest.TestCase):
     def test_earliest_kill_chain_technique_wins_and_id_breaks_ties(self):
         # T1595.003 and T1190 share the scan rule; T1190 is Initial Access, after Reconnaissance.
         # T1048 is Exfiltration. The card leads with the recon id.
-        listed = {item["id"]: item["top_technique"] for item in incidents.list_incidents(self.conn, {})}
+        rows, _omitted = incidents.list_incidents(self.conn, {})
+        listed = {item["id"]: item["top_technique"] for item in rows}
         self.assertEqual(listed[1], {
             "id": "T1595.003",
             "name": "Active Scanning: Wordlist Scanning",

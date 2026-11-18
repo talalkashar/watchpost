@@ -32,6 +32,8 @@ from datetime import datetime, timedelta, timezone
 from .db import audit, iso, now_iso, parse_iso, transaction, utcnow
 
 RULE_ID = "log_source_silent"
+# SQLite COLLATE NOCASE folds these letters only. Source and host keys use the same fold as entities.
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 
 CADENCE_WINDOW_SECONDS = 86400
 CADENCE_SAMPLE = 100
@@ -136,16 +138,35 @@ def judge(times, first_seen, now, windows=()):
     return {**out, "status": "healthy", "reasons": [f"{summary}; late after {_human(base['late_after'])}"]}
 
 
+def _ascii_fold(value):
+    return value.translate(_ASCII_FOLD)
+
+
+def _window_covers(window, source, host):
+    """True when this window excuses the pair. A window with no host covers every host of the source.
+
+    ASCII case only, so a window for web01 covers WEB01. Érin-host does not cover érin-host.
+    """
+    if _ascii_fold(window["source"] or "") != _ascii_fold(source or ""):
+        return False
+    if window.get("host") is None:
+        return True
+    return _ascii_fold(window["host"]) == _ascii_fold(host or "")
+
+
 def _windows_for(windows, source, host):
-    return [(w["start"], w["end"]) for w in windows
-            if w["source"] == source and (w["host"] is None or w["host"] == host)]
+    return [(w["start"], w["end"]) for w in windows if _window_covers(w, source, host)]
 
 
 def _arrivals(events):
-    """Group events by (source, host) into sorted distinct arrivals, keeping the newest event of each."""
+    """Group events by (source, host) into sorted distinct arrivals, keeping the newest event of each.
+
+    The key folds ASCII case, so Demo/WEB01 and demo/web01 are one stream. A spelling change is not a
+    new source, and the old spelling is not a silence. Non-ASCII case stays exact.
+    """
     groups = {}
     for e in events:
-        key = (e.get("source") or "", e.get("host") or "")
+        key = (_ascii_fold(e.get("source") or ""), _ascii_fold(e.get("host") or ""))
         when = _epoch(e.get("ingested_at") or e["ts"])
         g = groups.setdefault(key, {"by_time": {}, "first_seen": when})
         if e.get("first_seen"):
@@ -165,6 +186,7 @@ def log_source_silent(events, params):
     engine and the noise lab, never stored) the current silence is judged too. The evidence is the last event
     before the silence, so one silence episode is one finding however often it is rescanned.
     `params["maintenance"]` lists windows ({source, host or None, start, end} as epochs) that excuse quiet time.
+    A window matches ASCII case, so a window for web01 covers WEB01.
     """
     now = _epoch(params["now"]) if params.get("now") else None
     windows = params.get("maintenance") or []
@@ -184,7 +206,10 @@ def log_source_silent(events, params):
                 continue
             last = g["by_time"][times[i - 1]]
             resumed = i < len(times)
-            where = f"{source} on {host}" if host else f"{source} (no host)"
+            # The key is folded. The title still shows the source and host as logged.
+            logged_source = last.get("source") or source
+            logged_host = last.get("host") or ""
+            where = f"{logged_source} on {logged_host}" if logged_host else f"{logged_source} (no host)"
             findings.append({
                 "group_key": f"{source}|{host}",
                 "event_ids": [last["id"]],
@@ -211,6 +236,44 @@ def _pairs(conn, max_id=None, since=None):
         sql += " WHERE id <= ?"
         args.append(max_id)
     return [dict(r) for r in conn.execute(sql + " GROUP BY source, host", args)]
+
+
+def _folded_pairs(pairs):
+    """One row per stream. Spellings that differ only by ASCII case share a row.
+
+    The returned source and host are the folded spellings. A NULL host stays NULL.
+    Counts add. Arrival reads stay on each stored spelling (`members`) so they keep using
+    idx_events_source_host.
+    """
+    grouped = {}
+    for p in pairs:
+        source = _ascii_fold(p["source"] or "")
+        host = None if p["host"] is None else _ascii_fold(p["host"])
+        key = (source, host)
+        found = grouped.get(key)
+        if found is None:
+            grouped[key] = {"source": source, "host": host, "first_seen": p["first_seen"],
+                            "last_seen": p["last_seen"], "events_24h": p["events_24h"] or 0,
+                            "events": p["events"] or 0, "members": [(p["source"], p["host"])]}
+            continue
+        found["first_seen"] = min(found["first_seen"], p["first_seen"])
+        found["last_seen"] = max(found["last_seen"], p["last_seen"])
+        found["events_24h"] += p["events_24h"] or 0
+        found["events"] += p["events"] or 0
+        found["members"].append((p["source"], p["host"]))
+    return list(grouped.values())
+
+
+def _merged_arrivals(conn, members, max_id=None):
+    """Recent arrivals of every stored spelling of one stream, oldest first."""
+    by_time = {}
+    for source, host in members:
+        for row in _recent_arrivals(conn, source, host, max_id):
+            when = row["ingested_at"]
+            best = by_time.get(when)
+            if best is None or row["id"] > best["id"]:
+                by_time[when] = row
+    return [by_time[when] for when in sorted(by_time)]
 
 
 def _recent_arrivals(conn, source, host, max_id=None):
@@ -256,19 +319,23 @@ def clock_params(conn, params, now=None):
 
 
 def inventory(conn, now=None):
-    """GET /api/sources/health: every (source, host) with its status, cadence, last arrival, and reasons."""
+    """GET /api/sources/health: every (source, host) with its status, cadence, last arrival, and reasons.
+
+    ASCII case is one stream. Demo/WEB01 and demo/web01 share a row named demo/web01. Non-ASCII case stays
+    two rows.
+    """
     now = now or now_iso()
     now_s = _epoch(now)
     listed = list_windows(conn)
     windows = [{"source": w["source"], "host": w["host"], "start": _epoch(w["starts_at"]),
                 "end": _epoch(w["effective_end"])} for w in listed]
     rows = []
-    for p in _pairs(conn, since=iso_from(now_s - 86400)):
-        arrivals = _recent_arrivals(conn, p["source"], p["host"])
+    for p in _folded_pairs(_pairs(conn, since=iso_from(now_s - 86400))):
+        arrivals = _merged_arrivals(conn, p["members"])
         times = [_epoch(a["ingested_at"]) for a in arrivals]
-        verdict = judge(times, _epoch(p["first_seen"]), now_s, _windows_for(windows, p["source"], p["host"] or ""))
-        active = [w for w in listed if w["active"] and w["source"] == p["source"]
-                  and (w["host"] is None or w["host"] == p["host"])]
+        host = p["host"] or ""
+        verdict = judge(times, _epoch(p["first_seen"]), now_s, _windows_for(windows, p["source"], host))
+        active = [w for w in listed if w["active"] and _window_covers(w, p["source"], host)]
         rows.append({"source": p["source"], "host": p["host"], "first_seen": p["first_seen"],
                      "last_seen": p["last_seen"], "last_event_ts": arrivals[-1]["ts"], "events_24h": p["events_24h"],
                      "events": p["events"], "synthetic": all(a["synthetic"] for a in arrivals),

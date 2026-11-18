@@ -108,6 +108,49 @@ class RiskScoreTests(unittest.TestCase):
         only_ips = entities.list_entities(self.conn, {"kind": "src_ip", "limit": "1"})["entities"]
         self.assertEqual([(r["kind"], r["value"]) for r in only_ips], [("src_ip", "203.0.113.9")])
 
+    def test_list_selects_only_alerts_that_can_score(self):
+        loud = add_event(self.conn, ANCHOR, user="mallory", src_ip="203.0.113.9")
+        cleared = add_event(self.conn, ANCHOR, user="bob", src_ip="10.0.50.5")
+        mixed = add_event(self.conn, ANCHOR, user="sam", src_ip="198.51.100.8")
+        add_alert(self.conn, "critical", ANCHOR, [loud])
+        fp = add_alert(self.conn, "critical", ANCHOR, [cleared], "resolved", "false_positive")
+        add_alert(self.conn, "high", ANCHOR, [mixed], "resolved", "benign")
+        kept = add_alert(self.conn, "medium", ANCHOR, [mixed], "resolved", "true_positive")
+
+        captured = []
+        real_execute = self.conn.execute
+
+        def execute(sql, args=()):
+            captured.append((sql, args))
+            return real_execute(sql, args)
+
+        self.conn.execute = execute
+        result = entities.list_entities(self.conn, {})
+        self.conn.execute = real_execute
+
+        alert_reads = [(sql, args) for sql, args in captured
+                       if f"SELECT {entities._ALERT_FIELDS} FROM alerts" in sql]
+        self.assertEqual(len(alert_reads), 1)
+        self.assertIn("disposition IS NULL OR disposition NOT IN (?, ?)", alert_reads[0][0])
+        self.assertEqual(tuple(alert_reads[0][1]), entities.EXCLUDED_DISPOSITIONS)
+        walks = [(sql, args) for sql, args in captured if "FROM alert_events" in sql]
+        self.assertEqual(len(walks), 1)
+        self.assertIn("JOIN alerts a ON a.id = ae.alert_id", walks[0][0])
+        self.assertIn("(a.disposition IS NULL OR a.disposition NOT IN (?, ?))", walks[0][0])
+        self.assertEqual(tuple(walks[0][1]), entities.EXCLUDED_DISPOSITIONS)
+
+        listed = {(r["kind"], r["value"]) for r in result["entities"]}
+        self.assertNotIn(("user", "bob"), listed)
+        self.assertNotIn(("src_ip", "10.0.50.5"), listed)
+        sam = next(r for r in result["entities"] if r["kind"] == "user" and r["value"] == "sam")
+        self.assertEqual({c["alert_id"] for c in sam["contributions"]}, {kept})
+        self.assertEqual(sam["score"], 10.0)
+        # Detail still lists the false positive, at weight 0, so the score stays 0.
+        detail = entities.get_entity(self.conn, "src_ip", "10.0.50.5")
+        self.assertEqual(detail["score"], 0.0)
+        self.assertEqual([(c["alert_id"], c["weight"], c["counted"]) for c in detail["contributions"]],
+                         [(fp, 0.0, False)])
+
     def test_empty_database_and_unknown_entity(self):
         self.assertEqual(entities.list_entities(self.conn, {})["entities"], [])
         detail = entities.get_entity(self.conn, "user", "nobody")
@@ -209,6 +252,44 @@ class SocMetricsTests(ServerTestCase):
         # Metrics that replayed timestamps would distort are named, not silently dropped.
         self.assertIn("time_to_detect", {o["metric"] for o in m["omitted_metrics"]})
         self.assertTrue(all(o["reason"] for o in m["omitted_metrics"]))
+
+    def test_window_scope_names_hours_and_all_stored_events(self):
+        now = utcnow()
+        recent, old = iso(now), iso(now - timedelta(hours=48))
+        with sqlite3.connect(self.db_path) as db:
+            db.executemany(
+                "INSERT INTO events(ts, ingested_at, source, event_type, severity, user, src_ip, message, synthetic)"
+                " VALUES (?,?,?,?,?,?,?,?,1)",
+                [(recent, recent, "test", "auth_failure", "low", "erin", "198.51.100.10", "synthetic labeled"),
+                 (old, old, "test", "auth_failure", "low", "erin", "198.51.100.11", "synthetic labeled"),
+                 (old, old, "test", "auth_success", "info", "sam", "198.51.100.12", "synthetic labeled")])
+        viewer = self.client("viewer")
+        narrow = viewer.get("/api/metrics?hours=1")[1]
+        wide = viewer.get("/api/metrics?hours=72")[1]
+        self.assertEqual(narrow["window_hours"], 1)
+        self.assertEqual(narrow["events_ingested_window"], 1)
+        self.assertEqual(wide["events_ingested_window"], 3)
+        # The three breakdowns ignore hours: the 48-hour-old failure stays in both reads.
+        self.assertEqual(narrow["top_failure_ips"], wide["top_failure_ips"])
+        self.assertEqual({row["src_ip"]: row["count"] for row in narrow["top_failure_ips"]},
+                         {"198.51.100.10": 1, "198.51.100.11": 1})
+        self.assertEqual(narrow["top_failure_users"], [{"user": "erin", "count": 2}])
+        self.assertEqual(narrow["events_by_type"], wide["events_by_type"])
+        self.assertEqual({row["event_type"]: row["count"] for row in narrow["events_by_type"]},
+                         {"auth_failure": 2, "auth_success": 1})
+        scope = narrow["window_scope"]
+        self.assertEqual(scope, wide["window_scope"])
+        self.assertEqual(scope["honors_hours"], ["events_ingested_window"])
+        for name in ("top_failure_ips", "top_failure_users", "events_by_type", "events_total", "synthetic_events"):
+            self.assertIn(name, scope["all_stored_events"])
+            self.assertNotIn(name, scope["honors_hours"])
+        self.assertEqual(scope["newest_event_24h"], ["activity_last_24h_of_data"])
+        self.assertIn("count every stored event", scope["note"])
+        self.assertIn("top_failure_ips", scope["note"])
+        api = (Path(__file__).resolve().parent.parent / "docs" / "API.md").read_text()
+        self.assertIn("window_scope.all_stored_events", api)
+        self.assertIn("top_failure_ips`, `top_failure_users`, and `events_by_type` count every stored event", api)
+        self.assertIn("hours` filters only `events_ingested_window`", api)
 
 
 class EntityUiTests(unittest.TestCase):
