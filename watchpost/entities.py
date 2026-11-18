@@ -128,16 +128,35 @@ def _entity_alerts(conn, where="", args=()):
     return found
 
 
+def _scoreable_disposition(column="disposition"):
+    """SQL and binds for an alert that can add to a risk score.
+
+    `EXCLUDED_DISPOSITIONS` is the only list. A null disposition (still open, or closed
+    without one of those labels) counts. A false positive or benign close does not.
+    """
+    marks = ", ".join("?" * len(EXCLUDED_DISPOSITIONS))
+    return f"({column} IS NULL OR {column} NOT IN ({marks}))", EXCLUDED_DISPOSITIONS
+
+
 def list_entities(conn, params):
-    """Top entities by risk score. Only alerts that count toward a score are listed here."""
+    """Top entities by risk score.
+
+    The alert read and the evidence walk both keep only alerts that can score, using
+    `EXCLUDED_DISPOSITIONS` in SQL. A false positive still scores 0 on the entity page
+    and is absent here.
+    """
     kind = params.get("kind")
     if kind and kind not in KINDS:
         raise QueryError(f"kind must be one of {', '.join(KINDS)}")
     limit = _int(params.get("limit"), "limit", 10, 1, 100)
     anchor = _anchor(conn)
-    alerts = {r["id"]: dict(r) for r in conn.execute(f"SELECT {_ALERT_FIELDS} FROM alerts")}
+    clause, bound = _scoreable_disposition()
+    alerts = {r["id"]: dict(r) for r in conn.execute(
+        f"SELECT {_ALERT_FIELDS} FROM alerts WHERE {clause}", bound)}
+    walk, walk_bound = _scoreable_disposition("a.disposition")
     rows = []
-    for (entity_kind, value), alert_ids in _entity_alerts(conn).items():
+    for (entity_kind, value), alert_ids in _entity_alerts(
+            conn, f" JOIN alerts a ON a.id = ae.alert_id WHERE {walk}", walk_bound).items():
         if kind and entity_kind != kind:
             continue
         parts = [c for c in (_contribution(alerts[i], anchor) for i in alert_ids if i in alerts) if c["counted"]]
