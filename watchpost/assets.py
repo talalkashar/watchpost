@@ -22,6 +22,7 @@ import re
 
 from .db import audit, now_iso, row_to_dict, transaction
 from .normalize import SEVERITIES
+from .queries import catalog_name
 
 CRITICALITIES = ("low", "medium", "high", "critical")
 KINDS = ("server", "workstation", "network", "cloud", "database", "other")
@@ -84,12 +85,12 @@ def validate(data):
     name = str(data.get("name") or "").strip()
     if not _NAME_RE.match(name):
         raise AssetError("name must be 1-128 chars of letters, digits, _ . : -")
-    kind = data.get("kind") or "server"
-    if kind not in KINDS:
-        raise AssetError(f"kind must be one of {', '.join(KINDS)}")
-    criticality = data.get("criticality") or "medium"
-    if criticality not in CRITICALITIES:
-        raise AssetError(f"criticality must be one of {', '.join(CRITICALITIES)}")
+    # ASCII case folds onto the catalog spelling. `Server` stores `server` and `High` stores `high`.
+    # A missing value stays the default. Spaces and `Hıgh` stay the existing error.
+    kind = _catalog_field(data.get("kind"), KINDS, "server",
+                          f"kind must be one of {', '.join(KINDS)}")
+    criticality = _catalog_field(data.get("criticality"), CRITICALITIES, "medium",
+                                 f"criticality must be one of {', '.join(CRITICALITIES)}")
     tags = data.get("data_tags") or []
     if isinstance(tags, str):
         tags = [t for t in re.split(r"[,\s]+", tags) if t]
@@ -150,6 +151,20 @@ def review_reasons(before, after, taken=frozenset()):
 
 def _public(asset):
     return {k: asset[k] for k in ("id", "name", "kind", "criticality", "data_tags", "synthetic") if k in asset}
+
+
+def _catalog_field(value, names, default, message):
+    """A missing or empty value is `default`. Any other value must match one catalog spelling.
+
+    `Server` is `server`. A non-string, a value that is only spaces, and a non-ASCII
+    lookalike stay unset so the caller raises `message`.
+    """
+    if not value:
+        return default
+    name = catalog_name(value, names)
+    if name is None:
+        raise AssetError(message)
+    return name
 
 
 def _host_key(name):

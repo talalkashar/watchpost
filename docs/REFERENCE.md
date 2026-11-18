@@ -574,7 +574,7 @@ Each term compiles to a fixed SQL fragment chosen from a field whitelist, with t
 
 ### Asset inventory review
 
-The asset inventory was contributed by Juan Carlos Munera (PR #9): criticality and sensitive-data tags per host, severity raised on alerts that touch them, and open alerts re-weighed whenever the inventory changes. Because the inventory raises severity, editing it can also lower severity, so one admin alone may not make an edit that could do that. Such an edit goes through the same two-person review as rule and setting changes.
+The asset inventory was contributed by Juan Carlos Munera (PR #9): criticality and sensitive-data tags per host, severity raised on alerts that touch them, and open alerts re-weighed whenever the inventory changes. Create and edit fold ASCII case onto the catalog spelling, so `Server` stores `server` and `High` stores `high`. A value that is only spaces, and `Hıgh`, stay the existing 400. A missing kind stays `server` and a missing criticality stays `medium`. An address stays the form already stored. Because the inventory raises severity, editing it can also lower severity, so one admin alone may not make an edit that could do that. Such an edit goes through the same two-person review as rule and setting changes.
 
 | Needs a second admin | Applies at once (still audited) |
 |---|---|
