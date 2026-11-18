@@ -549,6 +549,124 @@ SCENARIOS.update({
 })
 
 
+def credential_stuffing(day, rng):
+    """Eight botnet addresses each try one breached password against hr_admin. None succeed.
+
+    One failure per address stays under the single-IP brute-force and password-spray thresholds.
+    Eight failures on the one account are what account_repeated_failures scores. `rng` is unused:
+    the timeline is fixed so this builder does not consume the shared seed.
+    """
+    del rng
+    start = _at(day, 14, 12)
+    return [_event(start + timedelta(seconds=i * 20), "credential_stuffing", "auth_failure", "hr_admin",
+                   f"203.0.113.{210 + i}",
+                   message="[SYNTHETIC] Failed password for hr_admin (credential stuffing, breached pair)")
+            for i in range(8)]
+
+
+def lateral_movement(day, rng):
+    """bob fails three times, logs in, opens an SMB session to db01, and gets a root shell there.
+
+    Three failures are enough for privilege_escalation_after_login and short of a success-after-failures
+    alert. Both hosts are inside 10.0.0.0/8, so the hop is not travel. `rng` is unused.
+    """
+    del rng
+    ip, start = "10.0.8.40", _at(day, 14, 40)
+    events = [_event(start + timedelta(seconds=i * 20), "lateral_movement", "auth_failure", "bob", ip,
+                     message="[SYNTHETIC] Failed password for bob (lateral movement foothold)")
+              for i in range(3)]
+    events.append(_event(start + timedelta(seconds=70), "lateral_movement", "auth_success", "bob", ip,
+                         message="[SYNTHETIC] Accepted password for bob"))
+    events.append(_event(start + timedelta(minutes=2), "lateral_movement", "network_connection", "bob", ip,
+                         dest_ip="10.0.4.20", dest_port=445,
+                         message="[SYNTHETIC] SMB session to db01 ADMIN$ (lateral movement)"))
+    events.append(_event(start + timedelta(minutes=2, seconds=20), "lateral_movement", "process_start", "bob",
+                         ip, host="db01",
+                         message="[SYNTHETIC] process start: wmic process call create on db01"))
+    events.append(_event(start + timedelta(minutes=3), "lateral_movement", "privilege_escalation", "bob", ip,
+                         host="db01",
+                         message="[SYNTHETIC] bob : TTY=pts/2 ; PWD=/tmp ; USER=root ; COMMAND=/bin/bash"))
+    return events
+
+
+def dns_exfil(day, rng):
+    """A workstation leaks payroll rows as DNS TXT queries while one address guesses that account.
+
+    The queries are a few kilobytes, under the volume rule, and no catalog technique covers DNS.
+    Ten failures from one address are what brute_force_ip and account_repeated_failures score.
+    `rng` is unused.
+    """
+    del rng
+    ip, start = "198.51.100.216", _at(day, 15, 5)
+    events = [_event(start + timedelta(seconds=i * 12), "dns_exfil", "auth_failure", "payroll", ip,
+                     message="[SYNTHETIC] Failed password for payroll (guessing before DNS exfil)")
+              for i in range(10)]
+    query_at = start + timedelta(minutes=3)
+    events += [_event(query_at + timedelta(seconds=i * 7), "dns_exfil", "network_connection", "payroll",
+                      "10.0.8.55", host="wkstn04", dest_ip="203.0.113.53", dest_port=53, bytes=120,
+                      message=f"[SYNTHETIC] DNS TXT query {i:02x}{i * 17 % 256:02x}.payroll.exfil.example type TXT")
+               for i in range(32)]
+    return events
+
+
+def ransomware_precursors(day, rng):
+    """heidi is guessed, then used to delete shadow copies and rename a file on the file server.
+
+    Four failures sit under the success-after-failures and repeated-failure thresholds. The sudo of
+    vssadmin is what privilege_escalation_after_login scores. `rng` is unused.
+    """
+    del rng
+    ip, start = "192.0.2.180", _at(day, 16, 10)
+    events = [_event(start + timedelta(seconds=i * 15), "ransomware_precursors", "auth_failure", "heidi", ip,
+                     host="files01", message="[SYNTHETIC] Failed password for heidi (ransomware precursor)")
+              for i in range(4)]
+    events.append(_event(start + timedelta(seconds=70), "ransomware_precursors", "auth_success", "heidi", ip,
+                         host="files01", message="[SYNTHETIC] Accepted password for heidi"))
+    events.append(_event(start + timedelta(minutes=3), "ransomware_precursors", "privilege_escalation", "heidi",
+                         ip, host="files01",
+                         message="[SYNTHETIC] heidi : TTY=pts/1 ; PWD=/var/tmp ; USER=root ; "
+                                 "COMMAND=/usr/bin/vssadmin delete shadows /all /quiet"))
+    for offset, command in enumerate((
+            "vssadmin.exe Delete Shadows /All /Quiet",
+            "wbadmin delete catalog -quiet",
+            "bcdedit /set {default} recoveryenabled No",
+    )):
+        events.append(_event(start + timedelta(minutes=3, seconds=20 + offset * 15), "ransomware_precursors",
+                             "process_start", "heidi", ip, host="files01",
+                             message=f"[SYNTHETIC] process start: {command}"))
+    events.append(_event(start + timedelta(minutes=4), "ransomware_precursors", "file_access", "heidi", ip,
+                         host="files01",
+                         message="[SYNTHETIC] rename /srv/files/payroll.xlsx -> /srv/files/payroll.xlsx.locked"))
+    return events
+
+
+# Later attacks stay out of the demo dataset. The noise lab still evaluates them, and any one can be
+# replayed by name. Techniques are set here because SCENARIO_TECHNIQUES was already copied onto the
+# demo scenarios above.
+SCENARIOS.update({
+    "credential_stuffing": {
+        "build": credential_stuffing, "malicious": True,
+        "expected": {"account_repeated_failures": "hr_admin"},
+        "techniques": ["T1110"],
+        "description": "Eight botnet addresses each try one breached password against hr_admin. None succeed."},
+    "lateral_movement": {
+        "build": lateral_movement, "malicious": True,
+        "expected": {"privilege_escalation_after_login": "bob|db01"},
+        "techniques": ["T1078", "T1548.003"],
+        "description": "bob fails three times, logs in, opens an SMB session to db01, and gets a root shell there."},
+    "dns_exfil": {
+        "build": dns_exfil, "malicious": True,
+        "expected": {"brute_force_ip": "198.51.100.216", "account_repeated_failures": "payroll"},
+        "techniques": ["T1110", "T1110.001"],
+        "description": "One address fails the payroll account ten times while a workstation leaks rows as DNS TXT queries."},
+    "ransomware_precursors": {
+        "build": ransomware_precursors, "malicious": True,
+        "expected": {"privilege_escalation_after_login": "heidi|files01"},
+        "techniques": ["T1078", "T1548.003"],
+        "description": "heidi is guessed, then used to delete shadow copies and rename a file on the file server."},
+})
+
+
 def build(scenario_names=None, seed=7, now=None):
     """Return {scenario: [events]} for the requested scenarios (default: the demo dataset)."""
     rng = random.Random(seed)
