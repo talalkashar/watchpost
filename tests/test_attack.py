@@ -1,3 +1,4 @@
+import inspect
 import unittest
 from pathlib import Path
 
@@ -255,6 +256,41 @@ class NavigatorLayerTests(unittest.TestCase):
         for rule_id in ("success_after_failures", "impossible_geo_login", "privilege_escalation_after_login"):
             self.assertIn(rule_id, by_id["T1078"]["comment"])
         self.assertEqual(self.layer({})["gradient"]["maxValue"], 1)  # no alerts yet: still a valid range
+
+    def test_tactic_slugs_fold_ascii_letters_only(self):
+        # Initial Access stays initial-access. A dotted capital I is not rewritten.
+        catalog = {t["techniqueID"]: t["tactic"] for t in self.layer({})["techniques"]}
+        self.assertEqual(catalog["T1078"], "initial-access")
+        self.assertEqual(catalog["T1548.003"], "privilege-escalation")
+
+        def bare(technique_id, tactic):
+            return {"id": technique_id, "tactic": tactic, "hits": 0, "level": "gap",
+                    "rules": [], "scenarios": []}
+
+        dotted = "\u0130nitial Access"
+        layer = attack.navigator_layer({"techniques": [
+            bare("T0001", "Command and Control"),
+            bare("T0002", dotted),
+            bare("T0003", "Attac\u212a"),
+        ]})
+        slugs = {t["techniqueID"]: t["tactic"] for t in layer["techniques"]}
+        self.assertEqual(slugs["T0001"], "command-and-control")
+        self.assertEqual(slugs["T0002"], "\u0130nitial-access")
+        self.assertNotEqual(slugs["T0002"], "initial-access")
+        self.assertNotIn("\u0307", slugs["T0002"])
+        self.assertEqual(slugs["T0003"], "attac\u212a")
+        self.assertNotEqual(slugs["T0003"], "attack")
+        for fn in (attack.navigator_layer, attack._tactic_slug):
+            source = inspect.getsource(fn)
+            self.assertNotIn(".lower(", source)
+            self.assertNotIn(".casefold(", source)
+        root = Path(__file__).resolve().parent.parent
+        phrase = "A tactic containing `\u0130` is not `initial-access`"
+        for name in ("API.md", "REFERENCE.md"):
+            text = (root / "docs" / name).read_text()
+            self.assertIn("`Initial Access` is `initial-access`", text)
+            self.assertIn("`Command and Control` is `command-and-control`", text)
+            self.assertIn(phrase, text)
 
 
 class CoverageDetailUiTests(unittest.TestCase):

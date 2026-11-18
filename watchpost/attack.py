@@ -202,6 +202,13 @@ def evidence(cov, lab_rules, scenarios):
 
 NAVIGATOR_LAYER_VERSION = "4.5"  # the layer file format; this module states no ATT&CK release, so none is claimed
 LEVEL_COLORS = {"validated": "#2e9e6b", "mapped": "#e6b422", "disabled": "#9aa5b1", "gap": "#d9534f"}
+# A–Z only. Not str.lower(): İ (U+0130) becomes i + combining dot, and K (U+212A) becomes k.
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def _tactic_slug(name):
+    """Navigator tactic slug. Spaces become hyphens. Only A–Z fold."""
+    return name.translate(_ASCII_FOLD).replace(" ", "-")
 
 
 def navigator_layer(cov):
@@ -226,7 +233,7 @@ def navigator_layer(cov):
                        "they are not observations of real attacks.",
         "techniques": [{
             "techniqueID": t["id"],
-            "tactic": t["tactic"].lower().replace(" ", "-"),
+            "tactic": _tactic_slug(t["tactic"]),
             "score": t["hits"],
             "color": LEVEL_COLORS[t["level"]],
             "comment": comment(t),
