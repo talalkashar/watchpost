@@ -288,7 +288,7 @@ seeds a fictional inventory (marked `synthetic`) for the demo hosts; existing na
 
 | Endpoint | Role | Notes |
 |---|---|---|
-| `GET /api/assets` | viewer | `{assets: [...], criticalities, kinds, data_tags: {tag: description}, pending, pending_omitted}`, most critical first. `pending` is the newest 100 pending `asset_add`, `asset_update`, and `asset_delete` requests by `id`. `pending_omitted` is how many of those were past that cap (0 when they fit, including none). A pending change of another kind is not in `pending` and not in `pending_omitted` |
+| `GET /api/assets` | viewer | `{assets: [...], criticalities, kinds, data_tags: {tag: description}, pending, pending_omitted, assets_omitted}`, most critical first, then name. `assets` is the first 100 in that order. `assets_omitted` is how many were past that cap (0 when they fit, including none). `pending` is the newest 100 pending `asset_add`, `asset_update`, and `asset_delete` requests by `id`. `pending_omitted` is how many of those were past that cap (0 when they fit, including none). A pending change of another kind is not in `pending` and not in `pending_omitted` |
 | `POST /api/assets` | admin | `{name, kind?, criticality?, data_tags?, addresses?, owner?, description?}` → 201 `{asset, alerts_rescored}`. `name` is unique ignoring case (409 on a clash); `data_tags` and `addresses` accept a list or a comma-separated string. Audited as `asset_created` |
 | `POST /api/assets/{id}` | admin | Same body; replaces the asset. Audited as `asset_updated` |
 | `POST /api/assets/{id}/delete` | admin | Always 409 `review_required`: a delete needs a second admin, through the proposal route below |
