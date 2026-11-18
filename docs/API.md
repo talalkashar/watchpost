@@ -45,7 +45,7 @@ curl -c jar -H 'Content-Type: application/json' -d '{"username":"analyst","passw
 
 | Endpoint | Role | Notes |
 |---|---|---|
-| `POST /api/auth/login` | public | `{username, password}` |
+| `POST /api/auth/login` | public | `{username, password}`. A username that is not 3–32 characters is the same 401 `invalid username or password` as an unknown account. Login does not truncate it. |
 | `POST /api/auth/logout` | any | |
 | `GET /api/auth/me` | any | current user and CSRF token |
 

@@ -188,20 +188,32 @@ def _start_session(conn, user, ttl_seconds, detail=None):
     return token, csrf, {"username": user["username"], "role": user["role"]}
 
 
+def _reject_unknown_login(conn, password):
+    """Same work and response as a missing account, so a bad length is not a distinct failure.
+
+    The dummy hash keeps this path about as slow as a real password check.
+    """
+    global _DUMMY_HASH
+    _DUMMY_HASH = _DUMMY_HASH or hash_password("dummy-password-for-timing")
+    verify_password(str(password), _DUMMY_HASH)
+    audit(conn, "anonymous", "login_failed", None, {"reason": "unknown user"})
+    raise AuthError("invalid username or password")
+
+
 def login(conn, username, password, ttl_seconds):
     """Check the password. Returns (token, csrf, user), or an MfaChallenge when the account has TOTP enrolled.
 
     For an enrolled account the password step does not reset the failure count: only a correct code does,
     so knowing the password does not buy unlimited code guesses.
+
+    Usernames are 3–32 characters. A value outside that is rejected before the lookup and is not sliced,
+    so a longer string cannot match a stored prefix.
     """
-    global _DUMMY_HASH
-    user = conn.execute("SELECT * FROM users WHERE username = ?", (str(username)[:64],)).fetchone()
+    if not isinstance(username, str) or not (3 <= len(username) <= 32):
+        _reject_unknown_login(conn, password)
+    user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     if user is None:
-        # Spend comparable time so response timing does not reveal valid usernames.
-        _DUMMY_HASH = _DUMMY_HASH or hash_password("dummy-password-for-timing")
-        verify_password(str(password), _DUMMY_HASH)
-        audit(conn, "anonymous", "login_failed", None, {"reason": "unknown user"})
-        raise AuthError("invalid username or password")
+        _reject_unknown_login(conn, password)
     if user["disabled"]:
         raise AuthError("invalid username or password")
     _check_not_locked(conn, user)
