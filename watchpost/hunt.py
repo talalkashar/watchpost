@@ -422,14 +422,20 @@ def _stats(conn, where, args, stage):
 
 
 def _top(conn, where, args, stage):
+    """The N most common values. Percents are shares of every matched event, including ones with no value.
+
+    `total` is that match count. `missing` is how many of them have no value in the grouped field, which
+    is why the shown percents can sum under 100 even when `truncated` is false. The column is from FIELDS.
+    """
     (field, column), = stage["by"]
     expr = _group_expr(field, column)
-    total = conn.execute(f"SELECT COUNT(*) FROM events{_where(where)}", args).fetchone()[0]
+    total, missing = conn.execute(
+        f"SELECT COUNT(*), COALESCE(SUM({column} IS NULL), 0) FROM events{_where(where)}", args).fetchone()
     rows = conn.execute(f"SELECT {expr}, COUNT(*) FROM events{_where(where, [f'{column} IS NOT NULL'])}"
                         f" GROUP BY {expr} ORDER BY 2 DESC, 1 LIMIT ?", args + [stage["limit"] + 1]).fetchall()
     return {"columns": [field, "count", "percent"],
             "rows": [[value, count, round(100 * count / total, 2)] for value, count in rows[:stage["limit"]]],
-            "truncated": len(rows) > stage["limit"]}
+            "truncated": len(rows) > stage["limit"], "total": total, "missing": missing}
 
 
 def _window(compiled, now):
