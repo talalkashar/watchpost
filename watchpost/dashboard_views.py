@@ -4,7 +4,7 @@ import json
 import sqlite3
 
 from .db import audit, now_iso, transaction
-from .queries import QueryError
+from .queries import QueryError, catalog_name
 
 ViewError = QueryError
 
@@ -20,22 +20,30 @@ def _payload(data):
     name = data.get("name")
     if not isinstance(name, str) or not (1 <= len(name.strip()) <= 80):
         raise ViewError("name must be 1-80 characters")
-    visibility = data.get("visibility")
-    if visibility not in VISIBILITIES:
+    # ASCII case folds onto the catalog spelling (`Private` stores `private`, `High` stores `high`).
+    # `info` is not a dashboard severity. `High` with `high` is still a duplicate. Panel ids stay exact.
+    visibility = catalog_name(data.get("visibility"), VISIBILITIES)
+    if visibility is None:
         raise ViewError("visibility must be private or shared")
     filters = data.get("filters")
     if not isinstance(filters, dict) or set(filters) != {"severities"}:
         raise ViewError("filters must contain only severities")
     severities = filters["severities"]
-    if not isinstance(severities, list) or not severities \
-            or any(value not in SEVERITIES for value in severities) \
-            or len(set(severities)) != len(severities):
+    folded = []
+    if isinstance(severities, list):
+        for value in severities:
+            level = catalog_name(value, SEVERITIES)
+            if level is None or level in folded:
+                folded = []
+                break
+            folded.append(level)
+    if not folded:
         raise ViewError("severities must be a non-empty list of unique known severities")
     layout = data.get("layout")
     if not isinstance(layout, list) or not layout or any(value not in PANELS for value in layout) \
             or len(set(layout)) != len(layout):
         raise ViewError("layout must be a non-empty list of unique dashboard panels")
-    return name.strip(), visibility, {"severities": severities}, layout
+    return name.strip(), visibility, {"severities": folded}, layout
 
 
 def _row(row):
@@ -53,11 +61,34 @@ def list_views(conn, actor):
     return [_row(row) for row in rows]
 
 
+def _stored_view_name(conn, owner, name, view_id=None):
+    """The saved spelling of `name` for this owner.
+
+    Unique is (owner, name COLLATE NOCASE), so `Dup` and `dup` are one row for that owner.
+    Another owner's view of the same name is a different row. `view_id` is this row, so a
+    rename to its own other spelling is not a clash.
+    """
+    sql = "SELECT name FROM dashboard_views WHERE owner = ? AND name = ? COLLATE NOCASE"
+    params = [owner, name]
+    if view_id is not None:
+        sql += " AND id != ?"
+        params.append(int(view_id))
+    row = conn.execute(sql, params).fetchone()
+    return None if row is None else row["name"]
+
+
+def _name_taken(stored):
+    raise ViewError(f"you already have a dashboard view named {stored!r}", 409)
+
+
 def save(conn, data, actor, view_id=None):
     name, visibility, filters, layout = _payload(data)
     timestamp = now_iso()
-    try:
-        with transaction(conn):
+    with transaction(conn):
+        stored = _stored_view_name(conn, actor, name, view_id)
+        if stored is not None:
+            _name_taken(stored)
+        try:
             if view_id is None:
                 cur = conn.execute(
                     "INSERT INTO dashboard_views(name, filters, layout, visibility, owner, created_at, updated_at)"
@@ -73,9 +104,11 @@ def save(conn, data, actor, view_id=None):
                 if not cur.rowcount:
                     raise ViewError("dashboard view not found", 404)
                 action = "dashboard_view_updated"
-            audit(conn, actor, action, name, {"id": view_id, "visibility": visibility})
-    except sqlite3.IntegrityError as exc:
-        raise ViewError(f"you already have a dashboard view named {name!r}", 409) from exc
+        except sqlite3.IntegrityError:
+            # A concurrent insert can pass the lookup and still hit UNIQUE (owner, name COLLATE NOCASE).
+            stored = _stored_view_name(conn, actor, name, view_id)
+            _name_taken(stored if stored is not None else name)
+        audit(conn, actor, action, name, {"id": view_id, "visibility": visibility})
     row = conn.execute("SELECT id, name, filters, layout, visibility, owner, created_at, updated_at"
                        " FROM dashboard_views WHERE id = ?", (view_id,)).fetchone()
     return _row(row)

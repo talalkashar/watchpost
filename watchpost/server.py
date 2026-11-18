@@ -27,6 +27,14 @@ SESSION_COOKIE = "wp_session"
 # The request line is decoded as iso-8859-1, so this count is the query's wire bytes.
 # A longer string is refused before parse_qs. Field limits (a hunt query is 500 characters) still apply under it.
 MAX_QUERY_BYTES = 8192
+# Health details returns this many error_log rows, newest by id. The rest are recent_errors_omitted.
+RECENT_ERRORS_LIMIT = 20
+# Health details returns this many detection runs, newest by id. The rest are recent_detection_runs_omitted.
+RECENT_RUNS_LIMIT = 10
+# These two stay bare arrays. The rows past the cap are X-Watchpost-Omitted.
+AUDIT_LIMIT = 200
+BATCH_LIMIT = 50
+OMITTED_HEADER = "X-Watchpost-Omitted"
 
 
 class ApiError(Exception):
@@ -204,13 +212,33 @@ def health_summary(req):
             "checks": {c["name"]: c["status"] for c in report["checks"]}}
 
 
+def _newest(conn, count_sql, rows_sql, limit):
+    """The newest `limit` rows, and how many the cap left out (0 when the table fits)."""
+    total = conn.execute(count_sql).fetchone()[0]
+    rows = [dict(r) for r in conn.execute(rows_sql, (limit,))]
+    return rows, total - len(rows)
+
+
+def _set_omitted(req, omitted):
+    """A bare-array response cannot grow a field. The count rides in this header."""
+    req.extra_headers[OMITTED_HEADER] = str(omitted)
+
+
 @route("GET", "/api/health/details")
 def health_details(req):
     report = run_health_checks(lambda: connect(req.app.config.db_path), req.app.config.db_path)
-    report["recent_errors"] = [dict(r) for r in req.conn.execute(
-        "SELECT created_at, component, message, guidance FROM error_log ORDER BY id DESC LIMIT 20")]
-    report["recent_detection_runs"] = [dict(r) for r in req.conn.execute(
-        "SELECT * FROM detection_runs ORDER BY id DESC LIMIT 10")]
+    errors, errors_omitted = _newest(
+        req.conn, "SELECT COUNT(*) FROM error_log",
+        "SELECT created_at, component, message, guidance FROM error_log ORDER BY id DESC LIMIT ?",
+        RECENT_ERRORS_LIMIT)
+    runs, runs_omitted = _newest(
+        req.conn, "SELECT COUNT(*) FROM detection_runs",
+        "SELECT * FROM detection_runs ORDER BY id DESC LIMIT ?",
+        RECENT_RUNS_LIMIT)
+    report["recent_errors"] = errors
+    report["recent_errors_omitted"] = errors_omitted
+    report["recent_detection_runs"] = runs
+    report["recent_detection_runs_omitted"] = runs_omitted
     return report
 
 
@@ -302,8 +330,12 @@ def ingest_upload(req):
 
 @route("GET", "/api/ingest/batches")
 def batches(req):
-    rows = req.conn.execute("SELECT * FROM ingest_batches ORDER BY created_at DESC LIMIT 50")
-    return [row_to_dict(r, ["errors"]) for r in rows]
+    total = req.conn.execute("SELECT COUNT(*) FROM ingest_batches").fetchone()[0]
+    rows = req.conn.execute(
+        "SELECT * FROM ingest_batches ORDER BY created_at DESC LIMIT ?", (BATCH_LIMIT,))
+    shown = [row_to_dict(r, ["errors"]) for r in rows]
+    _set_omitted(req, total - len(shown))
+    return shown
 
 
 @route("POST", "/api/demo/load", role="admin")
@@ -1032,7 +1064,11 @@ def user_mfa_reset(req, username):
 
 @route("GET", "/api/audit", role="admin")
 def audit_log(req):
-    return [dict(r) for r in req.conn.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT 200")]
+    rows, omitted = _newest(
+        req.conn, "SELECT COUNT(*) FROM audit_log",
+        "SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", AUDIT_LIMIT)
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("GET", "/api/audit/verify", role="admin")
@@ -1084,19 +1120,36 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
+    def _content_length(self):
+        """The single Content-Length as an int, or an error string.
+
+        A POST is framed only by one header whose value is one token of ASCII
+        digits. Two headers, a comma list, or any other token is not a length:
+        the first header must not be trusted and the body must not be read.
+        """
+        if self.headers.get("Transfer-Encoding") is not None:
+            return "Transfer-Encoding is not supported"
+        lengths = self.headers.get_all("Content-Length") or []
+        if not lengths:
+            return "Content-Length is required"
+        token = lengths[0].strip()
+        if len(lengths) != 1 or not token.isascii() or not token.isdigit():
+            return "invalid Content-Length"
+        return int(token)
+
     def _unframed_post_message(self):
-        """A POST body is framed only by Content-Length.
+        """A POST body is framed only by one integer Content-Length.
 
         Chunked encoding is not read. A missing length is not an empty body.
-        Either one leaves unread bytes that a keep-alive socket would take as
-        the next request.
+        A second Content-Length, or a value that is not one ASCII integer
+        token, is not a length either. Any of these leaves unread bytes that
+        a keep-alive socket would take as the next request.
         """
         if self.command != "POST":
             return None
-        if self.headers.get("Transfer-Encoding") is not None:
-            return "Transfer-Encoding is not supported"
-        if self.headers.get("Content-Length") is None:
-            return "Content-Length is required"
+        length = self._content_length()
+        if isinstance(length, str):
+            return length
         return None
 
     def _reject_unframed_post(self):
@@ -1113,12 +1166,8 @@ class Handler(BaseHTTPRequestHandler):
         if message is not None:
             self.close_connection = True
             raise ApiError(400, message)
-        length = self.headers.get("Content-Length")
-        try:
-            length = int(length)
-        except ValueError:
-            raise ApiError(400, "invalid Content-Length")
-        if length < 0 or length > self.app.config.max_upload_bytes:
+        length = self._content_length()
+        if length > self.app.config.max_upload_bytes:
             raise ApiError(413, f"request body exceeds {self.app.config.max_upload_bytes} bytes")
         return self.rfile.read(length)
 
@@ -1166,6 +1215,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._static(parsed.path)
         self.status = 200
         self.set_cookie = None
+        self.extra_headers = {}
         self.conn = None
         self.masker = None
         try:
@@ -1195,6 +1245,7 @@ class Handler(BaseHTTPRequestHandler):
             if result is STREAM_RESPONSE:
                 return self._stream()
             headers = {"Cache-Control": "no-store"}
+            headers.update(self.extra_headers)
             if self.set_cookie is not None:
                 headers["Set-Cookie"] = self._cookie_header(self.set_cookie)
             if isinstance(result, Download):

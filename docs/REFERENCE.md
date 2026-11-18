@@ -57,7 +57,7 @@ A small follow-up round. Nothing here changes how the rules detect.
 | **Baseline-aware exfiltration** | Abderrazak Benarous | `data_exfil_volume` keeps its flat thresholds by default: history and analyst verdicts never quiet it. A principal with an approved, unexpired tuning exception (analyst proposes, admin approves) is not skipped but compared with its own history (`baseline_multiplier`, 7-day window), so an excepted nightly backup that always moves several GB stays quiet and still alerts at 3x its own normal. The alert states which mode applied and, in baseline mode, the baseline and the ratio. |
 | **Tuning exceptions** | Issouf D. Dayo | A reviewed, expiring allowlist (rule + group key + reason, 1 to 90 days). An analyst proposes one, an admin approves it through the existing two-person review, and the engine skips matching findings and counts them as suppressed. In 3.0 exceptions ended only by expiring; 3.1 added a revoke route. |
 | **Shadow IT rule** | Issouf D. Dayo | A twelfth rule, `unsanctioned_cloud_service`, flags use of a cloud service that is not on the rule's sanctioned list (mapped to T1567). It is not part of the attack storyline. |
-| **Entity risk** | (added) | Every user, source IP, and host gets a risk score: each alert adds a severity weight (critical 40, high 20, medium 10, low 5, info 1) that halves every 24 hours, and alerts closed as false positive or benign add nothing. `GET /api/entities` and an entity page list the contributing alerts and their weights, so the score can be checked by hand. Asset criticality counts through severity: an alert on a critical or sensitive asset is raised before it is stored, and the breakdown shows the rule's base severity and the asset note next to the raised one. No ML; every point traces to an alert. A source-IP page looks up the address form ingest stores, so `2001:DB8::1` matches `2001:db8::1` and the returned `value` is that form. Anything that is not one address is 400. The dashboard has a **Riskiest entities** panel. |
+| **Entity risk** | (added) | Every user, source IP, and host gets a risk score: each alert adds a severity weight (critical 40, high 20, medium 10, low 5, info 1) that halves every 24 hours, and alerts closed as false positive or benign add nothing. `GET /api/entities` and an entity page list the contributing alerts and their weights, so the score can be checked by hand. On that list, `kind` folds ASCII case onto `user`, `src_ip`, or `host` (`User` is `user`). An unknown kind is 400. The entity path stays those three lowercase kinds. Asset criticality counts through severity: an alert on a critical or sensitive asset is raised before it is stored, and the breakdown shows the rule's base severity and the asset note next to the raised one. No ML; every point traces to an alert. A source-IP page looks up the address form ingest stores, so `2001:DB8::1` matches `2001:db8::1` and the returned `value` is that form. Anything that is not one address is 400. A user or host is keyed with the same ASCII fold as `COLLATE NOCASE`: `Erin`, `ERIN`, and `erin` are one account whose `value` is `erin`, and `WEB01` is `web01`. `Érin` and `érin` stay two accounts, because a full Unicode lower would share a key the lookup cannot match. The dashboard has a **Riskiest entities** panel. |
 | **SOC metrics** | (added) | Time to resolve by severity, false-positive rate by rule, and open-alert aging. Time to detect and dwell time are deliberately left out: the demo replays synthetic events with old timestamps, which would make both numbers meaningless. |
 
 Left for a contributor's pull requests ([issue #8](https://github.com/talalkashar/watchpost/issues/8)): encrypted syslog, more log sources, orchestration, hot/warm/cold retention, stronger correlation, and threat intelligence.
@@ -196,7 +196,7 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | `watchpost/syslog_listener.py` | Optional UDP/TCP syslog receiver (RFC 3164, RFC 5424, RFC 6587 framing). Runs each line through the auth.log parser, falls back to a generic `syslog` event with severity from PRI, and batches into the engine every 2 seconds. Reports itself as the `syslog` health component. |
 | `scripts/shipper.py` | Stdlib-only file tailer for Linux boxes: batches new lines to `/api/ingest/upload` with an ingest token, with backoff, rotation handling, and a position file. |
 | `watchpost/simulate.py` | Labeled synthetic scenarios and a CLI that sends only to loopback unless you explicitly allow otherwise. |
-| `watchpost/report.py` | Incident and alert reports: one model (summary, timeline, entities, alerts with evidence, ATT&CK techniques by tactic with evidence level, notes, recommended actions) rendered as Markdown or PDF. |
+| `watchpost/report.py` | Incident and alert reports: one model (summary, timeline of the first 200 events plus `timeline_omitted`, entities, alerts with evidence, ATT&CK techniques by tactic with evidence level, notes, recommended actions) rendered as Markdown or PDF. |
 | `watchpost/pdfwriter.py` | Minimal hand-written PDF 1.4 writer (Helvetica, wrapping, tables, page breaks, xref). |
 | `watchpost/server.py` | `http.server` routing, security headers (CSP, frame denial, nosniff), CSRF checks, body limits, and the static UI. |
 
@@ -254,7 +254,7 @@ The scenarios are synthetic, so "validated" means a rule detected the project's 
 
 After each detection run, `watchpost/correlate.py` groups related alerts into incidents: alerts whose evidence shares a source IP, account, or host within 30 minutes. An incident needs two related alerts or one critical alert, lists its kill-chain stages (ATT&CK tactics in order), and is raised one severity level when it spans three or more tactics. Account and host values that differ only by case are stored as one lowercase entry (`WEB01` and `web01` are one host). Source IPs stay as written. Reruns change nothing; new alerts join an open incident.
 
-Every rule except `log_source_silent` accepts `ignore_ips` and `ignore_users`. The engine merges overlapping findings into one open alert instead of creating duplicates, and a rescan never re-alerts on evidence already attached to an alert.
+Every rule except `log_source_silent` accepts `ignore_ips` and `ignore_users`. `ignore_users` and `privileged_users` fold ASCII letters only, the same fold as entity keys: `Alice`, `alice`, and `ALICE` are one account, and `érin` does not match `ÉRIN`. `josé` still matches `josé`. Sanctioned service names and logging actions still fold the whole string. The review gate uses those same helpers. The engine merges overlapping findings into one open alert instead of creating duplicates, and a rescan never re-alerts on evidence already attached to an alert.
 
 An analyst can also propose a **rule suppression window** for a planned operational period. It pauses every
 finding from one rule between explicit start and expiry times (at most 30 days), so its review evidence shows
@@ -281,7 +281,7 @@ investigation export, not a legal-hold or raw-log archive.
 
 ### Self-diagnosis
 
-`GET /api/health` is public and returns statuses only, with HTTP 503 when anything is failing. `GET /api/health/details` requires a login and adds details, recent redacted errors, and recent detection runs.
+`GET /api/health` is public and returns statuses only, with HTTP 503 when anything is failing. `GET /api/health/details` requires a login and adds details. `recent_errors` is the newest 20 by id and `recent_detection_runs` the newest 10 by id; each omitted count is 0 when that table fits. `GET /api/audit` (200) and `GET /api/ingest/batches` (50) stay bare arrays and send `X-Watchpost-Omitted` for the rows past those caps.
 
 | Check | Failing / degraded when |
 |---|---|
@@ -320,7 +320,7 @@ The longest-gap terms are what keep bursty sources quiet: a nightly backup or an
 
 ### Continuous improvement (what it actually does)
 
-1. When analysts resolve an alert, they record a verdict: `true_positive`, `false_positive`, or `benign`.
+1. When analysts resolve an alert, they record a verdict: `true_positive`, `false_positive`, or `benign`. ASCII case folds onto that spelling (`False_Positive` stores `false_positive`). A blank, a missing verdict, and a non-ASCII lookalike are rejected. Incidents have no verdict.
 2. **Rules** shows per-rule alert counts and precision, TP / (TP + FP).
 3. **Suggest improvements** applies fixed heuristics. If ≥ 2 false-positive alerts share an IP (or account) that never appears in a true positive, it proposes excluding that IP (or account). Otherwise, if false-positive event counts sit below every true-positive count, it proposes a higher threshold.
 4. Each proposal, from the system or a person, is scored against the labeled synthetic scenarios before and after the change.

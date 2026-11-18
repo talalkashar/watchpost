@@ -290,6 +290,14 @@ def _epoch(event):
 HIDING_EDITS = {"ignore_ips": "added", "ignore_users": "added", "sanctioned_services": "added",
                 "privileged_users": "removed", "logging_actions": "removed"}
 
+# SQLite COLLATE NOCASE folds these letters only. User lists and host keys use the same fold.
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+_USER_LISTS = ("ignore_users", "privileged_users")
+
+
+def _ascii_fold(value):
+    return value.translate(_ASCII_FOLD)
+
 
 def _stored_ip(value):
     """The address form ingest stores, or None when value is not one complete address.
@@ -311,6 +319,10 @@ def list_entry(param, value):
         stored = _stored_ip(value)
         # A prefix or other non-address is kept as written. covers will not treat it as an address.
         return value if stored is None else stored
+    if param in _USER_LISTS:
+        # ASCII letters only. érin does not match ÉRIN, the same split entity keys keep.
+        return _ascii_fold(value)
+    # Sanctioned services and logging actions still fold the whole string.
     return value.lower().lstrip(".") if param == "sanctioned_services" else value.lower()
 
 
@@ -324,6 +336,8 @@ def covers(param, entries, event):
         return bool(service) and any(service == s or service.endswith("." + s) for s in entries)
     if param == "logging_actions":
         return (_action(event) or "").lower() in entries
+    if param in _USER_LISTS:
+        return _ascii_fold(event.get("user") or "") in entries
     return (event.get("user") or "").lower() in entries
 
 
@@ -397,12 +411,9 @@ def _group_users(events):
     return groups
 
 
-# SQLite COLLATE NOCASE folds these letters only. Host keys use the same fold as entities.
-_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
-
-
-def _ascii_fold(value):
-    return value.translate(_ASCII_FOLD)
+def _account_name(user):
+    """Account spelling for a count. Alice and alice are one name."""
+    return user.lower()
 
 
 def brute_force_ip(events, params):
@@ -410,7 +421,9 @@ def brute_force_ip(events, params):
     findings = []
     for ip, group in _group(_filtered(events, params, "auth_failure"), "src_ip").items():
         for cluster in _clusters(group, window, lambda w: len(w) >= threshold):
-            users = Counter(e.get("user") or "?" for e in cluster)
+            # The raw spelling lists Alice and alice as two accounts. The
+            # threshold still counts events, and the finding key stays the IP.
+            users = Counter(_account_name(e["user"]) if e.get("user") else "?" for e in cluster)
             top = ", ".join(f"{u} ({n})" for u, n in users.most_common(3))
             findings.append(_finding(
                 ip, cluster,
@@ -424,7 +437,7 @@ def brute_force_ip(events, params):
 
 def _account_names(events):
     """Distinct account names, ignoring case. Alice and alice are one account."""
-    return {e["user"].lower() for e in events if e.get("user")}
+    return {_account_name(e["user"]) for e in events if e.get("user")}
 
 
 def password_spray(events, params):

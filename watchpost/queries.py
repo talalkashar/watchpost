@@ -16,6 +16,14 @@ DISPOSITIONS = ("true_positive", "false_positive", "benign")
 MAX_EVENT_OFFSET = 10_000
 # A longer needle used to be sliced, so it matched messages that lacked the rest.
 MAX_SEARCH_Q = 200
+# Alert detail returns this many evidence events, earliest first. The rest are evidence_omitted.
+EVIDENCE_LIMIT = 500
+# Related timeline returns this many events, earliest in the window. The rest are timeline_omitted.
+TIMELINE_LIMIT = 300
+# Alert detail returns this many notes and this many activity rows, newest by id.
+# Each list stays in id order. The older rows are notes_omitted and activity_omitted.
+NOTE_LIMIT = 100
+ACTIVITY_LIMIT = 100
 EVENT_FIELDS = "id, ts, ingested_at, source, host, event_type, outcome, severity, user, src_ip, dest_ip, dest_port, " \
                "bytes, message, synthetic, batch_id"
 
@@ -39,6 +47,22 @@ def catalog_name(value, names):
         if name.translate(_ASCII_FOLD) == folded:
             return name
     return None
+
+
+def catalog_pieces(value, names, message):
+    """Comma-separated names folded onto catalog spellings.
+
+    `Open` is `open` and `High` is `high`. Spaces around a piece are ignored.
+    A blank piece or an unknown name is QueryError(message). The returned
+    spellings are what a filter binds, so a stored lookalike is not a match.
+    """
+    pieces = []
+    for part in value.split(","):
+        name = catalog_name(part.strip(), names)
+        if name is None:
+            raise QueryError(message)
+        pieces.append(name)
+    return pieces
 
 
 def canonical_ip(value, field):
@@ -172,18 +196,17 @@ def get_event(conn, event_id):
 def list_alerts(conn, params):
     where, args = [], []
     if params.get("status"):
-        # One status or a comma list. Spaces around a name are ignored, as on severity.
-        # A blank piece is invalid, same as an unknown name.
-        statuses = [part.strip() for part in params["status"].split(",")]
-        if not statuses or not set(statuses) <= set(ALERT_STATUSES):
-            raise QueryError(f"status must be from {', '.join(ALERT_STATUSES)}")
+        # One status or a comma list. Spaces around a name are ignored.
+        # ASCII case folds onto the catalog spelling (`Open` binds `open`). A blank piece is invalid.
+        statuses = catalog_pieces(
+            params["status"], ALERT_STATUSES,
+            f"status must be from {', '.join(ALERT_STATUSES)}")
         where.append(f"status IN ({','.join('?' for _ in statuses)})")
         args += statuses
     if params.get("severity"):
-        # One level or a comma list (critical,high). A blank piece is invalid, same as an unknown name.
-        levels = [part.strip() for part in params["severity"].split(",")]
-        if not levels or not set(levels) <= set(SEVERITIES):
-            raise QueryError("invalid severity")
+        # One level or a comma list (critical,high). Same fold (`High` binds `high`).
+        # A blank piece is invalid, same as an unknown name.
+        levels = catalog_pieces(params["severity"], SEVERITIES, "invalid severity")
         where.append(f"severity IN ({','.join('?' for _ in levels)})")
         args += levels
     if params.get("rule_id"):
@@ -214,26 +237,54 @@ def get_alert(conn, alert_id):
                                              " WHERE id = ?", (alert["rule_id"],)).fetchone(), ["techniques"])
     alert["evidence"] = [dict(r) for r in conn.execute(
         f"SELECT {', '.join('e.' + c.strip() for c in EVENT_FIELDS.split(','))} FROM events e"
-        " JOIN alert_events ae ON ae.event_id = e.id WHERE ae.alert_id = ? ORDER BY e.ts, e.id LIMIT 500",
-        (alert_id,))]
-    alert["notes"] = [dict(r) for r in conn.execute(
-        "SELECT * FROM alert_notes WHERE alert_id = ? ORDER BY id", (alert_id,))]
-    alert["activity"] = [dict(r) for r in conn.execute(
-        "SELECT * FROM alert_activity WHERE alert_id = ? ORDER BY id", (alert_id,))]
+        " JOIN alert_events ae ON ae.event_id = e.id WHERE ae.alert_id = ?"
+        " ORDER BY e.ts, e.id LIMIT ?",
+        (alert_id, EVIDENCE_LIMIT))]
+    # Count the same join the page returns. A stored event_count, or a link whose event is gone, is not a row.
+    total = conn.execute(
+        "SELECT COUNT(*) AS n FROM events e"
+        " JOIN alert_events ae ON ae.event_id = e.id WHERE ae.alert_id = ?",
+        (alert_id,)).fetchone()["n"]
+    alert["evidence_omitted"] = total - len(alert["evidence"])
+    # Newest by id, then id order in the response. A later created_at on a lower id is still the older row.
+    alert["notes"], alert["notes_omitted"] = _newest_by_id(conn, "alert_notes", alert_id, NOTE_LIMIT)
+    alert["activity"], alert["activity_omitted"] = _newest_by_id(
+        conn, "alert_activity", alert_id, ACTIVITY_LIMIT)
     alert["timeline"] = related_timeline(conn, alert)
     return alert
 
 
-def related_timeline(conn, alert, pad_minutes=30):
-    """All events touching the alert's IPs or users, from 30 minutes before to 30 after.
+def _newest_by_id(conn, table, alert_id, limit):
+    """The newest `limit` rows for this alert (highest id), returned in id order.
 
-    User names match with COLLATE NOCASE (ASCII only), the same way event search does.
-    Source IPs stay an exact match. Shows context the rule did not use: e.g. what the
-    attacking IP did after a successful login.
+    The second value is how many older rows were left out (0 when the table fits).
+    `table` is a fixed name in this module, never a request value.
+    """
+    total = conn.execute(
+        f"SELECT COUNT(*) AS n FROM {table} WHERE alert_id = ?", (alert_id,)).fetchone()["n"]
+    rows = [dict(r) for r in conn.execute(
+        f"SELECT * FROM (SELECT * FROM {table} WHERE alert_id = ? ORDER BY id DESC LIMIT ?)"
+        " ORDER BY id",
+        (alert_id, limit))]
+    return rows, total - len(rows)
+
+
+def related_timeline(conn, alert, pad_minutes=30):
+    """Events touching the alert's IPs, users, or hosts, from pad_minutes before to pad_minutes after.
+
+    Returns the earliest TIMELINE_LIMIT rows in ts, id order. Sets alert["timeline_omitted"]
+    to how many matching events were past that cap (0 when the window has that many or fewer).
+    An event outside the window is not a row and is not omitted.
+
+    User names and hosts match with COLLATE NOCASE (ASCII only), the same way event search does.
+    Source IPs stay an exact match. Shows context the rule did not use: e.g. what else happened
+    on the host, or what the attacking IP did after a successful login.
     """
     ips = {e["src_ip"] for e in alert["evidence"] if e["src_ip"]}
     users = {e["user"] for e in alert["evidence"] if e["user"]}
-    if not ips and not users:
+    hosts = {e["host"] for e in alert["evidence"] if e.get("host")}
+    if not ips and not users and not hosts:
+        alert["timeline_omitted"] = 0
         return []
     start = iso(parse_iso(alert["first_seen"]) - timedelta(minutes=pad_minutes))
     end = iso(parse_iso(alert["last_seen"]) + timedelta(minutes=pad_minutes))
@@ -244,13 +295,22 @@ def related_timeline(conn, alert, pad_minutes=30):
     if users:
         clauses.append(f"user COLLATE NOCASE IN ({','.join('?' for _ in users)})")
         args += sorted(users)
+    if hosts:
+        clauses.append(f"host COLLATE NOCASE IN ({','.join('?' for _ in hosts)})")
+        args += sorted(hosts)
     evidence_ids = {e["id"] for e in alert["evidence"]}
+    where_sql = f"ts BETWEEN ? AND ? AND ({' OR '.join(clauses)})"
+    bound = [start, end] + args
+    total = conn.execute(
+        f"SELECT COUNT(*) AS n FROM events WHERE {where_sql}", bound).fetchone()["n"]
     rows = conn.execute(
         f"SELECT id, ts, source, host, event_type, severity, user, src_ip, message FROM events"
-        f" WHERE ts BETWEEN ? AND ? AND ({' OR '.join(clauses)}) ORDER BY ts, id LIMIT 300",
-        [start, end] + args,
+        f" WHERE {where_sql} ORDER BY ts, id LIMIT {TIMELINE_LIMIT}",
+        bound,
     )
-    return [{**dict(r), "is_evidence": r["id"] in evidence_ids} for r in rows]
+    result = [{**dict(r), "is_evidence": r["id"] in evidence_ids} for r in rows]
+    alert["timeline_omitted"] = total - len(result)
+    return result
 
 
 def add_note(conn, alert_id, author, body):
@@ -274,9 +334,14 @@ def add_note(conn, alert_id, author, body):
 def update_status(conn, alert_id, actor, status, disposition=None, note=None):
     if status not in ALERT_STATUSES:
         raise QueryError(f"status must be one of {', '.join(ALERT_STATUSES)}")
-    if status == "resolved" and disposition not in DISPOSITIONS:
-        raise QueryError(f"resolving requires a disposition: {', '.join(DISPOSITIONS)}")
-    if status != "resolved" and disposition is not None:
+    if status == "resolved":
+        # False_Positive stores false_positive. A blank, a missing value, and a
+        # non-ASCII lookalike stay the same error. Status is not folded.
+        folded = catalog_name(disposition, DISPOSITIONS)
+        if folded is None:
+            raise QueryError(f"resolving requires a disposition: {', '.join(DISPOSITIONS)}")
+        disposition = folded
+    elif disposition is not None:
         raise QueryError("disposition can only be set when resolving")
     with transaction(conn):
         alert = conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone()
@@ -417,10 +482,14 @@ def metrics(conn, hours=24):
         "dispositions": by("SELECT disposition, COUNT(*) AS count FROM alerts WHERE disposition IS NOT NULL"
                            " GROUP BY disposition"),
         "mean_time_to_resolve_minutes": round(mttr, 1) if mttr is not None else None,
+        # Addresses stay the stored spelling. Accounts fold ASCII case with SQLite lower(),
+        # the same fold hunt user groups use. Alice and alice are one row named alice.
+        # Érin and érin stay two rows.
         "top_failure_ips": by("SELECT src_ip, COUNT(*) AS count FROM events WHERE event_type = 'auth_failure'"
                               " AND src_ip IS NOT NULL GROUP BY src_ip ORDER BY count DESC LIMIT 5"),
-        "top_failure_users": by("SELECT user, COUNT(*) AS count FROM events WHERE event_type = 'auth_failure'"
-                                " AND user IS NOT NULL GROUP BY user ORDER BY count DESC LIMIT 5"),
+        "top_failure_users": by(
+            "SELECT lower(user) AS user, COUNT(*) AS count FROM events WHERE event_type = 'auth_failure'"
+            " AND user IS NOT NULL GROUP BY lower(user) ORDER BY count DESC LIMIT 5"),
         "events_by_type": by("SELECT event_type, COUNT(*) AS count FROM events GROUP BY event_type"
                              " ORDER BY count DESC"),
         "activity_last_24h_of_data": histogram,
