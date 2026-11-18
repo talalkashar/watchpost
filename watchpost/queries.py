@@ -146,8 +146,10 @@ def get_event(conn, event_id):
 def list_alerts(conn, params):
     where, args = [], []
     if params.get("status"):
-        statuses = params["status"].split(",")
-        if not set(statuses) <= set(ALERT_STATUSES):
+        # One status or a comma list. Spaces around a name are ignored, as on severity.
+        # A blank piece is invalid, same as an unknown name.
+        statuses = [part.strip() for part in params["status"].split(",")]
+        if not statuses or not set(statuses) <= set(ALERT_STATUSES):
             raise QueryError(f"status must be from {', '.join(ALERT_STATUSES)}")
         where.append(f"status IN ({','.join('?' for _ in statuses)})")
         args += statuses

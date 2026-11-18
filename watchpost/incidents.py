@@ -55,8 +55,10 @@ def top_techniques(conn, incident_ids):
 def list_incidents(conn, params):
     where, args = [], []
     if params.get("status"):
-        statuses = params["status"].split(",")
-        if not set(statuses) <= set(INCIDENT_STATUSES):
+        # One status or a comma list. Spaces around a name are ignored, as on severity.
+        # A blank piece is invalid, same as an unknown name.
+        statuses = [part.strip() for part in params["status"].split(",")]
+        if not statuses or not set(statuses) <= set(INCIDENT_STATUSES):
             raise QueryError(f"status must be from {', '.join(INCIDENT_STATUSES)}")
         where.append(f"status IN ({','.join('?' for _ in statuses)})")
         args += statuses
