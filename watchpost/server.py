@@ -624,7 +624,9 @@ DASHBOARD_ENTITIES = 8
 
 @route("GET", "/api/dashboard/views")
 def dashboard_view_list(req):
-    return dashboard_views.list_views(req.conn, req.user["username"])
+    rows, omitted = dashboard_views.list_views(req.conn, req.user["username"])
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", "/api/dashboard/views", role="analyst")
