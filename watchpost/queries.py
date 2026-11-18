@@ -236,19 +236,20 @@ def get_alert(conn, alert_id):
 
 
 def related_timeline(conn, alert, pad_minutes=30):
-    """Events touching the alert's IPs or users, from pad_minutes before to pad_minutes after.
+    """Events touching the alert's IPs, users, or hosts, from pad_minutes before to pad_minutes after.
 
     Returns the earliest TIMELINE_LIMIT rows in ts, id order. Sets alert["timeline_omitted"]
     to how many matching events were past that cap (0 when the window has that many or fewer).
     An event outside the window is not a row and is not omitted.
 
-    User names match with COLLATE NOCASE (ASCII only), the same way event search does.
-    Source IPs stay an exact match. Shows context the rule did not use: e.g. what the
-    attacking IP did after a successful login.
+    User names and hosts match with COLLATE NOCASE (ASCII only), the same way event search does.
+    Source IPs stay an exact match. Shows context the rule did not use: e.g. what else happened
+    on the host, or what the attacking IP did after a successful login.
     """
     ips = {e["src_ip"] for e in alert["evidence"] if e["src_ip"]}
     users = {e["user"] for e in alert["evidence"] if e["user"]}
-    if not ips and not users:
+    hosts = {e["host"] for e in alert["evidence"] if e.get("host")}
+    if not ips and not users and not hosts:
         alert["timeline_omitted"] = 0
         return []
     start = iso(parse_iso(alert["first_seen"]) - timedelta(minutes=pad_minutes))
@@ -260,6 +261,9 @@ def related_timeline(conn, alert, pad_minutes=30):
     if users:
         clauses.append(f"user COLLATE NOCASE IN ({','.join('?' for _ in users)})")
         args += sorted(users)
+    if hosts:
+        clauses.append(f"host COLLATE NOCASE IN ({','.join('?' for _ in hosts)})")
+        args += sorted(hosts)
     evidence_ids = {e["id"] for e in alert["evidence"]}
     where_sql = f"ts BETWEEN ? AND ? AND ({' OR '.join(clauses)})"
     bound = [start, end] + args

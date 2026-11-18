@@ -101,7 +101,7 @@ class TimelineOmittedTests(unittest.TestCase):
     def test_the_api_docs_name_the_cap_and_the_omitted_count(self):
         text = API.read_text()
         self.assertIn(
-            "`timeline` (the first 300 events involving the same source IPs or users, ±30 min,"
+            "`timeline` (the first 300 events involving the same source IPs, users, or hosts, ±30 min,"
             " in `ts, id` order",
             text)
         self.assertIn(

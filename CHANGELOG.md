@@ -6,6 +6,8 @@ All bundled data is synthetic. PR numbers refer to https://github.com/talalkasha
 
 ### Fixed
 
+- Alert related timeline also matches the evidence host, case-insensitively for ASCII. An event on `web01` in the window is included when the evidence host is `WEB01`, even with a different user and source IP. `Érin-host` and `érin-host` stay apart. Source IP matches stay exact.
+
 - Event search and hunt match `outcome` case-insensitively (ASCII). `outcome:failure` and `GET /api/events?outcome=Failure` return a row stored as `failure`. A prefix already folded ASCII. Grouping by outcome stays exact. The lookup uses `idx_events_outcome_nocase`.
 
 - Event search and hunt match `source` case-insensitively (ASCII). `source:Demo` and `GET /api/events?source=demo` return a row stored as `demo`. A prefix already folded ASCII. Grouping by source stays exact. The lookup uses `idx_events_source_nocase`.
