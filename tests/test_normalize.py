@@ -277,6 +277,55 @@ class RedactionTests(unittest.TestCase):
                 self.assertNotIn(secret, out)
                 self.assertEqual(out, '{"%s": "[REDACTED]", "user": "alice"}' % key)
         self.assertIn(secret, redact('{"session_id": "%s"}' % secret))
+        self.assertEqual(redact("session_id=%s" % secret), "session_id=%s" % secret)
+
+    def test_token_and_key_names_are_redacted(self):
+        # access_token, refresh_token, id_token, client_secret, and private_key
+        # stayed in the message. token and secret do not cover those names.
+        secret = "supersecret"
+        keys = ("access_token", "refresh_token", "id_token", "client_secret", "private_key",
+                "Access_Token", "PRIVATE_KEY")
+        for key in keys:
+            with self.subTest(key=key):
+                raw = '{"%s": "a\\"%s", "user": "alice"}' % (key, secret)
+                out = redact(raw)
+                self.assertNotIn(secret, out)
+                self.assertEqual(out, '{"%s": "[REDACTED]", "user": "alice"}' % key)
+                self.assertEqual(redact("%s=%s" % (key, secret)), "%s=[REDACTED]" % key)
+                self.assertEqual(redact('%s: "%s"' % (key, secret)), "%s: [REDACTED]" % key)
+        self.assertIn(secret, redact('{"session_id": "a\\"%s"}' % secret))
+        self.assertEqual(redact("session_id=%s" % secret), "session_id=%s" % secret)
+
+        message = ('{"access_token": "a\\"%s", "refresh_token": "%s", '
+                   '"id_token": "%s", "client_secret": "%s", "private_key": "%s", '
+                   '"session_id": "keep-%s", "user": "alice"}') % (
+                       secret, secret, secret, secret, secret, secret)
+        event = normalize_record({"ts": "2026-09-15T10:00:00Z", "message": message}, "api", NOW)
+        self.assertNotIn('"a\\"%s"' % secret, event["message"])
+        self.assertIn("[REDACTED]", event["message"])
+        self.assertIn('"session_id": "keep-%s"' % secret, event["message"])
+        self.assertIn('"user": "alice"', event["message"])
+        for key in ("access_token", "refresh_token", "id_token", "client_secret", "private_key"):
+            self.assertIn('"%s": "[REDACTED]"' % key, event["message"])
+
+        top = normalize_record({"ts": "2026-09-15T10:00:00Z", "message": "line",
+                                "access_token": secret, "client_secret": secret,
+                                "private_key": secret, "session_id": secret}, "api", NOW)
+        self.assertIn('"access_token": "[REDACTED]"', top["raw"])
+        self.assertIn('"client_secret": "[REDACTED]"', top["raw"])
+        self.assertIn('"private_key": "[REDACTED]"', top["raw"])
+        self.assertIn('"session_id": "%s"' % secret, top["raw"])
+
+        conn = connect(":memory:")
+        init_schema(conn)
+        self.addCleanup(conn.close)
+        stored = record_error(conn, "ingest", message)
+        self.assertNotIn("a\\\"%s" % secret, stored)
+        self.assertIn("keep-%s" % secret, stored)
+        logged = conn.execute("SELECT message FROM error_log").fetchone()[0]
+        self.assertNotIn("a\\\"%s" % secret, logged)
+        self.assertIn("[REDACTED]", logged)
+        self.assertIn("keep-%s" % secret, logged)
 
         message = ('{"api-key": "%s", "authorization": "Bearer %s", '
                    '"session": "a\\"%s", "user": "alice"}') % (secret, secret, secret)
