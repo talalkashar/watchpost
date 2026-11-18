@@ -126,28 +126,37 @@ function landDots(step = 2.4) {
 
 const r2 = (v) => Math.round(v * 10) / 10;
 
-// Static layer: graticule, faint coastlines, land dots. Returns an SVG string.
+// At 2x, sample the land about twice as fine. 1x keeps the caller's step.
+function crispStep(step) {
+  const dpr = typeof window !== "undefined" && window.devicePixelRatio ? window.devicePixelRatio : 1;
+  if (dpr < 2) return step;
+  return Math.min(step, Math.max(0.95, step * 0.56));
+}
+
+// Static layer: ocean, graticule, coastlines, land dots. Returns an SVG string.
 function baseMap(w, h, { step = 2.4 } = {}) {
-  let out = `<svg xmlns="http://www.w3.org/2000/svg" class="worldmap" width="${r2(w)}" height="${r2(h)}" viewBox="0 0 ${r2(w)} ${r2(h)}" role="img" aria-label="Attacker map">`;
+  const used = crispStep(step);
+  const rw = r2(w), rh = r2(h);
+  let out = `<svg xmlns="http://www.w3.org/2000/svg" class="worldmap" width="${rw}" height="${rh}" viewBox="0 0 ${rw} ${rh}" role="group" aria-label="Attacker map" shape-rendering="geometricPrecision">`;
   // Keep city labels readable when a bright arc or land dot passes underneath.
-  out += `<defs><filter id="map-label-plate" x="-5%" y="-5%" width="110%" height="110%" color-interpolation-filters="sRGB">
-    <feFlood flood-color="#191919" flood-opacity=".88"/><feComposite in="SourceGraphic" operator="over"/>
-  </filter></defs><g class="graticule">`;
+  out += `<defs><radialGradient id="map-ocean" cx="50%" cy="40%" r="78%"><stop offset="0%" stop-color="#16181d"/><stop offset="100%" stop-color="#0c0c0e"/></radialGradient>`;
+  out += `<filter id="map-label-plate" x="-5%" y="-5%" width="110%" height="110%" color-interpolation-filters="sRGB"><feFlood flood-color="#191919" flood-opacity=".88"/><feComposite in="SourceGraphic" operator="over"/></filter></defs>`;
+  out += `<rect class="ocean" x="0" y="0" width="${rw}" height="${rh}" fill="url(#map-ocean)"/><g class="graticule">`;
   for (let lon = -150; lon < 180; lon += 30) {
     const [x] = project(lon, 0, w, h);
-    out += `<line x1="${r2(x)}" x2="${r2(x)}" y1="0" y2="${r2(h)}"/>`;
+    out += `<line x1="${r2(x)}" x2="${r2(x)}" y1="0" y2="${rh}"/>`;
   }
   for (let lat = -30; lat <= 60; lat += 30) {
     const [, y] = project(0, lat, w, h);
-    out += `<line class="${lat === 0 ? "equator" : ""}" x1="0" x2="${r2(w)}" y1="${r2(y)}" y2="${r2(y)}"/>`;
+    out += `<line class="${lat === 0 ? "equator" : ""}" x1="0" x2="${rw}" y1="${r2(y)}" y2="${r2(y)}"/>`;
   }
   out += `</g><g class="coast">`;
   for (const ring of LAND) {
     out += `<path d="${ring.map(([lon, lat], i) => { const [x, y] = project(lon, lat, w, h); return `${i ? "L" : "M"}${r2(x)} ${r2(y)}`; }).join("")}Z"/>`;
   }
   out += `</g><g class="land">`;
-  const rad = Math.max(0.9, (w / 360) * step * 0.34);
-  for (const [lon, lat] of landDots(step)) {
+  const rad = Math.max(0.45, (w / 360) * used * 0.38);
+  for (const [lon, lat] of landDots(used)) {
     const [x, y] = project(lon, lat, w, h);
     out += `<circle cx="${r2(x)}" cy="${r2(y)}" r="${r2(rad)}"/>`;
   }
@@ -164,3 +173,412 @@ function arcPath(a, b, w, h) {
 }
 
 globalThis.WPMap = Object.freeze({ LAND, WATER, project, inside, landDots, baseMap, arcPath });
+
+// Decorate the dashboard map after it paints. dashboard.js owns the geometry.
+// Scoped so classic scripts do not share these names with app.js.
+(function () {
+"use strict";
+const SVG_NS = "http://www.w3.org/2000/svg";
+const SEVS = ["critical", "high", "medium", "low", "info"];
+const COUNTRY = {
+  Northhaven: "Sweden",
+  Saltmere: "Australia",
+  "Kestrel Bay": "Japan",
+  Duskport: "Brazil",
+  Ironvale: "Russia",
+  Emberfield: "Nigeria",
+  "Riverton HQ": "United States",
+  "Lakeside branch": "United States",
+  "Hillcrest remote site": "United States",
+  "Watchpost HQ (internal)": "United States",
+};
+const rulesByIp = new Map();
+let rulesPromise = null;
+let activeMark = null;
+
+function ns(name) { return document.createElementNS(SVG_NS, name); }
+function countryOf(city) { return COUNTRY[city] || "—"; }
+function sevName(g) {
+  for (const s of SEVS) if (g.classList.contains("sev-" + s)) return s;
+  return "info";
+}
+function clip(value, n) {
+  const s = String(value || "—");
+  return s.length > n ? s.slice(0, n - 1) + "…" : s;
+}
+function parseMark(g) {
+  const raw = g.querySelector("title") ? g.querySelector("title").textContent : "";
+  const lines = raw.split("\n");
+  const city = (lines[0] || "").trim();
+  const ips = (lines[1] || "").split(",").map((s) => s.trim()).filter((ip) => /^\d+\.\d+\.\d+\.\d+$/.test(ip));
+  const found = raw.match(/(\d+)\s+events/);
+  return { city, ips, events: found ? Number(found[1]) : 0, sev: sevName(g) };
+}
+function arcStart(d) {
+  const m = /M\s*(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)/.exec(d || "");
+  return m ? [Number(m[1]), Number(m[2])] : null;
+}
+function weightName(events, max) {
+  if (!max) return "wt-1";
+  const t = events / max;
+  if (t >= 0.75) return "wt-4";
+  if (t >= 0.45) return "wt-3";
+  if (t >= 0.2) return "wt-2";
+  return "wt-1";
+}
+function setWt(node, wt) {
+  for (let n = 1; n <= 4; n++) node.classList.toggle("wt-" + n, wt === "wt-" + n);
+}
+function setPh(node, ph) {
+  for (let n = 0; n < 6; n++) node.classList.toggle("ph-" + n, ph === "ph-" + n);
+}
+function hit(a, b, pad) {
+  return a.x < b.x + b.w + pad && a.x + a.w + pad > b.x && a.y < b.y + b.h + pad && a.y + a.h + pad > b.y;
+}
+function circleBox(c) {
+  const x = Number(c.getAttribute("cx")), y = Number(c.getAttribute("cy")), r = Number(c.getAttribute("r")) || 0;
+  return { x: x - r, y: y - r, w: r * 2, h: r * 2 };
+}
+function attrBox(rect) {
+  return {
+    x: Number(rect.getAttribute("x")), y: Number(rect.getAttribute("y")),
+    w: Number(rect.getAttribute("width")), h: Number(rect.getAttribute("height")),
+  };
+}
+function panelBoxes(svg) {
+  const ctm = svg.getScreenCTM();
+  if (!ctm) return null;
+  const inv = ctm.inverse();
+  const boxes = [];
+  for (const el of [document.getElementById("map-side"), document.querySelector("#p-map .map-legend")]) {
+    if (!el) continue;
+    const cs = getComputedStyle(el);
+    if (cs.display === "none" || cs.visibility === "hidden") continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) continue;
+    const a = svg.createSVGPoint(); a.x = r.left; a.y = r.top;
+    const b = svg.createSVGPoint(); b.x = r.right; b.y = r.bottom;
+    const p = a.matrixTransform(inv), q = b.matrixTransform(inv);
+    boxes.push({ x: Math.min(p.x, q.x), y: Math.min(p.y, q.y), w: Math.abs(q.x - p.x), h: Math.abs(q.y - p.y) });
+  }
+  return boxes;
+}
+async function readJson(path) {
+  const res = await fetch(path, { credentials: "same-origin", headers: { Accept: "application/json" } });
+  if (!res.ok) return null;
+  return res.json();
+}
+function topRule(ips) {
+  let best = null;
+  for (const ip of ips) {
+    const rows = rulesByIp.get(ip);
+    if (!rows) continue;
+    for (const row of rows) if (!best || row.count > best.count) best = row;
+  }
+  return best;
+}
+function loadRules(schedule) {
+  if (rulesPromise) return rulesPromise;
+  rulesPromise = (async () => {
+    try {
+      const [alerts, dash] = await Promise.all([readJson("/api/alerts?limit=200"), readJson("/api/dashboard")]);
+      const names = new Map();
+      for (const rule of (dash && dash.top_rules) || []) {
+        if (rule && rule.rule_id) names.set(rule.rule_id, rule.name || rule.rule_id);
+      }
+      const tally = new Map();
+      for (const alert of Array.isArray(alerts) ? alerts : []) {
+        const key = String(alert.group_key || "");
+        if (!/^\d+\.\d+\.\d+\.\d+$/.test(key)) continue;
+        const id = alert.rule_id || "";
+        const count = Number(alert.event_count) || 0;
+        const list = tally.get(key) || [];
+        let row = list.find((item) => item.id === id);
+        if (!row) {
+          row = { id, name: names.get(id) || id || "—", count: 0 };
+          list.push(row);
+        } else if (names.get(id)) row.name = names.get(id);
+        row.count += count > 0 ? count : 1;
+        tally.set(key, list);
+      }
+      rulesByIp.clear();
+      for (const [ip, list] of tally) rulesByIp.set(ip, list);
+    } catch { /* tooltip falls back to an em dash */ }
+    schedule();
+  })();
+  return rulesPromise;
+}
+function paintArcs(svg) {
+  const arcs = svg.querySelector("g.arcs");
+  if (!arcs) return;
+  const infos = [...svg.querySelectorAll("g.marks > g.mk")].map((g) => {
+    const core = g.querySelector("circle.core");
+    const info = parseMark(g);
+    return {
+      x: core ? Number(core.getAttribute("cx")) : 0,
+      y: core ? Number(core.getAttribute("cy")) : 0,
+      events: info.events,
+    };
+  });
+  const max = infos.reduce((m, info) => Math.max(m, info.events), 0);
+  [...arcs.querySelectorAll(":scope > path.arc:not(.arc-guide)")].forEach((path, i) => {
+    const start = arcStart(path.getAttribute("d"));
+    let events = 0;
+    if (start && infos.length) {
+      let best = Infinity, n = 0;
+      for (const info of infos) {
+        const d = Math.hypot(info.x - start[0], info.y - start[1]);
+        if (d < best) { best = d; n = info.events; }
+      }
+      if (best <= 2.5) events = n;
+    }
+    let guide = path.previousElementSibling;
+    if (!guide || !guide.classList.contains("arc-guide")) {
+      guide = path.cloneNode(false);
+      guide.classList.remove("arc-pulse");
+      guide.classList.add("arc-guide");
+      path.parentNode.insertBefore(guide, path);
+    }
+    const wt = weightName(events, max);
+    path.classList.add("arc-pulse");
+    guide.classList.remove("arc-pulse");
+    for (const node of [path, guide]) setWt(node, wt);
+    setPh(path, "ph-" + (i % 6));
+  });
+}
+function placeOne(svg, text, core, obstacles, placed) {
+  if (!core) return "hidden";
+  const cx = Number(core.getAttribute("cx"));
+  const cy = Number(core.getAttribute("cy"));
+  const r = Number(core.getAttribute("r")) || 4;
+  const vb = svg.viewBox.baseVal;
+  const candidates = [
+    [cx + r + 10, cy + 3, "start"],
+    [cx - r - 10, cy + 3, "end"],
+    [cx, cy - r - 8, "middle"],
+    [cx, cy + r + 14, "middle"],
+    [cx + r + 36, cy - 2, "start"],
+    [cx, cy - r - 22, "middle"],
+    [cx - r - 14, cy + r + 14, "end"],
+  ];
+  let plate = text.previousElementSibling;
+  if (!plate || !plate.classList.contains("chip-plate")) {
+    plate = ns("rect");
+    plate.setAttribute("class", "chip-plate");
+    plate.setAttribute("rx", "5");
+    text.parentNode.insertBefore(plate, text);
+  }
+  for (const [x, y, anchor] of candidates) {
+    text.setAttribute("x", String(r2(x)));
+    text.setAttribute("y", String(r2(y)));
+    text.setAttribute("text-anchor", anchor);
+    text.setAttribute("visibility", "visible");
+    plate.setAttribute("visibility", "visible");
+    let b;
+    try { b = text.getBBox(); }
+    catch { return "retry"; }
+    const box = { x: b.x - 5, y: b.y - 3, w: b.width + 10, h: b.height + 6 };
+    plate.setAttribute("x", String(r2(box.x)));
+    plate.setAttribute("y", String(r2(box.y)));
+    plate.setAttribute("width", String(r2(box.w)));
+    plate.setAttribute("height", String(r2(box.h)));
+    if (box.x < 1 || box.y < 1 || box.x + box.w > vb.width - 1 || box.y + box.h > vb.height - 1) continue;
+    if (obstacles.some((o) => hit(box, o, 3))) continue;
+    if (placed.some((o) => hit(box, o, 4))) continue;
+    placed.push(box);
+    return "shown";
+  }
+  text.setAttribute("visibility", "hidden");
+  plate.setAttribute("visibility", "hidden");
+  return "hidden";
+}
+function tipText(cls, value) {
+  const t = ns("text");
+  t.setAttribute("class", cls);
+  t.textContent = value;
+  return t;
+}
+function ensureTip(svg) {
+  let tip = svg.querySelector("g.tips");
+  if (tip) return tip;
+  tip = ns("g");
+  tip.setAttribute("class", "tips");
+  tip.setAttribute("id", "map-tip");
+  tip.setAttribute("visibility", "hidden");
+  const bg = ns("rect");
+  bg.setAttribute("class", "tip-bg");
+  bg.setAttribute("rx", "8");
+  tip.append(bg);
+  svg.append(tip);
+  return tip;
+}
+function layoutTip(svg, tip, g) {
+  const core = g.querySelector("circle.core");
+  if (!core) return;
+  const cx = Number(core.getAttribute("cx"));
+  const cy = Number(core.getAttribute("cy"));
+  const rad = Number(core.getAttribute("r")) || 4;
+  let y = 16, maxW = 72;
+  for (const t of tip.querySelectorAll("text")) {
+    t.setAttribute("x", "10");
+    t.setAttribute("y", String(y));
+    try { maxW = Math.max(maxW, t.getBBox().width); } catch { /* measure after layout */ }
+    y += 15;
+  }
+  const width = Math.ceil(maxW + 20), height = y + 6;
+  const bg = tip.querySelector("rect");
+  bg.setAttribute("x", "0");
+  bg.setAttribute("y", "0");
+  bg.setAttribute("width", String(width));
+  bg.setAttribute("height", String(height));
+  const vb = svg.viewBox.baseVal;
+  let x = cx + rad + 10;
+  let ty = cy - height / 2;
+  if (x + width > vb.width - 6) x = cx - rad - 10 - width;
+  if (x < 6) x = 6;
+  if (ty < 6) ty = 6;
+  if (ty + height > vb.height - 6) ty = Math.max(6, vb.height - 6 - height);
+  const panels = panelBoxes(svg) || [];
+  if (panels.some((p) => hit({ x, y: ty, w: width, h: height }, p, 2))) {
+    const flip = cx - rad - 10 - width;
+    if (flip > 6) x = flip;
+  }
+  tip.setAttribute("transform", `translate(${r2(x)} ${r2(ty)})`);
+}
+function showTip(svg, g) {
+  activeMark = g;
+  const info = parseMark(g);
+  const rule = topRule(info.ips);
+  const ruleText = clip(rule ? rule.name : "—", 28);
+  const tip = ensureTip(svg);
+  const sig = [info.city, info.events, ruleText, info.sev].join("|");
+  if (tip.dataset.sig !== sig) {
+    const bg = tip.querySelector("rect");
+    tip.replaceChildren(bg);
+    tip.append(
+      tipText("tip-city", info.city || "—"),
+      tipText("tip-muted", countryOf(info.city)),
+      tipText("tip-line", info.events + " events"),
+      tipText("tip-line", ruleText),
+      tipText("tip-sev tip-sev-" + info.sev, info.sev),
+    );
+    tip.dataset.sig = sig;
+  }
+  layoutTip(svg, tip, g);
+  tip.setAttribute("visibility", "visible");
+}
+function hideTip(svg) {
+  activeMark = null;
+  const tip = svg.querySelector("g.tips");
+  if (tip) tip.setAttribute("visibility", "hidden");
+}
+function bindMark(g, svg) {
+  if (g.dataset.bound) return;
+  g.dataset.bound = "1";
+  const enter = () => showTip(svg, g);
+  const leave = () => { if (activeMark === g) hideTip(svg); };
+  g.addEventListener("mouseenter", enter);
+  g.addEventListener("mouseleave", leave);
+  g.addEventListener("focus", enter);
+  g.addEventListener("blur", leave);
+}
+function paintMarks(svg) {
+  const map = svg.closest("#map");
+  const panels = panelBoxes(svg);
+  const ready = svg.getBoundingClientRect().width >= 20 && panels;
+  for (const g of svg.querySelectorAll("g.marks > g.mk")) {
+    const info = parseMark(g);
+    const rule = topRule(info.ips);
+    const label = `${info.city || "—"}, ${countryOf(info.city)}, ${info.events} events, ${rule ? rule.name : "—"}, ${info.sev}`;
+    if (g.getAttribute("aria-label") !== label) g.setAttribute("aria-label", label);
+    if (g.getAttribute("tabindex") !== "0") g.setAttribute("tabindex", "0");
+    if (g.getAttribute("role") !== "group") g.setAttribute("role", "group");
+    bindMark(g, svg);
+  }
+  const texts = [...svg.querySelectorAll("g.marks .ml")];
+  if (!ready) {
+    const n = Number(svg.dataset.placeTries || "0");
+    if (svg.getBoundingClientRect().width >= 20 && n < 8 && map) {
+      svg.dataset.placeTries = String(n + 1);
+      requestAnimationFrame(() => enhance(map));
+    }
+    return;
+  }
+  if (svg.dataset.placeTries !== "0") svg.dataset.placeTries = "0";
+  if (texts.every((t) => t.dataset.placed === "1")) return;
+  const obstacles = panels.slice();
+  svg.querySelectorAll("g.marks circle.core, g.hq circle.core, g.hq circle.ring").forEach((c) => obstacles.push(circleBox(c)));
+  const placed = [];
+  for (const text of texts) {
+    if (text.dataset.placed === "1") {
+      const chip = text.previousElementSibling;
+      if (chip && chip.classList.contains("chip-plate") && chip.getAttribute("visibility") !== "hidden") placed.push(attrBox(chip));
+      continue;
+    }
+    const result = placeOne(svg, text, text.parentNode.querySelector("circle.core"), obstacles, placed);
+    if (result === "retry") {
+      const n = Number(svg.dataset.placeTries || "0") + 1;
+      svg.dataset.placeTries = String(n);
+      if (n < 8 && map) requestAnimationFrame(() => enhance(map));
+      return;
+    }
+    text.dataset.placed = "1";
+  }
+}
+function enhance(map) {
+  const svg = map.querySelector("svg.worldmap");
+  if (!svg) return;
+  const count = document.getElementById("map-count");
+  if (count && !count.classList.contains("map-stat")) count.classList.add("map-stat");
+  paintArcs(svg);
+  paintMarks(svg);
+  if (activeMark && !activeMark.isConnected) hideTip(svg);
+  else if (activeMark && activeMark.isConnected) showTip(svg, activeMark);
+}
+function watch(map) {
+  let frame = 0, running = false, sub = null, ro = null;
+  const run = () => {
+    frame = 0;
+    if (!map.isConnected) {
+      if (sub) sub.disconnect();
+      if (ro) ro.disconnect();
+      return;
+    }
+    if (running) return;
+    running = true;
+    try { enhance(map); }
+    finally { running = false; }
+  };
+  const schedule = () => {
+    if (!map.isConnected) {
+      if (sub) sub.disconnect();
+      if (ro) ro.disconnect();
+      return;
+    }
+    if (frame) return;
+    frame = requestAnimationFrame(run);
+  };
+  sub = new MutationObserver(schedule);
+  sub.observe(map, { childList: true, subtree: true });
+  if (typeof ResizeObserver !== "undefined") {
+    ro = new ResizeObserver(() => {
+      for (const t of map.querySelectorAll(".ml")) delete t.dataset.placed;
+      schedule();
+    });
+    ro.observe(map);
+  }
+  loadRules(schedule);
+  schedule();
+}
+function boot() {
+  const arm = () => {
+    const map = document.getElementById("map");
+    if (!map || map.dataset.mapWatch === "1") return;
+    map.dataset.mapWatch = "1";
+    watch(map);
+  };
+  arm();
+  new MutationObserver(arm).observe(document.documentElement, { childList: true, subtree: true });
+}
+if (typeof document !== "undefined") boot();
+})();

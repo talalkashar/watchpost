@@ -1,0 +1,211 @@
+/* Attack map. Loaded after glass.css so these rules win on equal specificity. */
+
+.worldmap { shape-rendering: geometricPrecision; }
+.worldmap .ocean { pointer-events: none; }
+.worldmap .coast path {
+  fill: rgb(196 202 210 / .07);
+  stroke: rgb(232 234 238 / .46);
+  stroke-width: 1.15;
+  vector-effect: non-scaling-stroke;
+}
+.worldmap .land circle { fill: rgb(214 218 224 / .7); }
+
+.worldmap .arc {
+  fill: none;
+  stroke: var(--ink);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+  animation: none;
+  stroke-dasharray: none;
+}
+.worldmap .arc.s-critical { stroke: var(--crit); color: var(--crit); }
+.worldmap .arc.s-high { stroke: var(--high); color: var(--high); }
+.worldmap .arc.s-medium { stroke: var(--g-med); color: var(--g-med); }
+.worldmap .arc.s-low,
+.worldmap .arc.s-info { stroke: var(--g-low); color: var(--ink-2); }
+.worldmap .arc.wt-1 { stroke-width: 1.15; }
+.worldmap .arc.wt-2 { stroke-width: 1.6; }
+.worldmap .arc.wt-3 { stroke-width: 2.15; }
+.worldmap .arc.wt-4 { stroke-width: 2.75; }
+.worldmap .arc-guide.wt-1 { opacity: .38; }
+.worldmap .arc-guide.wt-2 { opacity: .55; }
+.worldmap .arc-guide.wt-3 { opacity: .72; }
+.worldmap .arc-guide.wt-4 { opacity: .9; }
+.worldmap .arc-guide { stroke-dasharray: none; animation: none; }
+.worldmap .arc.arc-pulse { opacity: 0; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .worldmap .arc.arc-pulse {
+    stroke-dasharray: 14 86;
+    stroke-linecap: round;
+    animation: map-travel 2.6s linear infinite;
+    filter: drop-shadow(0 0 2.5px currentColor);
+  }
+  .worldmap .arc.arc-pulse.wt-1 { opacity: .55; }
+  .worldmap .arc.arc-pulse.wt-2 { opacity: .7; }
+  .worldmap .arc.arc-pulse.wt-3 { opacity: .84; }
+  .worldmap .arc.arc-pulse.wt-4 { opacity: 1; }
+  .worldmap .arc-pulse.ph-0 { animation-delay: 0s; }
+  .worldmap .arc-pulse.ph-1 { animation-delay: .4s; }
+  .worldmap .arc-pulse.ph-2 { animation-delay: .8s; }
+  .worldmap .arc-pulse.ph-3 { animation-delay: 1.2s; }
+  .worldmap .arc-pulse.ph-4 { animation-delay: 1.6s; }
+  .worldmap .arc-pulse.ph-5 { animation-delay: 2s; }
+}
+
+@keyframes map-travel {
+  from { stroke-dashoffset: 100; }
+  to { stroke-dashoffset: 0; }
+}
+
+.worldmap .mk { cursor: pointer; outline: none; }
+.worldmap .mk:focus-visible { outline: none; }
+.worldmap .mk .core { filter: drop-shadow(0 0 3px currentColor); }
+.worldmap .mk .halo { filter: drop-shadow(0 0 6px currentColor); }
+.worldmap .mk:focus-visible .core { stroke: var(--accent); stroke-width: 2; }
+
+.worldmap .ml { filter: none; }
+.worldmap .chip-plate {
+  fill: rgb(16 16 18 / .9);
+  stroke: rgb(255 255 255 / .16);
+  stroke-width: 1;
+  pointer-events: none;
+}
+
+.worldmap .tips { pointer-events: none; }
+.worldmap .tip-bg {
+  fill: rgb(14 14 16 / .94);
+  stroke: rgb(255 255 255 / .16);
+  stroke-width: 1;
+}
+.worldmap .tip-city { fill: var(--ink); font: 600 12px var(--sans); }
+.worldmap .tip-muted,
+.worldmap .tip-line { fill: var(--ink-2); font: 500 11px var(--sans); }
+.worldmap .tip-sev { font: 600 10px var(--sans); letter-spacing: .06em; }
+.worldmap .tip-sev-critical { fill: var(--crit); }
+.worldmap .tip-sev-high { fill: var(--high); }
+.worldmap .tip-sev-medium { fill: var(--ink-2); }
+.worldmap .tip-sev-low,
+.worldmap .tip-sev-info { fill: var(--ink-2); }
+
+#map-count.map-stat {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / .06);
+  border: 1px solid var(--glass-border);
+  color: var(--ink-2);
+  font: 500 11px/1.5 var(--sans);
+  letter-spacing: .01em;
+}
+
+#p-map .map-side {
+  width: 200px;
+  background: var(--glass);
+  -webkit-backdrop-filter: var(--glass-filter);
+  backdrop-filter: var(--glass-filter);
+  border: 1px solid var(--glass-border);
+  border-top-color: var(--glass-top);
+  border-radius: 12px;
+  box-shadow: var(--glass-shadow);
+}
+#p-map .ms-h {
+  font: 600 10px/1.4 var(--sans);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+#p-map .ms-row + .ms-row {
+  border-top: 1px solid rgb(255 255 255 / .08);
+  margin-top: 2px;
+  padding-top: 3px;
+}
+#p-map .map-legend {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--glass);
+  -webkit-backdrop-filter: var(--glass-filter);
+  backdrop-filter: var(--glass-filter);
+  border: 1px solid var(--glass-border);
+  border-top-color: var(--glass-top);
+  box-shadow: var(--glass-shadow);
+}
+
+@media (max-width: 600px) {
+  #p-map { height: auto; }
+  #p-map .pb {
+    display: flex;
+    flex-direction: column;
+    flex: none;
+    height: auto;
+  }
+  #p-map .mapwrap {
+    position: relative;
+    inset: auto;
+    width: 100%;
+    height: auto;
+    aspect-ratio: 360 / 140;
+    flex: none;
+  }
+  /* Border box stays 0px wide. dashboard.js treats #map-side's right edge as
+     land it must not label, even when this card sits below the map. */
+  #p-map .map-side {
+    position: static;
+    display: flex;
+    align-self: flex-start;
+    width: 0;
+    min-width: 0;
+    max-width: 0;
+    flex: 0 0 auto;
+    overflow: visible;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    left: auto;
+    bottom: auto;
+    margin: 8px 0 0 8px;
+  }
+  #p-map .map-side .ms-h,
+  #p-map .map-side .ms-row,
+  #p-map .map-side .muted {
+    width: calc(100vw - 32px);
+    max-width: none;
+    box-sizing: border-box;
+    background: var(--glass);
+    -webkit-backdrop-filter: var(--glass-filter);
+    backdrop-filter: var(--glass-filter);
+  }
+  #p-map .map-side .ms-h {
+    border: 1px solid var(--glass-border);
+    border-bottom: 0;
+    border-radius: 12px 12px 0 0;
+    padding: 8px 12px 4px;
+  }
+  #p-map .map-side .ms-row {
+    border-left: 1px solid var(--glass-border);
+    border-right: 1px solid var(--glass-border);
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+  #p-map .map-side .ms-row:last-child,
+  #p-map .map-side .muted {
+    border-bottom: 1px solid var(--glass-border);
+    border-radius: 0 0 12px 12px;
+    padding-bottom: 8px;
+  }
+  #p-map .map-legend {
+    position: static;
+    left: auto;
+    right: auto;
+    bottom: auto;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    width: auto;
+    margin: 6px 8px 8px;
+    border-radius: 12px;
+  }
+}
