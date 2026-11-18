@@ -179,13 +179,16 @@ function openModal() {
 }
 
 // ---------- auth ----------
+const loginView = $("#login-view");
+
 function showLogin() {
   state.user = null; state.csrf = null;
   document.title = consoleTitle(false);
   Live.stop();
   document.body.classList.remove("authed");
-  $("#login-view").hidden = false;
-  Motion.intro($("#login-view"));
+  if (!loginView.isConnected) $("#view").before(loginView);
+  loginView.hidden = false;
+  Motion.intro(loginView);
   mfaStep(null);
   $("#rail").hidden = true; $("#strip").hidden = true; $("#who").hidden = true;
   render();
@@ -201,7 +204,7 @@ async function boot() {
   window.addEventListener("scroll", () => {
     document.body.classList.toggle("scrolled", window.scrollY > 8);
   }, { passive: true });
-  $("#login-view").hidden = true;
+  loginView.hidden = true;
   $("#login-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const f = new FormData(ev.target);
@@ -210,7 +213,7 @@ async function boot() {
       const data = await api("/api/auth/login", { method: "POST", body: { username: f.get("username"), password: f.get("password") } });
       ev.target.reset();
       if (data.mfa_required) mfaStep(data.mfa_token); else onLogin(data);
-    } catch (e) { $("#login-error").textContent = e.message; }
+    } catch (e) { loginView.querySelector("#login-error").textContent = e.message; }
   });
   $("#logout").addEventListener("click", async () => { await api("/api/auth/logout", { method: "POST" }).catch(() => {}); showLogin(); });
   document.querySelectorAll("#nav button").forEach((b) => b.addEventListener("click", () => {
@@ -269,7 +272,7 @@ function mfaStep(mfaToken) {
 
 function onLogin(data) {
   state.user = data.user; state.csrf = data.csrf_token;
-  $("#login-view").hidden = true;
+  loginView.remove();
   document.body.classList.add("authed");
   $("#rail").hidden = false; $("#strip").hidden = false; $("#who").hidden = false;
   const { username, role } = data.user;

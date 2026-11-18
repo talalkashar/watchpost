@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>Watchpost: an open-source SIEM and SOC console in Python</title>
   <meta name="description" content="Watchpost is a small, working SIEM in pure Python: it ingests logs, detects and correlates attacks mapped to MITRE ATT&amp;CK, and helps you triage incidents.">
-  <meta name="theme-color" content="#0c151f">
+  <meta name="theme-color" content="#050506">
   <link rel="canonical" href="https://watchpost-nxxu.onrender.com/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Watchpost">
@@ -40,7 +40,7 @@
   <aside class="rail" id="rail" hidden>
     <div class="brand">
       <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="5.5"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/></svg>
-      <div><b>WATCHPOST</b><small>SOC console</small></div>
+      <div><b>WATCHPOST</b><small>SIEM</small></div>
       <button type="button" id="nav-toggle" class="ghost nav-toggle" aria-expanded="false" aria-controls="nav">Menu</button>
     </div>
     <nav id="nav" aria-label="Views">
@@ -90,20 +90,21 @@
   <div id="banner" class="banner" role="status" hidden></div>
 
   <main id="main" tabindex="-1">
-    <section id="login-view" class="login">
+    <section id="login-view" class="login" aria-labelledby="sign-in-heading">
       <div class="login-brand">
         <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="5.5"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/></svg>
-        <div><b>WATCHPOST</b><small>Security operations console</small></div>
+        <b>Watchpost</b><small>SIEM</small>
       </div>
+      <h1 id="sign-in-heading">Sign in</h1>
       <form id="login-form">
         <label>Username <input name="username" autocomplete="username" required maxlength="64"></label>
         <label>Password <input name="password" type="password" autocomplete="current-password" required maxlength="256"></label>
         <button type="submit">Sign in</button>
         <p class="error" id="login-error" role="alert"></p>
       </form>
-      <p class="muted">Initial passwords come from <code>SIEM_ADMIN_PASSWORD</code> / <code>SIEM_ANALYST_PASSWORD</code>,
-        or were generated into <code>data/initial_credentials.txt</code> on first start.</p>
-      <a class="credit" href="https://www.arterysystems.com/?utm_source=watchpost-nxxu.onrender.com&amp;utm_medium=referral&amp;utm_campaign=powered-by">Powered by Artery Systems</a>
+      <footer class="login-footer">
+        <a class="credit" href="https://www.arterysystems.com/?utm_source=watchpost-nxxu.onrender.com&amp;utm_medium=referral&amp;utm_campaign=powered-by">Powered by Artery Systems</a>
+      </footer>
     </section>
     <div id="view"></div>
   </main>

@@ -862,58 +862,113 @@ body[data-view="ingest"] form.card li { line-height: 1.45; color: var(--ink-2); 
 body[data-view="ingest"] form.card li code { color: #fff; font-size: 12px; }
 
 /* ---------- sign-in ---------- */
+body:not(.authed) {
+  background:
+    radial-gradient(ellipse at 12% 0%, rgb(255 255 255 / .075), transparent 52%),
+    radial-gradient(ellipse at 85% 100%, rgb(255 255 255 / .04), transparent 48%),
+    var(--bg);
+}
 body:not(.authed) main {
-  min-height: 100vh;
+  min-height: 100svh;
   max-width: none;
   margin: 0;
+  padding: 24px 16px;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   place-items: center;
-  padding: 28px 16px;
+  isolation: isolate;
+  position: relative;
+  overflow: clip;
+}
+/* Quiet range rings behind the glass repeat the circular Watchpost mark. */
+body:not(.authed) main::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: repeating-radial-gradient(circle at 17% 15%, transparent 0 86px, rgb(198 198 198 / .12) 87px, transparent 88px 119px);
+  mask-image: linear-gradient(135deg, #000, transparent 70%);
 }
 body:not(.authed) #view { display: none; }
 .login {
-  width: min(420px, 100%);
-  margin: 0;
-  padding: 28px 28px 22px;
-  border-radius: 16px;
+  width: min(416px, 100%);
   position: relative;
-  background: var(--surface);
-  border: 1px solid var(--line-2);
-  box-shadow: var(--rim), 0 22px 60px rgb(0 5 13 / .4);
+  margin: 0;
+  padding: clamp(24px, 5vw, 36px);
+  border: 1px solid rgb(211 211 211 / .28);
+  border-radius: 22px;
+  color: #f4f4f4;
+  background: var(--panel);
+  box-shadow: inset 0 1px 0 rgb(248 248 248 / .22), 0 30px 80px -24px rgb(0 0 0 / .65);
 }
-.login::before {
-  content: "";
-  position: absolute;
-  left: 28px;
-  right: 28px;
-  top: 0;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgb(255 255 255 / .383), transparent);
+@media (prefers-reduced-motion: no-preference) {
+  @media not (prefers-reduced-transparency: reduce) {
+    @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+      .login {
+        background: var(--glass-edge) top / 100% 1px no-repeat,
+          linear-gradient(145deg, rgb(255 255 255 / .14), rgb(255 255 255 / .048) 58%, rgb(255 255 255 / .075));
+        -webkit-backdrop-filter: blur(18px);
+        backdrop-filter: blur(18px);
+      }
+    }
+  }
 }
-.login-brand { margin-bottom: 22px; }
-.login-brand .logo { width: 40px; height: 40px; }
-.login-brand b { font-size: 15px; letter-spacing: .2em; }
-.login label { font-size: 12.5px; color: var(--ink-2); }
+.login-brand { gap: 10px; margin-bottom: 30px; }
+.login-brand .logo { width: 30px; height: 30px; stroke: #e8e8e8; }
+.login-brand b { font-size: 20px; font-weight: 600; letter-spacing: -.035em; color: inherit; }
+.login-brand small {
+  margin-left: auto;
+  padding-left: 14px;
+  border-left: 1px solid rgb(215 215 215 / .3);
+  color: #cacaca;
+  font: 500 11px/1.25 var(--mono);
+  letter-spacing: .14em;
+}
+.login h1 { margin: 0 0 22px; font-size: 30px; line-height: 1.15; letter-spacing: -.045em; }
+.login label { margin: 0 0 15px; gap: 6px; color: #e4e4e4; font-size: 14px; }
 .login input {
-  min-height: 42px;
-  border-radius: 8px;
-  padding: 8px 12px;
-  background: var(--bg-2);
+  width: 100%;
+  min-height: 46px;
+  padding: 10px 12px;
+  border: 1px solid #808080;
+  border-radius: 9px;
+  background: rgb(11 11 11 / .65);
+  color: #f4f4f4;
+  font-size: 16px;
 }
 .login form button[type="submit"] {
-  min-height: 44px;
-  border-radius: 8px;
-  margin-top: 6px;
-  font-size: 14px;
+  min-height: 46px;
+  margin-top: 5px;
+  border: 1px solid #eeeeee;
+  border-radius: 9px;
+  background: #ececee;
+  color: #222222;
+  font-weight: 600;
 }
-.login .muted,
-.login > .muted { font-size: 12.5px; line-height: 1.5; margin: 14px 0 0; }
+.login form button.ghost { min-height: 44px; margin-top: 8px; }
+.login :is(input, button, a):focus-visible { outline: 3px solid #ededed; outline-offset: 3px; }
+.login .error { margin: 12px 0 0; color: #ffb7b0; }
+.login .error:empty { min-height: 0; margin: 0; }
+.login-footer { margin-top: 24px; border-top: 1px solid rgb(208 208 208 / .16); }
+.login .credit {
+  margin: 0 0 -10px;
+  padding: 0;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  color: #c8c8c8;
+  font-size: 12px;
+  text-decoration: underline;
+  text-decoration-color: rgb(200 200 200 / .45);
+}
+.login .credit:hover { color: #f7f7f7; text-decoration-color: currentColor; }
 
 dialog {
   border-radius: 14px;
   border-color: var(--line-3);
   background: var(--chrome);
-  box-shadow: var(--rim), 0 24px 80px rgb(0 5 13 / .58);
+  box-shadow: var(--rim), 0 24px 80px rgb(5 5 5 / .58);
 }
 
 /* ---------- sessions (account and admin) ---------- */
