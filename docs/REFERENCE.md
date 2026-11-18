@@ -278,8 +278,11 @@ Each download is audited as `case_exported`.
 The case is assembled from existing append-only activity, note, membership, evidence, and tamper-evident audit
 records; it creates no parallel case database. Viewer masking is applied to the structured case model before
 either renderer runs, so identity fields and free text are pseudonymized consistently in both formats when the
-masked viewer setting is enabled. The 1,000-event incident-detail limit also bounds case evidence; this is an
-investigation export, not a legal-hold or raw-log archive.
+masked viewer setting is enabled. The 1,000-event incident-detail limit also bounds case evidence. The case copies `events_omitted` and does not
+cap evidence again. Notes, alert activity other than `note_added`, and incident status changes are each the
+newest 100 by id (`notes_omitted`, `activity_omitted`, `status_changes_omitted`; 0 when that list fits). Those
+rows are read for every linked alert. Timeline order stays by time. Markdown names a count only when it is not
+0. This is an investigation export, not a legal-hold or raw-log archive.
 
 ### Self-diagnosis
 
