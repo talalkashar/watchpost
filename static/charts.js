@@ -1,5 +1,5 @@
 "use strict";
-// Watchpost charts: pure functions from data to an inline SVG string. No libraries.
+// Watchpost charts: render data as inline SVG strings. No libraries.
 // Every piece of text goes through esc(). Colors come from CSS classes (f-*, s-*, h0..h5),
 // never style attributes, so the strict CSP holds and the theme lives in style.css.
 // The dashboard parses these strings with DOMParser as image/svg+xml (scripts never run).
@@ -165,28 +165,42 @@ function cellClass(cell, heat) {
 function heatMatrix(columns, { w = 700, cellH = 22, headH = 30, maxRows = 8, label = "coverage matrix" } = {}) {
   const list = columns.length ? columns : [{ name: "", short: "", cells: [] }];
   const any = list.some((c) => c.cells.length);
-  // Quiet tactics still display their name and evidence count.
-  const cw = Math.max(90, w / list.length);
+  // The dashboard supplies a scrollable minimum width. Desktop layout uses the
+  // actual box width so the SVG can wrap tactics without shrinking its text.
+  const desktopWidth = globalThis.matchMedia?.("(min-width: 1101px)").matches
+    && Math.floor(document.getElementById("attack-chart")?.getBoundingClientRect().width || 0);
+  const hits = list.map((c) => c.cells.reduce((sum, cell) => sum + (cell.value || 0), 0));
+  const summaries = list.map((c, i) => `${c.cells.length} tech · ${hits[i]}`);
+  // 84px fits the tactic headers. Allow 7px per 11px monospace character
+  // plus insets so larger counts still fit alongside the technique ID.
+  const minColumn = Math.max(84, ...summaries.map((s) => 6 + 7 * s.length),
+    ...list.flatMap((c) => c.cells.map((cell) => 10 + 7 * (String(cell.id).length + String(cell.value || "").length))));
+  const capacity = desktopWidth ? Math.max(1, Math.floor(desktopWidth / minColumn)) : list.length;
+  const bands = Math.ceil(list.length / capacity);
+  const perRow = Math.ceil(list.length / bands);
+  const cw = desktopWidth ? desktopWidth / perRow : Math.max(90, w / list.length);
   const rows = Math.min(maxRows, Math.max(1, ...list.map((c) => c.cells.length || 1)));
   const overflow = list.some((c) => c.cells.length > rows);
   const h = headH + rows * (cellH + 3) + (overflow ? 12 : 0);
   const max = scaleMax(list.flatMap((c) => c.cells.map((x) => x.value || 0)));
   const heatOf = (v) => (!v ? 0 : Math.min(5, 1 + Math.floor((Math.log(v + 1) / Math.log(max + 1)) * 4.999)));
-  let out = svgOpen(cw * list.length, h, "heat", label);
-  let x = 0;
-  list.forEach((c) => {
+  const bandGap = 8;
+  let out = svgOpen(cw * perRow, bands * h + (bands - 1) * bandGap, "heat", label);
+  list.forEach((c, i) => {
+    const x = (i % perRow) * cw;
+    const yOffset = Math.floor(i / perRow) * (h + bandGap);
+    out += `<svg class="tactic" x="${n2(x)}" y="${n2(yOffset)}" width="${n2(cw)}" height="${h}">`;
     const quiet = any && !c.cells.length;
-    const hits = c.cells.reduce((s, x2) => s + (x2.value || 0), 0);
     const hidden = c.cells.slice(rows);
     const headTip = hidden.length ? `${c.name}\nnot shown: ${hidden.map((cell) => cell.id).join(", ")}` : c.name;
-    out += `<text class="th${quiet ? " quiet" : ""}" x="${n2(x + 3)}" y="12">${esc(c.short || c.name)}<title>${esc(headTip)}</title></text>` +
-      `<text class="tc${hits ? " hot" : ""}${quiet ? " quiet" : ""}" x="${n2(x + 3)}" y="25">${esc(c.cells.length)} tech · ${esc(hits)}</text>`;
+    out += `<text class="th${quiet ? " quiet" : ""}" x="3" y="12">${esc(c.short || c.name)}<title>${esc(headTip)}</title></text>` +
+      `<text class="tc${hits[i] ? " hot" : ""}${quiet ? " quiet" : ""}" x="3" y="25">${esc(summaries[i])}</text>`;
     if (!quiet) {
       for (let r = 0; r < rows; r++) {
         const cell = c.cells[r];
         const y = headH + r * (cellH + 3);
         if (!cell) {
-          out += `<rect class="cell void" x="${n2(x + 1.5)}" y="${n2(y)}" width="${n2(Math.max(1, cw - 3))}" height="${cellH}"/>`;
+          out += `<rect class="cell void" x="1.5" y="${n2(y)}" width="${n2(Math.max(1, cw - 3))}" height="${cellH}"/>`;
           continue;
         }
         const lv = cellClass(cell, heatOf(cell.value || 0));
@@ -194,17 +208,17 @@ function heatMatrix(columns, { w = 700, cellH = 22, headH = 30, maxRows = 8, lab
           (LEVEL_TIP[cell.level] ? `\n${LEVEL_TIP[cell.level]}` : "") +
           (cell.rules && cell.rules.length ? `\nrules: ${cell.rules.join(", ")}` : "\nno rule covers this");
         out += `<g class="cellg"><title>${esc(tip)}</title>` +
-          `<rect class="cell ${lv}" x="${n2(x + 1.5)}" y="${n2(y)}" width="${n2(Math.max(1, cw - 3))}" height="${cellH}"/>` +
-          `<text class="cid ${lv}" x="${n2(x + 4)}" y="${n2(y + cellH / 2 + 3.2)}">${esc(cell.id)}</text>` +
-          (cell.value ? `<text class="cv ${lv}" x="${n2(x + cw - 4)}" y="${n2(y + cellH / 2 + 3.2)}" text-anchor="end">${esc(cell.value)}</text>` : "") +
+          `<rect class="cell ${lv}" x="1.5" y="${n2(y)}" width="${n2(Math.max(1, cw - 3))}" height="${cellH}"/>` +
+          `<text class="cid ${lv}" x="4" y="${n2(y + cellH / 2 + 3.2)}">${esc(cell.id)}</text>` +
+          (cell.value ? `<text class="cv ${lv}" x="${n2(cw - 4)}" y="${n2(y + cellH / 2 + 3.2)}" text-anchor="end">${esc(cell.value)}</text>` : "") +
           `</g>`;
       }
       if (hidden.length) {
-        out += `<text class="more" x="${n2(x + 3)}" y="${n2(headH + rows * (cellH + 3) + 10)}">+${hidden.length}` +
+        out += `<text class="more" x="3" y="${n2(headH + rows * (cellH + 3) + 10)}">+${hidden.length}` +
           `<title>${esc(hidden.map((cell) => cell.id).join(", "))}</title></text>`;
       }
     }
-    x += cw;
+    out += "</svg>";
   });
   return out + "</svg>";
 }
