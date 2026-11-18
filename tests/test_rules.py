@@ -276,6 +276,31 @@ class GeoLoginRuleTests(unittest.TestCase):
         self.assertEqual(rules.privilege_escalation_after_login(
             make(attack[:3] + [ev(400, "privilege_escalation", "frank", host="web01")]), p), [])
 
+    def test_privilege_escalation_folds_ascii_host(self):
+        p = params("privilege_escalation_after_login")
+
+        def attack(host, at=420):
+            rows = [ev(i * 20, "auth_failure", "frank", "192.0.2.140") for i in range(3)]
+            rows += [ev(60, "auth_success", "frank", "192.0.2.140"),
+                     ev(at, "privilege_escalation", "frank", "192.0.2.140", host=host)]
+            return rows
+
+        found = rules.privilege_escalation_after_login(make(attack("WEB01")), p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "frank|web01")
+        self.assertIn("WEB01", found[0]["title"])
+        # Two spellings of one host share the key, so detection updates one alert.
+        both = attack("WEB01") + [ev(500, "privilege_escalation", "frank", "192.0.2.140", host="web01")]
+        found = rules.privilege_escalation_after_login(make(both), p)
+        self.assertEqual([f["group_key"] for f in found], ["frank|web01", "frank|web01"])
+        self.assertEqual(found[0]["event_ids"][-1], 5)
+        self.assertEqual(found[1]["event_ids"][-1], 6)
+        # Non-ASCII case stays apart, the same fold entities use.
+        upper = rules.privilege_escalation_after_login(make(attack("Érin-host")), p)
+        lower = rules.privilege_escalation_after_login(make(attack("érin-host")), p)
+        self.assertEqual(upper[0]["group_key"], "frank|Érin-host")
+        self.assertEqual(lower[0]["group_key"], "frank|érin-host")
+
 
 class CloudRuleTests(unittest.TestCase):
     def test_iam_change_by_new_principal(self):

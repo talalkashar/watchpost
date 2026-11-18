@@ -397,6 +397,14 @@ def _group_users(events):
     return groups
 
 
+# SQLite COLLATE NOCASE folds these letters only. Host keys use the same fold as entities.
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def _ascii_fold(value):
+    return value.translate(_ASCII_FOLD)
+
+
 def brute_force_ip(events, params):
     threshold, window = params["threshold"], params["window_seconds"]
     findings = []
@@ -588,9 +596,11 @@ def privilege_escalation_after_login(events, params):
             if len(prior) < needed:
                 continue
             host = esc.get("host") or "unknown"
+            # ASCII only, the same fold entities use, so WEB01 and web01 are one alert.
+            host_key = _ascii_fold(host)
             minutes = (t - _epoch(login)) / 60
             findings.append(_finding(
-                f"{user}|{host}", prior + [login, esc],
+                f"{user}|{host_key}", prior + [login, esc],
                 f"Privilege escalation by {esc.get('user')} on {host} after suspicious login",
                 f"{esc.get('user')} elevated privileges on {host} at {esc['ts']}, {minutes:,.0f} min after "
                 f"logging in from {login.get('src_ip') or 'an unknown IP'} at {login['ts']}. That login followed "
