@@ -277,6 +277,19 @@ OMITTED_METRICS = [
     {"metric": "dwell_time", "reason": "First malicious event to resolution. It starts from the same replayed"
                                        " event timestamps, so it would be inflated by the replay offset."},
 ]
+# `window_hours` is not the scope of the whole payload. Only events_ingested_window
+# filters on it. The event breakdowns count every stored row, so a client cannot
+# read a 24-hour window into top_failure_ips, top_failure_users, or events_by_type.
+METRICS_HONORS_HOURS = ("events_ingested_window",)
+METRICS_ALL_STORED_EVENTS = ("events_total", "synthetic_events", "top_failure_ips",
+                             "top_failure_users", "events_by_type")
+METRICS_NEWEST_24H = ("activity_last_24h_of_data",)
+METRICS_WINDOW_NOTE = (
+    "hours filters events_ingested_window by ingested_at. "
+    "top_failure_ips, top_failure_users, and events_by_type count every stored event. "
+    "activity_last_24h_of_data is the 24 hours ending at the newest event, not this window. "
+    "Alert counts are the current alerts table."
+)
 
 
 def metrics(conn, hours=24):
@@ -326,6 +339,12 @@ def metrics(conn, hours=24):
              "oldest_minutes": round(max(ages), 1) if ages else None}
     return {
         "window_hours": hours,
+        "window_scope": {
+            "honors_hours": list(METRICS_HONORS_HOURS),
+            "all_stored_events": list(METRICS_ALL_STORED_EVENTS),
+            "newest_event_24h": list(METRICS_NEWEST_24H),
+            "note": METRICS_WINDOW_NOTE,
+        },
         "events_total": one("SELECT COUNT(*) FROM events"),
         "events_ingested_window": one("SELECT COUNT(*) FROM events WHERE ingested_at >= ?", since),
         "synthetic_events": one("SELECT COUNT(*) FROM events WHERE synthetic = 1"),
