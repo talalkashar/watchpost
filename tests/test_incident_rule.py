@@ -53,6 +53,30 @@ class CorrelationRuleTests(unittest.TestCase):
         self.assertEqual(detail["entities"]["user"], ["erin"])
         self.assertEqual(detail["entities"]["host"], ["web01"])
 
+    def test_the_incident_list_carries_the_same_sentence(self):
+        conn = connect(":memory:")
+        init_schema(conn)
+        now = "2026-09-15T10:00:00.000Z"
+        for incident_id, minute in ((1, 0), (2, 5)):
+            seen = f"2026-09-15T10:{minute:02d}:00.000Z"
+            conn.execute(
+                "INSERT INTO incidents(id, title, severity, status, first_seen, last_seen, entities, stages,"
+                " alert_count, synthetic, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (incident_id, f"Synthetic probe {incident_id}", "high", "open", seen, seen,
+                 json.dumps({"src_ip": ["203.0.113.10"], "user": ["erin"], "host": ["web01"]}),
+                 json.dumps(["Initial Access"]), 1, 1, now, now))
+        listed = incidents.list_incidents(conn, {})
+        detail = incidents.get_incident(conn, 1)
+        conn.close()
+        self.assertEqual([row["correlation_rule"] for row in listed], [RULE, RULE])
+        self.assertEqual(listed[0]["correlation_rule"], detail["correlation_rule"])
+
+    def test_api_docs_put_the_sentence_on_the_list(self):
+        text = (Path(__file__).resolve().parent.parent / "docs" / "API.md").read_text()
+        row = next(line for line in text.splitlines() if line.startswith("| `GET /api/incidents?"))
+        self.assertIn("`correlation_rule`", row)
+        self.assertIn("shared source IP, account, or host within the correlation window, 30 minutes by default", row)
+
 
 class CorrelationRulePageTests(unittest.TestCase):
     def setUp(self):
