@@ -583,12 +583,15 @@ def compile_rule(source):
     tree = _Condition(detection["condition"], selections).parse()
     _check_budget(tree)
 
-    techniques, ignored_tags = [], []
+    techniques, ignored_tags, seen = [], [], set()
     for tag in tags:
-        m = _TECHNIQUE_TAG.fullmatch(tag.lower())
-        if m and m.group(1).upper() in attack.TECHNIQUES:
-            if m.group(1).upper() not in [t["id"] for t in techniques]:
-                techniques.append(attack.technique(m.group(1).upper()))
+        # ASCII letters only. attacK.t1110 (U+212A) stays ignored and is not T1110.
+        matched = _TECHNIQUE_TAG.fullmatch(tag.translate(_ASCII_FOLD))
+        technique_id = matched.group(1).upper() if matched else None
+        if technique_id in attack.TECHNIQUES:
+            if technique_id not in seen:
+                seen.add(technique_id)
+                techniques.append(attack.technique(technique_id))
         else:
             ignored_tags.append(tag)
     description = (doc.get("description") or "").strip()

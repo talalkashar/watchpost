@@ -259,6 +259,29 @@ class CompileTests(unittest.TestCase):
         with self.assertRaises(rules_mod.RuleConfigError):
             rules_mod.validate_params(c["rule_id"], {**c["params"], "threshold": 3})
 
+    def test_attack_tags_fold_ascii_letters_only(self):
+        # attack.T1110 and attack.t1110 are one catalog id. A Kelvin sign is not k.
+        kelvin = "attac\u212a.t1110"
+        compiled_rule = sigma.compile_rule(rule_yaml(
+            _SEL, tags=("attack.T1110", "attack.t1110", "ATTACK.T1110",
+                        "attack.t1110.001", "attack.T1110.001", kelvin, "attack.t9999")))
+        self.assertEqual([t["id"] for t in compiled_rule["techniques"]], ["T1110", "T1110.001"])
+        self.assertEqual(len(compiled_rule["techniques"]), 2)
+        warning = compiled_rule["warnings"][0]
+        self.assertIn(kelvin, warning)
+        self.assertIn("attack.t9999", warning)
+        self.assertNotIn("attack.T1110", warning)
+        alone = sigma.compile_rule(rule_yaml(_SEL, tags=(kelvin,)))
+        self.assertEqual(alone["techniques"], [])
+        self.assertIn(kelvin, alone["warnings"][0])
+        self.assertNotIn("T1110", alone["warnings"][0])
+        source = inspect.getsource(sigma.compile_rule)
+        self.assertNotIn("tag.lower()", source)
+        self.assertNotIn("tag.casefold()", source)
+        text = (EXAMPLE.parent.parent / "REFERENCE.md").read_text()
+        self.assertIn("`attack.T1110` is `T1110`", text)
+        self.assertIn("`attac\u212a.t1110` is not a technique", text)
+
     def test_glob_is_linear(self):
         p = compiled("  sel:\n    message: '*a*a*a*a*a*a*a*a*a*a*b'\n  condition: sel\n")
         started = time.monotonic()
