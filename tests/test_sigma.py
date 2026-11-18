@@ -210,6 +210,89 @@ class CompileTests(unittest.TestCase):
         self.assertIn("`1 of Backup*` matches selection `backup`", text)
         self.assertIn(f"`1 of {kelvin}*` matches no selection", text)
 
+    def test_condition_keywords_fold_ascii_letters_only(self):
+        # AND, OR, NOT, THEM, and NEAR stay keywords. İ and K are not rewritten into them.
+        dotted = "an\u0130"
+        kelvin = "nea\u212a"
+        them_look = "th\u0130m"
+        not_look = "n\u0130t"
+        det = ("  sel:\n    user: alice\n  other:\n    host: web01\n  condition: {}\n")
+        both = {"user": "alice", "host": "web01"}
+        alice = {"user": "alice"}
+        host = {"host": "web01"}
+        joined = compiled(det.format("sel AND other"))
+        self.assertTrue(sigma.matches(joined, both))
+        self.assertFalse(sigma.matches(joined, alice))
+        either = compiled(det.format("sel OR other"))
+        self.assertTrue(sigma.matches(either, alice))
+        self.assertTrue(sigma.matches(either, host))
+        self.assertFalse(sigma.matches(either, {}))
+        negated = compiled(det.format("NOT sel"))
+        self.assertFalse(sigma.matches(negated, alice))
+        self.assertTrue(sigma.matches(negated, host))
+        mixed = compiled(det.format("NoT sel"))
+        self.assertFalse(sigma.matches(mixed, alice))
+        them = compiled(det.format("1 OF THEM"))
+        self.assertTrue(sigma.matches(them, alice))
+        self.assertTrue(sigma.matches(them, host))
+        every = compiled(det.format("ALL OF them"))
+        self.assertTrue(sigma.matches(every, both))
+        self.assertFalse(sigma.matches(every, alice))
+        # Selection lookup stays the stored spelling. SEL is not sel.
+        with self.assertRaises(sigma.SigmaError) as ctx:
+            sigma.compile_rule(rule_yaml(det.format("SEL")))
+        self.assertIn("unknown selection 'SEL'", str(ctx.exception))
+        for cond in ("sel NEAR other", "sel NeAr other"):
+            with self.subTest(condition=cond):
+                with self.assertRaises(sigma.SigmaError) as ctx:
+                    sigma.compile_rule(rule_yaml(det.format(cond)))
+                self.assertIn("'near' is not supported", str(ctx.exception))
+        # U+0130 is not an ASCII letter. str.lower() would insert a combining dot.
+        with self.assertRaises(sigma.SigmaError) as ctx:
+            sigma.compile_rule(rule_yaml(det.format(f"sel {dotted} other")))
+        message = str(ctx.exception)
+        self.assertIn(f"unexpected '{dotted}'", message)
+        self.assertNotIn("\u0307", message)
+        self.assertNotIn("'and'", message)
+        with self.assertRaises(sigma.SigmaError) as ctx:
+            sigma.compile_rule(rule_yaml(det.format(f"{not_look} sel")))
+        message = str(ctx.exception)
+        self.assertIn(f"unknown selection '{not_look}'", message)
+        self.assertNotIn("\u0307", message)
+        with self.assertRaises(sigma.SigmaError) as ctx:
+            sigma.compile_rule(rule_yaml(det.format(f"1 of {them_look}")))
+        message = str(ctx.exception)
+        self.assertIn("matches no selection", message)
+        self.assertIn(them_look, message)
+        self.assertNotIn("\u0307", message)
+        # U+212A lowercases to k, so neaK is not the keyword near.
+        with self.assertRaises(sigma.SigmaError) as ctx:
+            sigma.compile_rule(rule_yaml(det.format(f"sel {kelvin} other")))
+        message = str(ctx.exception)
+        self.assertIn(f"unexpected '{kelvin}'", message)
+        self.assertNotIn("'near' is not supported", message)
+        for name in ("AND", "Or", "Not", "THEM", "NEAR"):
+            with self.subTest(name=name):
+                with self.assertRaises(sigma.SigmaError) as ctx:
+                    sigma.compile_rule(rule_yaml(f"  {name}:\n    user: x\n  condition: sel\n"
+                                                 "  sel:\n    user: y\n"))
+                self.assertIn(f"selection name '{name}' is not usable", str(ctx.exception))
+        with self.assertRaises(sigma.SigmaError) as ctx:
+            sigma.compile_rule(rule_yaml(f"  {dotted}:\n    user: x\n  condition: sel\n"
+                                         "  sel:\n    user: y\n"))
+        message = str(ctx.exception)
+        self.assertIn(f"selection name '{dotted}' is not usable", message)
+        self.assertNotIn("\u0307", message)
+        self.assertNotIn("selection name 'and'", message)
+        source = "\n".join(inspect.getsource(fn) for fn in (
+            sigma._Condition.__init__, sigma._Condition._peek, sigma._Condition._atom, sigma.compile_rule))
+        self.assertNotIn(".lower(", source)
+        self.assertNotIn(".casefold(", source)
+        text = (EXAMPLE.parent.parent / "REFERENCE.md").read_text()
+        self.assertIn("`AND`, `OR`, `NOT`, `them`, and `near` stay those keywords", text)
+        self.assertIn("`anİ` is not `and`", text)
+        self.assertIn("`nea\u212a` is not `near`", text)
+
     def test_conditions(self):
         det = ("  sel_a:\n    user: alice\n  sel_b:\n    src_ip: 203.0.113.9\n  other:\n    host: web01\n"
                "  condition: {}\n")

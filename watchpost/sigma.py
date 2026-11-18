@@ -464,7 +464,8 @@ class _Condition:
             raise SigmaError(f"condition is at most {MAX_CONDITION} characters")
         if "|" in text:
             raise SigmaError("condition: aggregations ('| count() by ...') are not supported")
-        if "near" in text.lower().split():
+        # ASCII letters only. NEAR is the keyword near. A word containing İ or K is not.
+        if any(word.translate(_ASCII_FOLD) == "near" for word in text.split()):
             raise SigmaError("condition: 'near' is not supported")
         self.toks, self.i, self.sel = _tokens(text), 0, selections
 
@@ -475,7 +476,8 @@ class _Condition:
         return node
 
     def _peek(self):
-        return self.toks[self.i].lower() if self.i < len(self.toks) else None
+        # ASCII letters only. AND, OR, and NOT stay keywords. anİ stays anİ and is not and.
+        return self.toks[self.i].translate(_ASCII_FOLD) if self.i < len(self.toks) else None
 
     def _take(self):
         if self.i >= len(self.toks):
@@ -507,7 +509,7 @@ class _Condition:
 
     def _atom(self, depth):
         tok = self._take()
-        low = tok.lower()
+        low = tok.translate(_ASCII_FOLD)
         if tok == "(":
             node = self._or(depth + 1)
             if self._take() != ")":
@@ -520,8 +522,10 @@ class _Condition:
                 raise SigmaError(f"condition: only '1 of' and 'all of' are supported, not '{tok} of'")
             self.i += 1
             target = self._take()
-            names = sorted(self.sel) if target.lower() == "them" else _glob_names(target, sorted(self.sel))
-            if target.lower() == "them":
+            # ASCII letters only. THEM is them. thİm is not, and the stored name is the lookup.
+            folded_target = target.translate(_ASCII_FOLD)
+            names = sorted(self.sel) if folded_target == "them" else _glob_names(target, sorted(self.sel))
+            if folded_target == "them":
                 names = [n for n in names if not n.startswith("_")]
             if not names:
                 raise SigmaError(f"condition: {target!r} matches no selection")
@@ -582,8 +586,9 @@ def compile_rule(source):
     if not named or len(named) > MAX_SELECTIONS:
         raise SigmaError(f"detection needs 1-{MAX_SELECTIONS} named selections")
     for name in named:
+        # ASCII letters only. AND is reserved. anİ is not the keyword and.
         if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.\-]+", name) or \
-                name.lower() in ("and", "or", "not", "of", "them", "near", "all", "1"):
+                name.translate(_ASCII_FOLD) in ("and", "or", "not", "of", "them", "near", "all", "1"):
             raise SigmaError(f"selection name {name!r} is not usable in a condition")
     selections = {name: _selection(name, body) for name, body in named.items()}
     tree = _Condition(detection["condition"], selections).parse()
