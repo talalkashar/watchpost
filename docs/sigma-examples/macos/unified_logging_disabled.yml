@@ -1,0 +1,28 @@
+# Unified logging switched off. level:info, level:default, and log config --status do not match.
+# Watchpost matches the command text on message.
+title: macOS Unified Logging Disabled
+id: 5b0e7d42-8a16-4c93-b27f-9d1a4e6c80b5
+status: experimental
+description: |
+  A process command that sets the macOS unified log mode to level:off. That stops events
+  from being recorded. Showing or querying the log does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1562/006/
+tags:
+  - attack.defense_evasion
+  - attack.t1562.006
+logsource:
+  category: process_creation
+  product: macos
+detection:
+  selection:
+    event.action: process_start
+    message|contains|all:
+      - log config
+      - 'level:off'
+  condition: selection
+falsepositives:
+  - A test that turns logging off for one subsystem and turns it back on
+level: high
