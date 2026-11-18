@@ -355,7 +355,8 @@ _ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstu
 _SCAN_PATTERN = re.compile(
     r"union\s+(?:all\s+)?select|'\s*or\s+'?\d|\bor\s+1\s*=\s*1|sleep\(\s*\d|benchmark\(|information_schema"
     r"|\.\./|<script|\$\{jndi:")
-_SCANNER_AGENT = re.compile(r"nikto|sqlmap|nmap|masscan|zgrab|gobuster|dirbuster|wpscan|nuclei|acunetix", re.I)
+_SCANNER_AGENT = re.compile(
+    r"nikto|sqlmap|nmap|masscan|zgrab|gobuster|dirbuster|wpscan|nuclei|acunetix")
 
 
 def classify_web_request(path, status, agent=None):
@@ -363,11 +364,13 @@ def classify_web_request(path, status, agent=None):
 
     The decoded path folds ASCII letters only, then the scanner-path list and the injection
     pattern run on that text. UNION SELECT and /.ENV are web_scan. A dotted I or a Kelvin
-    sign stays, so those lookalikes are not scans.
+    sign stays, so those lookalikes are not scans. The user agent folds the same way before
+    the scanner-name list. Nikto and sqlmap are web_scan. A Kelvin sign in the name is not.
     """
     decoded = unquote_plus(path or "").translate(_ASCII_FOLD)
+    folded_agent = agent.translate(_ASCII_FOLD) if isinstance(agent, str) else ""
     if any(p in decoded for p in SCAN_PATHS) or _SCAN_PATTERN.search(decoded) \
-            or (agent and _SCANNER_AGENT.search(agent)):
+            or _SCANNER_AGENT.search(folded_agent):
         return "web_scan"
     if status >= 500:
         return "web_error"

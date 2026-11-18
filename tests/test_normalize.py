@@ -184,6 +184,43 @@ class WebLogTests(unittest.TestCase):
             self.assertIn("`unıon select` and `/.gİt` are not", text)
         self.assertIn("`/.gİt` is not `/.git`", reference)
 
+    def test_scanner_agent_folds_ascii_letters_only(self):
+        # Nikto and sqlmap stay scans. A Kelvin sign in the name does not become nikto.
+        scans = ("Nikto/2.1", "NIKTO", "sqlmap/1.7", "SQLMAP", "nmap", "Nmap", "Masscan")
+        for agent in scans:
+            with self.subTest(agent=agent):
+                self.assertEqual(classify_web_request("/", 200, agent), "web_scan", agent)
+        nikto = self.parse("/", 200, agent="Nikto/2.1")
+        self.assertEqual(nikto["event_type"], "web_scan")
+        self.assertIn("ua=Nikto/2.1", nikto["message"])
+        sqlmap = self.parse("/", 200, agent="sqlmap/1.7")
+        self.assertEqual(sqlmap["event_type"], "web_scan")
+        lookalike = "ni\u212ato"
+        self.assertEqual(classify_web_request("/", 200, lookalike), "web_request")
+        self.assertEqual(classify_web_request("/", 500, lookalike), "web_error")
+        self.assertEqual(self.parse("/", 404, agent=lookalike)["event_type"], "web_request")
+        errored = self.parse("/", 502, agent=lookalike)
+        self.assertEqual(errored["event_type"], "web_error")
+        self.assertIn("ua=" + lookalike, errored["message"])
+        self.assertNotEqual(
+            classify_web_request("/", 200, lookalike),
+            classify_web_request("/", 200, "nikto"))
+        self.assertEqual(classify_web_request("/", 200, "Mozilla/5.0"), "web_request")
+        self.assertEqual(classify_web_request("/.env", 200, lookalike), "web_scan")
+        self.assertFalse(normalize._SCANNER_AGENT.flags & re.IGNORECASE)
+        assignment = next(line for line in inspect.getsource(normalize).splitlines()
+                          if "_SCANNER_AGENT" in line)
+        self.assertNotIn("re.I", assignment)
+        self.assertNotIn("IGNORECASE", assignment)
+        source = inspect.getsource(classify_web_request)
+        self.assertNotIn(".lower(", source)
+        self.assertNotIn("re.I", source)
+        self.assertNotIn("IGNORECASE", source)
+        for text in (self._docs("API.md"), self._docs("REFERENCE.md")):
+            self.assertIn("`Nikto` and `sqlmap` are `web_scan`", text)
+            self.assertIn("`ni\u212ato` is not", text)
+        self.assertIn("`ni\u212ato` is not `nikto`", self._docs("REFERENCE.md"))
+
     @staticmethod
     def _docs(name):
         from pathlib import Path

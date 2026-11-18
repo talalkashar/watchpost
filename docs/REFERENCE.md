@@ -206,7 +206,7 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 
 `event_type` is one of `auth_failure, auth_success, account_lockout, user_created, privilege_use, process_start, network_connection, file_access, other`, plus (2.0) `web_request, web_scan, web_error, fw_deny, fw_allow, vpn_login, cloud_api_call, cloud_iam_change, cloud_data_access, privilege_escalation`, and `syslog` (a line received by the syslog listener that no parser recognized). Events also carry `dest_port` and `bytes` when the source has them.
 
-A combined access line becomes `web_scan` for a scanner path or an injection string. The decoded path folds ASCII letters only. `UNION SELECT` and `/.ENV` are `web_scan`. `unıon select` and `/.gİt` are not. `/.gİt` is not `/.git`.
+A combined access line becomes `web_scan` for a scanner path, an injection string, or a scanner user agent. The decoded path folds ASCII letters only. `UNION SELECT` and `/.ENV` are `web_scan`. `unıon select` and `/.gİt` are not. `/.gİt` is not `/.git`. The user agent folds ASCII letters only. `Nikto` and `sqlmap` are `web_scan`. `niKto` is not. `niKto` is not `nikto`.
 
 ### Detection rules
 
