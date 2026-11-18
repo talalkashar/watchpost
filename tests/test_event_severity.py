@@ -50,6 +50,19 @@ class EventSeverityFilterTests(unittest.TestCase):
         self.assertEqual(self.levels(severity="high, critical", severity_mode="min"),
                          ["critical", "high"])
 
+    def test_min_mode_folds_ascii_case(self):
+        for mode in ("Min", "MIN", "mIn"):
+            with self.subTest(mode=mode):
+                self.assertEqual(self.levels(severity="high", severity_mode=mode),
+                                 ["critical", "high"])
+        # minimum is not an alias. The level list stays exact.
+        self.assertEqual(self.levels(severity="high", severity_mode="minimum"), ["high"])
+        self.assertEqual(self.levels(severity="high", severity_mode="MINIMUM"), ["high"])
+        # Dotless i is not ASCII i.
+        self.assertEqual(self.levels(severity="high", severity_mode="m\u0131n"), ["high"])
+        # A missing mode stays an exact list.
+        self.assertEqual(self.levels(severity="high"), ["high"])
+
     def test_a_blank_or_unknown_piece_is_invalid(self):
         for bad in ("urgent", "high,urgent", "high,", "high, ", ",", " , ", "high, critical,"):
             with self.subTest(bad=bad):
@@ -81,8 +94,19 @@ class EventSeverityApiTests(ServerTestCase):
         self.assertIn("severity must be from", data["error"])
         self.assertEqual(headers["Cache-Control"], "no-store")
 
+        status, data, headers = client.get("/api/events?severity=high&severity_mode=Min")
+        self.assertEqual(status, 200, data)
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(sorted(event["severity"] for event in data["events"]), ["critical", "high"])
+
+        status, data, _ = client.get("/api/events?severity=high&severity_mode=minimum")
+        self.assertEqual(status, 200, data)
+        self.assertEqual([event["severity"] for event in data["events"]], ["high"])
+
     def test_api_docs_say_spaces_are_ignored(self):
         text = API.read_text()
         row = next(line for line in text.splitlines() if "severity_mode=min" in line)
         self.assertIn("Spaces around each name are ignored", row)
         self.assertIn("A blank or unknown piece is 400", row)
+        self.assertIn("`Min` is `min`", row)
+        self.assertIn("`minimum` is not an alias", row)

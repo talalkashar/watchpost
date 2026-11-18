@@ -138,7 +138,8 @@ def search_events(conn, params):
             if name is None:
                 raise QueryError(f"severity must be from {', '.join(SEVERITIES)}")
             levels.append(name)
-        if params.get("severity_mode") == "min" and len(levels) == 1:
+        # severity_mode folds ASCII onto `min`. `Min` is `min`. `minimum` is not an alias.
+        if catalog_name(params.get("severity_mode"), ("min",)) == "min" and len(levels) == 1:
             levels = SEVERITIES[SEVERITIES.index(levels[0]):]
         where.append(f"severity IN ({','.join('?' for _ in levels)})")
         args += levels
