@@ -71,7 +71,12 @@ SPANS = {"5m": 300, "15m": 900, "1h": 3600, "6h": 21600, "1d": 86400}
 MAX_BUCKETS = 500
 MAX_SERIES = 5
 _STAGE_TOKEN = re.compile(r"\w+\s*\([^()]*\)|[^\s,()]+|[,()]")
-_AGGREGATE = re.compile(r"dc\(\s*(\S+?)\s*\)|count\(\s*distinct\s+(\S+?)\s*\)", re.IGNORECASE)
+# count, dc, and distinct fold A–Z only. İ and ı are not those words.
+# Not re.IGNORECASE. Not str.lower(). The field spelling stays as written.
+_AGGREGATE = re.compile(
+    r"[Dd][Cc]\(\s*(\S+?)\s*\)|"
+    r"[Cc][Oo][Uu][Nn][Tt]\(\s*[Dd][Ii][Ss][Tt][Ii][Nn][Cc][Tt]\s+(\S+?)\s*\)"
+)
 # Bucket start in Unix seconds, computed in SQL from the canonical "YYYY-MM-DDTHH:MM:SS.mmmZ" ts.
 _BUCKET = "(CAST(strftime('%s', substr(ts, 1, 19)) AS INTEGER) / ?) * ?"
 
@@ -343,6 +348,20 @@ def _group_expr(field, column):
     return column
 
 
+def _read_aggregate(token):
+    """('count', None) or ('dc', field), or None when the token is not an aggregate.
+
+    count, dc, and distinct fold ASCII letters only. The field spelling is the one in
+    the query, so grouping SQL is unchanged. DİSTINCT and dıstinct are not distinct.
+    """
+    if token.translate(_ASCII_FOLD) == "count":
+        return "count", None
+    match = _AGGREGATE.fullmatch(token)
+    if not match:
+        return None
+    return "dc", match.group(1) or match.group(2)
+
+
 def _by_fields(tokens, limit):
     """Fields after `by`, comma separated (commas optional)."""
     names = [t for t in tokens if t != ","]
@@ -373,14 +392,14 @@ def parse_stage(text):
         for token in rest[:split]:
             if token == ",":
                 continue
-            if token.lower() == "count":
+            read = _read_aggregate(token)
+            if read == ("count", None):
                 aggregates.append(("count", None, None))
                 continue
-            match = _AGGREGATE.fullmatch(token)
-            if not match:
+            if read is None:
                 raise HuntError(f"unknown aggregate {token!r}; stats supports count and dc(<field>)"
                                 " (also written count(distinct <field>))")
-            field, column = _group_field(match.group(1) or match.group(2))
+            field, column = _group_field(read[1])
             aggregates.append((f"dc({field})", field, column))
         if not aggregates:
             raise HuntError("stats needs an aggregate: count or dc(<field>), e.g. | stats count by src_ip")
