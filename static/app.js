@@ -192,6 +192,15 @@ function showLogin() {
 }
 
 async function boot() {
+  const strip = $("#strip");
+  if (window.ResizeObserver) {
+    new ResizeObserver(() => {
+      if (strip.offsetHeight) document.body.style.setProperty("--strip-height", `${strip.offsetHeight}px`);
+    }).observe(strip);
+  }
+  window.addEventListener("scroll", () => {
+    document.body.classList.toggle("scrolled", window.scrollY > 8);
+  }, { passive: true });
   $("#login-view").hidden = true;
   $("#login-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
@@ -220,7 +229,8 @@ async function boot() {
   document.addEventListener("keydown", onShortcut);
   window.addEventListener("hashchange", () => {
     const target = document.getElementById(location.hash.slice(1));
-    if (target) target.scrollIntoView(); else route();
+    if (target) target.scrollIntoView();
+    else { window.scrollTo(0, 0); route(); }
   });
   try { onLogin(await api("/api/auth/me")); } catch { showLogin(); }
 }
