@@ -238,7 +238,9 @@ def list_alerts(conn, params):
         where.append(f"severity IN ({','.join('?' for _ in levels)})")
         args += levels
     if params.get("rule_id"):
-        where.append("rule_id = ?")
+        # COLLATE NOCASE folds ASCII only. Brute_Force_Ip matches brute_force_ip.
+        # Érin_rule stays apart from érin_rule. An unknown name matches nothing.
+        where.append("rule_id = ? COLLATE NOCASE")
         args.append(params["rule_id"])
     limit = _int(params.get("limit"), "limit", 100, 1, 500)
     clause = (" WHERE " + " AND ".join(where)) if where else ""

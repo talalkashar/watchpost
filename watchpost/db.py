@@ -120,6 +120,8 @@ CREATE TABLE IF NOT EXISTS alerts (
 );
 CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status);
 CREATE INDEX IF NOT EXISTS idx_alerts_rule_group ON alerts(rule_id, group_key);
+-- Alert list rule_id compares with COLLATE NOCASE (ASCII). The group index stays exact.
+CREATE INDEX IF NOT EXISTS idx_alerts_rule_nocase ON alerts(rule_id COLLATE NOCASE);
 
 CREATE TABLE IF NOT EXISTS alert_events (
     alert_id INTEGER NOT NULL,
