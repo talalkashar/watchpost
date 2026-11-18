@@ -131,7 +131,7 @@ function baseMap(w, h, { step = 2.4 } = {}) {
   let out = `<svg xmlns="http://www.w3.org/2000/svg" class="worldmap" width="${r2(w)}" height="${r2(h)}" viewBox="0 0 ${r2(w)} ${r2(h)}" role="img" aria-label="Attacker map (synthetic geo)">`;
   // Keep city labels readable when a bright arc or land dot passes underneath.
   out += `<defs><filter id="map-label-plate" x="-5%" y="-5%" width="110%" height="110%" color-interpolation-filters="sRGB">
-    <feFlood flood-color="#101e2b" flood-opacity=".88"/><feComposite in="SourceGraphic" operator="over"/>
+    <feFlood flood-color="#191919" flood-opacity=".88"/><feComposite in="SourceGraphic" operator="over"/>
   </filter></defs><g class="graticule">`;
   for (let lon = -150; lon < 180; lon += 30) {
     const [x] = project(lon, 0, w, h);
