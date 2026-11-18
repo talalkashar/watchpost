@@ -1,5 +1,7 @@
+import inspect
 import json
 import unittest
+from pathlib import Path
 
 from tests.pdfparse import ParsedPDF
 from watchpost import engine, incidents, queries, report, simulate
@@ -90,6 +92,7 @@ class AlertReportTests(unittest.TestCase):
         self.assertEqual(lines[index + 1], "Valid Accounts")
         self.assertEqual(lines[index + 2], "validated")
         self.assertIn(f"Page 1 of {len(pdf.pages())}", text)
+        self.assertIn(f"Watchpost alert report #{m['id']}", flat)
 
     def test_long_report_paginates(self):
         bf = alert_id(self.conn, "brute_force_ip", "203.0.113.45")
@@ -197,6 +200,7 @@ class IncidentReportTests(unittest.TestCase):
         self.assertEqual(lines[index + 1], "Exfiltration Over Alternative Protocol")
         self.assertEqual(lines[index + 2], "mapped")
         self.assertIn(f"Page 1 of {len(pdf.pages())}", text)
+        self.assertIn(f"Watchpost incident report #{self.id}", " ".join(text.split()))
 
     def test_status_change_and_alert_notes_flow_through(self):
         incidents.update_status(self.conn, self.id, "analyst", "investigating")
@@ -243,6 +247,31 @@ class IncidentReportTests(unittest.TestCase):
         rows = report.actions_for([{"id": "T1110.999", "name": "", "tactic": "Credential Access"}])
         self.assertEqual(rows[0]["technique"], "T1110.999")
         self.assertIn(report.ACTIONS["T1110"][0], [r["action"] for r in rows])
+
+
+class FooterLabelTests(unittest.TestCase):
+    def test_footer_folds_ascii_letters_only(self):
+        self.assertEqual(report._footer_label("Incident"), "incident")
+        self.assertEqual(report._footer_label("Alert"), "alert")
+        dotted = "\u0130ncident"
+        folded = report._footer_label(dotted)
+        self.assertEqual(folded, "\u0130ncident")
+        self.assertNotEqual(folded, "incident")
+        self.assertNotIn("\u0307", folded)
+        self.assertNotEqual(folded, dotted.lower())
+        kelvin = "Aler\u212a"
+        self.assertEqual(report._footer_label(kelvin), "aler\u212a")
+        self.assertNotEqual(report._footer_label(kelvin), "alert")
+        for fn in (report.to_pdf_bytes, report._footer_label):
+            source = inspect.getsource(fn)
+            self.assertNotIn(".lower(", source)
+            self.assertNotIn(".casefold(", source)
+        root = Path(__file__).resolve().parent.parent
+        for name in ("API.md", "REFERENCE.md"):
+            text = (root / "docs" / name).read_text()
+            self.assertIn("`Incident` is `incident`", text)
+            self.assertIn("`Alert` is `alert`", text)
+            self.assertIn("A label containing `\u0130` is not rewritten", text)
 
 
 if __name__ == "__main__":

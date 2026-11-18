@@ -22,6 +22,8 @@ LEVEL_NOTE = ("Evidence level is the labeled-scenario grade. "
 EVIDENCE_PER_ALERT = 25
 # Merged timeline keeps this many events, earliest by ts, then id. The rest are timeline_omitted.
 TIMELINE_LIMIT = 200
+# A–Z only. Not str.lower(): İ (U+0130) becomes i + combining dot, and K (U+212A) becomes k.
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 
 # Recommended response actions by ATT&CK technique id. Sub-techniques fall back to their parent id.
 ACTIONS = {
@@ -362,10 +364,15 @@ def to_markdown(m):
     return "\n".join(out)
 
 
+def _footer_label(label):
+    """PDF footer word. Only A–Z fold."""
+    return label.translate(_ASCII_FOLD)
+
+
 def to_pdf_bytes(m):
     label = "Incident" if m["kind"] == "incident" else "Alert"
     doc = Document(title=f"{label} report: {m['title']}",
-                   footer=f"Watchpost {label.lower()} report #{m['id']}"
+                   footer=f"Watchpost {_footer_label(label)} report #{m['id']}"
                           + (" - SYNTHETIC DATA" if m["synthetic"] else "") + f" - generated {m['generated_at']}")
     doc.text(f"WATCHPOST {label.upper()} REPORT", size=9, bold=True, color=(0.35, 0.4, 0.5))
     doc.text(m["title"], size=18, bold=True)

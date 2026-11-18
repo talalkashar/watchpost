@@ -269,6 +269,7 @@ sensitive-data tags; each alert also shows its asset weighting when it changed t
 by tactic with the coverage evidence level on each one (the report says mapped is not proof; only validated is a labeled scenario), a merged timeline (the first 200 events by `ts`, then `id`; one row per event even when two alerts share it; evidence events marked; `timeline_omitted` is how many merged events were past that cap, and 0 when the timeline fits; Markdown and PDF name that count when it is not 0), each alert with its explanation and up to 25 evidence events,
 analyst notes, and recommended actions keyed by technique (generic actions when no technique is mapped).
 Reports built from synthetic data open with a "SYNTHETIC DATA" banner and repeat it in the PDF page footer.
+The PDF footer folds ASCII letters only (`Incident` is `incident`, `Alert` is `alert`). A label containing `İ` is not rewritten.
 Log-derived text is escaped in Markdown so it cannot inject tables, links, or HTML.
 
 Incident reports are built from the correlated incident (`GET /api/incidents/{id}`): its status, severity
