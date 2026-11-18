@@ -1,6 +1,6 @@
 # Watchpost API
 
-Base URL: `http://127.0.0.1:8080`. All request and response bodies are JSON unless noted otherwise. Errors come back as `{"error": "..."}`. A 4xx from the API and the generic 500 send `Cache-Control: no-store`, the same as a successful `/api` response, because the message can repeat a request value. A query string may name each key once. A repeated key (`severity=low&severity=critical`) is 400 `repeated query key 'severity'`. Where an endpoint accepts several values, send them as one comma list.
+Base URL: `http://127.0.0.1:8080`. All request and response bodies are JSON unless noted otherwise. Errors come back as `{"error": "..."}`. A 4xx from the API and the generic 500 send `Cache-Control: no-store`, the same as a successful `/api` response, because the message can repeat a request value. A missing static file is 404 `not found` (`text/plain`) and a non-GET on a static path is 405 `{"error": "method not allowed"}`. Both send `Cache-Control: no-store`. A static file that exists stays `Cache-Control: no-cache`. A query string may name each key once. A repeated key (`severity=low&severity=critical`) is 400 `repeated query key 'severity'`. A query string longer than 8192 bytes is 414 `query string exceeds 8192 bytes`, before the parameters are parsed. A POST with `Transfer-Encoding` set, or with no `Content-Length`, is 400 (`Transfer-Encoding is not supported`, or `Content-Length is required` when that header is the one missing) and the connection closes. The body is not read. Where an endpoint accepts several values, send them as one comma list.
 
 ## Authentication
 
@@ -45,7 +45,7 @@ curl -c jar -H 'Content-Type: application/json' -d '{"username":"analyst","passw
 
 | Endpoint | Role | Notes |
 |---|---|---|
-| `POST /api/auth/login` | public | `{username, password}` |
+| `POST /api/auth/login` | public | `{username, password}`. A username that is not 3–32 characters is the same 401 `invalid username or password` as an unknown account. Login does not truncate it. A password that is not a string, or is longer than 256 characters, is that same 401. Login does not hash that value and does not look up the account. A disabled account is that same 401. Login checks the stored hash, does not increment `failed_logins`, and does not lock the account. The body does not say the account is disabled. |
 | `POST /api/auth/logout` | any | |
 | `GET /api/auth/me` | any | current user and CSRF token |
 
@@ -122,10 +122,10 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 | Param | Meaning |
 |---|---|
 | `start`, `end` | ISO timestamps (inclusive) |
-| `source`, `host`, `user`, `batch_id` | Exact match (`user` and `host` ignore ASCII case, the same way the asset inventory matches a host name); a trailing `*` makes it a prefix match |
-| `ip` | Matches `src_ip` or `dest_ip` |
-| `event_type` | One normalized type |
-| `severity` | Comma list, or a single level with `severity_mode=min` for "at least" |
+| `source`, `host`, `user`, `outcome`, `batch_id` | Exact match (`user`, `host`, `source`, and `outcome` ignore ASCII case; grouping by source and outcome stays the stored spelling); a trailing `*` makes it a prefix match |
+| `ip` | Matches `src_ip` or `dest_ip`. A complete address is the form ingest stores (`2001:DB8::1` matches `2001:db8::1`). Anything that is not one address is 400 |
+| `event_type` | One normalized type. ASCII case folds onto the catalog spelling (`Auth_Failure` binds `auth_failure`). An unknown name is 400 listing the catalog. Grouping by `event_type` stays the stored spelling |
+| `severity` | Comma list, or a single level with `severity_mode=min` for "at least". Spaces around each name are ignored. ASCII case folds onto the catalog spelling (`High` binds `high`). A blank or unknown piece is 400 listing the catalog. Grouping by `severity` stays the stored spelling |
 | `q` | Substring of `message` (`%` and `_` are literal), at most 200 characters. A longer value is 400 naming that maximum |
 | `synthetic` | `0` or `1` |
 | `limit` (1–1000, default 100), `offset` (0–10000, default 0) | Paging; response includes `total`. An offset above 10000 is 400 naming that maximum |
@@ -139,11 +139,11 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 | `GET /api/hunt/saved` | viewer | Saved searches: `[{id, name, query, description, owner, created_at}]` by name |
 | `POST /api/hunt/saved` | analyst | `{name (≤ 80), query, description? (≤ 300)}`; the query must parse. 409 on a duplicate name (case-insensitive). Audited as `saved_search_created` |
 | `POST /api/hunt/saved/{id}/delete` | analyst | Owner or admin only (403 otherwise). Audited as `saved_search_deleted` |
-| `GET /api/alerts?status=open&severity=critical,high&rule_id=&limit=` | viewer | `status` and `severity` each take one value or a comma list. The console opens on open critical and high. Sorted by active first, then severity, then recency |
+| `GET /api/alerts?status=open&severity=critical,high&rule_id=&limit=` | viewer | `status` and `severity` each take one value or a comma list. Spaces around each name are ignored. A blank or unknown piece is 400. The console opens on open critical and high. Sorted by active first, then severity, then recency |
 | `GET /api/alerts/{id}` | viewer | Adds `rule`, `evidence`, `timeline` (events involving the same source IPs or users, ±30 min; user names match case-insensitively for ASCII, the same way event search does, and source IPs stay exact), `notes`, `activity`. Every alert also carries `base_severity` (the rule's), `assets` (matched inventory entries, see [Asset inventory](#asset-inventory)), and `severity_note` |
 | `POST /api/alerts/{id}/notes` | analyst | `{body}` (≤ 5000 chars) |
 | `POST /api/alerts/{id}/status` | analyst | `{status: open\|investigating\|resolved, disposition?, note?}`. `resolved` requires `disposition` (`true_positive`, `false_positive`, or `benign`); reopening clears it |
-| `GET /api/incidents?status=open,investigating&severity=critical,high&limit=` | viewer | `status` and `severity` each take one value or a comma list. Correlated incidents: `title`, `severity`, `status`, `first_seen`, `last_seen`, `entities` (`{src_ip, user, host}` lists; `user` and `host` values that differ only by case are one lowercase entry), `stages` (ATT&CK tactics in kill-chain order), `top_technique` (`{id, name, tactic}` or null — the earliest mapped technique, same order as the coverage matrix; id breaks ties), `correlation_rule` (the same plain sentence as the incident detail: shared source IP, account, or host within the correlation window, 30 minutes by default), `alert_count`, `synthetic`. Active first, then severity, then recency |
+| `GET /api/incidents?status=open,investigating&severity=critical,high&limit=` | viewer | `status` and `severity` each take one value or a comma list. Spaces around each name are ignored. A blank or unknown piece is 400. Correlated incidents: `title`, `severity`, `status`, `first_seen`, `last_seen`, `entities` (`{src_ip, user, host}` lists; `user` and `host` values that differ only by case are one lowercase entry), `stages` (ATT&CK tactics in kill-chain order), `top_technique` (`{id, name, tactic}` or null — the earliest mapped technique, same order as the coverage matrix; id breaks ties), `correlation_rule` (the same plain sentence as the incident detail: shared source IP, account, or host within the correlation window, 30 minutes by default), `alert_count`, `synthetic`. Active first, then severity, then recency |
 | `GET /api/incidents/{id}` | viewer | Adds `alerts` (each with `techniques`), `events` (evidence, each with `alert_ids`), `timeline` (one entry per alert with tactics and technique ids), `techniques`, `techniques_by_tactic`, `escalated`, the same `correlation_rule` as the list, `assets` (inventory entries behind the incident's hosts and addresses). 404 if missing |
 | `POST /api/incidents/{id}/status` | analyst | `{status: open\|investigating\|resolved, note?}`; audited as `incident_status_changed` |
 | `GET /api/incidents/{id}/case.json` | viewer | Chronological case record. `techniques` lists each rule technique with `level` (`validated`, `mapped`, `disabled`, or `gap`), the same grade as coverage. `mapped` is not proof. Audited as `case_exported` |
@@ -151,7 +151,7 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 | `GET /api/attack/coverage` | viewer | `{tactics, techniques: [{id, name, tactic, level, scenarios, rules: [{id, name, enabled, hits, verdict, lookalikes_fired, proves}], hits, covered, why}], summary, levels, level_meaning}` over the built-in ATT&CK subset. `level` is `validated`, `mapped`, `disabled`, or `gap` (see the README, "ATT&CK coverage"); `covered` is true only for `validated`. `why` is a one-line reason when `level` is `mapped`, otherwise null. `hits` counts alerts from the mapped rules; `summary.levels` counts techniques per level |
 | `GET /api/attack/navigator.json` | viewer | The same coverage as a MITRE ATT&CK Navigator layer, colored by level and scored by alert count |
 | `GET /api/entities?kind=&limit=` | viewer | Riskiest entities (`kind` is `user`, `src_ip`, or `host`; `limit` 1–100, default 10), each with its score and the alerts that contribute to it |
-| `GET /api/entities/{kind}/{value}` | viewer | One entity (value percent-encoded): score breakdown, alerts, incidents, recent events, and `alerts_by_day` (UTC day of each alert's newest evidence event for this entity, zeros filled, newest 31 days; `omitted` counts alerts older than that) |
+| `GET /api/entities/{kind}/{value}` | viewer | One entity (value percent-encoded): score breakdown, alerts, incidents, recent events, and `alerts_by_day` (UTC day of each alert's newest evidence event for this entity, zeros filled, newest 31 days; `omitted` counts alerts older than that). A `src_ip` path is the address form ingest stores, so `2001:DB8::1` matches `2001:db8::1` and `value` is that form. Anything that is not one address is 400. User and host folding are unchanged |
 | `GET /api/metrics?hours=24` | viewer | Counts, severity/rule breakdowns, MTTR, and `window_scope`. `hours` filters only `events_ingested_window`. `top_failure_ips`, `top_failure_users`, and `events_by_type` count every stored event. See [the metrics window](#get-apimetrics-window) |
 
 ### `GET /api/metrics` window

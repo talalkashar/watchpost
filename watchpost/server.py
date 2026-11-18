@@ -24,6 +24,9 @@ from .health import STATIC_DIR, run_health_checks
 from .normalize import EventError, parse_payload, validate_source
 
 SESSION_COOKIE = "wp_session"
+# The request line is decoded as iso-8859-1, so this count is the query's wire bytes.
+# A longer string is refused before parse_qs. Field limits (a hunt query is 500 characters) still apply under it.
+MAX_QUERY_BYTES = 8192
 
 
 class ApiError(Exception):
@@ -35,9 +38,14 @@ class ApiError(Exception):
 def query_params(raw):
     """One value per query key. A repeated key is a 400 that names it.
 
+    A query longer than MAX_QUERY_BYTES is 414 before parse_qs. The hunt
+    check (500 characters) runs only after this returns.
+
     parse_qs keeps every value, and taking the first would hide the rest
     (severity=low&severity=critical would filter as low).
     """
+    if len(raw) > MAX_QUERY_BYTES:
+        raise ApiError(414, f"query string exceeds {MAX_QUERY_BYTES} bytes")
     pairs = parse_qs(raw)
     for key, values in pairs.items():
         if len(values) > 1:
@@ -1076,10 +1084,36 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
+    def _unframed_post_message(self):
+        """A POST body is framed only by Content-Length.
+
+        Chunked encoding is not read. A missing length is not an empty body.
+        Either one leaves unread bytes that a keep-alive socket would take as
+        the next request.
+        """
+        if self.command != "POST":
+            return None
+        if self.headers.get("Transfer-Encoding") is not None:
+            return "Transfer-Encoding is not supported"
+        if self.headers.get("Content-Length") is None:
+            return "Content-Length is required"
+        return None
+
+    def _reject_unframed_post(self):
+        message = self._unframed_post_message()
+        if message is None:
+            return False
+        self.close_connection = True
+        self._send(400, {"error": message},
+                   extra_headers={"Cache-Control": "no-store", "Connection": "close"})
+        return True
+
     def _read_body(self):
+        message = self._unframed_post_message()
+        if message is not None:
+            self.close_connection = True
+            raise ApiError(400, message)
         length = self.headers.get("Content-Length")
-        if length is None:
-            return b""
         try:
             length = int(length)
         except ValueError:
@@ -1125,6 +1159,8 @@ class Handler(BaseHTTPRequestHandler):
     def _handle(self):
         parsed = urlparse(self.path)
         if self._rate_limited(parsed.path):
+            return
+        if self._reject_unframed_post():
             return
         if not parsed.path.startswith("/api/"):
             return self._static(parsed.path)
@@ -1299,12 +1335,14 @@ class Handler(BaseHTTPRequestHandler):
         return "; ".join(parts)
 
     def _static(self, path):
+        """A file that exists is no-cache. A missing path or a non-GET is no-store, like an API error."""
         if self.command != "GET":
-            return self._send(405, {"error": "method not allowed"})
+            return self._send(405, {"error": "method not allowed"},
+                              extra_headers={"Cache-Control": "no-store"})
         name = "index.html" if path in ("", "/") else path.lstrip("/")
         target = (STATIC_DIR / name).resolve()
         if STATIC_DIR.resolve() not in target.parents or not target.is_file():
-            return self._send(404, b"not found", "text/plain")
+            return self._send(404, b"not found", "text/plain", {"Cache-Control": "no-store"})
         ctype = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         if ctype.startswith("text/") or ctype.endswith("javascript"):
             ctype += "; charset=utf-8"

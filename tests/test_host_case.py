@@ -48,9 +48,9 @@ class HostCaseTests(unittest.TestCase):
         # A non-ASCII letter is not folded, so these stay two hosts.
         self.assertEqual(self.hosts("host:érin-host"), ["érin-host"])
         self.assertEqual(self.hosts("host:Érin-host"), ["Érin-host"])
-        # Source equality stays exact. Three events are source lab; Db01 is source LAB.
-        self.assertEqual(self.hosts("source:lab"), ["WEB01", "web01", "Érin-host", "érin-host"])
-        self.assertEqual(self.hosts("source:LAB"), ["Db01"])
+        # Source equality folds ASCII the same way. LAB and lab are one source here.
+        self.assertEqual(self.hosts("source:lab"), ["Db01", "WEB01", "web01", "Érin-host", "érin-host"])
+        self.assertEqual(self.hosts("source:LAB"), ["Db01", "WEB01", "web01", "Érin-host", "érin-host"])
 
         found = queries.search_events(self.conn, {"host": "Web01"})
         self.assertEqual(sorted(e["host"] for e in found["events"]), ["WEB01", "web01"])

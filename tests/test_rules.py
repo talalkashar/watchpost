@@ -47,6 +47,35 @@ class BruteForceTests(unittest.TestCase):
         self.assertEqual(rules.brute_force_ip(events, params("brute_force_ip", ignore_ips=["203.0.113.1"])), [])
         self.assertEqual(rules.brute_force_ip(events, params("brute_force_ip", ignore_users=["ADMIN"])), [])
 
+    def test_ignore_ips_matches_stored_address_form(self):
+        # Ingest stores str(ipaddress.ip_address), so a mixed-case or expanded entry must still ignore.
+        events = make([fail(i, ip="2001:db8::1") for i in range(12)])
+        for entry in ("2001:DB8::1", "2001:0db8:0000:0000:0000:0000:0000:0001"):
+            with self.subTest(entry=entry):
+                self.assertEqual(rules.list_entry("ignore_ips", entry), "2001:db8::1")
+                self.assertEqual(
+                    rules.brute_force_ip(events, params("brute_force_ip", ignore_ips=[entry])), [])
+        self.assertEqual(len(rules.brute_force_ip(
+            events, params("brute_force_ip", ignore_ips=["2001:db8::2"]))), 1)
+        # An event that was not rewritten still matches the stored form.
+        self.assertTrue(rules.covers(
+            "ignore_ips", {rules.list_entry("ignore_ips", "2001:DB8::1")}, {"src_ip": "2001:DB8::1"}))
+
+    def test_ignore_ip_prefix_or_non_address_does_not_match(self):
+        event = {"src_ip": "2001:db8::1"}
+        for raw in ("2001:db8::/32", "2001:db8::1/128", "not-an-ip", ""):
+            with self.subTest(raw=raw):
+                entry = rules.list_entry("ignore_ips", raw)
+                self.assertEqual(entry, raw)
+                self.assertFalse(rules.covers("ignore_ips", {entry}, event))
+                self.assertFalse(rules.covers("ignore_ips", {entry}, {"src_ip": raw}))
+                self.assertFalse(rules.covers("ignore_ips", {entry}, {"src_ip": None}))
+        # A list that skipped validation does not raise, and the burst still alerts.
+        p = params("brute_force_ip")
+        p["ignore_ips"] = ["2001:DB8::/32", "not-an-ip"]
+        events = make([fail(i, ip="2001:db8::1") for i in range(10)])
+        self.assertEqual(len(rules.brute_force_ip(events, p)), 1)
+
     def test_unordered_input_and_missing_ip(self):
         events = [fail(i) for i in reversed(range(10))] + [{**fail(1), "src_ip": None}]
         self.assertEqual(len(rules.brute_force_ip(make(events), params("brute_force_ip"))), 1)
@@ -59,12 +88,68 @@ class OtherRuleTests(unittest.TestCase):
         same_user = make([fail(i * 30) for i in range(20)])
         self.assertEqual(rules.password_spray(same_user, params("password_spray")), [])
 
+    def test_password_spray_folds_account_case(self):
+        # One account written two ways does not meet a threshold of 2.
+        one = make([fail(0, user="Alice"), fail(30, user="alice")])
+        self.assertEqual(rules.password_spray(one, params("password_spray", distinct_users=2)), [])
+        # Five spellings of two accounts used to meet the default threshold of 5.
+        inflated = make([
+            fail(i * 20, user=name)
+            for i, name in enumerate(["Alice", "alice", "ALICE", "Bob", "bob"])
+        ])
+        self.assertEqual(rules.password_spray(inflated, params("password_spray")), [])
+        # Two accounts, each written twice, is one finding and the names are folded.
+        two = make([
+            fail(0, user="Alice"),
+            fail(10, user="alice"),
+            fail(20, user="Bob"),
+            fail(30, user="BOB"),
+        ])
+        found = rules.password_spray(two, params("password_spray", distinct_users=2))
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "203.0.113.1")
+        self.assertEqual(found[0]["event_ids"], [1, 2, 3, 4])
+        self.assertIn("2 accounts targeted", found[0]["title"])
+        self.assertIn("2 different accounts (alice, bob)", found[0]["explanation"])
+        self.assertNotIn("Alice", found[0]["explanation"])
+        self.assertNotIn("Bob", found[0]["explanation"])
+
     def test_account_repeated_failures_across_ips(self):
         events = make([fail(i * 10, ip=f"192.0.2.{i}") for i in range(8)])
         found = rules.account_repeated_failures(events, params("account_repeated_failures"))
         self.assertEqual(len(found), 1)
         self.assertIn("8 source IP", found[0]["explanation"])
         self.assertEqual(rules.brute_force_ip(events, params("brute_force_ip")), [])
+
+    def test_account_repeated_failures_merges_user_spellings(self):
+        p = params("account_repeated_failures")
+        # Four plus four: neither spelling reaches eight, so two groups stay quiet.
+        split = make(
+            [fail(i * 10, user="Alice", ip=f"192.0.2.{i}") for i in range(4)]
+            + [fail(40 + i * 10, user="alice", ip=f"198.51.100.{i}") for i in range(4)]
+        )
+        found = rules.account_repeated_failures(split, p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "alice")
+        self.assertEqual(found[0]["event_ids"], list(range(1, 9)))
+        self.assertIn("8 failed", found[0]["explanation"])
+        self.assertIn("8 source IP", found[0]["explanation"])
+        # A spelling that already meets the threshold still keeps the other spelling's failures.
+        both = make(
+            [fail(i * 10, user="Alice") for i in range(8)]
+            + [fail(80 + i * 10, user="alice") for i in range(2)]
+        )
+        found = rules.account_repeated_failures(both, p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "alice")
+        self.assertEqual(found[0]["event_ids"], list(range(1, 11)))
+        self.assertIn("10 failed", found[0]["explanation"])
+        # Seven across both spellings stays under the threshold.
+        short = make(
+            [fail(i, user="Alice") for i in range(4)]
+            + [fail(10 + i, user="alice") for i in range(3)]
+        )
+        self.assertEqual(rules.account_repeated_failures(short, p), [])
 
     def test_success_after_failures(self):
         p = params("success_after_failures")
@@ -78,6 +163,37 @@ class OtherRuleTests(unittest.TestCase):
         self.assertEqual(rules.success_after_failures(make([fail(i, user="d") for i in range(5)] + [ok(7200, user="d")]), p), [])
         # A success *before* the failures is not "after failures".
         self.assertEqual(rules.success_after_failures(make([ok(0, user="d")] + [fail(10 + i, user="d") for i in range(5)]), p), [])
+
+    def test_success_after_failures_merges_user_spellings(self):
+        p = params("success_after_failures")
+        # Three plus two: neither spelling reaches five, so keeping one list misses the login.
+        split = make(
+            [fail(i * 10, user="Alice") for i in range(3)]
+            + [fail(30 + i * 10, user="alice") for i in range(2)]
+            + [ok(80, user="ALICE")]
+        )
+        found = rules.success_after_failures(split, p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "alice|203.0.113.1")
+        self.assertEqual(found[0]["event_ids"], [1, 2, 3, 4, 5, 6])
+        self.assertIn("5 failed", found[0]["explanation"])
+        # A spelling that already meets the threshold still keeps the other spelling's failures.
+        both = make(
+            [fail(i * 10, user="Alice") for i in range(5)]
+            + [fail(50 + i * 10, user="alice") for i in range(2)]
+            + [ok(80, user="Alice")]
+        )
+        found = rules.success_after_failures(both, p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["event_ids"], list(range(1, 9)))
+        self.assertIn("7 failed", found[0]["explanation"])
+        # Four across both spellings stays under the threshold.
+        short = make(
+            [fail(i, user="Alice") for i in range(2)]
+            + [fail(10 + i, user="alice") for i in range(2)]
+            + [ok(20, user="alice")]
+        )
+        self.assertEqual(rules.success_after_failures(short, p), [])
 
     def test_off_hours(self):
         p = params("off_hours_privileged_login")
@@ -159,6 +275,31 @@ class GeoLoginRuleTests(unittest.TestCase):
         self.assertEqual(rules.privilege_escalation_after_login(make(late), p), [])
         self.assertEqual(rules.privilege_escalation_after_login(
             make(attack[:3] + [ev(400, "privilege_escalation", "frank", host="web01")]), p), [])
+
+    def test_privilege_escalation_folds_ascii_host(self):
+        p = params("privilege_escalation_after_login")
+
+        def attack(host, at=420):
+            rows = [ev(i * 20, "auth_failure", "frank", "192.0.2.140") for i in range(3)]
+            rows += [ev(60, "auth_success", "frank", "192.0.2.140"),
+                     ev(at, "privilege_escalation", "frank", "192.0.2.140", host=host)]
+            return rows
+
+        found = rules.privilege_escalation_after_login(make(attack("WEB01")), p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "frank|web01")
+        self.assertIn("WEB01", found[0]["title"])
+        # Two spellings of one host share the key, so detection updates one alert.
+        both = attack("WEB01") + [ev(500, "privilege_escalation", "frank", "192.0.2.140", host="web01")]
+        found = rules.privilege_escalation_after_login(make(both), p)
+        self.assertEqual([f["group_key"] for f in found], ["frank|web01", "frank|web01"])
+        self.assertEqual(found[0]["event_ids"][-1], 5)
+        self.assertEqual(found[1]["event_ids"][-1], 6)
+        # Non-ASCII case stays apart, the same fold entities use.
+        upper = rules.privilege_escalation_after_login(make(attack("Érin-host")), p)
+        lower = rules.privilege_escalation_after_login(make(attack("érin-host")), p)
+        self.assertEqual(upper[0]["group_key"], "frank|Érin-host")
+        self.assertEqual(lower[0]["group_key"], "frank|érin-host")
 
 
 class CloudRuleTests(unittest.TestCase):

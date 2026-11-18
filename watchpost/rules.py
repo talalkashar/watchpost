@@ -291,17 +291,34 @@ HIDING_EDITS = {"ignore_ips": "added", "ignore_users": "added", "sanctioned_serv
                 "privileged_users": "removed", "logging_actions": "removed"}
 
 
+def _stored_ip(value):
+    """The address form ingest stores, or None when value is not one complete address.
+
+    A prefix and any other non-address are None. Comparing them is a non-match, not an error.
+    """
+    if isinstance(value, str):
+        import ipaddress
+        try:
+            return str(ipaddress.ip_address(value))
+        except ValueError:
+            return None
+    return None
+
+
 def list_entry(param, value):
     """One list entry in the form the rules compare it in."""
     if param == "ignore_ips":
-        return value
+        stored = _stored_ip(value)
+        # A prefix or other non-address is kept as written. covers will not treat it as an address.
+        return value if stored is None else stored
     return value.lower().lstrip(".") if param == "sanctioned_services" else value.lower()
 
 
 def covers(param, entries, event):
     """Whether `event` matches any of `entries` (already passed through list_entry) of a list parameter."""
     if param == "ignore_ips":
-        return event.get("src_ip") in entries
+        address = _stored_ip(event.get("src_ip"))
+        return address is not None and address in entries
     if param == "sanctioned_services":  # the service itself or any subdomain of an entry
         service = _service(event)
         return bool(service) and any(service == s or service.endswith("." + s) for s in entries)
@@ -380,6 +397,14 @@ def _group_users(events):
     return groups
 
 
+# SQLite COLLATE NOCASE folds these letters only. Host keys use the same fold as entities.
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def _ascii_fold(value):
+    return value.translate(_ASCII_FOLD)
+
+
 def brute_force_ip(events, params):
     threshold, window = params["threshold"], params["window_seconds"]
     findings = []
@@ -397,13 +422,19 @@ def brute_force_ip(events, params):
     return findings
 
 
+def _account_names(events):
+    """Distinct account names, ignoring case. Alice and alice are one account."""
+    return {e["user"].lower() for e in events if e.get("user")}
+
+
 def password_spray(events, params):
     needed, window = params["distinct_users"], params["window_seconds"]
     findings = []
     for ip, group in _group(_filtered(events, params, "auth_failure"), "src_ip").items():
-        qualifies = lambda w: len({e.get("user") for e in w if e.get("user")}) >= needed
+        # Counting the raw spelling lets one account meet a threshold of 2.
+        qualifies = lambda w: len(_account_names(w)) >= needed
         for cluster in _clusters(group, window, qualifies):
-            users = sorted({e.get("user") for e in cluster if e.get("user")})
+            users = sorted(_account_names(cluster))
             findings.append(_finding(
                 ip, cluster,
                 f"Password spray from {ip}: {len(users)} accounts targeted",
@@ -417,11 +448,13 @@ def password_spray(events, params):
 def account_repeated_failures(events, params):
     threshold, window = params["threshold"], params["window_seconds"]
     findings = []
-    for user, group in _group(_filtered(events, params, "auth_failure"), "user").items():
+    # One list per lowercase account. Exact spellings are two groups, so
+    # neither may reach the threshold on its own.
+    for user, group in _group_users(_filtered(events, params, "auth_failure")).items():
         for cluster in _clusters(group, window, lambda w: len(w) >= threshold):
             ips = sorted({e.get("src_ip") or "unknown" for e in cluster})
             findings.append(_finding(
-                user.lower(), cluster,
+                user, cluster,
                 f"Repeated failures for account {user}: {len(cluster)} attempts",
                 f"Account {user} had {len(cluster)} failed logins from {len(ips)} source IP(s) "
                 f"({', '.join(ips[:5])}) between {cluster[0]['ts']} and {cluster[-1]['ts']}. "
@@ -432,8 +465,9 @@ def account_repeated_failures(events, params):
 
 def success_after_failures(events, params):
     needed, window = params["failures"], params["window_seconds"]
-    failures = _group(_filtered(events, params, "auth_failure"), "user")
-    failures = {u.lower(): v for u, v in failures.items()}
+    # One list per lowercase account. A dict of exact spellings drops every
+    # spelling but the last, so a success can miss failures that still count.
+    failures = _group_users(_filtered(events, params, "auth_failure"))
     findings = []
     for success in _filtered(events, params, LOGIN_SUCCESS_TYPES):
         user = (success.get("user") or "").lower()
@@ -562,9 +596,11 @@ def privilege_escalation_after_login(events, params):
             if len(prior) < needed:
                 continue
             host = esc.get("host") or "unknown"
+            # ASCII only, the same fold entities use, so WEB01 and web01 are one alert.
+            host_key = _ascii_fold(host)
             minutes = (t - _epoch(login)) / 60
             findings.append(_finding(
-                f"{user}|{host}", prior + [login, esc],
+                f"{user}|{host_key}", prior + [login, esc],
                 f"Privilege escalation by {esc.get('user')} on {host} after suspicious login",
                 f"{esc.get('user')} elevated privileges on {host} at {esc['ts']}, {minutes:,.0f} min after "
                 f"logging in from {login.get('src_ip') or 'an unknown IP'} at {login['ts']}. That login followed "

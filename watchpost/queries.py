@@ -1,11 +1,14 @@
 """Read-side queries and analyst workflow operations."""
 
-from datetime import timedelta
-
+import ipaddress
 import json
+from datetime import timedelta
 
 from .db import audit, iso, now_iso, parse_iso, row_to_dict, transaction, utcnow
 from .normalize import EVENT_TYPES, SEVERITIES, EventError, parse_timestamp
+
+# A-Z only. SQLite NOCASE folds the same letters; É and é stay apart.
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 
 ALERT_STATUSES = ("open", "investigating", "resolved")
 DISPOSITIONS = ("true_positive", "false_positive", "benign")
@@ -21,6 +24,35 @@ class QueryError(ValueError):
     def __init__(self, message, status=400):
         super().__init__(message)
         self.status = status
+
+
+def catalog_name(value, names):
+    """The catalog spelling when `value` matches one name by ASCII case, else None.
+
+    `Auth_Failure` is `auth_failure`. A non-ASCII lookalike is not a match.
+    `names` is the catalog (the stored spellings).
+    """
+    if not isinstance(value, str):
+        return None
+    folded = value.translate(_ASCII_FOLD)
+    for name in names:
+        if name.translate(_ASCII_FOLD) == folded:
+            return name
+    return None
+
+
+def canonical_ip(value, field):
+    """The address form ingest stores (`str(ipaddress.ip_address)`).
+
+    A complete address binds as that form, so `2001:DB8::1` matches a row stored as `2001:db8::1`.
+    A prefix is not passed here. Anything else is 400.
+    """
+    if isinstance(value, str):
+        try:
+            return str(ipaddress.ip_address(value))
+        except ValueError:
+            pass
+    raise QueryError(f"{field} must be a valid IP address")
 
 
 def _int(value, name, default, low, high):
@@ -51,29 +83,41 @@ def search_events(conn, params):
         where.append("ts <= ?")
         args.append(_ts(params["end"], "end"))
     if params.get("severity"):
-        levels = params["severity"].split(",")
-        if not set(levels) <= set(SEVERITIES):
-            raise QueryError(f"severity must be from {', '.join(SEVERITIES)}")
+        # One level or a comma list. Spaces around a name are ignored, as on alerts and incidents.
+        # ASCII case folds onto the catalog spelling (`High` binds `high`). A blank piece is invalid,
+        # same as an unknown name.
+        levels = []
+        for part in params["severity"].split(","):
+            name = catalog_name(part.strip(), SEVERITIES)
+            if name is None:
+                raise QueryError(f"severity must be from {', '.join(SEVERITIES)}")
+            levels.append(name)
         if params.get("severity_mode") == "min" and len(levels) == 1:
             levels = SEVERITIES[SEVERITIES.index(levels[0]):]
         where.append(f"severity IN ({','.join('?' for _ in levels)})")
         args += levels
     if params.get("event_type"):
-        if params["event_type"] not in EVENT_TYPES:
+        # Same fold. The bound value is the catalog spelling, so a stored `Auth_Failure` stays out.
+        name = catalog_name(params["event_type"], EVENT_TYPES)
+        if name is None:
             raise QueryError(f"event_type must be one of {', '.join(sorted(EVENT_TYPES))}")
         where.append("event_type = ?")
-        args.append(params["event_type"])
-    for field, column in (("source", "source"), ("host", "host"), ("user", "user"), ("batch_id", "batch_id")):
+        args.append(name)
+    for field, column in (("source", "source"), ("host", "host"), ("user", "user"),
+                          ("outcome", "outcome"), ("batch_id", "batch_id")):
         if params.get(field):
             if params[field].endswith("*"):
                 where.append(f"{column} LIKE ? ESCAPE '\\'")
                 args.append(_escape_like(params[field][:-1]) + "%")
             else:
-                where.append(f"{column} = ? COLLATE NOCASE" if field in ("user", "host") else f"{column} = ?")
+                where.append(f"{column} = ? COLLATE NOCASE"
+                             if field in ("user", "host", "source", "outcome") else f"{column} = ?")
                 args.append(params[field])
     if params.get("ip"):
+        # Equality only. A trailing * is a hunt prefix, not an address, so it is 400 here.
+        address = canonical_ip(params["ip"], "ip")
         where.append("(src_ip = ? OR dest_ip = ?)")
-        args += [params["ip"], params["ip"]]
+        args += [address, address]
     if params.get("q"):
         needle = params["q"]
         if not isinstance(needle, str) or len(needle) > MAX_SEARCH_Q:
@@ -128,8 +172,10 @@ def get_event(conn, event_id):
 def list_alerts(conn, params):
     where, args = [], []
     if params.get("status"):
-        statuses = params["status"].split(",")
-        if not set(statuses) <= set(ALERT_STATUSES):
+        # One status or a comma list. Spaces around a name are ignored, as on severity.
+        # A blank piece is invalid, same as an unknown name.
+        statuses = [part.strip() for part in params["status"].split(",")]
+        if not statuses or not set(statuses) <= set(ALERT_STATUSES):
             raise QueryError(f"status must be from {', '.join(ALERT_STATUSES)}")
         where.append(f"status IN ({','.join('?' for _ in statuses)})")
         args += statuses
