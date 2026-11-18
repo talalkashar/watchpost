@@ -12,8 +12,10 @@ optional labeled sample: malicious events that must match and benign look-alikes
 cannot be enabled until its sample passes, and its ATT&CK techniques count as validated only while it does.
 """
 
+import base64
 import hashlib
 import ipaddress
+import itertools
 import json
 import re
 from collections import defaultdict
@@ -340,17 +342,22 @@ FIELD_MAP = {
     **{target: field for field, target in ecs.FIELD_MAP.items() if field in EVENT_FIELDS},  # ECS names
     **SIGMA_FIELDS,
 }
-MODIFIERS = ("contains", "startswith", "endswith", "all", "cidr")
+MODIFIERS = ("contains", "startswith", "endswith", "all", "cidr", "windash", "base64", "base64offset")
 REFUSED_MODIFIERS = {
     "re": "regular expressions are refused (a pattern from an imported rule could take unbounded time)",
-    "base64": "base64 modifiers are not supported", "base64offset": "base64 modifiers are not supported",
     "wide": "encoding modifiers are not supported", "utf16le": "encoding modifiers are not supported",
     "utf16be": "encoding modifiers are not supported", "utf16": "encoding modifiers are not supported",
-    "windash": "windash is not supported", "expand": "placeholders are not supported",
+    "expand": "placeholders are not supported",
     "lt": "numeric comparisons are not supported", "lte": "numeric comparisons are not supported",
     "gt": "numeric comparisons are not supported", "gte": "numeric comparisons are not supported",
     "exists": "exists is not supported; match null instead",
 }
+_MATCH_MODS = ("contains", "startswith", "endswith", "cidr")
+_WILDCARD_MODS = ("contains", "startswith", "endswith")
+_ENCODE_MODS = ("base64", "base64offset")
+# Fixed scanner. It is not a regular expression taken from the rule (`re` stays refused).
+_WINDASH_RE = re.compile(r"\B[-/]\b")
+_WINDASH_CHARS = ("-", "/", "\u2013", "\u2014", "\u2015")
 LEVELS = {"informational": "low", "low": "low", "medium": "medium", "high": "high", "critical": "critical"}
 INFO_KEYS = {"title", "id", "status", "description", "level", "tags", "logsource", "detection", "author", "date",
              "modified", "references", "falsepositives", "fields", "license", "related", "name", "taxonomy"}
@@ -374,6 +381,69 @@ def _value(v, where):
     raise SigmaError(f"{where}: values must be strings, numbers or null")
 
 
+def _unescape_literals(value, where):
+    """Sigma `\\*`, `\\?`, and `\\\\` become literals. An unescaped `*` or `?` is a wildcard."""
+    out, i = [], 0
+    while i < len(value):
+        c = value[i]
+        nxt = value[i + 1:i + 2]
+        if c == "\\" and nxt in ("*", "?", "\\"):
+            out.append(nxt)
+            i += 2
+            continue
+        if c in ("*", "?"):
+            raise SigmaError(f"{where}: Base64 encoding of strings with wildcards is not allowed")
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _windash_values(text, where):
+    """Each leading `-` or `/` becomes `-`, `/`, or a Unicode dash. At most three per value."""
+    positions = [m.start() for m in _WINDASH_RE.finditer(text)]
+    if len(positions) > 3:
+        raise SigmaError(f"{where}: windash expands at most three dashes in one value")
+    if not positions:
+        return [text]
+    chars = list(text)
+    expanded = []
+    for combo in itertools.product(_WINDASH_CHARS, repeat=len(positions)):
+        replaced = chars.copy()
+        for pos, ch in zip(positions, combo):
+            replaced[pos] = ch
+        expanded.append("".join(replaced))
+    return expanded
+
+
+def _base64_offsets(text):
+    """Three shifted encodings of `text`, including an empty slice when the input is very short."""
+    data = text.encode()
+    out = []
+    for i in range(3):
+        raw = base64.b64encode((b" " * i) + data)
+        end = (None, -3, -2)[(len(data) + i) % 3]
+        out.append(raw[(0, 2, 3)[i]:end].decode())
+    return out
+
+
+def _transform_values(text, mods, where):
+    """Apply windash / base64 / base64offset left to right. Each step ORs its results."""
+    current = [text]
+    for mod in mods:
+        if mod == "windash":
+            current = [item for s in current for item in _windash_values(s, where)]
+        elif mod in _ENCODE_MODS:
+            nxt = []
+            for s in current:
+                plain = _unescape_literals(s, where)
+                if mod == "base64":
+                    nxt.append(base64.b64encode(plain.encode()).decode())
+                else:
+                    nxt.extend(_base64_offsets(plain))
+            current = nxt
+    return current
+
+
 def _field_match(key, value, where):
     """One `field|mod|...: value(s)` entry -> a match node."""
     if not isinstance(key, str) or not key:
@@ -386,18 +456,45 @@ def _field_match(key, value, where):
             raise SigmaError(f"{where}: modifier {mod!r} is not supported (supported: {', '.join(MODIFIERS)})")
     if len(mods) != len(set(mods)):
         raise SigmaError(f"{where}: a modifier is repeated")
-    kinds = [m for m in mods if m != "all"]
+    kinds = [m for m in mods if m in _MATCH_MODS]
     if len(kinds) > 1:
         raise SigmaError(f"{where}: combine at most one of contains/startswith/endswith/cidr with all")
+    transforms = [m for m in mods if m not in _MATCH_MODS and m != "all"]
+    if "cidr" in kinds and transforms:
+        raise SigmaError(f"{where}: cidr cannot be combined with {transforms[0]}")
+    wildcard_seen = False
+    for mod in mods:
+        if mod in _ENCODE_MODS and wildcard_seen:
+            raise SigmaError(f"{where}: {mod} is only applicable to unmodified values")
+        if mod in _WILDCARD_MODS:
+            wildcard_seen = True
     values = value if isinstance(value, list) else [value]
     if not values or len(values) > MAX_VALUES:
         raise SigmaError(f"{where}: between 1 and {MAX_VALUES} values per field")
-    values = [_value(v, where) for v in values]
     kind = kinds[0] if kinds else "eq"
+    if transforms:
+        # Check the YAML type before `_value`, which turns numbers and bools into text.
+        groups = []
+        for v in values:
+            if not isinstance(v, str):
+                raise SigmaError(f"{where}: {transforms[0]} applies to strings")
+            _value(v, where)
+            groups.append(_transform_values(v, transforms, where))
+        mapped = _field(field)
+        if "all" in mods and len(groups) > 1:
+            # `|all` ANDs the author's values. Each value's expansion stays OR-linked.
+            return {"op": "and", "args": [
+                {"op": "match", "field": mapped, "mod": kind, "all": False, "values": group}
+                for group in groups
+            ]}
+        flat = [item for group in groups for item in group]
+        return {"op": "match", "field": mapped, "mod": kind, "all": "all" in mods and len(flat) == 1,
+                "values": flat}
+    values = [_value(v, where) for v in values]
     if kind == "cidr":
         for v in values:
             try:
-                ipaddress.ip_network(str(v), strict=False)
+                ipaddress.ip_network(str(v), strict=True)
             except ValueError:
                 raise SigmaError(f"{where}: {v!r} is not a CIDR network")
     elif kind != "eq" and None in values:
@@ -674,7 +771,7 @@ def _check_budget(tree):
 
 # --- Evaluation ---------------------------------------------------------------------------------
 
-_STAR, _ONE = object(), object()
+_STAR, _ONE, _BAD_CIDR = object(), object(), object()
 
 
 def _name_glob(pattern):
@@ -750,7 +847,10 @@ class _Compiled:
                 if v is None:
                     pats.append(None)
                 elif node["mod"] == "cidr":
-                    pats.append(ipaddress.ip_network(str(v), strict=False))
+                    try:
+                        pats.append(ipaddress.ip_network(str(v), strict=True))
+                    except ValueError:
+                        pats.append(_BAD_CIDR)  # stored host bits must not widen to the masked network
                 else:
                     pat = _pattern(str(v))
                     if node["mod"] in ("contains", "endswith") and (not pat or pat[0] is not _STAR):
@@ -764,13 +864,15 @@ class _Compiled:
     def _one(self, pat, mod, value):
         if pat is None:
             return value is None or value == ""
-        if value is None or value == "":
+        if pat is _BAD_CIDR:
             return False
         if mod == "cidr":
             try:
                 return ipaddress.ip_address(str(value)) in pat
             except ValueError:
                 return False
+        if value is None:
+            return False
         return _glob(pat, str(value).casefold())
 
     def matches(self, event, node=None):
