@@ -1,0 +1,43 @@
+# Interactive root shell via sudo or su. A one-shot root command such as systemctl does not match.
+# Watchpost stores sudo and su lines as privilege_escalation and keeps the syslog message.
+title: Interactive Root Shell via Sudo or Su
+id: 5b4a9e71-0c26-4d8f-a163-7e2f9d0c4b85
+status: experimental
+description: |
+  A privilege_escalation event whose message is a sudo line running /bin/bash,
+  /bin/sh, or the /usr/bin equivalents as root, or an su line "(to root)".
+  The shell tokens are matched as a whole command (end of the message, or
+  followed by a space) so COMMAND=/bin/shutdown does not match COMMAND=/bin/sh.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1548/003/
+tags:
+  - attack.privilege_escalation
+  - attack.t1548.003
+logsource:
+  category: process_creation
+  product: linux
+  service: sudo
+detection:
+  sudo_root:
+    event.action: privilege_escalation
+    message|contains: "USER=root"
+  shells:
+    message:
+      - '*COMMAND=/bin/bash'
+      - '*COMMAND=/bin/bash *'
+      - '*COMMAND=/usr/bin/bash'
+      - '*COMMAND=/usr/bin/bash *'
+      - '*COMMAND=/bin/sh'
+      - '*COMMAND=/bin/sh *'
+      - '*COMMAND=/usr/bin/sh'
+      - '*COMMAND=/usr/bin/sh *'
+  su_root:
+    event.action: privilege_escalation
+    message|contains: "(to root)"
+  condition: (sudo_root and shells) or su_root
+falsepositives:
+  - An administrator opening a root shell for maintenance
+  - A command line that happens to contain the text "(to root)"
+level: high

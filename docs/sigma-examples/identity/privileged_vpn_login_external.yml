@@ -1,0 +1,40 @@
+# Privileged account on a remote-access session whose source is not a private address.
+# Watchpost stores OpenVPN "Peer Connection Initiated" lines as vpn_login.
+title: Privileged VPN Login From External Address
+id: a91d4e28-6c50-4f3a-b7e2-1d8a5c0f3e64
+status: experimental
+description: |
+  A VPN login for root, admin, or administrator from outside the private, loopback,
+  and link-local ranges. An ordinary user on the same concentrator does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1133/
+tags:
+  - attack.initial_access
+  - attack.t1133
+logsource:
+  category: authentication
+  product: linux
+  service: openvpn
+detection:
+  selection:
+    event.action: vpn_login
+    user.name:
+      - root
+      - admin
+      - administrator
+  internal:
+    SourceIp|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+      - 169.254.0.0/16
+      - "::1/128"
+      - fc00::/7
+      - fe80::/10
+  condition: selection and not internal
+falsepositives:
+  - A privileged operator connecting from a home address to the corporate VPN
+level: high

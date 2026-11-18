@@ -1,0 +1,37 @@
+# A new cloud IAM user created from outside the private ranges.
+# Watchpost stores IAM CreateUser as cloud_iam_change with message "CreateUser on iam.amazonaws.com".
+title: Cloud User Created From External Address
+id: e2d70b95-1f38-4c6a-9e54-8a0d3c7b2f16
+status: experimental
+description: |
+  An IAM CreateUser call from an address outside the private, loopback, and
+  link-local ranges. CreateAccessKey does not match this rule, and CreateUser
+  from inside those ranges does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1136/003/
+tags:
+  - attack.persistence
+  - attack.t1136.003
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    event.action: cloud_iam_change
+    message|contains: CreateUser
+  internal:
+    SourceIp|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+      - 169.254.0.0/16
+      - "::1/128"
+      - fc00::/7
+      - fe80::/10
+  condition: selection and not internal
+falsepositives:
+  - An administrator creating an account from a home address during onboarding
+level: high

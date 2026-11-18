@@ -1,0 +1,42 @@
+# Cloud console sign-in or role assumption from outside the private ranges.
+# Watchpost stores ConsoleLogin and AssumeRole* as cloud_api_call. The message is "<action> on <service>".
+# AssumeRole also covers AssumeRoleWithSAML and AssumeRoleWithWebIdentity.
+title: External Cloud Console or Role Assumption
+id: 8c3d1f60-4e92-4a7b-b518-0f6a2d9e3c47
+status: experimental
+description: |
+  ConsoleLogin or AssumeRole (including SAML and web-identity variants) from an
+  address outside the private, loopback, and link-local ranges. A read-only
+  cloud API call from the same address does not match, and neither does the
+  same sign-in from inside those ranges. Watchpost events have no MFA field,
+  so this rule uses the source address instead of a missing-MFA check.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1078/004/
+tags:
+  - attack.initial_access
+  - attack.t1078.004
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    event.action: cloud_api_call
+    message|contains:
+      - ConsoleLogin
+      - AssumeRole
+  internal:
+    SourceIp|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+      - 169.254.0.0/16
+      - "::1/128"
+      - fc00::/7
+      - fe80::/10
+  condition: selection and not internal
+falsepositives:
+  - An administrator signing in to the console or assuming a role from a home address
+level: medium

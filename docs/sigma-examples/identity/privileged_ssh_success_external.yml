@@ -1,0 +1,41 @@
+# Privileged local account accepted over SSH from outside the private ranges.
+# Watchpost stores sshd "Accepted ..." lines as auth_success with destination.port 22.
+title: Privileged SSH Success From External Address
+id: 7c1e0a44-2b19-4d6f-8a31-6f0c9d2e4b17
+status: experimental
+description: |
+  A successful login for root, admin, or administrator on port 22 from an address
+  outside the private, loopback, and link-local ranges. A failure does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1078/003/
+tags:
+  - attack.initial_access
+  - attack.t1078.003
+logsource:
+  category: authentication
+  product: linux
+  service: sshd
+detection:
+  selection:
+    event.action: auth_success
+    user.name:
+      - root
+      - admin
+      - administrator
+    destination.port: 22
+  internal:
+    SourceIp|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+      - 169.254.0.0/16
+      - "::1/128"
+      - fc00::/7
+      - fe80::/10
+  condition: selection and not internal
+falsepositives:
+  - An administrator signing in from a home or hotel network during a break-glass
+level: high
