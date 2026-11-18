@@ -11,16 +11,23 @@ from .db import now_iso
 
 log = logging.getLogger("watchpost")
 
+# JSON and key=value share this list. Longer names come before token and secret.
+# session_id is not a name here: the word session stops before the underscore.
+_SECRET_NAMES = (
+    "password|passwd|pwd|client_secret|private_key|access_token|refresh_token|id_token|"
+    "secret|token|api[_-]?key|authorization|cookie|session"
+)
+
 _REDACTIONS = [
     # HTTP bearer / basic credentials (before key=value, which would otherwise eat the scheme word)
     (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 [REDACTED]"),
     # key=value / key: value style secrets
-    (re.compile(r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|authorization|cookie|session)"
+    (re.compile(r"(?i)\b(" + _SECRET_NAMES + r")"
                 r"(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;&]+)"), r"\1\2[REDACTED]"),
     # Watchpost ingest tokens
     (re.compile(r"\bwp_[A-Za-z0-9_-]{16,}"), "wp_[REDACTED]"),
     # JSON keys. Same names as key=value above. An escaped quote stays inside the value.
-    (re.compile(r'(?i)("(?:password|passwd|pwd|secret|token|api[_-]?key|authorization|cookie|session)"'
+    (re.compile(r'(?i)("(?:' + _SECRET_NAMES + r')"'
                 r'\s*:\s*)"(?:\\.|[^"\\])*"'), r'\1"[REDACTED]"'),
 ]
 
