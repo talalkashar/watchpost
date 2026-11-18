@@ -96,10 +96,7 @@ def validate(data):
         tags = [t for t in re.split(r"[,\s]+", tags) if t]
     if not isinstance(tags, list) or any(not isinstance(t, str) for t in tags):
         raise AssetError("data_tags must be a list of tags")
-    tags = sorted({t.strip().lower() for t in tags if t.strip()})
-    unknown = [t for t in tags if t not in DATA_TAGS]
-    if unknown:
-        raise AssetError(f"unknown data tag(s) {', '.join(unknown)}; use {', '.join(sorted(DATA_TAGS))}")
+    tags = _data_tags(tags)
     addresses = data.get("addresses") or []
     if isinstance(addresses, str):
         addresses = [a for a in re.split(r"[,\s]+", addresses) if a]
@@ -165,6 +162,25 @@ def _catalog_field(value, names, default, message):
     if name is None:
         raise AssetError(message)
     return name
+
+
+def _data_tags(tags):
+    """Catalog spellings, sorted. ASCII letters fold. `PII` is `pii`. `PİI` is not `pii`.
+
+    A blank piece is dropped. An unknown tag, including a non-ASCII lookalike, raises
+    the existing error and names the ASCII-folded spelling. Not `str.lower()`.
+    """
+    cleaned = set()
+    for raw in tags:
+        text = raw.strip()
+        if not text:
+            continue
+        name = catalog_name(text, DATA_TAGS)
+        cleaned.add(name if name is not None else text.translate(_ASCII_FOLD))
+    unknown = sorted(t for t in cleaned if t not in DATA_TAGS)
+    if unknown:
+        raise AssetError(f"unknown data tag(s) {', '.join(unknown)}; use {', '.join(sorted(DATA_TAGS))}")
+    return sorted(cleaned)
 
 
 def _host_key(name):

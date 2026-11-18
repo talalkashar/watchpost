@@ -48,6 +48,23 @@ class PureWeightingTests(unittest.TestCase):
             with self.subTest(bad=bad):
                 self.assertRaises(assets.AssetError, assets.validate, bad)
 
+    def test_data_tags_fold_ascii_letters_only(self):
+        """PII and Pci store the catalog spellings. PİI is not rewritten into pii."""
+        clean = assets.validate({"name": "db01", "data_tags": ["PII", "Pci", "pii", "  PCI  "]})
+        self.assertEqual(clean["data_tags"], ["pci", "pii"])
+        dotted = "P\u0130I"
+        with self.assertRaises(assets.AssetError) as ctx:
+            assets.validate({"name": "db01", "data_tags": [dotted, "PII"]})
+        message = str(ctx.exception)
+        named = message.split(";")[0]
+        self.assertIn("unknown data tag", named)
+        self.assertIn("p\u0130i", named)
+        self.assertNotIn("pii", named)
+        # str.lower() rewrites U+0130 into i plus a combining dot. That form is not the error.
+        self.assertNotIn("\u0307", message)
+        self.assertNotIn(dotted.lower(), message)
+        self.assertNotEqual(dotted.lower(), "pii")
+
     def test_match_by_host_name_case_insensitively_and_by_address(self):
         idx = assets.index([self.asset("DB01", addresses=["10.0.0.10"]), self.asset("web01")])
         events = [{"host": "db01"}, {"host": "other", "dest_ip": "10.0.0.10"}, {"host": None, "src_ip": "10.9.9.9"}]
@@ -141,6 +158,23 @@ class AssetApiTests(ServerTestCase):
         actions = [a["action"] for a in self.admin.get("/api/audit")[1]]
         for action in ("asset_created", "asset_updated"):
             self.assertIn(action, actions)
+
+    def test_data_tags_fold_ascii_on_create(self):
+        status, data, _ = self.admin.post("/api/assets", {"name": "pay-db", "data_tags": ["PII", "Pci"]})
+        self.assertEqual(status, 201, data)
+        self.assertEqual(data["asset"]["data_tags"], ["pci", "pii"])
+        dotted = "P\u0130I"
+        status, body, headers = self.admin.post("/api/assets", {"name": "look", "data_tags": [dotted]})
+        self.assertEqual(status, 400)
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        named = body["error"].split(";")[0]
+        self.assertIn("unknown data tag", named)
+        self.assertIn("p\u0130i", named)
+        self.assertNotIn("pii", named)
+        self.assertNotIn("\u0307", body["error"])
+        names = [a["name"] for a in self.admin.get("/api/assets")[1]["assets"]]
+        self.assertEqual(names, ["pay-db"])
+        self.assertNotIn("look", names)
 
     def test_alert_severity_is_raised_by_a_critical_sensitive_asset(self):
         self.admin.post("/api/assets", {"name": "db01", "criticality": "critical", "data_tags": ["pci"]})
