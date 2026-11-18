@@ -711,9 +711,60 @@ class PrincipalAsciiFoldTests(unittest.TestCase):
 
     def test_the_docs_name_the_principal_fold(self):
         text = (Path(__file__).resolve().parent.parent / "docs" / "REFERENCE.md").read_text()
-        self.assertIn("`data_exfil_volume`, and `cloud_logging_disabled`", text)
+        self.assertIn("`data_exfil_volume`, `cloud_logging_disabled`, and `unsanctioned_cloud_service`", text)
         self.assertIn("an exception for `Érin` does not quiet `érin`", text)
         self.assertIn("`2001:DB8::1` is not folded", text)
+
+
+def _cloud(sec, user, service="personal-drive.example"):
+    return ev(sec, "cloud_data_access", user, "10.0.1.40", message=f"UploadFile on {service} (x)")
+
+
+class UnsanctionedAccountFoldTests(unittest.TestCase):
+    """unsanctioned_cloud_service keys the account with the ASCII fold.
+
+    Alice, alice, and ALICE stay one finding. ÉRIN and érin stay two findings on
+    the same service. Sanctioned-service matching still folds the whole name.
+    The title shows the account as logged.
+    """
+
+    def test_accented_accounts_stay_two_findings(self):
+        p = params("unsanctioned_cloud_service")
+        merged = rules.unsanctioned_cloud_service(make([
+            _cloud(0, "Alice"),
+            _cloud(30, "ALICE"),
+        ]), p)
+        self.assertEqual([f["group_key"] for f in merged], ["alice|personal-drive.example"])
+        self.assertEqual(merged[0]["event_ids"], [1, 2])
+        self.assertIn("Alice", merged[0]["title"])
+        apart = rules.unsanctioned_cloud_service(make([
+            _cloud(0, "ÉRIN"),
+            _cloud(30, "érin"),
+        ]), p)
+        self.assertEqual(sorted(f["group_key"] for f in apart), [
+            "Érin|personal-drive.example", "érin|personal-drive.example"])
+        self.assertEqual(sorted(f["event_ids"] for f in apart), [[1], [2]])
+        self.assertEqual(sorted(f["title"] for f in apart), [
+            "Unsanctioned cloud service: ÉRIN used personal-drive.example",
+            "Unsanctioned cloud service: érin used personal-drive.example"])
+        same = rules.unsanctioned_cloud_service(make([
+            _cloud(0, "ÉRIN"),
+            _cloud(30, "Érin"),
+        ]), p)
+        self.assertEqual([f["group_key"] for f in same], ["Érin|personal-drive.example"])
+        self.assertEqual(same[0]["event_ids"], [1, 2])
+        self.assertIn("ÉRIN", same[0]["title"])
+
+    def test_sanctioned_service_still_folds_the_whole_name(self):
+        p = params("unsanctioned_cloud_service", sanctioned_services=[".ÉXAMPLE.com"])
+        quiet = rules.unsanctioned_cloud_service(make([_cloud(0, "ÉRIN", "éxample.com")]), p)
+        self.assertEqual(quiet, [])
+        found = rules.unsanctioned_cloud_service(make([_cloud(0, "érin", "other.example")]), p)
+        self.assertEqual([f["group_key"] for f in found], ["érin|other.example"])
+        self.assertEqual(rules.unsanctioned_cloud_service(make([
+            ev(0, "cloud_data_access", None, "10.0.1.40",
+               message="UploadFile on personal-drive.example (x)"),
+        ]), params("unsanctioned_cloud_service")), [])
 
 
 class TechniqueMappingTests(unittest.TestCase):

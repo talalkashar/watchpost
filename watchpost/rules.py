@@ -151,7 +151,10 @@ DEFAULT_RULES = [
                        "listed name also covers its subdomains. The service is read from cloud audit events of "
                        "the form '<action> on <service>' (CloudTrail-style JSON, or a proxy/CASB feed sent as "
                        "JSON); events that name no service are skipped. Uses of one service by one account "
-                       "within `window_seconds` join the same alert. Unsanctioned is not the same as hostile: "
+                       "within `window_seconds` join the same alert. The account folds ASCII letters only, the "
+                       "same fold as `ignore_users`: `Alice` and `alice` are one account, and `ÉRIN` and `érin` "
+                       "stay two. Sanctioned-service matching still folds the whole service name. Unsanctioned "
+                       "is not the same as hostile: "
                        "a newly approved tool alerts until the list is changed through review.",
         "techniques": techniques("T1567"),
         "severity": "medium",
@@ -764,7 +767,9 @@ def unsanctioned_cloud_service(events, params):
     window = params["window_seconds"]
     groups = defaultdict(list)
     for e in _filtered(events, params, CLOUD_TYPES):
-        service, user = _service(e), (e.get("user") or "").lower()
+        service = _service(e)
+        # ASCII letters only, the same fold as ignore_users. ÉRIN and érin stay two accounts.
+        user = _ascii_fold(e.get("user") or "")
         if not service or not user or covers("sanctioned_services", sanctioned, e):
             continue
         groups[(user, service)].append(e)
