@@ -1084,19 +1084,36 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
+    def _content_length(self):
+        """The single Content-Length as an int, or an error string.
+
+        A POST is framed only by one header whose value is one token of ASCII
+        digits. Two headers, a comma list, or any other token is not a length:
+        the first header must not be trusted and the body must not be read.
+        """
+        if self.headers.get("Transfer-Encoding") is not None:
+            return "Transfer-Encoding is not supported"
+        lengths = self.headers.get_all("Content-Length") or []
+        if not lengths:
+            return "Content-Length is required"
+        token = lengths[0].strip()
+        if len(lengths) != 1 or not token.isascii() or not token.isdigit():
+            return "invalid Content-Length"
+        return int(token)
+
     def _unframed_post_message(self):
-        """A POST body is framed only by Content-Length.
+        """A POST body is framed only by one integer Content-Length.
 
         Chunked encoding is not read. A missing length is not an empty body.
-        Either one leaves unread bytes that a keep-alive socket would take as
-        the next request.
+        A second Content-Length, or a value that is not one ASCII integer
+        token, is not a length either. Any of these leaves unread bytes that
+        a keep-alive socket would take as the next request.
         """
         if self.command != "POST":
             return None
-        if self.headers.get("Transfer-Encoding") is not None:
-            return "Transfer-Encoding is not supported"
-        if self.headers.get("Content-Length") is None:
-            return "Content-Length is required"
+        length = self._content_length()
+        if isinstance(length, str):
+            return length
         return None
 
     def _reject_unframed_post(self):
@@ -1113,12 +1130,8 @@ class Handler(BaseHTTPRequestHandler):
         if message is not None:
             self.close_connection = True
             raise ApiError(400, message)
-        length = self.headers.get("Content-Length")
-        try:
-            length = int(length)
-        except ValueError:
-            raise ApiError(400, "invalid Content-Length")
-        if length < 0 or length > self.app.config.max_upload_bytes:
+        length = self._content_length()
+        if length > self.app.config.max_upload_bytes:
             raise ApiError(413, f"request body exceeds {self.app.config.max_upload_bytes} bytes")
         return self.rfile.read(length)
 

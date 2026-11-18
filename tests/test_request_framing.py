@@ -1,6 +1,8 @@
-"""A POST with Transfer-Encoding, or with no Content-Length, is 400 and the connection closes.
+"""A POST is framed by exactly one integer Content-Length.
 
-The body is not an empty payload, and the leftover bytes are not the next request.
+Transfer-Encoding, a missing length, a second Content-Length, or a value that
+is not one token of ASCII digits is 400 and the connection closes. The body is
+not read, and the leftover bytes are not the next request.
 """
 
 import json
@@ -105,6 +107,39 @@ class RequestFramingTests(ServerTestCase):
         self.assertIn(b"Transfer-Encoding is not supported", raw)
         self.assertNotIn(b"method not allowed", raw)
 
+    def _assert_invalid_length(self, header_lines):
+        raw = exchange(self.port, (
+            b"POST /api/auth/login HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Content-Type: application/json\r\n"
+            + header_lines +
+            b"Connection: keep-alive\r\n"
+            b"\r\n" + self.login +
+            b"GET /api/health HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Connection: close\r\n"
+            b"\r\n"
+        ))
+        self.assertEqual(status_lines(raw), [b"HTTP/1.0 400 Bad Request"])
+        self.assertEqual(json.loads(raw.split(b"\r\n\r\n", 1)[1]),
+                         {"error": "invalid Content-Length"})
+        headers = header_map(raw)
+        self.assertEqual(headers["connection"], "close")
+        self.assertEqual(headers["cache-control"], "no-store")
+        self.assertNotIn(b"csrf_token", raw)
+        self.assertNotIn(b"200 OK", raw)
+
+    def test_two_content_lengths_are_400_and_the_body_is_not_read(self):
+        n = str(len(self.login)).encode()
+        self._assert_invalid_length(
+            b"Content-Length: " + n + b"\r\n"
+            b"Content-Length: " + n + b"\r\n"
+        )
+
+    def test_comma_and_non_integer_content_length_close_unread(self):
+        for value in (b"4, 2", b"abc", b"-1", b"+4", b"\xb2"):
+            self._assert_invalid_length(b"Content-Length: " + value + b"\r\n")
+
     def test_content_length_still_frames_the_body(self):
         raw = exchange(self.port, (
             b"POST /api/auth/login HTTP/1.1\r\n"
@@ -115,6 +150,15 @@ class RequestFramingTests(ServerTestCase):
         ))
         self.assertEqual(status_lines(raw), [b"HTTP/1.0 200 OK"])
         self.assertIn(b"csrf_token", raw)
+
+        padded = exchange(self.port, (
+            b"POST /api/auth/login HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: 0" + str(len(self.login)).encode() + b" \r\n"
+            b"\r\n" + self.login
+        ))
+        self.assertEqual(status_lines(padded), [b"HTTP/1.0 200 OK"])
 
         empty = exchange(self.port, (
             b"POST /api/auth/login HTTP/1.1\r\n"
@@ -131,4 +175,6 @@ class RequestFramingTests(ServerTestCase):
         text = API.read_text()
         self.assertIn("Transfer-Encoding is not supported", text)
         self.assertIn("Content-Length is required", text)
+        self.assertIn("invalid Content-Length", text)
+        self.assertIn("one token of ASCII digits", text)
         self.assertIn("the connection closes", text)
