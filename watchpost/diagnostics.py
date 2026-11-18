@@ -19,8 +19,9 @@ _REDACTIONS = [
                 r"(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;&]+)"), r"\1\2[REDACTED]"),
     # Watchpost ingest tokens
     (re.compile(r"\bwp_[A-Za-z0-9_-]{16,}"), "wp_[REDACTED]"),
-    # JSON "password": "..."
-    (re.compile(r'(?i)("(?:password|passwd|secret|token|api_key)"\s*:\s*)"[^"]*"'), r'\1"[REDACTED]"'),
+    # JSON "password": "...". An escaped quote is still inside the value.
+    (re.compile(r'(?i)("(?:password|passwd|secret|token|api_key)"\s*:\s*)'
+                r'"(?:\\.|[^"\\])*"'), r'\1"[REDACTED]"'),
 ]
 
 
@@ -31,6 +32,17 @@ def redact(text):
     for pattern, repl in _REDACTIONS:
         text = pattern.sub(repl, text)
     return text
+
+
+def redact_cut(text, limit):
+    """Redact the whole text, then cut it.
+
+    A quoted secret needs its closing quote. Cutting first leaves the secret
+    in the stored prefix when that quote sits past the limit.
+    """
+    if text is None:
+        return None
+    return redact(text)[:limit]
 
 
 class RedactingFilter(logging.Filter):

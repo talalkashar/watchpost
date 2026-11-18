@@ -225,8 +225,9 @@ def _term_sql(term, now):
         return f"{column} LIKE ? ESCAPE '\\'", [_escape_like(prefix) + "%"], f"{field} starts with {prefix}"
     if kind == "enum" and value not in ENUMS[field]:
         raise HuntError(f"{field} must be one of {', '.join(ENUMS[field])}")
-    # Same matching as the Events filter: user names compare case-insensitively.
-    collate = " COLLATE NOCASE" if field == "user" else ""
+    # Same matching as the Events filter: account and host names compare case-insensitively
+    # (ASCII, like SQLite NOCASE and the asset inventory's host lookup).
+    collate = " COLLATE NOCASE" if field in ("user", "host") else ""
     return f"{column} = ?{collate}", [value], f"{field} = {value}"
 
 
@@ -276,6 +277,10 @@ def run(conn, params, now=None):
     else:
         result = _timechart(conn, where, args, stage, _window(compiled, now))
     result.update(kind=stage["command"], terms=terms, query=text, filter=_parse_filter_text(text))
+    if stage["command"] == "timechart":
+        note = _timechart_note(text, result["span"], result["rows"])
+        if note is not None:
+            result["note"] = note
     return result
 
 
@@ -303,6 +308,17 @@ def _group_field(name):
         raise HuntError("bytes is compared with >=, >, <=, < or =, not grouped; "
                         f"group by one of {', '.join(GROUPABLE)}")
     return field, column
+
+
+def _group_expr(field, column):
+    """SQL for one grouped or distinct value. The column name comes from FIELDS.
+
+    Accounts fold ASCII case, matching `user:` (COLLATE NOCASE) and saved-search promotion.
+    The label is the lowercase name, so Alice and alice are one group. Other fields stay exact.
+    """
+    if field == "user":
+        return f"lower({column})"
+    return column
 
 
 def _by_fields(tokens, limit):
@@ -336,14 +352,14 @@ def parse_stage(text):
             if token == ",":
                 continue
             if token.lower() == "count":
-                aggregates.append(("count", None))
+                aggregates.append(("count", None, None))
                 continue
             match = _AGGREGATE.fullmatch(token)
             if not match:
                 raise HuntError(f"unknown aggregate {token!r}; stats supports count and dc(<field>)"
                                 " (also written count(distinct <field>))")
             field, column = _group_field(match.group(1) or match.group(2))
-            aggregates.append((f"dc({field})", column))
+            aggregates.append((f"dc({field})", field, column))
         if not aggregates:
             raise HuntError("stats needs an aggregate: count or dc(<field>), e.g. | stats count by src_ip")
         if len(aggregates) > MAX_AGGREGATES or len(set(aggregates)) != len(aggregates):
@@ -384,30 +400,43 @@ def _where(where, extra=()):
     return (" WHERE " + " AND ".join(clause)) if clause else ""
 
 
+def _aggregate_sql(field, column):
+    if column is None:
+        return "COUNT(*)"
+    return f"COUNT(DISTINCT {_group_expr(field, column)})"
+
+
 def _stats(conn, where, args, stage):
     by = stage["by"]
-    columns = [c for _, c in by]
-    selects = columns + ["COUNT(*)" if column is None else f"COUNT(DISTINCT {column})"
-                         for _, column in stage["aggregates"]]
-    sql = f"SELECT {', '.join(selects)} FROM events{_where(where, [f'{c} IS NOT NULL' for c in columns])}"
+    exprs = [_group_expr(f, c) for f, c in by]
+    selects = exprs + [_aggregate_sql(field, column) for _, field, column in stage["aggregates"]]
+    # NULL stays on the stored column. lower(NULL) is NULL, and the column can use an index.
+    sql = f"SELECT {', '.join(selects)} FROM events{_where(where, [f'{c} IS NOT NULL' for _, c in by])}"
     if by:
         order = [f"{len(by) + 1} DESC"] + [str(n + 1) for n in range(len(by))]
-        sql += f" GROUP BY {', '.join(columns)} ORDER BY {', '.join(order)} LIMIT ?"
+        sql += f" GROUP BY {', '.join(exprs)} ORDER BY {', '.join(order)} LIMIT ?"
         rows = [list(r) for r in conn.execute(sql, args + [MAX_GROUPS + 1])]
     else:
         rows = [list(conn.execute(sql, args).fetchone())]
-    return {"columns": [f for f, _ in by] + [name for name, _ in stage["aggregates"]],
+    return {"columns": [f for f, _ in by] + [name for name, _, _ in stage["aggregates"]],
             "rows": rows[:MAX_GROUPS], "truncated": len(rows) > MAX_GROUPS}
 
 
 def _top(conn, where, args, stage):
+    """The N most common values. Percents are shares of every matched event, including ones with no value.
+
+    `total` is that match count. `missing` is how many of them have no value in the grouped field, which
+    is why the shown percents can sum under 100 even when `truncated` is false. The column is from FIELDS.
+    """
     (field, column), = stage["by"]
-    total = conn.execute(f"SELECT COUNT(*) FROM events{_where(where)}", args).fetchone()[0]
-    rows = conn.execute(f"SELECT {column}, COUNT(*) FROM events{_where(where, [f'{column} IS NOT NULL'])}"
-                        f" GROUP BY {column} ORDER BY 2 DESC, 1 LIMIT ?", args + [stage["limit"] + 1]).fetchall()
+    expr = _group_expr(field, column)
+    total, missing = conn.execute(
+        f"SELECT COUNT(*), COALESCE(SUM({column} IS NULL), 0) FROM events{_where(where)}", args).fetchone()
+    rows = conn.execute(f"SELECT {expr}, COUNT(*) FROM events{_where(where, [f'{column} IS NOT NULL'])}"
+                        f" GROUP BY {expr} ORDER BY 2 DESC, 1 LIMIT ?", args + [stage["limit"] + 1]).fetchall()
     return {"columns": [field, "count", "percent"],
             "rows": [[value, count, round(100 * count / total, 2)] for value, count in rows[:stage["limit"]]],
-            "truncated": len(rows) > stage["limit"]}
+            "truncated": len(rows) > stage["limit"], "total": total, "missing": missing}
 
 
 def _window(compiled, now):
@@ -445,12 +474,13 @@ def _timechart(conn, where, args, stage, window):
                         f"{MAX_BUCKETS} are drawn; narrow the time range (last:, since:, until:) or use a wider span")
     series = []
     if by:
-        (_, column), = by
+        (field, column), = by
+        expr = _group_expr(field, column)
         series = [r[0] for r in conn.execute(
-            f"SELECT {column} FROM events{_where(where, [f'{column} IS NOT NULL'])}"
-            f" GROUP BY {column} ORDER BY COUNT(*) DESC, 1 LIMIT ?", args + [MAX_SERIES])]
+            f"SELECT {expr} FROM events{_where(where, [f'{column} IS NOT NULL'])}"
+            f" GROUP BY {expr} ORDER BY COUNT(*) DESC, 1 LIMIT ?", args + [MAX_SERIES])]
         marks = ", ".join("?" for _ in series) or "NULL"
-        sql = (f"SELECT {_BUCKET} AS bucket, CASE WHEN {column} IN ({marks}) THEN {column} END AS series, COUNT(*)"
+        sql = (f"SELECT {_BUCKET} AS bucket, CASE WHEN {expr} IN ({marks}) THEN {expr} END AS series, COUNT(*)"
                f" FROM events{_where(where)} GROUP BY bucket, series LIMIT ?")
         params = [span, span] + series + args + [MAX_BUCKETS * (MAX_SERIES + 1)]
     else:
@@ -469,6 +499,21 @@ def _timechart(conn, where, args, stage, window):
     rows = [[iso(datetime.fromtimestamp(t, timezone.utc))] + [counts.get((t, k), 0) for k in keys]
             for t in range(first, last + 1, span)]
     return {"columns": columns, "rows": rows, "truncated": False, "span": stage["span"]}
+
+
+def _timechart_note(query, span, rows):
+    """Sentence when a timechart has no rows or every bucket count is 0. A hit returns None.
+
+    The rows stay as they are (an all-zero window is still the filled buckets). The note names
+    the query and the span, the same sentence the hunt page shows instead of an empty chart.
+    """
+    for row in rows:
+        if any(row[1:]):
+            return None
+    text = query.strip() if isinstance(query, str) else ""
+    if span not in SPANS or not text:
+        return "No matching events."
+    return f"No events match {text} in {span} buckets."
 
 
 # --- Saved searches ----------------------------------------------------------------------

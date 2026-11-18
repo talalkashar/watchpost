@@ -3,8 +3,8 @@ import unittest
 from datetime import datetime, timezone
 
 from watchpost.diagnostics import redact
-from watchpost.normalize import (EventError, normalize_authlog_line, normalize_record, normalize_weblog_line,
-                                 parse_payload)
+from watchpost.normalize import (EventError, MAX_LEN, normalize_authlog_line, normalize_record,
+                                 normalize_weblog_line, parse_payload)
 
 NOW = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
 
@@ -250,6 +250,54 @@ class RedactionTests(unittest.TestCase):
                 self.assertIn("REDACTED", out)
                 self.assertNotIn("abc123", out)
                 self.assertNotIn("abcdefghijklmnop", out)
+
+    def test_json_escaped_quote_does_not_leave_the_rest_of_the_secret(self):
+        # The value is a\"supersecret. Stopping at the first quote would keep supersecret.
+        text = '{"password": "a\\"supersecret", "user": "alice"}'
+        self.assertEqual(redact(text), '{"password": "[REDACTED]", "user": "alice"}')
+        self.assertEqual(redact('{"password" : "a\\"b\\"c"}'), '{"password" : "[REDACTED]"}')
+        self.assertEqual(redact('{"password": ""}'), '{"password": "[REDACTED]"}')
+        for key in ("passwd", "secret", "token", "api_key", "Password"):
+            with self.subTest(key=key):
+                raw = '{"%s": "a\\"supersecret"}' % key
+                self.assertNotIn("supersecret", redact(raw))
+                self.assertIn('"[REDACTED]"', redact(raw))
+
+    def test_escaped_json_secret_is_redacted_in_the_stored_message(self):
+        secret = '{"password": "a\\"supersecret"}'
+        event = normalize_record({"ts": "2026-09-15T10:00:00Z", "message": secret}, "api", NOW)
+        self.assertEqual(event["message"], '{"password": "[REDACTED]"}')
+        self.assertNotIn("supersecret", event["message"])
+
+    def test_quoted_secret_is_redacted_before_the_message_and_raw_cuts(self):
+        # The JSON value pattern needs the closing quote. Cutting first keeps the secret.
+        secret = "SUPERSECRET"
+        value = 'a\\"' + secret + ("p" * 40)
+        opener = '{"password": "'
+        pad = MAX_LEN["message"] - len(opener) - len('a\\"') - len(secret)
+        message = ("n" * pad) + opener + value + '"}'
+        cut = message[:MAX_LEN["message"]]
+        self.assertIn(secret, cut)
+        self.assertIn(secret, redact(cut))
+        self.assertNotIn(secret, redact(message))
+        event = normalize_record({"ts": "2026-09-15T10:00:00Z", "message": message}, "api", NOW)
+        self.assertNotIn(secret, event["message"])
+        self.assertLessEqual(len(event["message"]), MAX_LEN["message"])
+        self.assertIn("[REDACTED]", event["message"])
+
+        # A top-level password whose closer sits past the raw limit.
+        raw_value = 'a"' + secret + ("p" * 80)
+        record = {"ts": "2026-09-15T10:00:00Z", "note": "n" * 3900, "password": raw_value}
+        raw = json.dumps(record, default=str, sort_keys=True)
+        raw_cut = raw[:MAX_LEN["raw"]]
+        self.assertGreater(len(raw), MAX_LEN["raw"])
+        self.assertIn(secret, raw_cut)
+        self.assertIn(secret, redact(raw_cut))
+        self.assertNotIn(secret, redact(raw))
+        event = normalize_record(record, "api", NOW)
+        self.assertNotIn(secret, event["raw"])
+        self.assertLessEqual(len(event["raw"]), MAX_LEN["raw"])
+        self.assertIn("[REDACTED]", event["raw"])
 
 
 if __name__ == "__main__":

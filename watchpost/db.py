@@ -40,11 +40,13 @@ CREATE INDEX IF NOT EXISTS idx_events_user ON events(user, ts);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type, ts);
 CREATE INDEX IF NOT EXISTS idx_events_batch ON events(batch_id);
 -- 6.0: indexes for the hot read paths, chosen from EXPLAIN QUERY PLAN on a 100k-event load test
--- (scripts/loadtest.py). User filters compare case-insensitively, which the BINARY idx_events_user cannot
--- serve; the NOCASE one also serves `user LIKE 'prefix%'`. dest_ip lets `(src_ip = ? OR dest_ip = ?)` use
--- two index lookups instead of a scan. ingested_at and synthetic back the dashboard and metrics counts.
+-- (scripts/loadtest.py). User and host filters compare case-insensitively, which the BINARY indexes
+-- cannot serve; the NOCASE ones also serve `user LIKE 'prefix%'` and `host LIKE 'prefix%'`. dest_ip lets
+-- `(src_ip = ? OR dest_ip = ?)` use two index lookups instead of a scan. ingested_at and synthetic back
+-- the dashboard and metrics counts. idx_events_host stays for exact (source, host) reads.
 CREATE INDEX IF NOT EXISTS idx_events_user_nocase ON events(user COLLATE NOCASE, ts);
 CREATE INDEX IF NOT EXISTS idx_events_host ON events(host, ts);
+CREATE INDEX IF NOT EXISTS idx_events_host_nocase ON events(host COLLATE NOCASE, ts);
 CREATE INDEX IF NOT EXISTS idx_events_dest_ip ON events(dest_ip, ts);
 CREATE INDEX IF NOT EXISTS idx_events_severity ON events(severity, ts);
 CREATE INDEX IF NOT EXISTS idx_events_ingested ON events(ingested_at);

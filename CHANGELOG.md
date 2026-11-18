@@ -6,6 +6,14 @@ All bundled data is synthetic. PR numbers refer to https://github.com/talalkasha
 
 ### Fixed
 
+- Alert related timeline matches `user` case-insensitively (ASCII, like event search). Evidence stored as `Alice` includes events stored as `alice`. Source IP matches stay exact.
+
+- Event search and hunt match `host` case-insensitively (ASCII, like the asset inventory). `WEB01` and `web01` are one host in `host=` and `host:`. Grouping by host stays exact. The lookup uses `idx_events_host_nocase`.
+
+- Hunt `timechart` returns `note` when there are no rows or every bucket count is 0, naming the query and the span. The rows stay as they are. A chart with a count above 0 omits `note`.
+
+- Hunt `stats`, `top`, and `timechart` group `user` case-insensitively, and `dc(user)` counts those spellings once. The group label is the lowercase account. Other fields still compare exactly.
+
 - Alert and incident Markdown and PDF reports list each ATT&CK technique with its evidence level. Mapped means a rule names the technique and is not proof; only validated is a labeled scenario.
 
 - Incident case Markdown lists each ATT&CK technique with its evidence level. Mapped means a rule names the technique and is not proof; only validated is a labeled scenario.

@@ -21,6 +21,8 @@ from .db import parse_iso
 from .queries import EVENT_FIELDS, QueryError, _int
 
 KINDS = ("user", "src_ip", "host")
+# SQLite COLLATE NOCASE folds these letters only. Host keys use the same fold.
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 SEVERITY_WEIGHTS = {"critical": 40, "high": 20, "medium": 10, "low": 5, "info": 1}
 HALF_LIFE_HOURS = 24
 EXCLUDED_DISPOSITIONS = ("false_positive", "benign")
@@ -58,6 +60,26 @@ def _utc_day(ts):
     return date.fromisoformat(ts[:10])
 
 
+def _entity_value(kind, value):
+    """The value an entity is keyed and returned as.
+
+    Accounts use str.lower, which is what the list already did. Hosts fold ASCII
+    letters only, the same fold as COLLATE NOCASE and event search, so WEB01 and
+    web01 are one host and Érin-host stays apart from érin-host. An IP stays as stored.
+    """
+    if kind == "user":
+        return value.lower()
+    if kind == "host":
+        return value.translate(_ASCII_FOLD)
+    return value
+
+
+def _entity_match(kind):
+    """SQL comparing one bound value to e.<kind>. User and host ignore ASCII case."""
+    collate = " COLLATE NOCASE" if kind in ("user", "host") else ""
+    return f"e.{kind} = ?{collate}"
+
+
 def _alerts_by_day(conn, kind, value):
     """Count this entity's alerts on each UTC day of its stored events.
 
@@ -67,7 +89,7 @@ def _alerts_by_day(conn, kind, value):
     A span longer than `_DAY_BARS` keeps the newest days. `omitted` is how many alerts
     sit on a day older than that window.
     """
-    match = f"e.{kind} = ?" + (" COLLATE NOCASE" if kind == "user" else "")
+    match = _entity_match(kind)
     span = conn.execute(
         f"SELECT MIN(e.ts) AS first_seen, MAX(e.ts) AS last_seen FROM events e WHERE {match}", (value,)).fetchone()
     if not span["first_seen"]:
@@ -93,14 +115,16 @@ def _alerts_by_day(conn, kind, value):
 
 
 def _entity_alerts(conn, where="", args=()):
-    """{(kind, value): {alert_id, ...}} from evidence events. Accounts are lowercased."""
+    """{(kind, value): {alert_id, ...}} from evidence events.
+
+    Accounts are lowercased. Hosts fold ASCII case, so WEB01 and web01 share one score.
+    """
     found = {}
     for row in conn.execute("SELECT DISTINCT ae.alert_id, e.user, e.src_ip, e.host FROM alert_events ae"
                             f" JOIN events e ON e.id = ae.event_id{where}", args):
         for kind in KINDS:
             if row[kind]:
-                value = row[kind].lower() if kind == "user" else row[kind]
-                found.setdefault((kind, value), set()).add(row["alert_id"])
+                found.setdefault((kind, _entity_value(kind, row[kind])), set()).add(row["alert_id"])
     return found
 
 
@@ -138,9 +162,8 @@ def get_entity(conn, kind, value):
     """
     if kind not in KINDS:
         raise QueryError("entity kind not found", 404)
-    match = f"e.{kind} = ?" + (" COLLATE NOCASE" if kind == "user" else "")
-    if kind == "user":
-        value = value.lower()
+    match = _entity_match(kind)
+    value = _entity_value(kind, value)
     anchor = _anchor(conn)
     alert_ids = sorted(_entity_alerts(conn, f" WHERE {match}", (value,)).get((kind, value), ()))
     marks = ",".join("?" for _ in alert_ids)

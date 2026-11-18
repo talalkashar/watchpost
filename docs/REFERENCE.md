@@ -407,7 +407,7 @@ Like a scheduled saved search with an alert condition: a hunt that finds somethi
 
 The rule id is `search_<name as lowercase letters and underscores>`. Its `params` are the compiled definition `{title, query, terms, group_by, threshold, window_seconds}`; `validate_params` re-parses the query and refuses stored terms that disagree with it.
 
-**Matching.** The filter runs in Python over the event dicts the engine already passes (`engine.RULE_EVENT_FIELDS`), with the hunt's SQL semantics: the same fields and value checks, a trailing `*` on an unquoted value is a prefix match, message terms mean "contains", and `NOT` keeps events missing the field. Case follows SQLite, which folds ASCII letters only: `user:` equality, every prefix match and message contains ignore ASCII case; other equality (host, source, IPs, event_type) is exact. `tests/test_search_rules.py` runs some 45 queries through both this matcher and `hunt.compile_query` in SQL over a varied event set (mixed case, non-ASCII, `%`/`_` in values, missing fields) and requires the same events, so the two cannot drift.
+**Matching.** The filter runs in Python over the event dicts the engine already passes (`engine.RULE_EVENT_FIELDS`), with the hunt's SQL semantics: the same fields and value checks, a trailing `*` on an unquoted value is a prefix match, message terms mean "contains", and `NOT` keeps events missing the field. Case follows SQLite, which folds ASCII letters only: `user:` and `host:` equality, every prefix match and message contains ignore ASCII case; other equality (source, IPs, event_type) is exact. Grouping by `host` stays exact, so `WEB01` and `web01` are still two groups. `tests/test_search_rules.py` runs some 45 queries through both this matcher and `hunt.compile_query` in SQL over a varied event set (mixed case, non-ASCII, `%`/`_` in values, missing fields) and requires the same events, so the two cannot drift.
 
 **Workflow and the gate.**
 
@@ -523,7 +523,7 @@ Send `{"value": 0}` the same way to turn it off. A viewer with masking on gets `
 
 | Form | Example | Meaning |
 |---|---|---|
-| `field:value` | `user:alice` | Exact match (user names ignore case, as in event search) |
+| `field:value` | `user:alice` | Exact match (user and host names ignore ASCII case, as in event search and the asset inventory) |
 | `field:prefix*` | `host:web*` | Starts with; unquoted values only |
 | `field:"quoted"` | `user:"svc backup"` | Literal value; spaces and `*` are not special, `\"` escapes a quote |
 | word or `"phrase"` | `"invalid password"` | Message contains (`%` and `_` are literal) |
@@ -547,19 +547,19 @@ One stage may follow the filter, after a `|`. The filter picks the events and th
 | Stage | Example | Result |
 |---|---|---|
 | `stats <agg>[, <agg>] [by <f1>[, <f2>]]` | `event_type:auth_failure \| stats count, dc(user) by src_ip` | One row per group, largest first (ties by value). Aggregates: `count`, `dc(<field>)` (also written `count(distinct <field>)`), at most 3. Without `by`, one row for all matched events. |
-| `top [N] <field>` | `event_type:auth_failure \| top 10 src_ip` | The N most common values (1 to 100, default 10) with count and percent of all matched events. |
+| `top [N] <field>` | `event_type:auth_failure \| top 10 src_ip` | The N most common values (1 to 100, default 10) with count and percent of all matched events. The response also includes `total` (matched events) and `missing` (how many of those have no value in the field). |
 | `timechart span=<5m\|15m\|1h\|6h\|1d> [count] [by <field>]` | `host:web* last:24h \| timechart span=1h by user` | Events per time bucket. Buckets start on UTC boundaries (midnight for `1d`, 00/06/12/18 for `6h`) and are computed in SQL from the stored `ts`. Empty buckets are 0. With `by`, the 5 largest series are kept and everything else (including events without the field) is summed into `other`. |
 
 Caps and rules:
 
 - `stats` returns at most 1000 groups, and `top` at most N values. The response says `"truncated": true` when there were more.
-- Groups compare values exactly, so `by user` lists `Alice` and `alice` separately even though the `user:` filter ignores case. A pivot on either one shows both.
+- Groups compare values exactly, except `user`. Accounts fold ASCII case with SQLite `lower`, the same way the `user:` filter and a promoted saved search do, and the group label is the lowercase name. `Alice` and `alice` are one group in `stats`, `top`, and `timechart`, and `dc(user)` counts them once. Other fields stay exact, so `Web01` and `web01` stay two groups. A pivot on the lowercase account matches every spelling.
 - `timechart` covers the query's time window (`last:`, `since:`, `until:`), or the first to last matching event when there is none, and draws at most 500 buckets. A larger range is refused with the bucket count and a hint to narrow the time range or use a wider span, rather than silently trimmed. `last:24h` works with every span, `last:7d` needs `1h` or wider.
-- Group-by and `dc()` fields come from the same whitelist as filter terms: any of them except `message` (free text), `ip` (use `src_ip` or `dest_ip`), `bytes` (a numeric comparison, not a group) and the time filters, each refused with the reason. Events with no value in a `by` field are left out of `stats` and `top` groups, but still count toward `top`'s percent.
+- Group-by and `dc()` fields come from the same whitelist as filter terms: any of them except `message` (free text), `ip` (use `src_ip` or `dest_ip`), `bytes` (a numeric comparison, not a group) and the time filters, each refused with the reason. Events with no value in a `by` field are left out of `stats` and `top` groups. They still count toward `top`'s percent: each percent is that value's share of `total`, so the shown percents can sum under 100. `missing` is how many matched events lack the field. `truncated` means more values exist than N, which also leaves the shown percents under 100.
 - Only one stage. A second `|`, an unknown command, an unknown aggregate, or a field name that is not on the whitelist is a 400 that lists what is supported. Field names in the stage become SQL only through the whitelist, and values stay bound parameters.
 - A `|` starts the stage only at the start of a word. Inside a quoted value (`"a | b"`) or an unquoted word (`host:a|b`) it is part of the value.
 
-The response is `{"kind": "stats"|"top"|"timechart", "columns": [...], "rows": [[...], ...], "truncated": bool, "terms": [...], "query": "...", "filter": "..."}`, where `filter` is the query text before the `|`. A timechart also returns `span` (`5m`, `15m`, `1h`, `6h`, or `1d`). A query without a stage keeps the event page shape. In the UI, `stats` and `top` render as a table where each value is a link that adds `field:value` to the filter and shows the matching events. `timechart` renders as an inline SVG chart (bars, or one line per series with `by`) with the numbers in a data table below it. When there are no rows, or every bucket is 0, the page names the query and the span instead of drawing that empty chart. Saved searches can hold a stage, and it is checked on save. The viewer can run aggregations but still cannot save.
+The response is `{"kind": "stats"|"top"|"timechart", "columns": [...], "rows": [[...], ...], "truncated": bool, "terms": [...], "query": "...", "filter": "..."}`, where `filter` is the query text before the `|`. A `top` result also returns `total` (matched events) and `missing` (matched events with no value in the grouped field). Each percent is that value's share of `total`. A timechart also returns `span` (`5m`, `15m`, `1h`, `6h`, or `1d`). When that chart has no rows, or every bucket count is 0, it also returns `note`: `No events match <query> in <span> buckets.` The rows stay as they are, including an all-zero window. A chart with any count above 0 omits `note`. A query without a stage keeps the event page shape. In the UI, `stats` and `top` render as a table where each value is a link that adds `field:value` to the filter and shows the matching events. `timechart` renders as an inline SVG chart (bars, or one line per series with `by`) with the numbers in a data table below it. When there are no rows, or every bucket is 0, the page names the query and the span instead of drawing that empty chart. Saved searches can hold a stage, and it is checked on save. The viewer can run aggregations but still cannot save.
 
 Each term compiles to a fixed SQL fragment chosen from a field whitelist, with the value as a bound parameter, so a value like `user:"x' OR 1=1 --"` matches that literal user name and nothing else. Any role can run a hunt and read saved searches. Analysts and admins can save a search (the query is checked on save) and delete their own; admins can delete any. Each save and delete is written to the audit log.
 
@@ -697,7 +697,8 @@ What these numbers do and do not say:
   need: a week of the transfer and cloud events of the accounts involved. That is most of the per-batch
   detection time, and it grows with event density.
 - **Text search scans.** `q=` and hunt message terms are `LIKE '%text%'`, which no index serves, so they cost
-  one pass over the table (about 22 ms per 100,000 events here). Prefix searches on `host` scan too.
+  one pass over the table (about 22 ms per 100,000 events here). Host equality and `host` prefix now use
+  `idx_events_host_nocase`; those prefix numbers above were measured before that index.
 - **Very busy accounts cost more.** The user filters and entity page use an index, but the generator's busiest
   account has about a quarter of all events, so its entity page and a hunt that pairs it with a rare event type
   read tens of thousands of rows.

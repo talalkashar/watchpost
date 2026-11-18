@@ -36,21 +36,55 @@ class TimechartSpanTests(unittest.TestCase):
         return hunt.run(self.conn, {"q": text}, now=NOW)
 
     def test_a_miss_with_no_window_names_the_span_and_returns_no_rows(self):
-        data = self.run_q("user:nobody | timechart span=1h")
+        query = "user:nobody | timechart span=1h"
+        data = self.run_q(query)
         self.assertEqual(data["rows"], [])
         self.assertEqual(data["span"], "1h")
-        self.assertEqual(data["query"], "user:nobody | timechart span=1h")
+        self.assertEqual(data["query"], query)
+        self.assertEqual(data["note"], f"No events match {query} in 1h buckets.")
 
     def test_a_window_with_no_events_is_all_zero_buckets(self):
-        data = self.run_q("user:nobody last:6h | timechart span=15m")
+        query = "user:nobody last:6h | timechart span=15m"
+        data = self.run_q(query)
         self.assertEqual(data["span"], "15m")
         self.assertGreater(len(data["rows"]), 0)
         self.assertTrue(all(count == 0 for row in data["rows"] for count in row[1:]))
+        self.assertEqual(data["note"], f"No events match {query} in 15m buckets.")
 
-    def test_a_hit_keeps_its_span(self):
+    def test_a_by_chart_with_no_events_still_names_the_query(self):
+        query = "user:nobody last:1h | timechart span=15m by host"
+        data = self.run_q(query)
+        self.assertGreater(len(data["rows"]), 0)
+        self.assertTrue(all(not row[1:] or all(count == 0 for count in row[1:]) for row in data["rows"]))
+        self.assertEqual(data["note"], f"No events match {query} in 15m buckets.")
+
+    def test_a_hit_keeps_its_span_and_omits_the_note(self):
         data = self.run_q("event_type:auth_failure | timechart span=1d count")
         self.assertEqual(data["span"], "1d")
         self.assertTrue(any(count > 0 for row in data["rows"] for count in row[1:]))
+        self.assertNotIn("note", data)
+
+    def test_a_zero_bucket_beside_a_hit_omits_the_note(self):
+        data = self.run_q("event_type:auth_failure | timechart span=1h count")
+        self.assertIn(0, [row[1] for row in data["rows"]])
+        self.assertTrue(any(row[1] > 0 for row in data["rows"]))
+        self.assertNotIn("note", data)
+        series = self.run_q("event_type:auth_failure | timechart span=1h by user")
+        self.assertTrue(any(count > 0 for row in series["rows"] for count in row[1:]))
+        self.assertNotIn("note", series)
+
+    def test_stats_and_top_do_not_add_a_note(self):
+        for query in ("user:nobody | stats count", "user:nobody | top user"):
+            with self.subTest(query=query):
+                self.assertNotIn("note", self.run_q(query))
+
+    def test_the_docs_name_the_empty_timechart_note(self):
+        root = Path(__file__).resolve().parent.parent
+        reference = (root / "docs" / "REFERENCE.md").read_text()
+        api = (root / "docs" / "API.md").read_text()
+        for text in (reference, api):
+            self.assertIn("No events match <query> in <span> buckets.", text)
+            self.assertIn("every bucket count", text)
 
 
 class TimechartEmptyNoteTests(unittest.TestCase):

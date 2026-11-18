@@ -9,6 +9,8 @@ from .normalize import EVENT_TYPES, SEVERITIES, EventError, parse_timestamp
 
 ALERT_STATUSES = ("open", "investigating", "resolved")
 DISPOSITIONS = ("true_positive", "false_positive", "benign")
+# A longer needle used to be sliced, so it matched messages that lacked the rest.
+MAX_SEARCH_Q = 200
 EVENT_FIELDS = "id, ts, ingested_at, source, host, event_type, outcome, severity, user, src_ip, dest_ip, dest_port, " \
                "bytes, message, synthetic, batch_id"
 
@@ -65,14 +67,17 @@ def search_events(conn, params):
                 where.append(f"{column} LIKE ? ESCAPE '\\'")
                 args.append(_escape_like(params[field][:-1]) + "%")
             else:
-                where.append(f"{column} = ? COLLATE NOCASE" if field == "user" else f"{column} = ?")
+                where.append(f"{column} = ? COLLATE NOCASE" if field in ("user", "host") else f"{column} = ?")
                 args.append(params[field])
     if params.get("ip"):
         where.append("(src_ip = ? OR dest_ip = ?)")
         args += [params["ip"], params["ip"]]
     if params.get("q"):
+        needle = params["q"]
+        if not isinstance(needle, str) or len(needle) > MAX_SEARCH_Q:
+            raise QueryError(f"q must be at most {MAX_SEARCH_Q} characters")
         where.append("message LIKE ? ESCAPE '\\'")
-        args.append("%" + _escape_like(params["q"][:200]) + "%")
+        args.append("%" + _escape_like(needle) + "%")
     if params.get("synthetic") in ("0", "1"):
         where.append("synthetic = ?")
         args.append(int(params["synthetic"]))
@@ -169,7 +174,9 @@ def get_alert(conn, alert_id):
 def related_timeline(conn, alert, pad_minutes=30):
     """All events touching the alert's IPs or users, from 30 minutes before to 30 after.
 
-    Shows context the rule did not use: e.g. what the attacking IP did after a successful login.
+    User names match with COLLATE NOCASE (ASCII only), the same way event search does.
+    Source IPs stay an exact match. Shows context the rule did not use: e.g. what the
+    attacking IP did after a successful login.
     """
     ips = {e["src_ip"] for e in alert["evidence"] if e["src_ip"]}
     users = {e["user"] for e in alert["evidence"] if e["user"]}
@@ -182,7 +189,7 @@ def related_timeline(conn, alert, pad_minutes=30):
         clauses.append(f"src_ip IN ({','.join('?' for _ in ips)})")
         args += sorted(ips)
     if users:
-        clauses.append(f"user IN ({','.join('?' for _ in users)})")
+        clauses.append(f"user COLLATE NOCASE IN ({','.join('?' for _ in users)})")
         args += sorted(users)
     evidence_ids = {e["id"] for e in alert["evidence"]}
     rows = conn.execute(

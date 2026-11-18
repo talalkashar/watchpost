@@ -74,8 +74,11 @@ def list_incidents(conn, params):
                         f" last_seen DESC LIMIT ?", args + [limit])
     items = [_incident(r) for r in rows]
     tops = top_techniques(conn, [item["id"] for item in items])
+    # Same sentence as the incident detail. The window is the correlator default, not per row.
+    sentence = correlate.rule_summary()
     for item in items:
         item["top_technique"] = tops.get(item["id"])
+        item["correlation_rule"] = sentence
     return items
 
 
