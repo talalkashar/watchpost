@@ -210,6 +210,44 @@ class SocMetricsTests(ServerTestCase):
         self.assertIn("time_to_detect", {o["metric"] for o in m["omitted_metrics"]})
         self.assertTrue(all(o["reason"] for o in m["omitted_metrics"]))
 
+    def test_window_scope_names_hours_and_all_stored_events(self):
+        now = utcnow()
+        recent, old = iso(now), iso(now - timedelta(hours=48))
+        with sqlite3.connect(self.db_path) as db:
+            db.executemany(
+                "INSERT INTO events(ts, ingested_at, source, event_type, severity, user, src_ip, message, synthetic)"
+                " VALUES (?,?,?,?,?,?,?,?,1)",
+                [(recent, recent, "test", "auth_failure", "low", "erin", "198.51.100.10", "synthetic labeled"),
+                 (old, old, "test", "auth_failure", "low", "erin", "198.51.100.11", "synthetic labeled"),
+                 (old, old, "test", "auth_success", "info", "sam", "198.51.100.12", "synthetic labeled")])
+        viewer = self.client("viewer")
+        narrow = viewer.get("/api/metrics?hours=1")[1]
+        wide = viewer.get("/api/metrics?hours=72")[1]
+        self.assertEqual(narrow["window_hours"], 1)
+        self.assertEqual(narrow["events_ingested_window"], 1)
+        self.assertEqual(wide["events_ingested_window"], 3)
+        # The three breakdowns ignore hours: the 48-hour-old failure stays in both reads.
+        self.assertEqual(narrow["top_failure_ips"], wide["top_failure_ips"])
+        self.assertEqual({row["src_ip"]: row["count"] for row in narrow["top_failure_ips"]},
+                         {"198.51.100.10": 1, "198.51.100.11": 1})
+        self.assertEqual(narrow["top_failure_users"], [{"user": "erin", "count": 2}])
+        self.assertEqual(narrow["events_by_type"], wide["events_by_type"])
+        self.assertEqual({row["event_type"]: row["count"] for row in narrow["events_by_type"]},
+                         {"auth_failure": 2, "auth_success": 1})
+        scope = narrow["window_scope"]
+        self.assertEqual(scope, wide["window_scope"])
+        self.assertEqual(scope["honors_hours"], ["events_ingested_window"])
+        for name in ("top_failure_ips", "top_failure_users", "events_by_type", "events_total", "synthetic_events"):
+            self.assertIn(name, scope["all_stored_events"])
+            self.assertNotIn(name, scope["honors_hours"])
+        self.assertEqual(scope["newest_event_24h"], ["activity_last_24h_of_data"])
+        self.assertIn("count every stored event", scope["note"])
+        self.assertIn("top_failure_ips", scope["note"])
+        api = (Path(__file__).resolve().parent.parent / "docs" / "API.md").read_text()
+        self.assertIn("window_scope.all_stored_events", api)
+        self.assertIn("top_failure_ips`, `top_failure_users`, and `events_by_type` count every stored event", api)
+        self.assertIn("hours` filters only `events_ingested_window`", api)
+
 
 class EntityUiTests(unittest.TestCase):
     """No JS runtime in CI: check that the entity links are built with encoded values."""

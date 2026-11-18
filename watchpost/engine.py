@@ -361,7 +361,7 @@ def _candidate_alerts(conn):
         alert = alerts[row["alert_id"]]
         for kind in correlate_mod.ENTITY_TYPES:
             if row[kind]:
-                value = row[kind].lower() if kind == "user" else row[kind]
+                value = row[kind].lower() if kind in correlate_mod.LOWER_ENTITY_TYPES else row[kind]
                 alert["entities"][kind].add(value)
                 alert["sightings"].add((kind, value, row["ts"]))
     tactics = {r["id"]: [t["tactic"] for t in r["techniques"]] for r in load_rules(conn, enabled_only=False)}

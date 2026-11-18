@@ -128,14 +128,14 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 | `severity` | Comma list, or a single level with `severity_mode=min` for "at least" |
 | `q` | Substring of `message` (`%` and `_` are literal), at most 200 characters. A longer value is 400 naming that maximum |
 | `synthetic` | `0` or `1` |
-| `limit` (1–1000, default 100), `offset` | Paging; response includes `total` |
-| `since_id` | Only events stored after that event id, newest stored first (ignores event time). Used by the dashboard's polling fallback |
+| `limit` (1–1000, default 100), `offset` (0–10000, default 0) | Paging; response includes `total`. An offset above 10000 is 400 naming that maximum |
+| `since_id` | Only events stored after that event id, newest stored first (ignores event time). This is how to walk newer events; it does not skip rows with `offset`. Used by the dashboard's polling fallback |
 
 | Endpoint | Role | Notes |
 |---|---|---|
 | `GET /api/events/{id}` | viewer | Includes the redacted `raw` record and linked alerts |
 | `GET /api/events/{id}/ecs` | viewer | The event as an ECS-shaped document (field mapping for export; see the README, "ECS field mapping") |
-| `GET /api/hunt?q=&limit=&offset=` | viewer | Runs a hunt query (syntax in the README, "Hunting"). Returns the event-search page plus `query` and `terms` (`[{field, value, negate, text}]`, how each term was read). A `| top` result includes `total` (matched events) and `missing` (how many of those lack the grouped field). Each percent is that value's share of `total`, so the shown percents can sum under 100. A `| timechart` with no rows, or with every bucket count 0, also returns `note` (`No events match <query> in <span> buckets.`); the rows stay as they are, and a chart with a count above 0 omits `note`. Bad syntax or an unknown field is 400 with the reason. A `bytes:` term is one of `>=`, `>`, `<=`, `<`, `=` and an integer (`bytes:>=1000000`); the number is a bound parameter, and any other value is 400 listing those operators. Grouping by `bytes` is refused. |
+| `GET /api/hunt?q=&limit=&offset=` | viewer | Runs a hunt query (syntax in the README, "Hunting"). `offset` above 10000 is 400 naming that maximum, including when a pipeline stage does not page. Returns the event-search page plus `query` and `terms` (`[{field, value, negate, text}]`, how each term was read). A `| top` result includes `total` (matched events) and `missing` (how many of those lack the grouped field). Each percent is that value's share of `total`, so the shown percents can sum under 100. A `| timechart` with no rows, or with every bucket count 0, also returns `note` (`No events match <query> in <span> buckets.`); the rows stay as they are, and a chart with a count above 0 omits `note`. Bad syntax or an unknown field is 400 with the reason. A `bytes:` term is one of `>=`, `>`, `<=`, `<`, `=` and an integer (`bytes:>=1000000`); the number is a bound parameter, and any other value is 400 listing those operators. Grouping by `bytes` is refused. |
 | `GET /api/hunt/saved` | viewer | Saved searches: `[{id, name, query, description, owner, created_at}]` by name |
 | `POST /api/hunt/saved` | analyst | `{name (≤ 80), query, description? (≤ 300)}`; the query must parse. 409 on a duplicate name (case-insensitive). Audited as `saved_search_created` |
 | `POST /api/hunt/saved/{id}/delete` | analyst | Owner or admin only (403 otherwise). Audited as `saved_search_deleted` |
@@ -143,7 +143,7 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 | `GET /api/alerts/{id}` | viewer | Adds `rule`, `evidence`, `timeline` (events involving the same source IPs or users, ±30 min; user names match case-insensitively for ASCII, the same way event search does, and source IPs stay exact), `notes`, `activity`. Every alert also carries `base_severity` (the rule's), `assets` (matched inventory entries, see [Asset inventory](#asset-inventory)), and `severity_note` |
 | `POST /api/alerts/{id}/notes` | analyst | `{body}` (≤ 5000 chars) |
 | `POST /api/alerts/{id}/status` | analyst | `{status: open\|investigating\|resolved, disposition?, note?}`. `resolved` requires `disposition` (`true_positive`, `false_positive`, or `benign`); reopening clears it |
-| `GET /api/incidents?status=open,investigating&severity=critical,high&limit=` | viewer | `status` and `severity` each take one value or a comma list. Correlated incidents: `title`, `severity`, `status`, `first_seen`, `last_seen`, `entities` (`{src_ip, user, host}` lists), `stages` (ATT&CK tactics in kill-chain order), `top_technique` (`{id, name, tactic}` or null — the earliest mapped technique, same order as the coverage matrix; id breaks ties), `correlation_rule` (the same plain sentence as the incident detail: shared source IP, account, or host within the correlation window, 30 minutes by default), `alert_count`, `synthetic`. Active first, then severity, then recency |
+| `GET /api/incidents?status=open,investigating&severity=critical,high&limit=` | viewer | `status` and `severity` each take one value or a comma list. Correlated incidents: `title`, `severity`, `status`, `first_seen`, `last_seen`, `entities` (`{src_ip, user, host}` lists; `user` and `host` values that differ only by case are one lowercase entry), `stages` (ATT&CK tactics in kill-chain order), `top_technique` (`{id, name, tactic}` or null — the earliest mapped technique, same order as the coverage matrix; id breaks ties), `correlation_rule` (the same plain sentence as the incident detail: shared source IP, account, or host within the correlation window, 30 minutes by default), `alert_count`, `synthetic`. Active first, then severity, then recency |
 | `GET /api/incidents/{id}` | viewer | Adds `alerts` (each with `techniques`), `events` (evidence, each with `alert_ids`), `timeline` (one entry per alert with tactics and technique ids), `techniques`, `techniques_by_tactic`, `escalated`, the same `correlation_rule` as the list, `assets` (inventory entries behind the incident's hosts and addresses). 404 if missing |
 | `POST /api/incidents/{id}/status` | analyst | `{status: open\|investigating\|resolved, note?}`; audited as `incident_status_changed` |
 | `GET /api/incidents/{id}/case.json` | viewer | Chronological case record. `techniques` lists each rule technique with `level` (`validated`, `mapped`, `disabled`, or `gap`), the same grade as coverage. `mapped` is not proof. Audited as `case_exported` |
@@ -152,7 +152,19 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 | `GET /api/attack/navigator.json` | viewer | The same coverage as a MITRE ATT&CK Navigator layer, colored by level and scored by alert count |
 | `GET /api/entities?kind=&limit=` | viewer | Riskiest entities (`kind` is `user`, `src_ip`, or `host`; `limit` 1–100, default 10), each with its score and the alerts that contribute to it |
 | `GET /api/entities/{kind}/{value}` | viewer | One entity (value percent-encoded): score breakdown, alerts, incidents, recent events, and `alerts_by_day` (UTC day of each alert's newest evidence event for this entity, zeros filled, newest 31 days; `omitted` counts alerts older than that) |
-| `GET /api/metrics?hours=24` | viewer | Counts, severity/rule breakdowns, MTTR, top failing IPs/users, and a 24-hour histogram ending at the newest event |
+| `GET /api/metrics?hours=24` | viewer | Counts, severity/rule breakdowns, MTTR, and `window_scope`. `hours` filters only `events_ingested_window`. `top_failure_ips`, `top_failure_users`, and `events_by_type` count every stored event. See [the metrics window](#get-apimetrics-window) |
+
+### `GET /api/metrics` window
+
+`hours` is an integer from 1 to 2160 (90 days), default 24. `window_hours` repeats that value. It does not scope the rest of the payload.
+
+`window_scope.honors_hours` is `events_ingested_window` only. That count is events whose `ingested_at` falls in the last `hours` hours.
+
+`window_scope.all_stored_events` is `events_total`, `synthetic_events`, `top_failure_ips`, `top_failure_users`, and `events_by_type`. Those count every stored event. A failed login older than `hours` still appears in `top_failure_ips` and `top_failure_users`, and its type still appears in `events_by_type`.
+
+`window_scope.newest_event_24h` is `activity_last_24h_of_data`: the 24 hours ending at the newest stored event, not the `hours` window. Alert counts, mean time to resolve, dispositions, false-positive rates, and open-alert aging read the current alerts table. `omitted_metrics` still names time to detect and dwell time.
+
+`window_scope.note` says the same thing in one sentence: `hours` filters `events_ingested_window` by `ingested_at`, and `top_failure_ips`, `top_failure_users`, and `events_by_type` count every stored event.
 
 ### `GET /api/attack/coverage` example
 

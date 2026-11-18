@@ -81,6 +81,19 @@ class CorrelateTests(unittest.TestCase):
         self.assertEqual([(g["incident_id"], g["alert_ids"], g["new_alert_ids"]) for g in groups],
                          [(7, [1, 3], [3]), (9, [2], [])])
 
+    def test_summary_folds_hosts_that_differ_only_by_case(self):
+        # Correlation already keys hosts with lower(); the stored list used to keep both spellings.
+        folded = correlate.summarize([
+            instant(1, 0, host="WEB01", ip="203.0.113.5"),
+            instant(2, 5, host="web01", user="Erin"),
+            instant(3, 10, host="Db01", user="erin"),
+        ])
+        self.assertEqual(folded["entities"]["host"], ["db01", "web01"])
+        self.assertEqual(folded["entities"]["user"], ["erin"])
+        self.assertEqual(folded["entities"]["src_ip"], ["203.0.113.5"])
+        # The title keeps the first three entities, so the folded host spelling is what it prints.
+        self.assertEqual(folded["title"], "Related alerts: 203.0.113.5, erin, db01")
+
     def test_summary_escalates_on_three_tactics(self):
         base = [{**alert(1, 0, ip="203.0.113.5"), "tactics": ["Credential Access"], "synthetic": 1},
                 {**alert(2, 5, ip="203.0.113.5", user="frank", severity="high"),
@@ -178,6 +191,22 @@ class EngineCorrelationTests(unittest.TestCase):
         self.assertEqual(incidents[0]["alert_count"], 4)
         self.assertIn("Exfiltration", json.loads(incidents[0]["stages"]))
         self.assertEqual({i for _, i in links}, {incident["id"]})
+
+    def test_stored_incident_folds_host_case(self):
+        records = self.intrusion()
+        for record in records:
+            if record["event_type"] == "auth_failure" and record.get("user") == "frank":
+                record["host"] = "WEB01"
+            elif record["event_type"] == "privilege_escalation":
+                record["host"] = "web01"
+        self.ingest(records)
+        incidents, _ = self.incidents()
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(json.loads(incidents[0]["entities"])["host"], ["web01"])
+        self.assertNotIn("WEB01", incidents[0]["title"])
+        engine.run_detection(self.conn, trigger="rerun")
+        again, _ = self.incidents()
+        self.assertEqual(json.loads(again[0]["entities"])["host"], ["web01"])
 
     def test_resolved_incident_is_not_reopened(self):
         self.ingest(self.intrusion())

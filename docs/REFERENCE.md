@@ -252,7 +252,7 @@ The scenarios are synthetic, so "validated" means a rule detected the project's 
 
 ### Incidents (correlation)
 
-After each detection run, `watchpost/correlate.py` groups related alerts into incidents: alerts whose evidence shares a source IP, account, or host within 30 minutes. An incident needs two related alerts or one critical alert, lists its kill-chain stages (ATT&CK tactics in order), and is raised one severity level when it spans three or more tactics. Reruns change nothing; new alerts join an open incident.
+After each detection run, `watchpost/correlate.py` groups related alerts into incidents: alerts whose evidence shares a source IP, account, or host within 30 minutes. An incident needs two related alerts or one critical alert, lists its kill-chain stages (ATT&CK tactics in order), and is raised one severity level when it spans three or more tactics. Account and host values that differ only by case are stored as one lowercase entry (`WEB01` and `web01` are one host). Source IPs stay as written. Reruns change nothing; new alerts join an open incident.
 
 Every rule except `log_source_silent` accepts `ignore_ips` and `ignore_users`. The engine merges overlapping findings into one open alert instead of creating duplicates, and a rescan never re-alerts on evidence already attached to an alert.
 
@@ -532,7 +532,7 @@ Send `{"value": 0}` the same way to turn it off. A viewer with masking on gets `
 | `since:` / `until:` | `since:2026-10-01 until:2026-10-02T06:00Z` | ISO times, UTC unless an offset is given |
 | `bytes:opN` | `bytes:>=1000000` | Byte count on the event. `op` is `>=`, `>`, `<=`, `<` or `=`, and `N` is an integer from 0 to 1000000000000000. The number is a bound parameter. Events with no byte count do not match. Any other `bytes:` value is an error that lists those operators. |
 
-Fields: `user`, `host`, `source`, `outcome`, `src_ip`, `dest_ip`, `ip` (source or destination), `batch_id`, `event_type`, `severity`, `dest_port`, `bytes` (a comparison, not an exact token), `synthetic` (`0`/`1`), `message`. An unknown field is an error that lists these. Queries are capped at 500 characters and 20 terms, and results page and sort like event search (newest first, up to 1000 per page).
+Fields: `user`, `host`, `source`, `outcome`, `src_ip`, `dest_ip`, `ip` (source or destination), `batch_id`, `event_type`, `severity`, `dest_port`, `bytes` (a comparison, not an exact token), `synthetic` (`0`/`1`), `message`. An unknown field is an error that lists these. Queries are capped at 500 characters and 20 terms, and results page and sort like event search (newest first, up to 1000 per page). `offset` above 10000 is 400 naming that maximum, on a plain hunt and on a pipeline stage. Walk newer events with `since_id` on `GET /api/events`.
 
 ```
 user:alice event_type:auth_failure NOT src_ip:10.0.0.5 host:web* "invalid password" last:24h
@@ -705,7 +705,8 @@ What these numbers do and do not say:
 - **The dashboard's events-per-minute chart** reads every event ingested in the last hour, which here is all of
   them because the whole load arrived in under a minute.
 - **Paging totals are exact.** `total` is a `COUNT(*)` with the same filters; with these indexes it stayed in the
-  low milliseconds except for text search, so it is not capped.
+  low milliseconds except for text search, so it is not capped. `offset` on event search and hunt stops at 10000.
+  A larger skip would make SQLite visit every skipped row. Newer events are walked with `since_id`.
 
 ## What is real vs. synthetic vs. future
 
