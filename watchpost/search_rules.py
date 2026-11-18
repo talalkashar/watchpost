@@ -74,9 +74,21 @@ def is_search(rule_id):
 
 
 def slug(name):
-    """Rule id for a name: search_<letters and underscores>, to fit the [a-z_]+ rule routes."""
-    base = re.sub(r"[^a-z]+", "_", name.lower()).strip("_")[:48].strip("_")
-    if not base:
+    """Rule id for a name: search_ plus letters and underscores.
+
+    ASCII letters fold. Any other letter stays, so Érin watch and érin watch
+    are two ids. A run that is not a letter becomes one underscore. A name
+    with no ASCII letter is refused. The base is at most 48 characters.
+    """
+    folded = name.translate(_ASCII_FOLD)
+    pieces = []
+    for ch in folded:
+        if ch.isalpha():
+            pieces.append(ch)
+        else:
+            pieces.append("_")
+    base = re.sub(r"_+", "_", "".join(pieces)).strip("_")[:48].strip("_")
+    if not re.search(r"[a-z]", base):
         raise SearchRuleError("the name must contain letters (it names the rule id)")
     return RULE_PREFIX + base
 

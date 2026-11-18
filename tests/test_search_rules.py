@@ -4,6 +4,8 @@ window, and the reviewed promote -> sample -> enable workflow."""
 import json
 import unittest
 from datetime import timedelta
+from pathlib import Path
+from urllib.parse import quote
 
 from watchpost import engine, hunt
 from watchpost import rules as rules_mod
@@ -228,6 +230,53 @@ class WindowTests(unittest.TestCase):
             search_rules.validate_sample({"malicious": [{"ts": "yesterday-ish"}], "benign": benign})
 
 
+class SearchSlugTests(unittest.TestCase):
+    def test_ascii_case_folds_and_other_letters_stay(self):
+        self.assertEqual(search_rules.slug("Failed Login"), "search_failed_login")
+        self.assertEqual(search_rules.slug("failed login"), "search_failed_login")
+        self.assertEqual(search_rules.slug("FAILED LOGIN"), "search_failed_login")
+        self.assertEqual(search_rules.slug("Web Burst!"), "search_web_burst")
+        self.assertEqual(search_rules.slug("Érin watch"), "search_Érin_watch")
+        self.assertEqual(search_rules.slug("érin watch"), "search_érin_watch")
+        self.assertNotEqual(search_rules.slug("Érin watch"), search_rules.slug("érin watch"))
+        # U+0130 is not an ASCII letter, so it is not folded into i.
+        self.assertEqual(search_rules.slug("HİGH alert"), "search_hİgh_alert")
+        self.assertNotEqual(search_rules.slug("HİGH alert"), search_rules.slug("high alert"))
+        # A combining acute is not a letter, so it is not the precomposed é.
+        self.assertEqual(search_rules.slug("e\u0301rin watch"), "search_e_rin_watch")
+        self.assertNotEqual(search_rules.slug("e\u0301rin watch"), search_rules.slug("érin watch"))
+
+    def test_no_ascii_letter_is_refused_and_the_base_stays_capped(self):
+        for name in ("É", "日本語", "---", "!!!", "123"):
+            with self.subTest(name=name):
+                with self.assertRaises(search_rules.SearchRuleError) as ctx:
+                    search_rules.slug(name)
+                self.assertIn("must contain letters", str(ctx.exception))
+        long = search_rules.slug("n" * 60)
+        self.assertTrue(long.startswith("search_"))
+        self.assertEqual(len(long) - len("search_"), 48)
+        kept = search_rules.slug("É" + "a" * 60)
+        self.assertEqual(len(kept) - len("search_"), 48)
+        self.assertTrue(kept.startswith("search_É"))
+
+    def test_compile_uses_the_folded_id(self):
+        self.assertEqual(search_rules.compile_rule("Failed Login", "user:a", definition())["rule_id"],
+                         "search_failed_login")
+        self.assertEqual(search_rules.compile_rule("x", "user:a", definition(name="Érin watch"))["rule_id"],
+                         "search_Érin_watch")
+        self.assertEqual(search_rules.compile_rule("x", "user:a", definition(name="érin watch"))["rule_id"],
+                         "search_érin_watch")
+        with self.assertRaises(search_rules.SearchRuleError) as ctx:
+            search_rules.compile_rule("É", "user:a", definition())
+        self.assertIn("must contain letters", str(ctx.exception))
+
+    def test_reference_names_the_ascii_fold(self):
+        text = (Path(__file__).resolve().parent.parent / "docs" / "REFERENCE.md").read_text()
+        self.assertIn("`Failed Login` and `failed login` are `search_failed_login`", text)
+        self.assertIn("`Érin watch` and `érin watch` are two ids", text)
+        self.assertIn("ASCII letters fold", text)
+
+
 WEB_QUERY = 'event_type:web_request message:"/cgi-bin/"'
 RULE_ID = "search_cgi_probe_burst"
 GOOD_SAMPLE = {"malicious": [{"event_type": "web_request", "src_ip": "203.0.113.9", "message": "GET /cgi-bin/x"}] * 3,
@@ -310,6 +359,38 @@ class PromoteWorkflowTests(ServerTestCase):
         self.assertIn("time terms", data["error"])
         self.assertEqual(self.promote(analyst, 9999, dry_run=True)[0], 404)
         self.assertEqual(self.promote(analyst, dry_run=True, query="user:x")[0], 400)  # not a definition key
+
+    def test_accented_names_stay_two_rule_ids(self):
+        analyst, admin = self.client("analyst"), self.client("admin")
+        status, data, _ = self.promote(analyst, dry_run=True, name="Érin watch")
+        self.assertEqual(status, 200, data)
+        self.assertTrue(data["ok"], data)
+        self.assertEqual(data["compiled"]["rule_id"], "search_Érin_watch")
+        status, other, _ = self.promote(analyst, dry_run=True, name="érin watch")
+        self.assertEqual(status, 200, other)
+        self.assertEqual(other["compiled"]["rule_id"], "search_érin_watch")
+        self.assertNotEqual(data["compiled"]["rule_id"], other["compiled"]["rule_id"])
+        status, same, _ = self.promote(analyst, dry_run=True, name="Failed Login")
+        self.assertEqual(same["compiled"]["rule_id"], "search_failed_login")
+        status, folded, _ = self.promote(analyst, dry_run=True, name="failed login")
+        self.assertEqual(folded["compiled"]["rule_id"], "search_failed_login")
+        status, refused, _ = self.promote(analyst, dry_run=True, name="É")
+        self.assertEqual(status, 200, refused)
+        self.assertFalse(refused["ok"])
+        self.assertIn("must contain letters", refused["refused"])
+        status, change, _ = self.promote(analyst, name="Érin watch")
+        self.assertEqual(status, 201, change)
+        self.assertEqual(change["target"], "search_Érin_watch")
+        self.approve(admin, change)
+        path = "/api/rules/" + quote("search_Érin_watch", safe="") + "/history"
+        status, rows, _ = analyst.get(path)
+        self.assertEqual(status, 200, rows)
+        self.assertEqual(rows[0]["rule_id"], "search_Érin_watch")
+        self.assertIsNone(self.rule(analyst, "search_érin_watch"))
+        self.assertIsNone(self.rule(analyst, "search_rin_watch"))
+        status, data, _ = self.promote(analyst, name="É")
+        self.assertEqual(status, 400, data)
+        self.assertIn("must contain letters", data["error"])
 
     def test_two_person_review_adds_the_rule_disabled(self):
         analyst, admin = self.client("analyst"), self.client("admin")
