@@ -716,7 +716,9 @@ What these numbers do and do not say:
 
 Alert grouping and incident correlation are deliberately separate. A reviewed per-rule grouping override changes
 the stable key used to deduplicate that rule's alerts (up to three allowlisted event fields) while retaining the
-finding's evidence event IDs. Correlation still combines distinct alerts into incidents using its own entities and
+finding's evidence event IDs. `user` and `host` in that key fold ASCII case only, so Alice and alice share a key
+and ÉRIN stays apart from érin. `src_ip` and `dest_ip` stay the stored address. `event_type` and `source` stay
+the stored spelling. Correlation still combines distinct alerts into incidents using its own entities and
 time window; changing an alert grouping key does not change that incident logic.
 
 **Synthetic:** all bundled data. The demo dataset and simulator scenarios (`watchpost/simulate.py`) and the files in `samples/` are invented. External IPs come from the RFC 5737 documentation ranges. Synthetic events are stored with `synthetic=1`, sourced `demo:*`, and tagged in the UI. The evaluation scores (recall and precision) measure the rules against these hand-labeled scenarios only. They say nothing about real-world accuracy.

@@ -4,6 +4,11 @@ import hashlib
 
 FIELDS = ("src_ip", "dest_ip", "user", "host", "event_type", "source")
 
+# SQLite COLLATE NOCASE folds these letters only. User and host keys use the same fold.
+# src_ip and dest_ip stay the stored address. event_type and source stay the stored spelling.
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+_FOLDED = frozenset({"user", "host"})
+
 
 def validate(fields):
     if not isinstance(fields, list) or any(not isinstance(value, str) for value in fields):
@@ -11,6 +16,13 @@ def validate(fields):
     if len(fields) > 3 or len(set(fields)) != len(fields) or any(value not in FIELDS for value in fields):
         raise ValueError(f"grouping may contain up to 3 unique fields from {', '.join(FIELDS)}")
     return fields
+
+
+def _key_part(field, value):
+    text = str(value)
+    if field in _FOLDED:
+        return text.translate(_ASCII_FOLD)
+    return text
 
 
 def apply(findings, events, fields):
@@ -23,7 +35,8 @@ def apply(findings, events, fields):
         evidence = [by_id[event_id] for event_id in finding["event_ids"] if event_id in by_id]
         parts = []
         for field in fields:
-            values = sorted({str(event[field]).casefold() for event in evidence if event.get(field) not in (None, "")})
+            present = (event[field] for event in evidence if event.get(field) not in (None, ""))
+            values = sorted({_key_part(field, value) for value in present})
             parts.append(",".join(values) if values else "(none)")
         key = "|".join(parts)
         if len(key) > 256:

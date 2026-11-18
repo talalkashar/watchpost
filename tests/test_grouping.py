@@ -24,6 +24,33 @@ class GroupingTests(unittest.TestCase):
         self.assertEqual(first["group_key"], second["group_key"])
         self.assertRegex(first["group_key"], r"^sha256:[0-9a-f]{64}$")
 
+    def test_user_and_host_fold_ascii_only(self):
+        events = [
+            {"id": 1, "user": "ÉRIN", "host": "Érin-host", "src_ip": "2001:DB8::1",
+             "dest_ip": "2001:DB8::2", "event_type": "AUTH_FAILURE", "source": "Demo"},
+            {"id": 2, "user": "érin", "host": "érin-host", "src_ip": "2001:db8::1",
+             "dest_ip": "2001:db8::2", "event_type": "auth_failure", "source": "demo"},
+            {"id": 3, "user": "Alice", "host": "WEB01", "src_ip": "203.0.113.9",
+             "dest_ip": "203.0.113.10", "event_type": "auth_failure", "source": "demo"},
+            {"id": 4, "user": "alice", "host": "web01", "src_ip": "203.0.113.9",
+             "dest_ip": "203.0.113.10", "event_type": "auth_failure", "source": "demo"},
+            {"id": 5, "user": "ÉRIN", "host": "Érin-host"},
+        ]
+        findings = [{"group_key": "old", "event_ids": [i]} for i in (1, 2, 3, 4)]
+        users = [item["group_key"] for item in grouping.apply(findings, events, ["user"])]
+        self.assertEqual(users, ["Érin", "érin", "alice", "alice"])
+        hosts = [item["group_key"] for item in grouping.apply(findings, events, ["host"])]
+        self.assertEqual(hosts, ["Érin-host", "érin-host", "web01", "web01"])
+        addresses = grouping.apply(findings[:2], events, ["src_ip", "dest_ip"])
+        self.assertEqual(addresses[0]["group_key"], "2001:DB8::1|2001:DB8::2")
+        self.assertEqual(addresses[1]["group_key"], "2001:db8::1|2001:db8::2")
+        stored = grouping.apply(findings[:2], events, ["event_type", "source"])
+        self.assertEqual(stored[0]["group_key"], "AUTH_FAILURE|Demo")
+        self.assertEqual(stored[1]["group_key"], "auth_failure|demo")
+        # Two spellings of one account in one finding still share one ASCII key.
+        shared = grouping.apply([{"group_key": "old", "event_ids": [1, 5, 3, 4]}], events, ["user"])[0]
+        self.assertEqual(shared["group_key"], "alice,Érin")
+
 
 class GroupingApiTests(ServerTestCase):
     def test_reviewed_grouping_preview_applies_and_preserves_evidence(self):
