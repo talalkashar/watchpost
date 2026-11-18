@@ -11,6 +11,8 @@ match, message terms are "contains", NOT keeps events missing the field, and a b
 same >=, >, <=, < or = comparison as the hunt. Comparisons fold case the way SQLite does
 (ASCII only): user, host, source, outcome, and batch_id equality, every prefix match and message contains ignore ASCII case.
 `event_type` and `severity` fold ASCII case and bind the catalog spelling (`Auth_Failure` is `auth_failure`).
+`synthetic:` is `0`, `1`, `true`, or `false`, folded on ASCII letters only (not `str.lower()`).
+`TRUE` is `true`. `truİe`, `trüe`, and `yes` are refused with the same error as a hunt.
 Other equality is exact. Grouping by user folds ASCII letters only, the same fold as the user: filter,
 so Alice and alice share a key and ÉRIN stays apart from érin. Grouping by host, source, outcome,
 event_type, and severity stays the stored spelling.
@@ -34,7 +36,7 @@ from datetime import timedelta
 from . import attack
 from . import hunt
 from . import sigma
-from .queries import canonical_ip, catalog_name
+from .queries import canonical_ip, catalog_name, synthetic_flag
 from .db import iso, parse_iso
 from .normalize import EventError, parse_timestamp
 
@@ -125,7 +127,8 @@ def _predicate(term):
         op, number = hunt.bytes_bound(value)
         return lambda e, op=op, number=number: hunt.bytes_matches(e.get("bytes"), op, number)
     if kind == "flag":
-        flag = hunt.FLAGS[value.lower()]
+        # ASCII letters only, the same fold as the hunt and event search. Not str.lower().
+        flag = synthetic_flag(value)
         return lambda e: e.get("synthetic") == flag
     if kind == "ip":
         if prefix is not None:
