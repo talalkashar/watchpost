@@ -18,6 +18,8 @@ MAX_EVENT_OFFSET = 10_000
 MAX_SEARCH_Q = 200
 # Alert detail returns this many evidence events, earliest first. The rest are evidence_omitted.
 EVIDENCE_LIMIT = 500
+# Related timeline returns this many events, earliest in the window. The rest are timeline_omitted.
+TIMELINE_LIMIT = 300
 EVENT_FIELDS = "id, ts, ingested_at, source, host, event_type, outcome, severity, user, src_ip, dest_ip, dest_port, " \
                "bytes, message, synthetic, batch_id"
 
@@ -234,7 +236,11 @@ def get_alert(conn, alert_id):
 
 
 def related_timeline(conn, alert, pad_minutes=30):
-    """All events touching the alert's IPs or users, from 30 minutes before to 30 after.
+    """Events touching the alert's IPs or users, from pad_minutes before to pad_minutes after.
+
+    Returns the earliest TIMELINE_LIMIT rows in ts, id order. Sets alert["timeline_omitted"]
+    to how many matching events were past that cap (0 when the window has that many or fewer).
+    An event outside the window is not a row and is not omitted.
 
     User names match with COLLATE NOCASE (ASCII only), the same way event search does.
     Source IPs stay an exact match. Shows context the rule did not use: e.g. what the
@@ -243,6 +249,7 @@ def related_timeline(conn, alert, pad_minutes=30):
     ips = {e["src_ip"] for e in alert["evidence"] if e["src_ip"]}
     users = {e["user"] for e in alert["evidence"] if e["user"]}
     if not ips and not users:
+        alert["timeline_omitted"] = 0
         return []
     start = iso(parse_iso(alert["first_seen"]) - timedelta(minutes=pad_minutes))
     end = iso(parse_iso(alert["last_seen"]) + timedelta(minutes=pad_minutes))
@@ -254,12 +261,18 @@ def related_timeline(conn, alert, pad_minutes=30):
         clauses.append(f"user COLLATE NOCASE IN ({','.join('?' for _ in users)})")
         args += sorted(users)
     evidence_ids = {e["id"] for e in alert["evidence"]}
+    where_sql = f"ts BETWEEN ? AND ? AND ({' OR '.join(clauses)})"
+    bound = [start, end] + args
+    total = conn.execute(
+        f"SELECT COUNT(*) AS n FROM events WHERE {where_sql}", bound).fetchone()["n"]
     rows = conn.execute(
         f"SELECT id, ts, source, host, event_type, severity, user, src_ip, message FROM events"
-        f" WHERE ts BETWEEN ? AND ? AND ({' OR '.join(clauses)}) ORDER BY ts, id LIMIT 300",
-        [start, end] + args,
+        f" WHERE {where_sql} ORDER BY ts, id LIMIT {TIMELINE_LIMIT}",
+        bound,
     )
-    return [{**dict(r), "is_evidence": r["id"] in evidence_ids} for r in rows]
+    result = [{**dict(r), "is_evidence": r["id"] in evidence_ids} for r in rows]
+    alert["timeline_omitted"] = total - len(result)
+    return result
 
 
 def add_note(conn, alert_id, author, body):
