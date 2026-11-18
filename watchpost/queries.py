@@ -36,6 +36,9 @@ BOARD_LIMIT = 60
 # Dashboard recent events are this many, newest by ts, then id.
 # recent_events_omitted is how many stored events were past that cap.
 RECENT_LIMIT = 60
+# Metrics failure lists are this many groups, most failures first.
+# top_failure_ips_omitted and top_failure_users_omitted are how many groups were past that cap.
+TOP_FAILURE_LIMIT = 5
 _ATTACKER_FROM = (
     " FROM alerts a JOIN alert_events ae ON ae.alert_id = a.id"
     " JOIN events e ON e.id = ae.event_id WHERE e.src_ip IS NOT NULL")
@@ -485,6 +488,19 @@ def metrics(conn, hours=24):
     aging = {"buckets": [{"label": label, "count": sum(low <= a < high for a in ages)}
                          for label, low, high in AGING_BUCKETS],
              "oldest_minutes": round(max(ages), 1) if ages else None}
+    # Addresses stay the stored spelling. Accounts fold ASCII case with SQLite lower(),
+    # the same fold hunt user groups use. Alice and alice are one row named alice.
+    # Érin and érin stay two rows. Each list is the busiest TOP_FAILURE_LIMIT groups.
+    top_ips = by("SELECT src_ip, COUNT(*) AS count FROM events WHERE event_type = 'auth_failure'"
+                 " AND src_ip IS NOT NULL GROUP BY src_ip ORDER BY count DESC"
+                 f" LIMIT {TOP_FAILURE_LIMIT}")
+    top_users = by("SELECT lower(user) AS user, COUNT(*) AS count FROM events WHERE event_type = 'auth_failure'"
+                   " AND user IS NOT NULL GROUP BY lower(user) ORDER BY count DESC"
+                   f" LIMIT {TOP_FAILURE_LIMIT}")
+    ips_omitted = one("SELECT COUNT(DISTINCT src_ip) FROM events WHERE event_type = 'auth_failure'"
+                      " AND src_ip IS NOT NULL") - len(top_ips)
+    users_omitted = one("SELECT COUNT(DISTINCT lower(user)) FROM events WHERE event_type = 'auth_failure'"
+                        " AND user IS NOT NULL") - len(top_users)
     return {
         "window_hours": hours,
         "window_scope": {
@@ -505,14 +521,10 @@ def metrics(conn, hours=24):
         "dispositions": by("SELECT disposition, COUNT(*) AS count FROM alerts WHERE disposition IS NOT NULL"
                            " GROUP BY disposition"),
         "mean_time_to_resolve_minutes": round(mttr, 1) if mttr is not None else None,
-        # Addresses stay the stored spelling. Accounts fold ASCII case with SQLite lower(),
-        # the same fold hunt user groups use. Alice and alice are one row named alice.
-        # Érin and érin stay two rows.
-        "top_failure_ips": by("SELECT src_ip, COUNT(*) AS count FROM events WHERE event_type = 'auth_failure'"
-                              " AND src_ip IS NOT NULL GROUP BY src_ip ORDER BY count DESC LIMIT 5"),
-        "top_failure_users": by(
-            "SELECT lower(user) AS user, COUNT(*) AS count FROM events WHERE event_type = 'auth_failure'"
-            " AND user IS NOT NULL GROUP BY lower(user) ORDER BY count DESC LIMIT 5"),
+        "top_failure_ips": top_ips,
+        "top_failure_ips_omitted": ips_omitted,
+        "top_failure_users": top_users,
+        "top_failure_users_omitted": users_omitted,
         "events_by_type": by("SELECT event_type, COUNT(*) AS count FROM events GROUP BY event_type"
                              " ORDER BY count DESC"),
         "activity_last_24h_of_data": histogram,
