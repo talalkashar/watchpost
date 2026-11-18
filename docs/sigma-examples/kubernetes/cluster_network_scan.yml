@@ -1,0 +1,40 @@
+# A scanner process whose command line names cluster DNS or the default service CIDR.
+title: Kubernetes Cluster Network Service Scan
+id: 1d5f8a30-2c67-4e91-9b04-8f6a3c1e5d29
+status: experimental
+description: |
+  A process start whose command line is nmap, masscan, naabu, or zmap and also
+  names Kubernetes service DNS or the default service CIDR 10.96.0.0/12. That is
+  network service discovery from inside the cluster. The command line is the
+  event message. Watchpost groups events with no source IP by host, then by user.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1046/
+  - https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/
+tags:
+  - attack.discovery
+  - attack.t1046
+logsource:
+  category: process_creation
+  product: kubernetes
+  service: audit
+detection:
+  process:
+    event.action: process_start
+  scanner:
+    message|contains:
+      - nmap
+      - masscan
+      - naabu
+      - zmap
+  cluster:
+    message|contains:
+      - svc.cluster.local
+      - kubernetes.default
+      - kube-dns
+      - 10.96.
+  condition: process and scanner and cluster
+falsepositives:
+  - An engineer running a scanner from a pod while troubleshooting cluster DNS
+level: high
