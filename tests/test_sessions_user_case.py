@@ -24,7 +24,10 @@ class SessionUserCaseTests(unittest.TestCase):
         self.conn = connect(":memory:")
         init_schema(self.conn)
         create_user(self.conn, "admin", "admin-password-1", "admin")
-        create_user(self.conn, "Admin", "admin-password-2", "analyst")
+        # create_user refuses a second ASCII spelling. This row is inserted so the list can still see both.
+        self.conn.execute(
+            "INSERT INTO users(username, pw_hash, role, created_at) VALUES (?, 'unused-hash', ?, ?)",
+            ("Admin", "analyst", SAME))
         create_user(self.conn, "bob", "bob-password-1", "analyst")
         create_user(self.conn, "Érin", "erin-password-1", "analyst")
         create_user(self.conn, "érin", "erin-password-2", "analyst")
