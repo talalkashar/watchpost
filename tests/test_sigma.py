@@ -277,6 +277,60 @@ class SigmaSlugTests(unittest.TestCase):
         self.assertIn("must contain letters", str(ctx.exception))
 
 
+class SigmaLevelTests(ServerTestCase):
+    def test_ascii_case_folds_and_a_lookalike_stays_unknown(self):
+        high = sigma.compile_rule(rule_yaml(_SEL, level="HIGH"))
+        self.assertEqual((high["level"], high["severity"]), ("high", "high"))
+        info = sigma.compile_rule(rule_yaml(_SEL, level="Informational"))
+        self.assertEqual((info["level"], info["severity"]), ("informational", "low"))
+        for written, stored, severity in (
+                ("LOW", "low", "low"),
+                ("Medium", "medium", "medium"),
+                ("CRITICAL", "critical", "critical"),
+                ("informational", "informational", "low")):
+            compiled = sigma.compile_rule(rule_yaml(_SEL, level=written))
+            self.assertEqual((compiled["level"], compiled["severity"]), (stored, severity))
+        missing = sigma.compile_rule("title: Quiet\ndetection:\n  sel:\n    user: x\n  condition: sel\n")
+        self.assertEqual((missing["level"], missing["severity"]), ("medium", "medium"))
+
+        # U+0130 is not an ASCII letter. str.lower() would insert a combining dot; the catalog key stays hİgh.
+        with self.assertRaises(sigma.SigmaError) as ctx:
+            sigma.compile_rule(rule_yaml(_SEL, level="HİGH"))
+        message = str(ctx.exception)
+        self.assertIn("level 'hİgh'", message)
+        self.assertNotIn("level 'high'", message)
+        self.assertNotIn("\u0307", message)
+        self.assertIn("informational, low, medium, high, critical", message)
+
+        analyst = self.client("analyst")
+        status, data, _ = analyst.post("/api/rules/sigma?dry_run=1",
+                                       {"source": rule_yaml(_SEL, title="Level Fold", level="HIGH")})
+        self.assertEqual(status, 200, data)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["compiled"]["severity"], "high")
+        status, folded, _ = analyst.post("/api/rules/sigma?dry_run=1",
+                                         {"source": rule_yaml(_SEL, title="Info Fold", level="Informational")})
+        self.assertEqual(status, 200, folded)
+        self.assertEqual(folded["compiled"]["severity"], "low")
+        status, refused, _ = analyst.post("/api/rules/sigma?dry_run=1",
+                                          {"source": rule_yaml(_SEL, level="HİGH")})
+        self.assertEqual(status, 200, refused)
+        self.assertFalse(refused["ok"])
+        self.assertIn("level 'hİgh'", refused["refused"])
+        self.assertNotIn("level 'high'", refused["refused"])
+        self.assertNotIn("\u0307", refused["refused"])
+        self.assertEqual(analyst.get("/api/changes")[1], [])
+        status, real, _ = analyst.post("/api/rules/sigma", {"source": rule_yaml(_SEL, level="HİGH")})
+        self.assertEqual(status, 400, real)
+        self.assertIn("level 'hİgh'", real["error"])
+        self.assertNotIn("\u0307", real["error"])
+        status, anon, _ = self.client().post("/api/rules/sigma?dry_run=1",
+                                             {"source": rule_yaml(_SEL, level="HIGH")})
+        self.assertEqual(status, 401)
+        self.assertNotIn("compiled", anon)
+        self.assertNotIn("severity", anon)
+
+
 class SigmaGroupKeyTests(unittest.TestCase):
     def test_host_and_user_keys_fold_ascii_only(self):
         params = compiled("  sel:\n    message: hit\n  condition: sel\n")

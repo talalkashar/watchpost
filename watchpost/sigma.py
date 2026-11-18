@@ -555,7 +555,8 @@ def compile_rule(source):
     for key in ("id", "status", "description", "level"):
         if doc.get(key) is not None and not isinstance(doc[key], str):
             raise SigmaError(f"{key} must be a string")
-    level = (doc.get("level") or "medium").lower()
+    # ASCII letters only. HİGH stays unknown and is not rewritten to high.
+    level = (doc.get("level") or "medium").translate(_ASCII_FOLD)
     if level not in LEVELS:
         raise SigmaError(f"level {level!r} is not one of {', '.join(LEVELS)}")
     tags = doc.get("tags") or []
