@@ -420,14 +420,29 @@ def mfa_disable(conn, username, code):
 
 
 def mfa_admin_reset(conn, username, actor):
-    """The recovery path: an admin turns off another user's TOTP. There are no recovery codes."""
-    if username == actor:
-        raise AuthError("use your own disable step (with a current code) for your account", 400)
-    user = _user_row(conn, username)
-    if not user["totp_secret"] and not user["totp_pending"]:
-        raise AuthError("that user has no two-factor authentication to reset", 409)
-    _clear_mfa(conn, user["id"])
-    audit(conn, actor, "mfa_reset", username)
+    """The recovery path: an admin turns off another user's TOTP. There are no recovery codes.
+
+    The name matches ASCII case (`COLLATE NOCASE`) and the reset applies to the stored
+    account. `Admin` resets `admin` when that is the only match. Two accounts that share
+    the fold are 409 and nobody is reset. `Érin` does not match `érin`. A name outside
+    3–32 stays unmatched (404), with no slice. Resetting your own account stays 400.
+    """
+    if not isinstance(username, str) or not (3 <= len(username) <= 32):
+        raise AuthError("user not found", 404)
+    with transaction(conn):
+        users = conn.execute(
+            "SELECT * FROM users WHERE username = ? COLLATE NOCASE", (username,)).fetchall()
+        if len(users) > 1:
+            raise AuthError("username matches more than one account", 409)
+        if not users:
+            raise AuthError("user not found", 404)
+        user = users[0]
+        if user["username"] == actor:
+            raise AuthError("use your own disable step (with a current code) for your account", 400)
+        if not user["totp_secret"] and not user["totp_pending"]:
+            raise AuthError("that user has no two-factor authentication to reset", 409)
+        _clear_mfa(conn, user["id"])
+        audit(conn, actor, "mfa_reset", user["username"])
     return {"enabled": False}
 
 

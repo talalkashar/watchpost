@@ -1135,9 +1135,10 @@ def session_revoke(req, sid):
     return auth.revoke_session(req.conn, sid, req.user["username"])
 
 
-@route("POST", r"/api/users/(\w{3,32})/mfa/reset", role="admin")
+@route("POST", r"/api/users/([^/]+)/mfa/reset", role="admin")
 def user_mfa_reset(req, username):
-    return auth.mfa_admin_reset(req.conn, username, req.user["username"])
+    # The path may be percent-encoded (Érin). Length and the ASCII fold are checked below.
+    return auth.mfa_admin_reset(req.conn, unquote(username), req.user["username"])
 
 
 @route("GET", "/api/audit", role="admin")
