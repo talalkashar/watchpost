@@ -281,7 +281,7 @@ investigation export, not a legal-hold or raw-log archive.
 
 ### Self-diagnosis
 
-`GET /api/health` is public and returns statuses only, with HTTP 503 when anything is failing. `GET /api/health/details` requires a login and adds details, recent redacted errors, and recent detection runs.
+`GET /api/health` is public and returns statuses only, with HTTP 503 when anything is failing. `GET /api/health/details` requires a login and adds details. `recent_errors` is the newest 20 by id and `recent_detection_runs` the newest 10 by id; each omitted count is 0 when that table fits. `GET /api/audit` (200) and `GET /api/ingest/batches` (50) stay bare arrays and send `X-Watchpost-Omitted` for the rows past those caps.
 
 | Check | Failing / degraded when |
 |---|---|

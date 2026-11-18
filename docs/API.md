@@ -109,7 +109,7 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 
 | Endpoint | Role | Notes |
 |---|---|---|
-| `GET /api/ingest/batches` | viewer | Last 50 batches, with up to 100 rejection reasons each |
+| `GET /api/ingest/batches` | viewer | Last 50 batches by `created_at`, with up to 100 rejection reasons each. The body stays a bare array. `X-Watchpost-Omitted` is how many batches were past that cap (0 when the table fits) |
 | `POST /api/detection/run` | analyst | Full rescan; processes any backlog |
 | `GET /api/demo/scenarios` | viewer | Labeled synthetic scenarios |
 | `POST /api/demo/load` | admin | `{seed?, force?}`: loads every scenario (409 if already loaded) |
@@ -356,10 +356,10 @@ The dashboard also reads `GET /api/incidents`, `GET /api/attack/coverage`, and `
 | Endpoint | Role | Notes |
 |---|---|---|
 | `GET /api/health` | public | `{status, checks: {name: status}}`; HTTP 503 when failing. `checks` includes `syslog` while the listener is enabled and always includes `storyline` |
-| `GET /api/health/details` | viewer | Full checks with guidance, a `means` sentence (what failing or degraded means on this demo), recent redacted errors, recent detection runs |
+| `GET /api/health/details` | viewer | Full checks with guidance, a `means` sentence (what failing or degraded means on this demo). `recent_errors` is the newest 20 `error_log` rows by `id`. `recent_errors_omitted` is how many were past that cap (0 when the table fits). `recent_detection_runs` is the newest 10 detection runs by `id`. `recent_detection_runs_omitted` is how many were past that cap (0 when the table fits) |
 | `GET /api/tokens` / `POST /api/tokens` | admin | `{name}` → `{token}` (shown once; only a SHA-256 hash is stored) |
 | `POST /api/tokens/{id}/revoke` | admin | |
-| `GET /api/audit` | admin | Last 200 audit entries |
+| `GET /api/audit` | admin | Last 200 audit entries by `id`. The body stays a bare array. `X-Watchpost-Omitted` is how many entries were past that cap (0 when the table fits) |
 | `GET /api/audit/verify` | admin | Walks the audit hash chain: `{ok, status (verified\|partial\|broken), entries, keyed, head, chain_started, legacy, first_break}` (README, "Tamper-evident audit log") |
 
 ## Attack storyline (synthetic demo)
