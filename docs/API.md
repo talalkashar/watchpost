@@ -114,7 +114,7 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 
 | Endpoint | Role | Notes |
 |---|---|---|
-| `GET /api/ingest/batches` | viewer | Last 50 batches by `created_at`, with up to 100 rejection reasons each. The body stays a bare array. `X-Watchpost-Omitted` is how many batches were past that cap (0 when the table fits) |
+| `GET /api/ingest/batches` | viewer | Last 50 batches by `created_at` descending, then `id` descending. The same timestamp keeps the higher id. Each row has up to 100 rejection reasons. The body stays a bare array. `X-Watchpost-Omitted` is how many batches were past that cap (0 when the table fits) |
 | `POST /api/detection/run` | analyst | Full rescan; processes any backlog |
 | `GET /api/demo/scenarios` | viewer | Labeled synthetic scenarios |
 | `POST /api/demo/load` | admin | `{seed?, force?}`: loads every scenario (409 if already loaded) |
