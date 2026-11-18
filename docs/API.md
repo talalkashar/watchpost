@@ -127,7 +127,7 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 | Param | Meaning |
 |---|---|
 | `start`, `end` | ISO timestamps (inclusive) |
-| `source`, `host`, `user`, `outcome`, `batch_id` | Exact match (`user`, `host`, `source`, and `outcome` ignore ASCII case; grouping by source and outcome stays the stored spelling); a trailing `*` makes it a prefix match |
+| `source`, `host`, `user`, `outcome`, `batch_id` | Exact match (`user`, `host`, `source`, `outcome`, and `batch_id` ignore ASCII case; grouping by source, outcome, and batch_id stays the stored spelling); a trailing `*` makes it a prefix match |
 | `ip` | Matches `src_ip` or `dest_ip`. A complete address is the form ingest stores (`2001:DB8::1` matches `2001:db8::1`). Anything that is not one address is 400 |
 | `event_type` | One normalized type. ASCII case folds onto the catalog spelling (`Auth_Failure` binds `auth_failure`). An unknown name is 400 listing the catalog. Grouping by `event_type` stays the stored spelling |
 | `severity` | Comma list, or a single level with `severity_mode=min` for "at least". `severity_mode` folds ASCII onto `min` (`Min` is `min`). `minimum` is not an alias and stays ignored. Spaces around each name are ignored. ASCII case folds onto the catalog spelling (`High` binds `high`). A blank or unknown piece is 400 listing the catalog. Grouping by `severity` stays the stored spelling |

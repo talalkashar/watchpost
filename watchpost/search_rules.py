@@ -9,7 +9,7 @@ The filter is matched in Python over the event dicts the engine already scans (e
 with the hunt's SQL semantics: same fields and value checks, a trailing `*` on an unquoted value is a prefix
 match, message terms are "contains", NOT keeps events missing the field, and a bytes term uses the
 same >=, >, <=, < or = comparison as the hunt. Comparisons fold case the way SQLite does
-(ASCII only): user, host, source, and outcome equality, every prefix match and message contains ignore ASCII case.
+(ASCII only): user, host, source, outcome, and batch_id equality, every prefix match and message contains ignore ASCII case.
 `event_type` and `severity` fold ASCII case and bind the catalog spelling (`Auth_Failure` is `auth_failure`).
 Other equality is exact. Grouping by user folds ASCII letters only, the same fold as the user: filter,
 so Alice and alice share a key and ÉRIN stays apart from érin. Grouping by host, source, outcome,
@@ -143,8 +143,8 @@ def _predicate(term):
         # Catalog spelling, same bound value as hunt SQL. A stored lookalike stays unmatched.
         name = catalog_name(value, hunt.ENUMS[field])
         return lambda e: e.get(column) == name
-    # COLLATE NOCASE, ASCII only. Grouping by source and outcome stays exact.
-    if field in ("user", "host", "source", "outcome"):
+    # COLLATE NOCASE, ASCII only. Grouping by source, outcome, and batch_id stays exact.
+    if field in ("user", "host", "source", "outcome", "batch_id"):
         folded = _fold(value)
         return lambda e: isinstance(e.get(column), str) and _fold(e[column]) == folded
     return lambda e: e.get(column) == value
