@@ -9,6 +9,8 @@ from .normalize import EVENT_TYPES, SEVERITIES, EventError, parse_timestamp
 
 ALERT_STATUSES = ("open", "investigating", "resolved")
 DISPOSITIONS = ("true_positive", "false_positive", "benign")
+# OFFSET makes SQLite visit every skipped row. Past this, walk newer events with since_id.
+MAX_EVENT_OFFSET = 10_000
 EVENT_FIELDS = "id, ts, ingested_at, source, host, event_type, outcome, severity, user, src_ip, dest_ip, dest_port, " \
                "bytes, message, synthetic, batch_id"
 
@@ -84,10 +86,15 @@ def search_events(conn, params):
     return page_events(conn, where, args, params, newest_stored_first=since_id is not None)
 
 
+def event_offset(params):
+    """Page offset for event search and hunt. Above MAX_EVENT_OFFSET is a 400 naming that maximum."""
+    return _int(params.get("offset"), "offset", 0, 0, MAX_EVENT_OFFSET)
+
+
 def page_events(conn, where, args, params, newest_stored_first=False):
     """One page of events matching parameterized WHERE fragments (shared by event search and hunting)."""
     limit = _int(params.get("limit"), "limit", 100, 1, 1000)
-    offset = _int(params.get("offset"), "offset", 0, 0, 10_000_000)
+    offset = event_offset(params)
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     total = conn.execute(f"SELECT COUNT(*) FROM events{clause}", args).fetchone()[0]
     rows = conn.execute(

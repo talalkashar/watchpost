@@ -128,14 +128,14 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 | `severity` | Comma list, or a single level with `severity_mode=min` for "at least" |
 | `q` | Substring of `message` (`%` and `_` are literal) |
 | `synthetic` | `0` or `1` |
-| `limit` (1–1000, default 100), `offset` | Paging; response includes `total` |
-| `since_id` | Only events stored after that event id, newest stored first (ignores event time). Used by the dashboard's polling fallback |
+| `limit` (1–1000, default 100), `offset` (0–10000, default 0) | Paging; response includes `total`. An offset above 10000 is 400 naming that maximum |
+| `since_id` | Only events stored after that event id, newest stored first (ignores event time). This is how to walk newer events; it does not skip rows with `offset`. Used by the dashboard's polling fallback |
 
 | Endpoint | Role | Notes |
 |---|---|---|
 | `GET /api/events/{id}` | viewer | Includes the redacted `raw` record and linked alerts |
 | `GET /api/events/{id}/ecs` | viewer | The event as an ECS-shaped document (field mapping for export; see the README, "ECS field mapping") |
-| `GET /api/hunt?q=&limit=&offset=` | viewer | Runs a hunt query (syntax in the README, "Hunting"). Returns the event-search page plus `query` and `terms` (`[{field, value, negate, text}]`, how each term was read). A `| top` result includes `total` (matched events) and `missing` (how many of those lack the grouped field). Each percent is that value's share of `total`, so the shown percents can sum under 100. A `| timechart` with no rows, or with every bucket count 0, also returns `note` (`No events match <query> in <span> buckets.`); the rows stay as they are, and a chart with a count above 0 omits `note`. Bad syntax or an unknown field is 400 with the reason. A `bytes:` term is one of `>=`, `>`, `<=`, `<`, `=` and an integer (`bytes:>=1000000`); the number is a bound parameter, and any other value is 400 listing those operators. Grouping by `bytes` is refused. |
+| `GET /api/hunt?q=&limit=&offset=` | viewer | Runs a hunt query (syntax in the README, "Hunting"). `offset` above 10000 is 400 naming that maximum, including when a pipeline stage does not page. Returns the event-search page plus `query` and `terms` (`[{field, value, negate, text}]`, how each term was read). A `| top` result includes `total` (matched events) and `missing` (how many of those lack the grouped field). Each percent is that value's share of `total`, so the shown percents can sum under 100. A `| timechart` with no rows, or with every bucket count 0, also returns `note` (`No events match <query> in <span> buckets.`); the rows stay as they are, and a chart with a count above 0 omits `note`. Bad syntax or an unknown field is 400 with the reason. A `bytes:` term is one of `>=`, `>`, `<=`, `<`, `=` and an integer (`bytes:>=1000000`); the number is a bound parameter, and any other value is 400 listing those operators. Grouping by `bytes` is refused. |
 | `GET /api/hunt/saved` | viewer | Saved searches: `[{id, name, query, description, owner, created_at}]` by name |
 | `POST /api/hunt/saved` | analyst | `{name (≤ 80), query, description? (≤ 300)}`; the query must parse. 409 on a duplicate name (case-insensitive). Audited as `saved_search_created` |
 | `POST /api/hunt/saved/{id}/delete` | analyst | Owner or admin only (403 otherwise). Audited as `saved_search_deleted` |

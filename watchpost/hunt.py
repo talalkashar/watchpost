@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 
 from .db import audit, iso, now_iso, transaction, utcnow
 from .normalize import EVENT_TYPES, MAX_BYTES, SEVERITIES, EventError, parse_timestamp
-from .queries import QueryError, _escape_like, page_events
+from .queries import QueryError, _escape_like, event_offset, page_events
 
 # Same 400/404/409 handling in the server as every other query error.
 HuntError = QueryError
@@ -263,6 +263,8 @@ def run(conn, params, now=None):
     text = params.get("q") or ""
     now = now or utcnow()
     compiled, stage = _compile(text, now)
+    # A pipeline stage does not page, but the same cap still applies so a huge offset is never a scan.
+    event_offset(params)
     where, args = [sql for sql, _, _ in compiled], [a for _, args, _ in compiled for a in args]
     terms = [echo for _, _, echo in compiled]
     if stage is None:
