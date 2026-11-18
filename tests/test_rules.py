@@ -624,6 +624,98 @@ class AccountAsciiFoldTests(unittest.TestCase):
         self.assertIn("`ÉRIN` and `érin` stay two accounts (`Érin` and `érin`)", text)
 
 
+def _gb(sec, user, ip="203.0.113.9"):
+    """1.2 GB as two cloud reads. One read alone stays under the 1 GB threshold."""
+    return [ev(sec, "cloud_data_access", user, ip, bytes=600_000_000),
+            ev(sec + 10, "cloud_data_access", user, ip, bytes=600_000_000)]
+
+
+class PrincipalAsciiFoldTests(unittest.TestCase):
+    """data_exfil_volume and cloud_logging_disabled key the account with the ASCII fold.
+
+    Alice, alice, and ALICE stay one principal and share one exfil baseline.
+    ÉRIN and érin stay two, so one account's history does not quiet the other.
+    An IP principal stays the stored address.
+    """
+
+    def test_exfil_keeps_accented_principals_apart(self):
+        p = params("data_exfil_volume")
+        half = rules.data_exfil_volume(make([
+            ev(0, "cloud_data_access", "Alice", bytes=600_000_000),
+            ev(10, "cloud_data_access", "alice", bytes=600_000_000),
+        ]), p)
+        self.assertEqual(len(half), 1)
+        self.assertEqual(half[0]["group_key"], "alice")
+        self.assertEqual(half[0]["event_ids"], [1, 2])
+        self.assertEqual(rules.data_exfil_volume(make([
+            ev(0, "cloud_data_access", "Alice", bytes=600_000_000),
+        ]), p), [])
+        apart = rules.data_exfil_volume(make([
+            ev(0, "cloud_data_access", "ÉRIN", bytes=600_000_000),
+            ev(10, "cloud_data_access", "érin", bytes=600_000_000),
+        ]), p)
+        self.assertEqual(apart, [])
+        both = rules.data_exfil_volume(make(_gb(0, "ÉRIN") + _gb(30, "érin")), p)
+        self.assertEqual(sorted(f["group_key"] for f in both), ["Érin", "érin"])
+        same = rules.data_exfil_volume(make(_gb(0, "ÉRIN") + _gb(30, "Érin")), p)
+        self.assertEqual([f["group_key"] for f in same], ["Érin"])
+        self.assertEqual(same[0]["event_ids"], [1, 2, 3, 4])
+
+    def test_exfil_baseline_is_per_ascii_principal(self):
+        # baseline_principals is engine-supplied; validate_params rejects it.
+        def excepted(*principals):
+            return {**params("data_exfil_volume"), "baseline_principals": list(principals)}
+
+        shared = excepted("alice")
+        found = rules.data_exfil_volume(make(_gb(-86400, "Alice") + _gb(0, "ALICE")), shared)
+        self.assertEqual([f["group_key"] for f in found], ["alice"])
+        self.assertEqual(found[0]["event_ids"], [1, 2])
+        self.assertIn("Baseline mode", found[0]["explanation"])
+        split = excepted("Érin")
+        found = rules.data_exfil_volume(make(_gb(-86400, "ÉRIN") + _gb(0, "érin")), split)
+        by_key = {f["group_key"]: f for f in found}
+        self.assertEqual(set(by_key), {"Érin", "érin"})
+        self.assertEqual(by_key["Érin"]["event_ids"], [1, 2])
+        self.assertIn("Baseline mode", by_key["Érin"]["explanation"])
+        self.assertEqual(by_key["érin"]["event_ids"], [3, 4])
+        self.assertIn("no approved tuning exception", by_key["érin"]["explanation"])
+
+    def test_exfil_ip_principal_stays_the_stored_address(self):
+        uploads = [ev(i * 60, "fw_allow", None, "2001:DB8::1", bytes=600_000_000) for i in range(2)]
+        found = rules.data_exfil_volume(make(uploads), params("data_exfil_volume"))
+        self.assertEqual([f["group_key"] for f in found], ["2001:DB8::1"])
+
+    def test_logging_disabled_keeps_accented_principals_apart(self):
+        p = params("cloud_logging_disabled")
+        merged = rules.cloud_logging_disabled(make([
+            trail(0, "StopLogging", user="Alice"),
+            trail(30, "DeleteTrail", user="ALICE"),
+        ]), p)
+        self.assertEqual([f["group_key"] for f in merged], ["alice"])
+        self.assertEqual(merged[0]["event_ids"], [1, 2])
+        apart = rules.cloud_logging_disabled(make([
+            trail(0, "StopLogging", user="ÉRIN"),
+            trail(30, "DeleteTrail", user="érin"),
+        ]), p)
+        self.assertEqual(sorted(f["group_key"] for f in apart), ["Érin", "érin"])
+        self.assertEqual(sorted(f["event_ids"] for f in apart), [[1], [2]])
+        same = rules.cloud_logging_disabled(make([
+            trail(0, "StopLogging", user="ÉRIN"),
+            trail(30, "DeleteTrail", user="Érin"),
+        ]), p)
+        self.assertEqual([f["group_key"] for f in same], ["Érin"])
+        self.assertEqual(same[0]["event_ids"], [1, 2])
+        found = rules.cloud_logging_disabled(
+            make([trail(0, "StopLogging", user=None, ip="2001:DB8::1")]), p)
+        self.assertEqual(found[0]["group_key"], "2001:DB8::1")
+
+    def test_the_docs_name_the_principal_fold(self):
+        text = (Path(__file__).resolve().parent.parent / "docs" / "REFERENCE.md").read_text()
+        self.assertIn("`data_exfil_volume`, and `cloud_logging_disabled`", text)
+        self.assertIn("an exception for `Érin` does not quiet `érin`", text)
+        self.assertIn("`2001:DB8::1` is not folded", text)
+
+
 class TechniqueMappingTests(unittest.TestCase):
     def test_every_rule_has_techniques_and_a_function(self):
         for rule in rules.DEFAULT_RULES:

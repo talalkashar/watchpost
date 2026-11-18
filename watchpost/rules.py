@@ -419,6 +419,19 @@ def _account_name(user):
     return _ascii_fold(user)
 
 
+def _principal(event):
+    """The account, or the source IP when the event has no account.
+
+    An account folds ASCII letters only, the same fold as ignore_users.
+    Alice and alice are one principal. ÉRIN and érin stay two.
+    An IP principal stays the stored address.
+    """
+    user = event.get("user") or ""
+    if user:
+        return _ascii_fold(user)
+    return event.get("src_ip")
+
+
 def brute_force_ip(events, params):
     threshold, window = params["threshold"], params["window_seconds"]
     findings = []
@@ -682,7 +695,7 @@ def data_exfil_volume(events, params):
     for e in _filtered(events, params, EXFIL_TYPES):
         if e["event_type"] != "cloud_data_access" and not e.get("bytes"):
             continue
-        key = (e.get("user") or "").lower() or e.get("src_ip")
+        key = _principal(e)
         if key:
             groups[key].append(e)
     multiplier, history = params["baseline_multiplier"], params["history_seconds"]
@@ -776,7 +789,7 @@ def cloud_logging_disabled(events, params):
     window = params["window_seconds"]
     groups = defaultdict(list)
     for e in _filtered(events, params, CLOUD_TYPES):
-        key = (e.get("user") or "").lower() or e.get("src_ip")
+        key = _principal(e)
         if key and covers("logging_actions", actions, e):
             groups[key].append(e)
     findings = []
