@@ -107,7 +107,7 @@ def coverage(rules, hits_by_rule):
 # Evidence levels, strongest first. Only "validated" counts as covered.
 LEVELS = ("validated", "mapped", "disabled", "gap")
 LEVEL_MEANING = {
-    "validated": "An enabled rule detects a labeled synthetic attack that exercises this technique.",
+    "validated": "An enabled rule detects a labeled test attack for this technique.",
     "mapped": "An enabled rule maps here, but no labeled scenario proves it detects this technique. "
               "Not counted as covered.",
     "disabled": "Only disabled rules map here, so nothing is watching for it.",

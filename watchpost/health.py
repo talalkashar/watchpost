@@ -18,40 +18,32 @@ STATUS_ORDER = {"ok": 0, "degraded": 1, "failing": 2}
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 LOW_DISK_BYTES = 100 * 1024 * 1024
 
-# One sentence per check: what failing or degraded means on this labeled demo.
-# Shown even when the check is ok, so a viewer can read the status without waiting for a fault.
+# Each check explains both fault states, including while it is healthy.
 CHECK_MEANS = {
     "storage": (
-        "On this demo, failing means the synthetic event store cannot be read or written, "
-        "and degraded means less than 100 MB of disk is left so new labeled events may stop landing."
+        "Failing means the event store cannot be read or written, and degraded means "
+        "less than 100 MB of disk space remains."
     ),
     "ingestion": (
-        "On this demo, failing means the ingest check itself crashed, and degraded means recent "
-        "synthetic batches were rejected or failed server-side so those events never became alerts."
+        "Failing means the ingest check crashed, and degraded means recent batches were "
+        "rejected or failed on the server."
     ),
     "detection": (
-        "On this demo, failing means the last detection run died and new synthetic events stay "
-        "unalerted, and degraded means rules are off, a run is stuck, or some batches were skipped "
-        "so coverage is incomplete."
+        "Failing means the last detection run failed, and degraded means rules are off, "
+        "a run is stuck, or batches were skipped."
     ),
     "dependencies": (
-        "On this demo, failing means Python, SQLite, or a writable database directory is missing, "
-        "and degraded means the bundled console files are missing so the pages will not load."
+        "Failing means Python, SQLite, or a writable database directory is missing, "
+        "and degraded means console files are missing."
     ),
     "syslog": (
-        "On this demo, failing means the optional syslog listener is down so live lab senders "
-        "cannot add events, and degraded means a recent batch was dropped while the labeled data "
-        "already stored is unchanged."
+        "Failing means the listener is down, and degraded means a recent batch was dropped."
     ),
     "storyline": (
-        "On this demo, failing means the storyline check itself crashed, and degraded means the "
-        "last synthetic replay failed while earlier labeled events stay on the dashboard."
+        "Failing means the storyline check crashed, and degraded means the last replay failed."
     ),
 }
-DEFAULT_MEANS = (
-    "On this demo, failing means this component is down, and degraded means it is running with a "
-    "fault while the labeled synthetic events already stored stay readable."
-)
+DEFAULT_MEANS = "Failing means the component is down, and degraded means it is running with a fault."
 
 
 def status_means(name):

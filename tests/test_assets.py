@@ -239,7 +239,7 @@ class AssetApiTests(ServerTestCase):
     def test_admin_page_redraws_the_inventory_after_a_demo_load(self):
         # No JS runtime in CI: the demo-load handler must refetch the inventory and swap the card in place.
         app = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text()
-        handler = app[app.index('api("/api/demo/load"'):app.index('"Load synthetic demo data"')]
+        handler = app[app.index('api("/api/demo/load"'):app.index('"Load demo data"')]
         self.assertIn('assetsCard(await api("/api/assets"))', handler)
         self.assertIn("inventoryCard.replaceWith(", handler)
 

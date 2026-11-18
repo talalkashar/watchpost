@@ -50,7 +50,8 @@ process.stdout.write(JSON.stringify(copy));
     def test_zero_events_is_one_explanation_and_only_an_admin_can_load(self):
         admin = self.copy(0, True)
         self.assertEqual(admin["title"], "No events yet")
-        self.assertIn("marked synthetic", admin["body"])
+        self.assertIn("Ingest", admin["body"])
+        self.assertNotIn("synthetic", admin["body"].lower())
         self.assertNotIn("real", admin["body"].lower())
         self.assertTrue(admin["load"])
         self.assertEqual(admin["hint"], "")
@@ -82,7 +83,7 @@ class EmptyDashboardUiTests(unittest.TestCase):
         self.assertIn("soc.hidden = true", render)
         self.assertLess(render.index("copy.load"), render.index('id: "dash-load-demo"'))
         self.assertLess(render.index('id: "dash-load-demo"'), render.index("copy.hint"))
-        self.assertIn("Load synthetic demo data", render)
+        self.assertIn("Load demo data", render)
 
         load = method_body(src, "loadDemo")
         self.assertIn('api("/api/demo/load", { method: "POST", body: {} })', load)

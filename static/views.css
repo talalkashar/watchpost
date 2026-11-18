@@ -3,7 +3,7 @@
 
 /* ---------- page canvas ---------- */
 body.authed:not([data-view="dashboard"]) main {
-  padding: 24px 0 56px;
+  padding: 18px 0 40px;
 }
 body.authed:not([data-view="dashboard"]) #view {
   font-size: 14px;
@@ -15,7 +15,7 @@ body.authed:not([data-view="dashboard"]) h1 {
   letter-spacing: -0.02em;
   line-height: 1.2;
   color: #fff;
-  margin: 0 0 16px;
+  margin: 0 0 12px;
 }
 body.authed:not([data-view="dashboard"]) h2 {
   font-size: 15px;
@@ -30,7 +30,7 @@ body.authed:not([data-view="dashboard"]) h3 {
 body.authed:not([data-view="dashboard"]) .page-head {
   align-items: center;
   gap: 12px;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
 }
 body.authed:not([data-view="dashboard"]) .page-head h1 { margin: 0; }
 body.authed:not([data-view="dashboard"]) #view > p:first-child { margin: 0 0 12px; }
@@ -42,10 +42,10 @@ body.authed:not([data-view="dashboard"]) #view > p:first-child a:hover { color: 
 
 /* ---------- surfaces ---------- */
 body.authed:not([data-view="dashboard"]) .card {
-  padding: 16px;
-  margin-bottom: 16px;
+  padding: 14px;
+  margin-bottom: 12px;
 }
-body.authed:not([data-view="dashboard"]) .grid { gap: 16px; }
+body.authed:not([data-view="dashboard"]) .grid { gap: 12px; }
 body.authed:not([data-view="dashboard"]) main button,
 body.authed:not([data-view="dashboard"]) main a.button {
   border-radius: 8px;
@@ -144,11 +144,6 @@ body.authed:not([data-view="dashboard"]) .pill.st-approved { background: rgb(255
 body.authed:not([data-view="dashboard"]) .pill.sev-info { background: rgb(255 255 255 / .04); }
 body.authed:not([data-view="dashboard"]) .pill.st-investigating { background: rgb(255 255 255 / .045); }
 body.authed:not([data-view="dashboard"]) .pill.st-failing { background: rgb(var(--crit-rgb) / .085); }
-body.authed:not([data-view="dashboard"]) .pill.synthetic {
-  font-size: 9.5px;
-  padding: 0 6px;
-  background: rgb(255 255 255 / .055);
-}
 body.authed:not([data-view="dashboard"]) .pill.technique,
 body.authed:not([data-view="dashboard"]) .pill.stage,
 body.authed:not([data-view="dashboard"]) .pill.asset,
@@ -196,7 +191,7 @@ body[data-view="incidents"] .bh {
 }
 body[data-view="incidents"] .bh b { font-size: 13px; }
 body[data-view="incidents"] .bcard {
-  padding: 12px 16px;
+  padding: 10px 14px;
   border-radius: 12px;
   border-left-width: 2px;
   background: var(--panel-2);
@@ -221,7 +216,7 @@ body[data-view="incidents"] .bm {
   margin-top: 6px;
   gap: 8px;
 }
-body[data-view="incidents"] .btags { margin-top: 8px; gap: 4px; }
+body[data-view="incidents"] .btags { margin-top: 6px; gap: 4px; }
 body[data-view="incidents"] .tag {
   font-size: 10.5px;
   padding: 1px 6px;
@@ -233,12 +228,6 @@ body[data-view="incidents"] .sevtag {
   line-height: 16px;
   border-radius: 4px;
   padding: 0 5px;
-}
-body[data-view="incidents"] .syn {
-  font-size: 9px;
-  border-radius: 999px;
-  padding: 0 5px;
-  line-height: 16px;
 }
 
 /* ---------- alerts, events, hunt ---------- */
@@ -277,22 +266,21 @@ body[data-view="incidents"] .split td:first-child { white-space: nowrap; }
 body[data-view="alerts"] #view > .card .table-wrap table {
   table-layout: fixed;
   width: 100%;
-  min-width: 960px;
+  min-width: 860px;
 }
-/* Active incidents: severity, title, kill chain, count, status, stamp, synthetic. */
-body[data-view="alerts"] #view > .card:first-of-type .table-wrap th:nth-child(1),
-body[data-view="alerts"] #view > .card:first-of-type .table-wrap td:nth-child(1) { width: 108px; }
-body[data-view="alerts"] #view > .card:first-of-type .table-wrap th:nth-child(3),
-body[data-view="alerts"] #view > .card:first-of-type .table-wrap td:nth-child(3) { width: 248px; }
-body[data-view="alerts"] #view > .card:first-of-type .table-wrap th:nth-child(4),
-body[data-view="alerts"] #view > .card:first-of-type .table-wrap td:nth-child(4) { width: 64px; }
-body[data-view="alerts"] #view > .card:first-of-type .table-wrap th:nth-child(5),
-body[data-view="alerts"] #view > .card:first-of-type .table-wrap td:nth-child(5) { width: 92px; }
-body[data-view="alerts"] #view > .card:first-of-type .table-wrap th:nth-child(6),
-body[data-view="alerts"] #view > .card:first-of-type .table-wrap td:nth-child(6) { width: 108px; }
-body[data-view="alerts"] #view > .card:first-of-type .table-wrap th:nth-child(7),
-body[data-view="alerts"] #view > .card:first-of-type .table-wrap td:nth-child(7) { width: 100px; }
-/* Alert list: severity, title, rule, status (plus the SLA badge), count, stamp, synthetic. */
+body[data-view="alerts"] .active-incidents summary { cursor: pointer; font-weight: 600; }
+/* Active incidents: severity, title, kill chain, count, status, stamp. */
+body[data-view="alerts"] #view > .active-incidents .table-wrap th:nth-child(1),
+body[data-view="alerts"] #view > .active-incidents .table-wrap td:nth-child(1) { width: 108px; }
+body[data-view="alerts"] #view > .active-incidents .table-wrap th:nth-child(3),
+body[data-view="alerts"] #view > .active-incidents .table-wrap td:nth-child(3) { width: 248px; }
+body[data-view="alerts"] #view > .active-incidents .table-wrap th:nth-child(4),
+body[data-view="alerts"] #view > .active-incidents .table-wrap td:nth-child(4) { width: 64px; }
+body[data-view="alerts"] #view > .active-incidents .table-wrap th:nth-child(5),
+body[data-view="alerts"] #view > .active-incidents .table-wrap td:nth-child(5) { width: 92px; }
+body[data-view="alerts"] #view > .active-incidents .table-wrap th:nth-child(6),
+body[data-view="alerts"] #view > .active-incidents .table-wrap td:nth-child(6) { width: 108px; }
+/* Alert list: severity, title, rule, status (plus the SLA badge), count, stamp. */
 body[data-view="alerts"] #view > .card[data-kbd-list] .table-wrap th:nth-child(1),
 body[data-view="alerts"] #view > .card[data-kbd-list] .table-wrap td:nth-child(1) { width: 108px; }
 body[data-view="alerts"] #view > .card[data-kbd-list] .table-wrap th:nth-child(3),
@@ -303,8 +291,6 @@ body[data-view="alerts"] #view > .card[data-kbd-list] .table-wrap th:nth-child(5
 body[data-view="alerts"] #view > .card[data-kbd-list] .table-wrap td:nth-child(5) { width: 64px; }
 body[data-view="alerts"] #view > .card[data-kbd-list] .table-wrap th:nth-child(6),
 body[data-view="alerts"] #view > .card[data-kbd-list] .table-wrap td:nth-child(6) { width: 108px; }
-body[data-view="alerts"] #view > .card[data-kbd-list] .table-wrap th:nth-child(7),
-body[data-view="alerts"] #view > .card[data-kbd-list] .table-wrap td:nth-child(7) { width: 100px; }
 body[data-view="alerts"] #view > .card[data-kbd-list] td:nth-child(3) {
   white-space: nowrap;
 }
@@ -312,8 +298,7 @@ body[data-view="alerts"] #view > .card[data-kbd-list] td:nth-child(3) code { fon
 body[data-view="alerts"] #view > .card .table-wrap td {
   overflow-wrap: break-word;
   vertical-align: top;
-  padding-top: 11px;
-  padding-bottom: 11px;
+  padding-block: 8px;
 }
 body[data-view="alerts"] #view > .card .table-wrap td:nth-child(2) {
   color: #fff;
@@ -321,7 +306,7 @@ body[data-view="alerts"] #view > .card .table-wrap td:nth-child(2) {
   font-size: 13.5px;
   line-height: 1.4;
 }
-body[data-view="alerts"] #view > .card:first-of-type .table-wrap td:nth-child(3) {
+body[data-view="alerts"] #view > .active-incidents .table-wrap td:nth-child(3) {
   color: var(--ink-2);
   font-size: 12.5px;
   line-height: 1.45;
@@ -374,7 +359,6 @@ body[data-view="alerts"] #view > .card .table-wrap td:nth-child(6) {
   color: var(--ink-2);
 }
 .event-log td:nth-child(4) { color: #fff; font-weight: 600; }
-.event-log td:nth-child(7) .pill.synthetic { margin-left: 6px; vertical-align: 1px; }
 .event-log tbody tr:nth-child(even),
 body[data-view="events"] tbody tr:nth-child(even) { background: rgb(255 255 255 / .02); }
 body[data-view="alerts"] tr:has(.sev-critical) td:first-child,
@@ -990,8 +974,8 @@ body[data-view="admin"] .sessions button.danger:focus-visible {
   body[data-view="noise"] .nr > .pill { justify-self: start; }
 }
 @media (max-width: 760px) {
-  body.authed:not([data-view="dashboard"]) main { padding: 16px 0 8px; }
-  body.authed:not([data-view="dashboard"]) .card { padding: 16px; }
+  body.authed:not([data-view="dashboard"]) main { padding: 12px 0 8px; }
+  body.authed:not([data-view="dashboard"]) .card { padding: 12px; }
   body[data-view="hunt"] form.card input[name="q"] { min-height: 44px; font-size: 16px; }
   body[data-view="noise"] .nr {
     grid-template-areas:
@@ -1016,7 +1000,7 @@ body[data-view="admin"] .sessions button.danger:focus-visible {
     flex: 1;
   }
   body[data-view="incidents"] .bcol:not(:has(.bcard)) .bmore { margin-left: auto; }
-  body[data-view="events"] form.card > .row,
+  body[data-view="events"] form.card > .row { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   body[data-view="coverage"] .legend [role="listitem"],
   body[data-view="ingest"] .grid > form.card:first-child > .row,
   body[data-view="ingest"] .grid > form.card:nth-child(2) > .row { grid-template-columns: 1fr; }
@@ -1025,8 +1009,7 @@ body[data-view="admin"] .sessions button.danger:focus-visible {
   body[data-view="health"] .check:has(details) { padding-block: 2px; }
   /* Keep short status pills intact; the base stylesheet lets every pill wrap at 760px. */
   body.authed:not([data-view="dashboard"]) td .pill:not(.technique):not(.asset):not(.tag):not(.stage),
-  body[data-view="incidents"] .sevtag,
-  body[data-view="incidents"] .syn {
+  body[data-view="incidents"] .sevtag {
     white-space: nowrap;
     overflow-wrap: normal;
   }

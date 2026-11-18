@@ -49,18 +49,20 @@ nav button.active { background: rgb(255 255 255 / .09); }
 .sev-critical:is(.pill, .sevtag), .sev-critical .sevtag { color: #ff8d84; }
 
 .login { width: min(420px, 100%); padding: clamp(26px, 4vw, 40px); }
-.login-brand { flex-direction: row; gap: 10px; margin-bottom: 32px; }
+.login-brand { flex-direction: row; gap: 10px; margin-bottom: 20px; }
 .login-brand .logo { width: 30px; height: 30px; }
 .login-brand b { font-size: 14px; font-weight: 650; letter-spacing: .13em; text-transform: uppercase; }
-.login h1 { margin-bottom: 24px; text-align: left; font: 600 38px/1.12 var(--sans); letter-spacing: -.05em; color: var(--ink); }
+.login h1 { margin-bottom: 16px; text-align: left; font: 600 38px/1.12 var(--sans); letter-spacing: -.05em; color: var(--ink); }
 .login input { background: rgb(9 9 11 / .68); border-color: rgb(255 255 255 / .19); }
 .login-footer { border-top: 1px solid var(--glass-border); padding-top: 10px; }
+
+.login-footer p { margin: 0; color: var(--muted); font-size: 12px; }
 
 @media (min-width: 1367px) {
   body.authed { --gutter: clamp(16px, 1.55vw, 26px); }
 }
 @media (min-width: 761px) {
-  .view-bar { margin-block: 6px 20px; }
+  .view-bar { margin-block: 4px 12px; }
 }
 @media (max-width: 760px) {
   body::before { background-image: url("/chrome-scene-mobile.webp"); }
