@@ -326,7 +326,7 @@ Asset fields: `id`, `name`, `kind` (`server`, `workstation`, `network`, `cloud`,
 | `GET /api/noise-lab` | viewer | Each rule against the labeled scenarios and its benign look-alikes: recall, precision, tp/fn/fp, look-alikes tested and fired, and a `verdict` (`quiet`, `noisy`, `blind`, `untested`, `disabled`). `strip` is the pass/fail line above that list: `scenarios`, `detected_attacks` out of `attacks`, `false_positives` (distinct benign scenarios an enabled rule fired on), `missed`, `false_positive_scenarios`, and `verdict` (`pass` only when every labeled attack is detected and no benign scenario fired) |
 | `GET /api/settings` | viewer | Security settings with allowed ranges |
 | `POST /api/settings/{key}/proposals` | admin | `{value, reason}` |
-| `GET /api/changes?status=pending` | viewer | Change requests |
+| `GET /api/changes?status=pending` | viewer | Change requests, newest by `id`, at most 100. The body stays a bare array. `X-Watchpost-Omitted` is how many matched change requests were past that cap (0 when the list fits). A status filter counts only that status |
 | `POST /api/changes/{id}/review` | admin | `{decision: approve\|reject, note, evidence_digest?, acknowledge_detection_loss?}`. Approval must send the `evidence_digest` of the evidence the reviewer was shown; if the evidence changed, nothing is applied and the answer is 409. A rule change that loses a labeled detection also needs `acknowledge_detection_loss: true`. Self-review → 403; already reviewed → 409 |
 | `GET /api/evaluations` / `POST /api/evaluations` | viewer / analyst | Evaluation history / run one now |
 

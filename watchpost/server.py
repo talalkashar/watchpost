@@ -31,9 +31,11 @@ MAX_QUERY_BYTES = 8192
 RECENT_ERRORS_LIMIT = 20
 # Health details returns this many detection runs, newest by id. The rest are recent_detection_runs_omitted.
 RECENT_RUNS_LIMIT = 10
-# These two stay bare arrays. The rows past the cap are X-Watchpost-Omitted.
+# These stay bare arrays. The rows past the cap are X-Watchpost-Omitted.
 AUDIT_LIMIT = 200
 BATCH_LIMIT = 50
+# Change requests, newest by id. A status filter counts only that status.
+CHANGES_LIMIT = 100
 OMITTED_HEADER = "X-Watchpost-Omitted"
 
 
@@ -920,7 +922,9 @@ def setting_propose(req, key):
 
 @route("GET", "/api/changes")
 def changes(req):
-    return improve.list_changes(req.conn, req.query.get("status"))
+    rows, omitted = improve.list_changes(req.conn, req.query.get("status"), CHANGES_LIMIT)
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", r"/api/changes/(\d+)/review", role="admin")
@@ -950,7 +954,8 @@ def evaluation_run(req):
 
 @route("GET", "/api/assets")
 def asset_list(req):
-    pending = [c for c in improve.list_changes(req.conn, "pending") if c["kind"] in improve.ASSET_KINDS]
+    pending_rows, _pending_omitted = improve.list_changes(req.conn, "pending")
+    pending = [c for c in pending_rows if c["kind"] in improve.ASSET_KINDS]
     return {"assets": assets.list_assets(req.conn), "criticalities": list(assets.CRITICALITIES),
             "kinds": list(assets.KINDS), "data_tags": assets.DATA_TAGS, "pending": pending}
 
