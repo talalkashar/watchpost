@@ -346,10 +346,10 @@ Session cookie required (EventSource sends it). One thread per connection; at mo
 | `event` | When | `data` |
 |---|---|---|
 | `hello` | on connect | `{version, user, heartbeat_seconds}` |
-| `health` | on connect (full), after each detection run (partial) | `{partial: false, status, checked_at, checks: {name: status}}` or `{partial: true, checks: {detection: ok\|failing}, error}` |
+| `health` | on connect (full), after each detection run (partial) | `{partial: false, status, checked_at, checks: {name: status}}` or `{partial: true, checks: {detection: ok\|failing}, error, alerts_omitted, incidents_omitted}`. `alerts_omitted` is how many alerts this run touched past the newest 100 by `id` (0 when the run fits, and 0 on a failing run). `incidents_omitted` is the same count for incidents |
 | `event` | after a batch is stored | `{batch_id, count, synthetic, events: [...], events_omitted}`: the newest 50 events of the batch (no `raw`). `events_omitted` is `count` minus the events array (0 when the batch fits). The events stay the newest 50 by `ts`, then `id` |
-| `alert` | after detection, per alert created or extended | alert row fields plus `change: created\|updated` |
-| `incident` | after detection, per incident touched (once the `incidents` table exists) | the incident row |
+| `alert` | after detection, per alert created or extended | the newest 100 alerts this run touched, by `id`, frames still in `id` order. Each frame keeps the alert row fields plus `change: created\|updated` |
+| `incident` | after detection, per incident touched (once the `incidents` table exists) | the newest 100 incidents this run touched, by `id`, frames still in `id` order. Each frame keeps the incident row |
 | `heartbeat` | every 15 s without other traffic | `{ts, subscribers}` |
 | `resync` | the client fell behind (its 500-message queue overflowed) | `{reason}`: refetch `/api/dashboard` |
 
