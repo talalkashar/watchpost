@@ -24,6 +24,9 @@ from .health import STATIC_DIR, run_health_checks
 from .normalize import EventError, parse_payload, validate_source
 
 SESSION_COOKIE = "wp_session"
+# The request line is decoded as iso-8859-1, so this count is the query's wire bytes.
+# A longer string is refused before parse_qs. Field limits (a hunt query is 500 characters) still apply under it.
+MAX_QUERY_BYTES = 8192
 
 
 class ApiError(Exception):
@@ -35,9 +38,14 @@ class ApiError(Exception):
 def query_params(raw):
     """One value per query key. A repeated key is a 400 that names it.
 
+    A query longer than MAX_QUERY_BYTES is 414 before parse_qs. The hunt
+    check (500 characters) runs only after this returns.
+
     parse_qs keeps every value, and taking the first would hide the rest
     (severity=low&severity=critical would filter as low).
     """
+    if len(raw) > MAX_QUERY_BYTES:
+        raise ApiError(414, f"query string exceeds {MAX_QUERY_BYTES} bytes")
     pairs = parse_qs(raw)
     for key, values in pairs.items():
         if len(values) > 1:
