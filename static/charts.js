@@ -165,17 +165,16 @@ function cellClass(cell, heat) {
 function heatMatrix(columns, { w = 700, cellH = 22, headH = 30, maxRows = 8, label = "coverage matrix" } = {}) {
   const list = columns.length ? columns : [{ name: "", short: "", cells: [] }];
   const any = list.some((c) => c.cells.length);
-  const weights = list.map((c) => (any && !c.cells.length ? 0.42 : 1));
-  const weightSum = weights.reduce((sum, n) => sum + n, 0);
+  // Quiet tactics still display their name and evidence count.
+  const cw = Math.max(90, w / list.length);
   const rows = Math.min(maxRows, Math.max(1, ...list.map((c) => c.cells.length || 1)));
   const overflow = list.some((c) => c.cells.length > rows);
   const h = headH + rows * (cellH + 3) + (overflow ? 12 : 0);
   const max = scaleMax(list.flatMap((c) => c.cells.map((x) => x.value || 0)));
   const heatOf = (v) => (!v ? 0 : Math.min(5, 1 + Math.floor((Math.log(v + 1) / Math.log(max + 1)) * 4.999)));
-  let out = svgOpen(w, h, "heat", label);
+  let out = svgOpen(cw * list.length, h, "heat", label);
   let x = 0;
-  list.forEach((c, ci) => {
-    const cw = (w * weights[ci]) / weightSum;
+  list.forEach((c) => {
     const quiet = any && !c.cells.length;
     const hits = c.cells.reduce((s, x2) => s + (x2.value || 0), 0);
     const hidden = c.cells.slice(rows);
