@@ -1,0 +1,33 @@
+# CloudTrail, VPC flow logs, AWS Config recording, or a CloudWatch log group stopped or deleted.
+# UpdateTrail and PutEventSelectors are omitted. The message names the action and not the new settings,
+# so a routine edit cannot be told from one that turns logging off.
+title: Cloud Logging Disabled
+id: c4e8a1d6-5b27-4f90-a6c3-1d9e7b2f0a58
+status: experimental
+description: |
+  An API call that stops or deletes a cloud audit trail, flow logs, Config recording, or a log group.
+  A denied call still matches. Starting a trail or creating one does not.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1562/008/
+tags:
+  - attack.defense_evasion
+  - attack.t1562.008
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    event.action: cloud_api_call
+    message|contains:
+      - StopLogging on cloudtrail.amazonaws.com
+      - DeleteTrail on cloudtrail.amazonaws.com
+      - DeleteFlowLogs on ec2.amazonaws.com
+      - StopConfigurationRecorder on config.amazonaws.com
+      - DeleteDeliveryChannel on config.amazonaws.com
+      - DeleteLogGroup on logs.amazonaws.com
+  condition: selection
+falsepositives:
+  - An administrator retiring a trail, a flow log, or a log group on purpose
+level: high

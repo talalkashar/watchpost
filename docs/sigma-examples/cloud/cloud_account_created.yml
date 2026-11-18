@@ -1,0 +1,31 @@
+# A new IAM user, or a new account in AWS Organizations.
+# CreateUser is an IAM change. CreateAccount is an Organizations call, so it stays a cloud API call.
+title: Cloud Account Created
+id: 3f6b8d12-9a40-4c7e-b152-8d0e6f1a3c94
+status: experimental
+description: |
+  Someone created an IAM user or an AWS Organizations account. A denied call still matches.
+  DeleteUser does not. The normalized message names the action and not the new account.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1136/003/
+tags:
+  - attack.persistence
+  - attack.t1136.003
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  iam_user:
+    event.action: cloud_iam_change
+    message|contains: CreateUser on iam.amazonaws.com
+  org_account:
+    event.action: cloud_api_call
+    message|contains:
+      - CreateAccount on organizations.amazonaws.com
+      - CreateGovCloudAccount on organizations.amazonaws.com
+  condition: 1 of them
+falsepositives:
+  - An administrator provisioning a user or a member account
+level: high

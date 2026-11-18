@@ -1,0 +1,37 @@
+# GuardDuty or Security Hub turned off or detached.
+# UpdateDetector is omitted. The same name is a routine detector edit, and the message
+# does not include the new settings.
+title: Cloud Threat Detection Disabled
+id: e1a7c390-4d62-4b8f-a0e5-6c9d2f8b1a37
+status: experimental
+description: |
+  An API call that deletes or detaches GuardDuty, or that disables Security Hub.
+  A denied call still matches. Creating a detector or enabling Security Hub does not.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1562/006/
+tags:
+  - attack.defense_evasion
+  - attack.t1562.006
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    event.action: cloud_api_call
+    message|contains:
+      - DeleteDetector on guardduty.amazonaws.com
+      - DeleteMembers on guardduty.amazonaws.com
+      - StopMonitoringMembers on guardduty.amazonaws.com
+      - DeletePublishingDestination on guardduty.amazonaws.com
+      - DisassociateFromMasterAccount on guardduty.amazonaws.com
+      - DisassociateFromAdministratorAccount on guardduty.amazonaws.com
+      - DisassociateMembers on guardduty.amazonaws.com
+      - DisableSecurityHub on securityhub.amazonaws.com
+      - DeleteMembers on securityhub.amazonaws.com
+      - DisassociateFromAdministratorAccount on securityhub.amazonaws.com
+  condition: selection
+falsepositives:
+  - An administrator decommissioning GuardDuty or Security Hub
+level: high

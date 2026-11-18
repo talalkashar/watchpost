@@ -1,0 +1,29 @@
+# Any normalized cloud event whose principal is the AWS account root.
+# from_cloudtrail takes userName, otherwise the last segment of the ARN. Root's ARN ends in root.
+title: Cloud Root Account Activity
+id: 2a8f4c61-0e95-4d3b-b7a6-9c1e5d8f0a24
+status: experimental
+description: |
+  The account root called a cloud API, changed IAM, or read cloud data. A named IAM user
+  doing the same thing does not match, and neither does a local login by a Unix account named root.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1078/004/
+tags:
+  - attack.initial_access
+  - attack.t1078.004
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    event.action:
+      - cloud_api_call
+      - cloud_iam_change
+      - cloud_data_access
+    user.name: root
+  condition: selection
+falsepositives:
+  - A break-glass sign-in that used the account root on purpose
+level: high

@@ -1,0 +1,43 @@
+# A successful S3 object read or copy from outside the private ranges.
+# GetSecretValue is not here. It is a cloud data event, but it is not object storage.
+# A denied read is not here either. The errorCode is the only "(" Watchpost adds to the message.
+title: Cloud Storage Read From External Address
+id: 8b2d6f04-1c73-4a9e-95d8-7e0a3c5b1f46
+status: experimental
+description: |
+  GetObject, SelectObjectContent, or CopyObject with no errorCode, from an address outside
+  the private ranges. The bucket name is not in the normalized message, so this cannot tell
+  a sensitive bucket from any other bucket.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1530/
+tags:
+  - attack.collection
+  - attack.t1530
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    event.action: cloud_data_access
+    message|contains:
+      - GetObject on s3.amazonaws.com
+      - SelectObjectContent on s3.amazonaws.com
+      - CopyObject on s3.amazonaws.com
+  denied:
+    message|contains: '('
+  internal:
+    source.ip|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+      - 169.254.0.0/16
+  no_ip:
+    source.ip: null
+  condition: selection and not denied and not internal and not no_ip
+falsepositives:
+  - A person or a build system reading a bucket from a public address
+  - A partner account copying an object
+level: medium

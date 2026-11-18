@@ -1,0 +1,39 @@
+# Successful AWS console sign-in from outside the private ranges.
+# Written for Watchpost's Sigma subset. CloudTrail is stored as "<action> on <service>",
+# with " (<errorCode>)" appended only when errorCode is set. logsource is not a filter.
+title: Cloud Console Login From External Address
+id: 7c1e0a4b-2d55-4f1a-9c33-6b8e1d0a4f21
+status: experimental
+description: |
+  A ConsoleLogin that Watchpost recorded without an errorCode, from an address outside the
+  private ranges. A failure that carries errorCode does not match. A failure that does not
+  is indistinguishable from success, because the normalized message has no other field for it.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1078/004/
+tags:
+  - attack.initial_access
+  - attack.t1078.004
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    event.action: cloud_api_call
+    message: ConsoleLogin on signin.amazonaws.com
+  # RFC1918, loopback, and link-local (the instance metadata address).
+  internal:
+    source.ip|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+      - 169.254.0.0/16
+  no_ip:
+    source.ip: null
+  condition: selection and not internal and not no_ip
+falsepositives:
+  - An administrator signing in from a home network or a hotel
+  - A console failure CloudTrail recorded without errorCode
+level: high

@@ -1,0 +1,27 @@
+# One failed AWS console sign-in. This subset cannot count, so a single failure is the whole signal.
+# The built-in password-guessing rule is what aggregates. This rule only separates failure from success.
+title: Failed Cloud Console Login
+id: 5d0c9e84-7a31-4f6b-8c12-3e6a9b0d4f75
+status: experimental
+description: |
+  ConsoleLogin whose normalized message carries an errorCode. Watchpost only appends that
+  code, so a CloudTrail failure recorded with errorMessage alone does not match.
+  Level stays medium because one failure is not a count of guesses.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1110/001/
+tags:
+  - attack.credential_access
+  - attack.t1110.001
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    event.action: cloud_api_call
+    message|contains: 'ConsoleLogin on signin.amazonaws.com ('
+  condition: selection
+falsepositives:
+  - A person mistyping a console password once
+level: medium
