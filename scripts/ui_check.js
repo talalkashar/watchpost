@@ -159,7 +159,7 @@ async function main() {
       await p.goto(BASE);
       await p.waitForSelector("#login-view:not([hidden])");
       await auditView(p, "login form", width);
-      check(await p.locator("#login-view").getByText("Demo events and map locations are synthetic.").isVisible(),
+      check(await p.locator("#login-view").getByText("All data is synthetic.").isVisible(),
         `${width}px sign-in includes the data disclosure`);
       await ctx.close();
     }
