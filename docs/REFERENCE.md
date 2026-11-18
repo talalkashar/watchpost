@@ -12,11 +12,11 @@ It uses only the Python standard library (3.10+). No packages to install, no pai
 
 **Live demo:** https://watchpost-nxxu.onrender.com (read-only login `viewer` / `watchpost-viewer-demo`; free tier, first load may take a minute).
 
-![Watchpost SOC dashboard](screenshots/01-dashboard.png)
+![Watchpost SOC dashboard on labeled synthetic data, with the ATT&CK legend: validated, mapped, disabled, and gap](screenshots/01-dashboard-1117.jpg)
 
 | Incident board | Alerts and correlated incidents |
 |---|---|
-| ![Incidents](screenshots/02-incidents.png) | ![Alerts](screenshots/03-alerts.png) |
+| ![Incidents on labeled synthetic data, with the earliest technique id on each card](screenshots/02-incidents-1117.jpg) | ![Alerts on labeled synthetic data, filtered to open critical and high](screenshots/03-alerts-1117.jpg) |
 
 ## What's new in 5.0
 
