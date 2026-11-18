@@ -227,10 +227,24 @@ def _row(row):
     return row_to_dict(row, ["data_tags", "addresses"])
 
 
+# GET /api/assets returns this many assets, most critical first, then name.
+# The rest are assets_omitted. Matching and review still read the full inventory.
+ASSET_LIST_LIMIT = 100
+_LIST_ORDER = (
+    " ORDER BY CASE criticality WHEN 'critical' THEN 0 WHEN 'high' THEN 1"
+    " WHEN 'medium' THEN 2 ELSE 3 END, name")
+
+
 def list_assets(conn):
-    return [_row(r) for r in conn.execute(
-        "SELECT * FROM assets ORDER BY CASE criticality WHEN 'critical' THEN 0 WHEN 'high' THEN 1"
-        " WHEN 'medium' THEN 2 ELSE 3 END, name")]
+    """Every asset, most critical first, then name. Matching and review need the full set."""
+    return [_row(r) for r in conn.execute("SELECT * FROM assets" + _LIST_ORDER)]
+
+
+def list_assets_page(conn, limit=ASSET_LIST_LIMIT):
+    """The first `limit` assets in list order, and how many were past that cap (0 when they fit)."""
+    total = conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
+    rows = [_row(r) for r in conn.execute("SELECT * FROM assets" + _LIST_ORDER + " LIMIT ?", (limit,))]
+    return rows, total - len(rows)
 
 
 def get_asset(conn, asset_id):
