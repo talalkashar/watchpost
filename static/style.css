@@ -131,6 +131,7 @@ body:not(.authed) #view:empty { display: none; }
 .view-name { font: 600 13px/1.2 var(--sans); color: var(--ink); }
 .view-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
 .view-controls label, .view-save-form label { flex-direction: row; align-items: center; gap: 6px; margin: 0; white-space: nowrap; }
+.view-controls .view-pick { color: var(--ink-2); }
 .view-controls select { width: min(240px, 70vw); }
 .view-save { margin-left: auto; }
 .view-save summary { cursor: pointer; list-style: none; display: inline-flex; align-items: center; min-height: 32px; padding: 6px 12px;
