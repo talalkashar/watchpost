@@ -132,7 +132,7 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 | `event_type` | One normalized type. ASCII case folds onto the catalog spelling (`Auth_Failure` binds `auth_failure`). An unknown name is 400 listing the catalog. Grouping by `event_type` stays the stored spelling |
 | `severity` | Comma list, or a single level with `severity_mode=min` for "at least". `severity_mode` folds ASCII onto `min` (`Min` is `min`). `minimum` is not an alias and stays ignored. Spaces around each name are ignored. ASCII case folds onto the catalog spelling (`High` binds `high`). A blank or unknown piece is 400 listing the catalog. Grouping by `severity` stays the stored spelling |
 | `q` | Substring of `message` (`%` and `_` are literal), at most 200 characters. A longer value is 400 naming that maximum |
-| `synthetic` | `0` or `1` |
+| `synthetic` | When present, `0`, `1`, `true`, or `false`. ASCII case folds, so `True` is `true` and `FALSE` is `false`. Any other present value, including a blank `synthetic=`, is 400 `synthetic must be 0, 1, true or false`. An absent parameter stays unfiltered |
 | `limit` (1–1000, default 100), `offset` (0–10000, default 0) | Paging; response includes `total`. An offset above 10000 is 400 naming that maximum |
 | `since_id` | Only events stored after that event id, newest stored first (ignores event time). This is how to walk newer events; it does not skip rows with `offset`. Used by the dashboard's polling fallback |
 
