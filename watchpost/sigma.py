@@ -443,8 +443,16 @@ def _tokens(text):
 
 
 def _glob_names(pattern, names):
-    """Selection names matching a condition pattern like 'sel*' (a trailing or embedded * only)."""
-    return [n for n in names if _glob(_pattern(pattern), n.casefold())]
+    """Selection names a `1 of` / `all of` pattern refers to.
+
+    `*` matches any length at any position, over the whole name. The match is case-sensitive:
+    selection names are YAML keys, unlike field values. A name starting with `_` is included only
+    when the pattern itself starts with `_` — a pattern is `them`, then restricted (Sigma spec),
+    so `1 of *` and `1 of *end` skip `_private`, while `1 of _priv*` can still name it.
+    """
+    pat = _name_glob(pattern)
+    allow_private = pattern.startswith("_")
+    return [n for n in names if (allow_private or not n.startswith("_")) and _glob(pat, n)]
 
 
 class _Condition:
@@ -667,6 +675,23 @@ def _check_budget(tree):
 # --- Evaluation ---------------------------------------------------------------------------------
 
 _STAR, _ONE = object(), object()
+
+
+def _name_glob(pattern):
+    """Case-sensitive selection glob. Only `*` is special; `?` and `\\` are ordinary characters.
+
+    Condition patterns in the Sigma spec use `*` and nothing else. Value matching stays in
+    `_pattern` (case-insensitive, with `?` and escapes). Consecutive stars collapse so `sel**`
+    is the same name set as `sel*`.
+    """
+    out = []
+    for c in pattern:
+        if c == "*":
+            if not out or out[-1] is not _STAR:
+                out.append(_STAR)
+        else:
+            out.append(c)
+    return out
 
 
 def _pattern(value):
