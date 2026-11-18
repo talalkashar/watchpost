@@ -19,6 +19,8 @@ from .db import parse_iso
 
 DEFAULT_WINDOW_SECONDS = 1800
 ENTITY_TYPES = ("src_ip", "user", "host")
+# Correlation keys these with lower(). The stored list must too, or WEB01 and web01 stay two hosts.
+LOWER_ENTITY_TYPES = frozenset({"user", "host"})
 SEVERITY_ORDER = ["info", "low", "medium", "high", "critical"]
 ESCALATION_TACTICS = 3
 
@@ -143,7 +145,7 @@ def summarize(alerts):
     escalated = len(stages) >= ESCALATION_TACTICS
     if escalated:
         severity = _bump(severity)
-    entities = {kind: sorted({str(v) if kind != "user" else str(v).lower()
+    entities = {kind: sorted({str(v).lower() if kind in LOWER_ENTITY_TYPES else str(v)
                               for a in alerts for v in (a.get("entities") or {}).get(kind) or []})
                 for kind in ENTITY_TYPES}
     who = (entities["src_ip"] + entities["user"] + entities["host"])[:3]

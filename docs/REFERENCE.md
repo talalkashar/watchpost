@@ -252,7 +252,7 @@ The scenarios are synthetic, so "validated" means a rule detected the project's 
 
 ### Incidents (correlation)
 
-After each detection run, `watchpost/correlate.py` groups related alerts into incidents: alerts whose evidence shares a source IP, account, or host within 30 minutes. An incident needs two related alerts or one critical alert, lists its kill-chain stages (ATT&CK tactics in order), and is raised one severity level when it spans three or more tactics. Reruns change nothing; new alerts join an open incident.
+After each detection run, `watchpost/correlate.py` groups related alerts into incidents: alerts whose evidence shares a source IP, account, or host within 30 minutes. An incident needs two related alerts or one critical alert, lists its kill-chain stages (ATT&CK tactics in order), and is raised one severity level when it spans three or more tactics. Account and host values that differ only by case are stored as one lowercase entry (`WEB01` and `web01` are one host). Source IPs stay as written. Reruns change nothing; new alerts join an open incident.
 
 Every rule except `log_source_silent` accepts `ignore_ips` and `ignore_users`. The engine merges overlapping findings into one open alert instead of creating duplicates, and a rescan never re-alerts on evidence already attached to an alert.
 
