@@ -192,6 +192,12 @@ function showLogin() {
 }
 
 async function boot() {
+  const strip = $("#strip");
+  if (window.ResizeObserver) {
+    new ResizeObserver(() => {
+      if (strip.offsetHeight) document.body.style.setProperty("--strip-height", `${strip.offsetHeight}px`);
+    }).observe(strip);
+  }
   $("#login-view").hidden = true;
   $("#login-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();

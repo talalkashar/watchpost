@@ -147,6 +147,28 @@ async function main() {
       headers: { "Content-Type": "application/json", "X-CSRF-Token": state.csrf },
       body: JSON.stringify({ name: "UI check failed logins", query: "event_type:auth_failure" }) })).status);
     check(savedStatus === 201, `saved a search for the promote dialog (${savedStatus})`);
+    // Exercise logout, expired MFA and sign-in again in the same tab.
+    const page = admin.page;
+    check(await page.locator("#login-view[hidden]").count() === 1, "signed-in page keeps the sign-in section hidden");
+    await page.click("#logout");
+    const expired = "sign-in step expired; sign in again";
+    await page.route("**/api/auth/login", (route) => route.fulfill({
+      json: { mfa_required: true, mfa_token: "ui-test-challenge" },
+    }), { times: 1 });
+    await page.route("**/api/auth/mfa", (route) => route.fulfill({ status: 401, json: { error: expired } }), { times: 1 });
+    await page.fill("#login-form [name=username]", "admin");
+    await page.fill("#login-form [name=password]", ADMIN_PW);
+    await page.click("#login-form button[type=submit]");
+    await page.fill("#mfa-code", "000000");
+    await page.click("#mfa-form button[type=submit]");
+    await page.waitForSelector("#login-error:visible");
+    check(await page.textContent("#login-error") === expired && await page.isVisible("#login-form")
+      && await page.locator("#mfa-form").count() === 0, "expired MFA after logout restores the password form and shows the server message in #login-error");
+    await page.fill("#login-form [name=username]", "admin");
+    await page.fill("#login-form [name=password]", ADMIN_PW);
+    await page.click("#login-form button[type=submit]");
+    await page.waitForSelector("body.authed");
+    check(await page.locator("#login-view[hidden]").count() === 1 && !admin.errors.length, "sign-in succeeds after the expired challenge");
     await admin.ctx.close();
 
     const views = ["dashboard", "incidents", "alerts", `alerts/${alertId}`, incidentId ? `incidents/${incidentId}` : null, "events",
@@ -167,6 +189,23 @@ async function main() {
       for (const v of views) {
         await show(page, v);
         await auditView(page, `#${v}`, width);
+        if (width >= 390 && v === "dashboard") {
+          await page.waitForSelector("#attack-chart .cellg");
+          const size = await page.locator("#attack-chart").evaluate((box) => {
+            box.scrollLeft = box.scrollWidth;
+            const result = { offset: box.scrollLeft, total: box.scrollWidth, visible: box.clientWidth,
+              page: document.scrollingElement.scrollWidth, overflow: getComputedStyle(box).overflowX };
+            box.scrollLeft = 0;
+            return result;
+          });
+          if (width === 390) {
+            check(["auto", "scroll"].includes(size.overflow) && size.offset > 0
+              && size.offset === size.total - size.visible && size.page === width,
+              `390px ATT&CK matrix scrolls ${size.offset}px inside its ${size.visible}px box (${size.total}px content, ${size.page}px page)`);
+          } else {
+            check(size.offset === 0 && size.total === size.visible, `${width}px ATT&CK matrix fits its ${size.visible}px box`);
+          }
+        }
       }
       await show(page, "overview");
       const triage = await page.evaluate(() => { const c = document.querySelector("#triage-metrics");
@@ -282,7 +321,7 @@ async function main() {
       check(await page.locator(".reveal-pending").evaluateAll((nodes) => nodes.every((n) => getComputedStyle(n).opacity === "1" && getComputedStyle(n).transform === "none")), "enabling reduced motion makes pending content visible immediately");
       await show(page, "overview");
       check(await page.locator(".reveal-pending").count() === 0
-        && await page.locator("h1").evaluate((n) => getComputedStyle(n).animationName === "none"), "reduced motion disables reveals and intros on new views");
+        && await page.locator("#view h1").evaluate((n) => getComputedStyle(n).animationName === "none"), "reduced motion disables reveals and intros on new views");
       await ctx.close();
       const noScript = await browser.newContext({ javaScriptEnabled: false, viewport: { width: 320, height: 568 } });
       const plain = await noScript.newPage();
