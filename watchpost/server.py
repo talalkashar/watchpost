@@ -1161,15 +1161,20 @@ class Handler(BaseHTTPRequestHandler):
             self._send_error(getattr(exc, "status", 400), str(exc))
         except Exception as exc:
             record_error(self.conn, "api", exc, guidance=f"Unhandled error on {self.command} {parsed.path}")
-            self._send(500, {"error": "internal error; it has been recorded on the Health page"})
+            self._send(500, {"error": "internal error; it has been recorded on the Health page"},
+                       extra_headers={"Cache-Control": "no-store"})
         finally:
             if self.conn is not None:
                 self.conn.close()
 
     def _send_error(self, status, message):
-        """Errors echo request values, and a viewer's pivot has already resolved to the real value: mask them."""
+        """Errors echo request values, and a viewer's pivot has already resolved to the real value: mask them.
+
+        no-store matches a successful /api response so a shared cache cannot keep that echo.
+        """
         payload = {"error": message}
-        self._send(status, self.masker.mask(payload) if self.masker is not None else payload)
+        self._send(status, self.masker.mask(payload) if self.masker is not None else payload,
+                   extra_headers={"Cache-Control": "no-store"})
 
     def _download_body(self, download):
         if download.render is not None:
