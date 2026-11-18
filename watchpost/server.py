@@ -33,6 +33,7 @@ RECENT_ERRORS_LIMIT = 20
 RECENT_RUNS_LIMIT = 10
 # These stay bare arrays. The rows past the cap are X-Watchpost-Omitted.
 AUDIT_LIMIT = 200
+# Ingest batches, newest by created_at, then id. The same timestamp keeps the higher id.
 BATCH_LIMIT = 50
 # Change requests, newest by id. A status filter counts only that status.
 CHANGES_LIMIT = 100
@@ -418,7 +419,7 @@ def _upload_synthetic(req):
 def batches(req):
     total = req.conn.execute("SELECT COUNT(*) FROM ingest_batches").fetchone()[0]
     rows = req.conn.execute(
-        "SELECT * FROM ingest_batches ORDER BY created_at DESC LIMIT ?", (BATCH_LIMIT,))
+        "SELECT * FROM ingest_batches ORDER BY created_at DESC, id DESC LIMIT ?", (BATCH_LIMIT,))
     shown = [row_to_dict(r, ["errors"]) for r in rows]
     _set_omitted(req, total - len(shown))
     return shown
