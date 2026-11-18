@@ -43,6 +43,11 @@ TOP_FAILURE_LIMIT = 5
 # alerts_by_rule_omitted is how many rule ids on alerts were past that cap.
 # A rule with no alerts is not a row and is not omitted.
 ALERTS_BY_RULE_LIMIT = 100
+# Metrics false_positive_rate_by_rule is this many rule ids that have a disposition,
+# false-positive rate descending, then rule_id.
+# false_positive_rate_by_rule_omitted is how many of those rule ids were past that cap.
+# A rule with no disposition is not a row and is not omitted.
+FP_RATE_BY_RULE_LIMIT = 100
 # Event detail returns this many linked alerts, newest by alert id, then id order.
 # alerts_omitted is how many linked alerts were past that cap.
 EVENT_ALERT_LIMIT = 50
@@ -509,11 +514,16 @@ def metrics(conn, hours=24):
             f"SELECT severity, COUNT(*) AS resolved, AVG({minutes}) AS mean, MAX({minutes}) AS longest FROM alerts"
             f" WHERE resolved_at IS NOT NULL GROUP BY severity ORDER BY {SEVERITY_RANK_SQL.format(col='severity')}"
             " DESC")]
+    # Rate descending, then rule_id. A rule with no disposition is not a row.
+    fp_rows = conn.execute(
+        "SELECT rule_id, COUNT(*) AS reviewed, SUM(disposition = 'false_positive') AS false_positive,"
+        " SUM(disposition = 'benign') AS benign FROM alerts WHERE disposition IS NOT NULL GROUP BY rule_id"
+        " ORDER BY SUM(disposition = 'false_positive') * 1.0 / COUNT(*) DESC, rule_id"
+        f" LIMIT {FP_RATE_BY_RULE_LIMIT}").fetchall()
     fp_by_rule = [
-        {**dict(r), "false_positive_rate": round(r["false_positive"] / r["reviewed"], 3)} for r in conn.execute(
-            "SELECT rule_id, COUNT(*) AS reviewed, SUM(disposition = 'false_positive') AS false_positive,"
-            " SUM(disposition = 'benign') AS benign FROM alerts WHERE disposition IS NOT NULL GROUP BY rule_id"
-            " ORDER BY SUM(disposition = 'false_positive') * 1.0 / COUNT(*) DESC, rule_id")]
+        {**dict(r), "false_positive_rate": round(r["false_positive"] / r["reviewed"], 3)} for r in fp_rows]
+    fp_by_rule_omitted = one(
+        "SELECT COUNT(DISTINCT rule_id) FROM alerts WHERE disposition IS NOT NULL") - len(fp_by_rule)
     now = utcnow()
     ages = [(now - parse_iso(r["created_at"])).total_seconds() / 60 for r in conn.execute(
         "SELECT created_at FROM alerts WHERE status != 'resolved'")]
@@ -568,6 +578,7 @@ def metrics(conn, hours=24):
         "activity_last_24h_of_data": histogram,
         "time_to_resolve_by_severity": resolve_by_severity,
         "false_positive_rate_by_rule": fp_by_rule,
+        "false_positive_rate_by_rule_omitted": fp_by_rule_omitted,
         "open_alert_aging": aging,
         "omitted_metrics": OMITTED_METRICS,
     }
