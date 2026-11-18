@@ -1,0 +1,35 @@
+# GetObject from outside the office ranges. Bucket name is not in the stored
+# message, so this is every external object read, not one bucket.
+title: AWS S3 Object Read From External Address
+id: 6a0e3c91-5d48-4f2b-9e17-3c8b4a7d0f65
+status: experimental
+description: |
+  An S3 GetObject came from an address outside the private ranges. Bulk reads
+  from a new address are how stolen keys turn into a data theft. Reads from
+  the office ranges, and service calls with no source IP, do not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1530/
+tags:
+  - attack.collection
+  - attack.t1530
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    event.action: cloud_data_access
+    message|startswith: GetObject on s3.amazonaws.com
+  has_ip:
+    SourceIp: null
+  internal:
+    SourceIp|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+  condition: selection and not has_ip and not internal
+falsepositives:
+  - A partner or analyst reading objects from outside the office ranges
+level: medium

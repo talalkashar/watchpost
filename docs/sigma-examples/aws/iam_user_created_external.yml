@@ -1,0 +1,35 @@
+# CreateUser from outside the office ranges. IAM create calls are stored as
+# cloud_iam_change. A missing source IP (service principal) is not "external".
+title: AWS IAM User Created From External Address
+id: 2b8e6d14-9c30-4a77-b1e2-5f90c3d7a418
+status: experimental
+description: |
+  An IAM user was created from an address outside the private ranges. New cloud
+  principals are a common persistence step after a token is stolen. The same
+  call from an office address is left to the joiner workflow.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1136/003/
+tags:
+  - attack.persistence
+  - attack.t1136.003
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    event.action: cloud_iam_change
+    message|startswith: CreateUser on iam.amazonaws.com
+  has_ip:
+    SourceIp: null
+  internal:
+    SourceIp|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+  condition: selection and not has_ip and not internal
+falsepositives:
+  - An administrator creating an account from a home or hotel network
+level: high

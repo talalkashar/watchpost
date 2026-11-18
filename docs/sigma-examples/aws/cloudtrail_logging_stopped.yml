@@ -1,0 +1,29 @@
+# CloudTrail StopLogging / DeleteTrail. Watchpost stores the call as
+# cloud_api_call with message "<eventName> on <eventSource>".
+title: AWS CloudTrail Logging Stopped Or Trail Deleted
+id: 7f3a1c90-2e64-4b18-9d55-1a6c0e8b4f21
+status: experimental
+description: |
+  Somebody stopped a CloudTrail trail or deleted one. Either call blinds the
+  account to later API activity. Trail updates are left out: they are a common
+  change-management action and the stored message does not show what changed.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1562/008/
+tags:
+  - attack.defense_evasion
+  - attack.t1562.008
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    event.action: cloud_api_call
+    message|startswith:
+      - StopLogging on cloudtrail.amazonaws.com
+      - DeleteTrail on cloudtrail.amazonaws.com
+  condition: selection
+falsepositives:
+  - Decommissioning a trail during an approved logging migration
+level: critical

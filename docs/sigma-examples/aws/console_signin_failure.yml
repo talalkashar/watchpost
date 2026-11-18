@@ -1,0 +1,28 @@
+# Failed console sign-in. Watchpost appends " (<errorCode>)" only when the
+# CloudTrail record has errorCode, so a failure is the parenthesis and a
+# success is the bare "ConsoleLogin on signin.amazonaws.com".
+title: AWS Console Sign-In Failure
+id: c5b7e2a4-8f16-4d90-b3c1-0e9a6d2f4b87
+status: experimental
+description: |
+  A console sign-in failed. One miss is weak on its own; Watchpost groups hits
+  by source address, which is where password guessing shows up. A successful
+  sign-in has no error suffix and does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1110/001/
+tags:
+  - attack.credential_access
+  - attack.t1110.001
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    event.action: cloud_api_call
+    message|contains: 'ConsoleLogin on signin.amazonaws.com ('
+  condition: selection
+falsepositives:
+  - An operator mistyping a password or an MFA code
+level: medium

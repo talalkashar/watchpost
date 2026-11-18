@@ -1,0 +1,28 @@
+# Root console sign-in. Watchpost keeps userIdentity.userName when it is set.
+# A raw root ARN with no userName is stored as the principal id, not "root".
+title: AWS Root Account Console Sign-In
+id: 4d1f8a33-6e92-4c5b-a047-8b2e6f1c9d70
+status: experimental
+description: |
+  The account root principal signed in to the AWS console. Root has no IAM
+  boundary, so any console sign-in (success or failure) is worth a page.
+  This matches when the stored user name is root.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1078/004/
+tags:
+  - attack.initial_access
+  - attack.t1078.004
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    event.action: cloud_api_call
+    user.name: root
+    message|startswith: ConsoleLogin on signin.amazonaws.com
+  condition: selection
+falsepositives:
+  - A break-glass root sign-in during an approved recovery
+level: critical

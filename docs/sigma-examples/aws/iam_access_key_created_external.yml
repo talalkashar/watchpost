@@ -1,0 +1,35 @@
+# CreateAccessKey from outside the office ranges. The key id is not in the
+# stored message; the event name and source address are.
+title: AWS IAM Access Key Created From External Address
+id: 9e4c2a68-1b75-4d03-8f36-c0a7e5d19b52
+status: experimental
+description: |
+  A long-lived IAM access key was created from an address outside the private
+  ranges. Extra keys let an attacker keep access after the password changes.
+  Key rotation from an office address does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1098/001/
+tags:
+  - attack.persistence
+  - attack.t1098.001
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    event.action: cloud_iam_change
+    message|startswith: CreateAccessKey on iam.amazonaws.com
+  has_ip:
+    SourceIp: null
+  internal:
+    SourceIp|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+  condition: selection and not has_ip and not internal
+falsepositives:
+  - An administrator minting a key from a home or hotel network
+level: high
