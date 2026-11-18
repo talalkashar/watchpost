@@ -246,6 +246,82 @@ class TimechartTests(unittest.TestCase):
         self.assertEqual(self.run_q("user:nobody | timechart span=1h")["rows"], [])
 
 
+class TimechartSeriesOmittedTests(unittest.TestCase):
+    """A timechart by-field keeps five series. series_omitted counts the rest. other and the buckets stay."""
+
+    def chart(self, rows, text):
+        conn = memory_db(rows)
+        self.addCleanup(conn.close)
+        return hunt.run(conn, {"q": text}, now=NOW)
+
+    def test_series_past_five_stay_in_other_and_are_counted(self):
+        # Equal counts sort by the host name, so h1–h5 are drawn and h6 and h7 are the two left out.
+        # A blank host is not a series. It still lands in other, and the bucket total stays 8.
+        rows = [("2026-10-07T10:00:00.000Z", "auth_failure", "u", "203.0.113.10", f"h{n}", None, "m")
+                for n in range(1, 8)]
+        rows.append(("2026-10-07T10:30:00.000Z", "auth_failure", "u", "203.0.113.10", None, None, "blank"))
+        data = self.chart(rows, "| timechart span=1h by host")
+        self.assertEqual(data["columns"], ["_time", "h1", "h2", "h3", "h4", "h5", "other"])
+        self.assertEqual(data["rows"], [["2026-10-07T10:00:00.000Z", 1, 1, 1, 1, 1, 3]])
+        self.assertEqual((data["series_omitted"], data["truncated"]), (2, False))
+        self.assertNotIn("h6", data["columns"])
+        self.assertNotIn("h7", data["columns"])
+        exact = [("2026-10-07T10:00:00.000Z", "auth_failure", "u", "203.0.113.10", f"h{n}", None, "m")
+                 for n in range(1, 6)]
+        fitted = self.chart(exact, "| timechart span=1h by host")
+        self.assertEqual(fitted["columns"], ["_time", "h1", "h2", "h3", "h4", "h5"])
+        self.assertEqual(fitted["rows"], [["2026-10-07T10:00:00.000Z", 1, 1, 1, 1, 1]])
+        self.assertEqual((fitted["series_omitted"], fitted["truncated"]), (0, False))
+        blank = exact + [("2026-10-07T10:30:00.000Z", "auth_failure", "u", "203.0.113.10", None, None, "blank")]
+        with_blank = self.chart(blank, "| timechart span=1h by host")
+        self.assertEqual(with_blank["columns"], ["_time", "h1", "h2", "h3", "h4", "h5", "other"])
+        self.assertEqual(with_blank["rows"], [["2026-10-07T10:00:00.000Z", 1, 1, 1, 1, 1, 1]])
+        self.assertEqual(with_blank["series_omitted"], 0)
+
+    def test_a_chart_that_draws_every_series_returns_zero(self):
+        one = self.chart(EVENTS, "user:alice | timechart span=1h by user")
+        self.assertEqual(one["columns"], ["_time", "alice"])
+        self.assertNotIn("other", one["columns"])
+        self.assertEqual((one["series_omitted"], one["truncated"]), (0, False))
+        plain = self.chart(EVENTS, "event_type:auth_failure | timechart span=1h count")
+        self.assertEqual(plain["columns"], ["_time", "count"])
+        self.assertEqual((plain["series_omitted"], plain["truncated"]), (0, False))
+        self.assertEqual(plain["rows"], [["2026-10-07T08:00:00.000Z", 2], ["2026-10-07T09:00:00.000Z", 0],
+                                         ["2026-10-07T10:00:00.000Z", 1], ["2026-10-07T11:00:00.000Z", 4]])
+        empty = self.chart(EVENTS, "user:nobody | timechart span=1h")
+        self.assertEqual((empty["rows"], empty["series_omitted"], empty["truncated"]), ([], 0, False))
+        zeros = self.chart(EVENTS, "user:nobody last:1h | timechart span=15m by host")
+        self.assertGreater(len(zeros["rows"]), 0)
+        self.assertEqual(zeros["columns"], ["_time"])
+        self.assertTrue(all(row[1:] == [] for row in zeros["rows"]))
+        self.assertEqual((zeros["series_omitted"], zeros["truncated"]), (0, False))
+
+    def test_user_fold_counts_one_series_and_leaves_the_accented_pair_apart(self):
+        # alice, Alice, and ALICE are one series. ÉRIN and érin stay two, so six series and one omitted.
+        # A blank user is not that omitted series. It still adds to other.
+        rows = [
+            ("2026-10-07T10:00:00.000Z", "auth_failure", "alice", "203.0.113.10", "web01", None, "a"),
+            ("2026-10-07T10:05:00.000Z", "auth_failure", "Alice", "203.0.113.10", "web01", None, "b"),
+            ("2026-10-07T10:10:00.000Z", "auth_failure", "ALICE", "203.0.113.10", "web01", None, "c"),
+            ("2026-10-07T10:15:00.000Z", "auth_failure", "ÉRIN", "203.0.113.10", "web01", None, "d"),
+            ("2026-10-07T10:20:00.000Z", "auth_failure", "érin", "203.0.113.10", "web01", None, "e"),
+            ("2026-10-07T10:25:00.000Z", "auth_failure", "u1", "203.0.113.10", "web01", None, "f"),
+            ("2026-10-07T10:30:00.000Z", "auth_failure", "u2", "203.0.113.10", "web01", None, "g"),
+            ("2026-10-07T10:35:00.000Z", "auth_failure", "u3", "203.0.113.10", "web01", None, "h"),
+            ("2026-10-07T10:40:00.000Z", "auth_failure", None, "203.0.113.10", "web01", None, "blank"),
+        ]
+        data = self.chart(rows, "| timechart span=1h by user")
+        self.assertEqual(data["columns"], ["_time", "alice", "u1", "u2", "u3", "Érin", "other"])
+        self.assertNotIn("Alice", data["columns"])
+        self.assertNotIn("érin", data["columns"])
+        self.assertEqual(data["rows"], [["2026-10-07T10:00:00.000Z", 3, 1, 1, 1, 1, 2]])
+        self.assertEqual((data["series_omitted"], data["truncated"]), (1, False))
+        text = (Path(__file__).resolve().parent.parent / "docs" / "REFERENCE.md").read_text()
+        api = (Path(__file__).resolve().parent.parent / "docs" / "API.md").read_text()
+        self.assertIn("`series_omitted` is how many distinct non-null series were past those 5", text)
+        self.assertIn("series_omitted", api)
+
+
 class RefusalTests(unittest.TestCase):
     def setUp(self):
         self.conn = memory_db()
@@ -428,7 +504,22 @@ class HuntStatsApiTests(ServerTestCase):
         self.assertEqual((data["truncated"], data["groups_omitted"]), (False, 0))
         status, plain, _ = viewer.get("/api/hunt?q=" + quote("| stats count"))
         self.assertEqual((status, plain["groups_omitted"], plain["truncated"]), (200, 0, False))
+        status, chart, _ = viewer.get("/api/hunt?q=" + quote("| timechart span=1h count"))
+        self.assertEqual((status, chart["series_omitted"], chart["truncated"]), (200, 0, False))
         self.assertEqual(viewer.post("/api/hunt/saved", {"name": "v", "query": "| top user"})[0], 403)
+
+    def test_timechart_series_omitted_on_the_api(self):
+        db = sqlite3.connect(self.db_path)
+        with db:
+            insert(db, [("2026-10-07T10:00:00.000Z", "auth_failure", "u", "203.0.113.10", f"h{n}", None, "m")
+                        for n in range(1, 8)])
+        db.close()
+        status, data, _ = self.client("viewer").get(
+            "/api/hunt?q=" + quote("host:h* | timechart span=1h by host"))
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["columns"], ["_time", "h1", "h2", "h3", "h4", "h5", "other"])
+        self.assertEqual((data["series_omitted"], data["truncated"]), (2, False))
+        self.assertEqual(sum(data["rows"][0][1:]), 7)
 
     def test_bad_stage_is_a_400(self):
         status, data, _ = self.client("viewer").get("/api/hunt?q=" + quote("| stats count by message"))
