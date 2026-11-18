@@ -245,8 +245,7 @@ def _folded_pairs(pairs):
     """One row per stream. Spellings that differ only by ASCII case share a row.
 
     The returned source and host are the folded spellings. A NULL host stays NULL.
-    Counts add. Arrival reads stay on each stored spelling (`members`) so they keep using
-    idx_events_source_host.
+    Counts add. `members` is each stored spelling, so inventory can fold the one arrival page.
     """
     grouped = {}
     for p in pairs:
@@ -267,11 +266,35 @@ def _folded_pairs(pairs):
     return list(grouped.values())
 
 
-def _merged_arrivals(conn, members, max_id=None):
-    """Recent arrivals of every stored spelling of one stream, oldest first."""
+def _arrival_pages(conn):
+    """The newest CADENCE_SAMPLE + 2 arrivals of every stored (source, host), in one query.
+
+    Each arrival is the event with the greatest id at that ingested_at. A page is oldest first.
+    Inventory folds these pages. It does not query each spelling.
+    """
+    sql = (
+        "SELECT source, host, ingested_at, id, ts, synthetic FROM ("
+        " SELECT source, host, ingested_at, id, ts, synthetic,"
+        " ROW_NUMBER() OVER (PARTITION BY source, host, ingested_at ORDER BY id DESC) AS same_time,"
+        " DENSE_RANK() OVER (PARTITION BY source, host ORDER BY ingested_at DESC) AS arrival_rank"
+        " FROM events) WHERE same_time = 1 AND arrival_rank <= ?"
+    )
+    pages = {}
+    for row in conn.execute(sql, (CADENCE_SAMPLE + 2,)):
+        pages.setdefault((row["source"], row["host"]), []).append(dict(row))
+    for rows in pages.values():
+        rows.sort(key=lambda item: item["ingested_at"])
+    return pages
+
+
+def _merge_pages(pages, members):
+    """Recent arrivals of every stored spelling of one stream, oldest first.
+
+    The same ingested_at keeps the row with the greater id. A spelling with no page adds nothing.
+    """
     by_time = {}
-    for source, host in members:
-        for row in _recent_arrivals(conn, source, host, max_id):
+    for key in members:
+        for row in pages.get(key, ()):
             when = row["ingested_at"]
             best = by_time.get(when)
             if best is None or row["id"] > best["id"]:
@@ -331,18 +354,20 @@ def inventory(conn, now=None):
 
     `sources` is the first SOURCE_LIST_LIMIT rows after silent, then source, then host. `sources_omitted`
     is how many pairs were past that cap (0 when the inventory fits, including none). `summary` counts
-    every pair, including the ones left off the page. `maintenance_windows` is windows whose effective end
-    is still ahead, at most MAINTENANCE_LIST_LIMIT, in starts_at descending then id descending order.
-    `maintenance_windows_omitted` is how many of those were past that cap.
+    every pair, including the ones left off the page. Arrivals of every stored spelling are read in one
+    query, the newest CADENCE_SAMPLE + 2 per spelling, then folded. `maintenance_windows` is windows whose
+    effective end is still ahead, at most MAINTENANCE_LIST_LIMIT, in starts_at descending then id descending
+    order. `maintenance_windows_omitted` is how many of those were past that cap.
     """
     now = now or now_iso()
     now_s = _epoch(now)
     listed = list_windows(conn)
     windows = [{"source": w["source"], "host": w["host"], "start": _epoch(w["starts_at"]),
                 "end": _epoch(w["effective_end"])} for w in listed]
+    pages = _arrival_pages(conn)
     rows = []
     for p in _folded_pairs(_pairs(conn, since=iso_from(now_s - 86400))):
-        arrivals = _merged_arrivals(conn, p["members"])
+        arrivals = _merge_pages(pages, p["members"])
         times = [_epoch(a["ingested_at"]) for a in arrivals]
         host = p["host"] or ""
         verdict = judge(times, _epoch(p["first_seen"]), now_s, _windows_for(windows, p["source"], host))
