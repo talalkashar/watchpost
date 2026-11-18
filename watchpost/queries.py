@@ -483,8 +483,17 @@ def assign(conn, alert_id, actor, assignee):
 
 
 # Open-alert age buckets in minutes since the alert was created: (label, from, up to).
+# The upper bound is exclusive. An age of exactly 60 minutes is "1-4h", not "under 1h".
 AGING_BUCKETS = (("under 1h", 0, 60), ("1-4h", 60, 240), ("4-24h", 240, 1440), ("1-7d", 1440, 10080),
                  ("over 7d", 10080, float("inf")))
+# Minutes between a canonical timestamp and created_at. julianday is a float of days and
+# reads an exact hour as 59.999999 minutes, which would drop that alert into the younger
+# bucket. unixepoch drops the fractional second, so the milliseconds are added back.
+_ALERT_AGE_MINUTES = (
+    "((unixepoch(?) - unixepoch(created_at)) * 1000"
+    " + CAST(substr(?, 21, 3) AS INTEGER)"
+    " - CAST(substr(created_at, 21, 3) AS INTEGER)) / 60000.0"
+)
 # Left out on purpose: they compare an event's own timestamp with this instance's clock, and demo
 # and simulated events are replayed with timestamps from the previous business day.
 OMITTED_METRICS = [
@@ -506,6 +515,36 @@ METRICS_WINDOW_NOTE = (
     "activity_last_24h_of_data is the 24 hours ending at the newest event, not this window. "
     "Alert counts are the current alerts table."
 )
+
+
+def _aging_sum(index, low, high):
+    if high == float("inf"):
+        cond = f"age >= {low:g}"
+    else:
+        cond = f"age >= {low:g} AND age < {high:g}"
+    return f"COALESCE(SUM({cond}), 0) AS b{index}"
+
+
+def open_alert_aging(conn, now=None):
+    """Bucket alerts that are not resolved, in one aggregate.
+
+    An empty open set is five counts of 0 and oldest_minutes None. A resolved
+    alert is not a row. oldest_minutes is the greatest age, rounded to one
+    decimal the same way the per-row loop rounded it, including a future
+    created_at whose age is negative and matches no bucket.
+    """
+    stamp = iso(now or utcnow())
+    sums = ", ".join(_aging_sum(i, low, high) for i, (_label, low, high) in enumerate(AGING_BUCKETS))
+    row = conn.execute(
+        f"SELECT {sums}, MAX(age) AS oldest FROM ("
+        f"SELECT {_ALERT_AGE_MINUTES} AS age FROM alerts WHERE status != 'resolved') AS ages",
+        (stamp, stamp)).fetchone()
+    oldest = row["oldest"]
+    return {
+        "buckets": [{"label": label, "count": row[f"b{i}"]}
+                    for i, (label, _low, _high) in enumerate(AGING_BUCKETS)],
+        "oldest_minutes": round(oldest, 1) if oldest is not None else None,
+    }
 
 
 def metrics(conn, hours=24):
@@ -552,12 +591,7 @@ def metrics(conn, hours=24):
         {**dict(r), "false_positive_rate": round(r["false_positive"] / r["reviewed"], 3)} for r in fp_rows]
     fp_by_rule_omitted = one(
         "SELECT COUNT(DISTINCT rule_id) FROM alerts WHERE disposition IS NOT NULL") - len(fp_by_rule)
-    now = utcnow()
-    ages = [(now - parse_iso(r["created_at"])).total_seconds() / 60 for r in conn.execute(
-        "SELECT created_at FROM alerts WHERE status != 'resolved'")]
-    aging = {"buckets": [{"label": label, "count": sum(low <= a < high for a in ages)}
-                         for label, low, high in AGING_BUCKETS],
-             "oldest_minutes": round(max(ages), 1) if ages else None}
+    aging = open_alert_aging(conn)
     # Addresses stay the stored spelling. Equal counts keep the earlier src_ip.
     # Accounts fold ASCII case with SQLite lower(),
     # the same fold hunt user groups use. Alice and alice are one row named alice.
