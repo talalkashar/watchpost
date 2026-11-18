@@ -529,7 +529,8 @@ def off_hours_privileged_login(events, params):
     start, end = params["business_start_hour"], params["business_end_hour"]
     findings = []
     for event in _filtered(events, params, LOGIN_SUCCESS_TYPES):
-        user = (event.get("user") or "").lower()
+        # ASCII only, the same fold covers already used, so ÉRIN and érin are two alerts.
+        user = _ascii_fold(event.get("user") or "")
         if not covers("privileged_users", privileged, event):
             continue
         dt = parse_iso(event["ts"])

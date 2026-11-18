@@ -767,6 +767,65 @@ class UnsanctionedAccountFoldTests(unittest.TestCase):
         ]), params("unsanctioned_cloud_service")), [])
 
 
+NIGHT = datetime(2026, 9, 15, 3, 0, tzinfo=timezone.utc)
+
+
+class OffHoursAccountFoldTests(unittest.TestCase):
+    """off_hours_privileged_login keys the account with the ASCII fold.
+
+    covers already used that fold. The finding key used str.lower(), so ÉRIN
+    and érin shared one alert. Alice, alice, and ALICE stay one key. The title
+    shows the account as logged.
+    """
+
+    def test_accented_accounts_do_not_share_a_key(self):
+        p = params("off_hours_privileged_login", privileged_users=["ÉRIN", "érin", "alice"])
+        merged = rules.off_hours_privileged_login(make([
+            ok(0, "Alice", base=NIGHT),
+            ok(60, "ALICE", base=NIGHT),
+        ]), p)
+        self.assertEqual([f["group_key"] for f in merged], [
+            "alice|203.0.113.1|2026-09-15",
+            "alice|203.0.113.1|2026-09-15",
+        ])
+        self.assertEqual(merged[0]["event_ids"], [1])
+        self.assertEqual(merged[1]["event_ids"], [2])
+        self.assertIn("Alice", merged[0]["title"])
+        self.assertIn("ALICE", merged[1]["title"])
+        apart = rules.off_hours_privileged_login(make([
+            ok(0, "ÉRIN", base=NIGHT),
+            ok(60, "érin", base=NIGHT),
+        ]), p)
+        self.assertEqual([f["group_key"] for f in apart], [
+            "Érin|203.0.113.1|2026-09-15",
+            "érin|203.0.113.1|2026-09-15",
+        ])
+        self.assertEqual([f["title"] for f in apart], [
+            "Off-hours privileged login: ÉRIN",
+            "Off-hours privileged login: érin",
+        ])
+        same = rules.off_hours_privileged_login(make([
+            ok(0, "ÉRIN", base=NIGHT),
+            ok(60, "Érin", base=NIGHT),
+        ]), p)
+        self.assertEqual([f["group_key"] for f in same], [
+            "Érin|203.0.113.1|2026-09-15",
+            "Érin|203.0.113.1|2026-09-15",
+        ])
+        self.assertIn("ÉRIN", same[0]["title"])
+        self.assertIn("Érin", same[1]["title"])
+        other_ip = rules.off_hours_privileged_login(make([
+            ok(0, "ÉRIN", ip="198.51.100.8", base=NIGHT),
+        ]), p)
+        self.assertEqual([f["group_key"] for f in other_ip], ["Érin|198.51.100.8|2026-09-15"])
+
+    def test_the_docs_name_the_off_hours_fold(self):
+        text = (Path(__file__).resolve().parent.parent / "docs" / "REFERENCE.md").read_text()
+        self.assertIn("`off_hours_privileged_login`", text)
+        self.assertIn("the key is `account|src_ip|date`", text)
+        self.assertIn("the title still shows the account as logged", text)
+
+
 class TechniqueMappingTests(unittest.TestCase):
     def test_every_rule_has_techniques_and_a_function(self):
         for rule in rules.DEFAULT_RULES:
