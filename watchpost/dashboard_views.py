@@ -53,12 +53,26 @@ def _row(row):
     return result
 
 
-def list_views(conn, actor):
+# Views this account can see. The rest of that set is X-Watchpost-Omitted.
+VIEW_LIST_LIMIT = 100
+_VISIBLE = "owner = ? OR visibility = 'shared'"
+
+
+def list_views(conn, actor, limit=VIEW_LIST_LIMIT):
+    """Views this account can see, and how many the limit left out.
+
+    Own views and shared views, ordered by name COLLATE NOCASE, then id.
+    A private view owned by someone else is not a row and is not counted.
+    The second value is 0 when the visible list fits. Callers that return
+    the bare array send that count as X-Watchpost-Omitted.
+    """
+    total = conn.execute(
+        f"SELECT COUNT(*) FROM dashboard_views WHERE {_VISIBLE}", (actor,)).fetchone()[0]
     rows = conn.execute(
         "SELECT id, name, filters, layout, visibility, owner, created_at, updated_at"
-        " FROM dashboard_views WHERE owner = ? OR visibility = 'shared'"
-        " ORDER BY name COLLATE NOCASE, id", (actor,)).fetchall()
-    return [_row(row) for row in rows]
+        f" FROM dashboard_views WHERE {_VISIBLE}"
+        " ORDER BY name COLLATE NOCASE, id LIMIT ?", (actor, limit)).fetchall()
+    return [_row(row) for row in rows], total - len(rows)
 
 
 def _stored_view_name(conn, owner, name, view_id=None):
