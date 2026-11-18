@@ -7,6 +7,7 @@ invented. An empty table is an empty list. window_scope stays as it is.
 
 import sqlite3
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from tests.helpers import ServerTestCase
@@ -32,13 +33,20 @@ def memory_db():
     return conn
 
 
-def add_alert(conn, severity, status="open", disposition=None, key=None):
+def _at(minutes):
+    base = datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc) + timedelta(minutes=minutes)
+    return base.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def add_alert(conn, severity, status="open", disposition=None, key=None, created_at=None, resolved_at=None):
+    created = created_at or STAMP
     conn.execute(
         "INSERT INTO alerts(rule_id, rule_version, group_key, severity, title, explanation,"
-        " status, disposition, first_seen, last_seen, event_count, synthetic, created_at, updated_at)"
-        " VALUES ('brute_force_ip', 1, ?, ?, 'synthetic alert', 'why', ?, ?, ?, ?, 1, 1, ?, ?)",
+        " status, disposition, first_seen, last_seen, event_count, synthetic, created_at,"
+        " updated_at, resolved_at)"
+        " VALUES ('brute_force_ip', 1, ?, ?, 'synthetic alert', 'why', ?, ?, ?, ?, 1, 1, ?, ?, ?)",
         (key or f"{severity}-{status}-{disposition}", severity, status, disposition,
-         STAMP, STAMP, STAMP, STAMP))
+         STAMP, STAMP, created, created, resolved_at))
 
 
 class MetricsOrderTests(unittest.TestCase):
@@ -119,6 +127,9 @@ class MetricsOrderTests(unittest.TestCase):
             api)
         self.assertIn("An empty alerts table is an empty list for both", api)
         self.assertIn("`window_scope` does not change", api)
+        self.assertIn(
+            "`time_to_resolve_by_severity` reads alerts that have `resolved_at`", api)
+        self.assertIn("rounded to one decimal", api)
 
 
 class MetricsOrderApiTests(ServerTestCase):
@@ -143,3 +154,82 @@ class MetricsOrderApiTests(ServerTestCase):
         self.assertEqual(status, 401)
         self.assertNotIn("alerts_by_severity", denied)
         self.assertNotIn("dispositions", denied)
+
+
+class ResolveOrderTests(unittest.TestCase):
+    """time_to_resolve_by_severity is rank, then severity. Rank 0 is not one row."""
+
+    def setUp(self):
+        self.conn = memory_db()
+        self.addCleanup(self.conn.close)
+
+    def _resolved(self):
+        # Quiet names first. A scan-order read would not match rank, then severity.
+        add_alert(self.conn, "urgent", status="resolved", disposition="benign", key="urgent",
+                  created_at=_at(0), resolved_at=_at(4))
+        add_alert(self.conn, "info", status="resolved", disposition="benign", key="info",
+                  created_at=_at(0), resolved_at=_at(1))
+        add_alert(self.conn, "alert", status="resolved", disposition="benign", key="alert",
+                  created_at=_at(0), resolved_at=_at(2))
+        add_alert(self.conn, "low", status="resolved", disposition="benign", key="low",
+                  created_at=_at(0), resolved_at=_at(5))
+        add_alert(self.conn, "high", status="resolved", disposition="false_positive", key="high",
+                  created_at=_at(0), resolved_at=_at(15))
+        add_alert(self.conn, "critical", status="resolved", disposition="true_positive", key="c10",
+                  created_at=_at(0), resolved_at=_at(10))
+        add_alert(self.conn, "critical", status="resolved", disposition="true_positive", key="c30",
+                  created_at=_at(0), resolved_at=_at(30))
+        add_alert(self.conn, "medium", status="open", key="open-medium")
+
+    def test_rank_then_severity_and_one_decimal(self):
+        self._resolved()
+        rows = metrics(self.conn)["time_to_resolve_by_severity"]
+        self.assertEqual(
+            rows,
+            [{"severity": "critical", "resolved": 2, "mean_minutes": 20.0, "max_minutes": 30.0},
+             {"severity": "high", "resolved": 1, "mean_minutes": 15.0, "max_minutes": 15.0},
+             {"severity": "low", "resolved": 1, "mean_minutes": 5.0, "max_minutes": 5.0},
+             {"severity": "alert", "resolved": 1, "mean_minutes": 2.0, "max_minutes": 2.0},
+             {"severity": "info", "resolved": 1, "mean_minutes": 1.0, "max_minutes": 1.0},
+             {"severity": "urgent", "resolved": 1, "mean_minutes": 4.0, "max_minutes": 4.0}])
+        self.assertNotIn("medium", [row["severity"] for row in rows])
+
+    def test_empty_table_is_an_empty_list(self):
+        self.assertEqual(metrics(self.conn)["time_to_resolve_by_severity"], [])
+
+    def test_the_query_orders_by_rank_then_severity(self):
+        captured = []
+        real_execute = self.conn.execute
+
+        def execute(sql, args=()):
+            captured.append(sql)
+            return real_execute(sql, args)
+
+        self.conn.execute = execute
+        metrics(self.conn)
+        sql = next(s for s in captured if "resolved_at IS NOT NULL GROUP BY severity" in s)
+        self.assertIn("ORDER BY " + SEVERITY_RANK_SQL.format(col="severity") + " DESC, severity", sql)
+        self.assertNotIn("lower(", sql)
+
+
+class ResolveOrderApiTests(ServerTestCase):
+    def test_the_metrics_endpoint_returns_rank_then_severity(self):
+        with sqlite3.connect(self.db_path) as db:
+            add_alert(db, "urgent", status="resolved", disposition="benign", key="urgent",
+                      created_at=_at(0), resolved_at=_at(4))
+            add_alert(db, "info", status="resolved", disposition="true_positive", key="info",
+                      created_at=_at(0), resolved_at=_at(1))
+            add_alert(db, "critical", status="resolved", disposition="true_positive", key="critical",
+                      created_at=_at(0), resolved_at=_at(10))
+            add_alert(db, "medium", status="investigating", key="open-medium")
+        status, body, headers = self.client("viewer").get("/api/metrics")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(
+            body["time_to_resolve_by_severity"],
+            [{"severity": "critical", "resolved": 1, "mean_minutes": 10.0, "max_minutes": 10.0},
+             {"severity": "info", "resolved": 1, "mean_minutes": 1.0, "max_minutes": 1.0},
+             {"severity": "urgent", "resolved": 1, "mean_minutes": 4.0, "max_minutes": 4.0}])
+        status, denied, _ = self.client().get("/api/metrics")
+        self.assertEqual(status, 401)
+        self.assertNotIn("time_to_resolve_by_severity", denied)

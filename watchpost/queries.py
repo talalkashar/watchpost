@@ -575,12 +575,15 @@ def metrics(conn, hours=24):
     # SOC metrics (3.0). All three use created_at/resolved_at, which are wall-clock times of this
     # instance, so they stay honest when the events themselves are replayed with older timestamps.
     minutes = "(julianday(resolved_at) - julianday(created_at)) * 1440"
+    # Rank, then the stored severity. critical through low each have their own rank.
+    # info and any other name share rank 0, so the name keeps that tie in one order.
+    # A severity with no resolved alert is not a row.
     resolve_by_severity = [
         {"severity": r["severity"], "resolved": r["resolved"], "mean_minutes": round(r["mean"], 1),
          "max_minutes": round(r["longest"], 1)} for r in conn.execute(
             f"SELECT severity, COUNT(*) AS resolved, AVG({minutes}) AS mean, MAX({minutes}) AS longest FROM alerts"
-            f" WHERE resolved_at IS NOT NULL GROUP BY severity ORDER BY {SEVERITY_RANK_SQL.format(col='severity')}"
-            " DESC")]
+            f" WHERE resolved_at IS NOT NULL GROUP BY severity"
+            f" ORDER BY {SEVERITY_RANK_SQL.format(col='severity')} DESC, severity")]
     # Rate descending, then rule_id. A rule with no disposition is not a row.
     fp_rows = conn.execute(
         "SELECT rule_id, COUNT(*) AS reviewed, SUM(disposition = 'false_positive') AS false_positive,"
