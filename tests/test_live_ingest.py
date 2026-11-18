@@ -14,8 +14,9 @@ from tests.helpers import ServerTestCase
 from watchpost import health, syslog_listener
 from watchpost.config import Config
 from watchpost.db import connect
+from watchpost.diagnostics import redact
 from watchpost.health import run_health_checks
-from watchpost.normalize import EventError
+from watchpost.normalize import MAX_LEN, EventError
 from watchpost.server import App
 from watchpost.syslog_listener import SyslogListener, frame_to_event, parse_frame, read_tcp_frame
 
@@ -54,6 +55,21 @@ class SyslogParsingTests(unittest.TestCase):
         self.assertEqual((event["event_type"], event["severity"]), ("syslog", "high"))  # PRI 11 = user.err
         self.assertEqual(event["message"], "nginx: upstream timed out password=[REDACTED]")
         self.assertNotIn("hunter2", event["raw"])
+
+    def test_generic_message_redacts_before_the_length_cut(self):
+        secret = "SUPERSECRET"
+        value = 'a\\"' + secret + ("p" * 40)
+        opener = '{"password": "'
+        prefix = "nginx: "
+        pad = MAX_LEN["message"] - len(prefix) - len(opener) - len('a\\"') - len(secret)
+        body = ("n" * pad) + opener + value + '"}'
+        combined = prefix + body
+        self.assertIn(secret, redact(combined[:MAX_LEN["message"]]))
+        event = frame_to_event(f"<11>Sep 28 10:00:03 web01 {combined}")
+        self.assertNotIn(secret, event["message"])
+        self.assertNotIn(secret, event["raw"])
+        self.assertLessEqual(len(event["message"]), MAX_LEN["message"])
+        self.assertIn("[REDACTED]", event["message"])
 
     def test_pri_severity_mapping(self):
         for pri, severity in [(8, "critical"), (10, "critical"), (12, "medium"), (13, "low"), (14, "info")]:

@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote_plus
 
 from .db import iso, utcnow
-from .diagnostics import redact
+from .diagnostics import redact_cut
 
 EVENT_TYPES = {
     "auth_failure", "auth_success", "account_lockout", "user_created",
@@ -93,7 +93,7 @@ class EventError(ValueError):
     pass
 
 
-def clean_text(value, field):
+def clean_text(value, field, *, truncate=True):
     if value is None:
         return None
     if isinstance(value, dict):
@@ -103,7 +103,17 @@ def clean_text(value, field):
     text = _CONTROL.sub(" ", str(value)).strip()
     if not text or text == "-":
         return None
+    if not truncate:
+        return text
     return text[: MAX_LEN.get(field, 256)]
+
+
+def stored_text(value, field):
+    """Clean, redact the full value, then cut to the field limit."""
+    text = clean_text(value, field, truncate=False)
+    if text is None:
+        return None
+    return redact_cut(text, MAX_LEN.get(field, 256))
 
 
 def validate_source(source):
@@ -258,8 +268,8 @@ def normalize_record(record, default_source, now=None):
         "dest_ip": parse_ip(_pick(record, "dest_ip"), "dest_ip"),
         "dest_port": parse_int(_pick(record, "dest_port"), "dest_port", 65535),
         "bytes": parse_int(_pick(record, "bytes"), "bytes", MAX_BYTES),
-        "message": redact(clean_text(_pick(record, "message"), "message")),
-        "raw": redact(raw)[: MAX_LEN["raw"]],
+        "message": stored_text(_pick(record, "message"), "message"),
+        "raw": redact_cut(raw, MAX_LEN["raw"]),
     }
 
 
@@ -327,7 +337,7 @@ def normalize_authlog_line(line, default_source, year=None, now=None):
         "program": match.group("prog"),
     }
     event = normalize_record(record, default_source, now)
-    event["raw"] = redact(line.strip())[: MAX_LEN["raw"]]
+    event["raw"] = redact_cut(line.strip(), MAX_LEN["raw"])
     return event
 
 
@@ -376,7 +386,7 @@ def normalize_weblog_line(line, default_source, now=None):
                    + (f" ua={match.group('agent')[:120]}" if match.group("agent") not in (None, "", "-") else ""),
     }
     event = normalize_record(record, default_source, now)
-    event["raw"] = redact(line.strip())[: MAX_LEN["raw"]]
+    event["raw"] = redact_cut(line.strip(), MAX_LEN["raw"])
     return event
 
 

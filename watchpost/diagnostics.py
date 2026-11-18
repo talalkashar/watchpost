@@ -34,6 +34,17 @@ def redact(text):
     return text
 
 
+def redact_cut(text, limit):
+    """Redact the whole text, then cut it.
+
+    A quoted secret needs its closing quote. Cutting first leaves the secret
+    in the stored prefix when that quote sits past the limit.
+    """
+    if text is None:
+        return None
+    return redact(text)[:limit]
+
+
 class RedactingFilter(logging.Filter):
     def filter(self, record):
         record.msg = redact(record.getMessage())
