@@ -17,6 +17,7 @@ A `|` starts the stage only at the start of a word; inside a quoted value or an 
 """
 
 import re
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from .db import audit, iso, now_iso, transaction, utcnow
@@ -451,6 +452,17 @@ def list_saved(conn):
         "SELECT id, name, query, description, owner, created_at FROM saved_searches ORDER BY name COLLATE NOCASE")]
 
 
+def _stored_saved_name(conn, name):
+    """The saved spelling of `name`. The unique index is COLLATE NOCASE, so `Dup` and `dup` are one row."""
+    row = conn.execute(
+        "SELECT name FROM saved_searches WHERE name = ? COLLATE NOCASE", (name,)).fetchone()
+    return None if row is None else row["name"]
+
+
+def _name_taken(stored):
+    raise HuntError(f"a saved search named {stored!r} already exists", 409)
+
+
 def save_search(conn, data, actor):
     name = _text(data.get("name"), "name", NAME_MAX, required=True)
     query = data.get("query")
@@ -460,10 +472,16 @@ def save_search(conn, data, actor):
     compile_query(query)  # a saved search must run (this checks a pipeline stage too)
     description = _text(data.get("description"), "description", DESCRIPTION_MAX)
     with transaction(conn):
-        if conn.execute("SELECT 1 FROM saved_searches WHERE name = ?", (name,)).fetchone():
-            raise HuntError(f"a saved search named {name!r} already exists", 409)
-        cur = conn.execute("INSERT INTO saved_searches(name, query, description, owner, created_at)"
-                           " VALUES (?, ?, ?, ?, ?)", (name, query, description, actor, now_iso()))
+        stored = _stored_saved_name(conn, name)
+        if stored is not None:
+            _name_taken(stored)
+        try:
+            cur = conn.execute("INSERT INTO saved_searches(name, query, description, owner, created_at)"
+                               " VALUES (?, ?, ?, ?, ?)", (name, query, description, actor, now_iso()))
+        except sqlite3.IntegrityError:
+            # A concurrent insert can pass the lookup and still hit UNIQUE COLLATE NOCASE.
+            stored = _stored_saved_name(conn, name)
+            _name_taken(stored if stored is not None else name)
         audit(conn, actor, "saved_search_created", name, {"id": cur.lastrowid, "query": query})
     return dict(conn.execute("SELECT id, name, query, description, owner, created_at FROM saved_searches"
                              " WHERE id = ?", (cur.lastrowid,)).fetchone())
