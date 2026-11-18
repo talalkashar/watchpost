@@ -24,7 +24,7 @@ TIMELINE_LIMIT = 300
 # Each list stays in id order. The older rows are notes_omitted and activity_omitted.
 NOTE_LIMIT = 100
 ACTIVITY_LIMIT = 100
-# Dashboard attacker list is this many source IPs, most alerts then most events.
+# Dashboard attacker list is this many source IPs, most alerts, then most events, then ip.
 # attackers_omitted is how many source IPs on alerts were past that cap.
 ATTACKER_LIMIT = 40
 # Dashboard top rules is this many rule ids, most alerts first, then rule_id.
@@ -681,7 +681,8 @@ def dashboard(conn):
         f"SELECT e.src_ip AS ip, COUNT(DISTINCT e.id) AS events, COUNT(DISTINCT a.id) AS alerts,"
         f" MAX(MAX({sev_events}), MAX({sev_alerts})) AS sev_rank, MAX(e.ts) AS last_seen,"
         f" SUM(a.status != 'resolved') AS open_alerts"
-        f"{_ATTACKER_FROM} GROUP BY e.src_ip ORDER BY alerts DESC, events DESC LIMIT {ATTACKER_LIMIT}")]
+        f"{_ATTACKER_FROM} GROUP BY e.src_ip"
+        f" ORDER BY alerts DESC, events DESC, e.src_ip LIMIT {ATTACKER_LIMIT}")]
     for a in attackers:
         del a["sev_rank"]
     attackers_omitted = one(f"SELECT COUNT(DISTINCT e.src_ip){_ATTACKER_FROM}") - len(attackers)
