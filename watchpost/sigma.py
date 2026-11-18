@@ -678,11 +678,18 @@ def compile_rule(source):
     techniques, ignored_tags = [], []
     for tag in tags:
         m = _TECHNIQUE_TAG.fullmatch(tag.lower())
-        if m and m.group(1).upper() in attack.TECHNIQUES:
-            if m.group(1).upper() not in [t["id"] for t in techniques]:
-                techniques.append(attack.technique(m.group(1).upper()))
-        else:
+        if not m:
             ignored_tags.append(tag)
+            continue
+        # attack.technique resolves ids ATT&CK has revoked (T1562.008 -> T1685.002). A tag that
+        # is not in the catalog at all stays out of coverage, as before.
+        try:
+            item = attack.technique(m.group(1).upper())
+        except KeyError:
+            ignored_tags.append(tag)
+            continue
+        if item["id"] not in [t["id"] for t in techniques]:
+            techniques.append(item)
     description = (doc.get("description") or "").strip()
     rule_id = slug(title)
     return {

@@ -136,7 +136,7 @@ class IncidentReportTests(unittest.TestCase):
         self.assertEqual([a["id"] for a in m["alerts"]], [a["id"] for a in i["alerts"]])
         self.assertIn(self.exfil, [a["id"] for a in m["alerts"]])
         self.assertTrue(m["synthetic"])
-        self.assertEqual(m["stages"], ["Initial Access", "Persistence", "Defense Evasion", "Collection",
+        self.assertEqual(m["stages"], ["Initial Access", "Persistence", "Defense Impairment", "Collection",
                                        "Exfiltration"])
         self.assertTrue(m["escalated"])
         self.assertIn("svc-deploy-tmp", m["entities"]["users"])
@@ -164,13 +164,13 @@ class IncidentReportTests(unittest.TestCase):
             for technique in alert["techniques"]:
                 self.assertEqual(technique["level"], graded[technique["id"]])
         mapped = {a["technique"] for a in m["actions"] if a["technique"]}
-        self.assertTrue({"T1078.004", "T1098.001", "T1562.008", "T1530", "T1048"} <= mapped)
+        self.assertTrue({"T1078.004", "T1098.001", "T1685.002", "T1530", "T1048"} <= mapped)
 
     def test_markdown(self):
         text = report.to_markdown(report.build(self.conn, self.id))
         self.assertTrue(text.startswith("# Incident report: Initial Access"))
         for expected in ("SYNTHETIC DATA", f"- **Incident:** #{self.id}",
-                         "**Kill-chain stages:** Initial Access -> Persistence -> Defense Evasion -> Collection"
+                         "**Kill-chain stages:** Initial Access -> Persistence -> Defense Impairment -> Collection"
                          " -> Exfiltration"
                          " (escalated: 3 or more tactics)",
                          f"- **Exfiltration:** T1048 Exfiltration Over Alternative Protocol (mapped) (alert #{self.exfil})",

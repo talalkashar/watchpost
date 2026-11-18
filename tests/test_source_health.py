@@ -327,7 +327,8 @@ class NoiseLabTests(unittest.TestCase):
         self.assertEqual(row["verdict"], "quiet")
         cov = attack.evidence(attack.coverage(engine.load_rules(conn, enabled_only=False), {}), lab,
                               simulate.SCENARIOS)
-        t = next(t for t in cov["techniques"] if t["id"] == "T1562.006")
+        # T1562.006 was revoked. The catalog and this scenario now record T1685.
+        t = next(t for t in cov["techniques"] if t["id"] == "T1685")
         self.assertEqual((t["level"], t["scenarios"]), ("validated", ["log_source_stops"]))
 
 

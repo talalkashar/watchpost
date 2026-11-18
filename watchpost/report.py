@@ -43,7 +43,10 @@ ACTIONS = {
     "T1190": ["Check web server logs for successful exploitation and patch the exposed application."],
     "T1548": ["Review sudoers/admin group membership on the host; remove rights that are not needed."],
     "T1548.003": ["Audit /etc/sudoers and sudo logs on the host; require re-authentication for sudo."],
+    # T1562.008 was revoked; rules still name it, and the catalog stores T1685.002. Same response either way.
     "T1562.008": ["Turn cloud audit logging back on (StartLogging, or recreate the trail) and restrict who may stop it.",
+                  "Treat the time logging was off as a blind spot and review it from other sources."],
+    "T1685.002": ["Turn cloud audit logging back on (StartLogging, or recreate the trail) and restrict who may stop it.",
                   "Treat the time logging was off as a blind spot and review it from other sources."],
     "T1068": ["Patch the host's kernel and local services; rebuild it if root was obtained."],
     "T1136": ["Disable accounts created during the incident window and confirm who requested them."],
@@ -128,7 +131,13 @@ def actions_for(techniques):
     """Recommended actions keyed by technique, de-duplicated, with a generic fallback."""
     rows, seen = [], set()
     for t in techniques:
-        for action in ACTIONS.get(t["id"]) or ACTIONS.get(t["id"].split(".")[0]) or []:
+        # A stored technique may still carry a revoked id. The action is keyed by the current one.
+        try:
+            current_id = attack.technique(t["id"])["id"]
+        except KeyError:
+            current_id = t["id"]
+        for action in (ACTIONS.get(current_id) or ACTIONS.get(t["id"])
+                       or ACTIONS.get(current_id.split(".")[0]) or ACTIONS.get(t["id"].split(".")[0]) or []):
             if action not in seen:
                 seen.add(action)
                 rows.append({"technique": t["id"], "action": action})

@@ -222,7 +222,8 @@ CASES = [
         "cloud_audit_logging_stopped.yml",
         "sigma_cloud_audit_logging_stopped",
         "critical",
-        ("T1562.008",),
+        # The file still tags revoked T1562.008. The compiler stores the current technique.
+        ("T1685.002",),
         [
             {"event_type": "cloud_api_call", "user": "ops-admin",
              "message": "StopLogging on cloudtrail.amazonaws.com"},

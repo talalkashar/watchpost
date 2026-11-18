@@ -12,7 +12,8 @@ const SEV_RANK = { info: 0, low: 1, medium: 2, high: 3, critical: 4 };
 const TACTICS = [
   ["Reconnaissance", "Recon"], ["Resource Development", "Res Dev"], ["Initial Access", "Init Access"],
   ["Execution", "Execution"], ["Persistence", "Persist"], ["Privilege Escalation", "Priv Esc"],
-  ["Defense Evasion", "Def Evasion"], ["Credential Access", "Cred Access"], ["Discovery", "Discovery"],
+  ["Stealth", "Stealth"], ["Defense Impairment", "Def Impair"],
+  ["Credential Access", "Cred Access"], ["Discovery", "Discovery"],
   ["Lateral Movement", "Lateral"], ["Collection", "Collect"], ["Command and Control", "C2"],
   ["Exfiltration", "Exfil"], ["Impact", "Impact"],
 ];

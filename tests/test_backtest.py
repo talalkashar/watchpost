@@ -137,7 +137,9 @@ class BacktestTests(unittest.TestCase):
         alert = self.conn.execute("SELECT id FROM alerts WHERE rule_id = ?", (RULE,)).fetchone()["id"]
         change = improve.propose_change(self.conn, "rule_update", RULE, {"params": {"threshold": 13}},
                                         "too noisy for the helpdesk", "analyst")
-        self.assertEqual(change["evaluation"]["after"]["missed"], [])  # the labeled scenarios see no loss
+        # dns_exfil is ten failures from one address, so a threshold of 13 drops that labeled attack.
+        # The open alert below is a separate loss and still needs its own acknowledgement.
+        self.assertEqual(change["evaluation"]["after"]["missed"], ["dns_exfil"])
         for ack in (False, "yes"):
             with self.assertRaises(improve.ChangeError) as caught:
                 improve.review_change(self.conn, change["id"], "approve", "admin", digest=change["evidence_digest"],

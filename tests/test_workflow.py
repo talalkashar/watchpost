@@ -237,7 +237,13 @@ class ChangeEvidenceTests(ServerTestCase):
         # Resending the digest the reviewer first saw is refused again: only the evidence now stored applies.
         self.assertEqual(self.approve(admin, second)[0], 409)
         self.assertNotEqual(change["evidence_digest"], second["evidence_digest"])
-        status, reviewed, _ = self.approve(admin, change)
+        # Threshold 12 drops dns_exfil (ten failures). The fresh digest is not enough on its own.
+        status, refused, _ = self.approve(admin, change)
+        self.assertEqual(status, 400)
+        self.assertIn("dns_exfil", refused["error"])
+        self.assertIn("acknowledge_detection_loss", refused["error"])
+        self.assertEqual((rule()["version"], rule()["params"]["threshold"]), (2, 10))
+        status, reviewed, _ = self.approve(admin, change, acknowledge_detection_loss=True)
         self.assertEqual((status, reviewed["status"]), (200, "approved"))
         self.assertEqual(reviewed["evaluation"], change["evaluation"])
         self.assertEqual((rule()["version"], rule()["params"]["threshold"]), (3, 12))
