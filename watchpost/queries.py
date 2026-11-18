@@ -65,7 +65,7 @@ def search_events(conn, params):
                 where.append(f"{column} LIKE ? ESCAPE '\\'")
                 args.append(_escape_like(params[field][:-1]) + "%")
             else:
-                where.append(f"{column} = ? COLLATE NOCASE" if field == "user" else f"{column} = ?")
+                where.append(f"{column} = ? COLLATE NOCASE" if field in ("user", "host") else f"{column} = ?")
                 args.append(params[field])
     if params.get("ip"):
         where.append("(src_ip = ? OR dest_ip = ?)")
