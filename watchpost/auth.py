@@ -36,12 +36,18 @@ def hash_password(password, iterations=None):
 
 def verify_password(password, stored):
     try:
+        if not isinstance(password, str):
+            return False
         algo, iterations, salt, digest = stored.split("$")
         if algo != "pbkdf2_sha256":
             return False
-        candidate = hashlib.pbkdf2_hmac("sha256", password.encode(), base64.b64decode(salt), int(iterations))
+        try:
+            secret = password.encode()
+        except UnicodeEncodeError:
+            return False
+        candidate = hashlib.pbkdf2_hmac("sha256", secret, base64.b64decode(salt), int(iterations))
         return hmac.compare_digest(candidate, base64.b64decode(digest))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError, AttributeError):
         return False
 
 
@@ -54,6 +60,10 @@ def validate_password_strength(password):
         raise AuthError("password must be at least 12 characters", 400)
     if len(password) > 256:
         raise AuthError("password is too long", 400)
+    try:
+        password.encode()
+    except UnicodeEncodeError:
+        raise AuthError("password must be valid UTF-8", 400) from None
 
 
 def _stored_username(conn, username):
@@ -123,6 +133,8 @@ def _bootstrap_initial(conn, config, data_dir):
         path = Path(data_dir) / "initial_credentials.txt"
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # Mode on open applies only when the file is created. A pre-existing looser file stays loose.
+        os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w") as handle:
             handle.write("# Watchpost initial credentials. Store them safely, then delete this file.\n")
             for username, password in generated.items():
@@ -147,12 +159,6 @@ def _lockout_settings(conn):
     return get_setting_int(conn, "login_lockout_threshold", 5), get_setting_int(conn, "login_lockout_minutes", 15)
 
 
-def _check_not_locked(conn, user):
-    if user["locked_until"] and parse_iso(user["locked_until"]) > utcnow():
-        audit(conn, user["username"], "login_blocked", None, {"reason": "locked"})
-        raise AuthError("account temporarily locked after repeated failures; try again later", 429)
-
-
 def _count_failure(conn, user_id):
     """Add one failure to the account inside the caller's transaction, locking it at the threshold.
 
@@ -169,12 +175,29 @@ def _count_failure(conn, user_id):
     return bool(locked_until)
 
 
-def _record_failure(conn, user, detail=None):
-    """Count a failed password toward the per-account lockout. Returns True when it locks."""
+def _reject_wrong_password(conn, user, password):
+    """Check the password under the write lock. A wrong one is counted in that same transaction.
+
+    Parallel guesses therefore cannot all pass the lock check before any of them increments it:
+    at most login_lockout_threshold hashes are computed per lockout window. Returns True when
+    the password matches. Raises 429 when the account is already locked, without hashing.
+    """
     with transaction(conn):
-        locked = _count_failure(conn, user["id"])
-        audit(conn, user["username"], "login_failed", None, {**(detail or {}), "locked": locked})
-    return locked
+        row = conn.execute(
+            "SELECT locked_until FROM users WHERE id = ?", (user["id"],)).fetchone()
+        if row["locked_until"] and parse_iso(row["locked_until"]) > utcnow():
+            audit(conn, user["username"], "login_blocked", None, {"reason": "locked"})
+            raise_locked = True
+            ok = False
+        else:
+            raise_locked = False
+            ok = verify_password(password, user["pw_hash"])
+            if not ok:
+                locked = _count_failure(conn, user["id"])
+                audit(conn, user["username"], "login_failed", None, {"locked": locked})
+    if raise_locked:
+        raise AuthError("account temporarily locked after repeated failures; try again later", 429)
+    return ok
 
 
 def _reserve_code_attempt(conn, user_id):
@@ -263,6 +286,10 @@ def login(conn, username, password, ttl_seconds):
 
     A disabled account still checks the stored hash, then returns that same 401. It does not
     increment failed_logins and it does not lock. The error text does not say the account is disabled.
+
+    The lock is checked again under a write lock and the password is hashed there. A mismatch is
+    counted before that lock is released, so parallel guesses cannot check more passwords than
+    the threshold.
     """
     if not _password_is_login_shaped(password):
         _reject_unknown_login(conn, password)
@@ -273,17 +300,21 @@ def login(conn, username, password, ttl_seconds):
         _reject_unknown_login(conn, password)
     if user["disabled"]:
         _reject_disabled_login(conn, user, password)
-    _check_not_locked(conn, user)
-    if not verify_password(password, user["pw_hash"]):
-        _record_failure(conn, user)
+    if not _reject_wrong_password(conn, user, password):
         raise AuthError("invalid username or password")
     if user["totp_secret"]:
         mfa_token = secrets.token_urlsafe(32)
-        conn.execute("DELETE FROM mfa_pending WHERE expires_at < ?", (now_iso(),))
-        conn.execute("INSERT INTO mfa_pending(token_hash, user_id, created_at, expires_at) VALUES (?,?,?,?)",
-                     (sha256(mfa_token), user["id"], now_iso(),
-                      iso(utcnow() + timedelta(seconds=MFA_TOKEN_TTL_SECONDS))))
-        audit(conn, user["username"], "login_mfa_challenge", None)
+        token_hash = sha256(mfa_token)
+        with transaction(conn):
+            conn.execute("DELETE FROM mfa_pending WHERE expires_at < ?", (now_iso(),))
+            conn.execute(
+                "INSERT INTO mfa_pending(token_hash, user_id, created_at, expires_at) VALUES (?,?,?,?)",
+                (token_hash, user["id"], now_iso(),
+                 iso(utcnow() + timedelta(seconds=MFA_TOKEN_TTL_SECONDS))))
+            # A newer password proof replaces older challenges. A stolen earlier token stops working.
+            conn.execute("DELETE FROM mfa_pending WHERE user_id = ? AND token_hash != ?",
+                         (user["id"], token_hash))
+            audit(conn, user["username"], "login_mfa_challenge", None)
         return MfaChallenge(mfa_token)
     return _start_session(conn, user, ttl_seconds)
 
@@ -318,6 +349,7 @@ def complete_mfa(conn, mfa_token, code, ttl_seconds):
             conn.execute("DELETE FROM mfa_pending WHERE user_id = ?", (pending["id"],))
         audit(conn, pending["username"], "login_failed", None, {"reason": "mfa", "locked": locked})
         raise AuthError("invalid authentication code")
+    conn.execute("DELETE FROM mfa_pending WHERE user_id = ?", (pending["id"],))
     return _start_session(conn, pending, ttl_seconds, {"mfa": True})
 
 
@@ -329,6 +361,9 @@ def _claim_step(conn, user_id, step):
 
 
 def logout(conn, token):
+    # A bearer request can reach logout with no session cookie. sha256(None) must not 500.
+    if not isinstance(token, str) or not token:
+        return
     conn.execute("DELETE FROM sessions WHERE token_hash = ?", (sha256(token),))
 
 
@@ -408,9 +443,12 @@ def mfa_disable(conn, username, code):
             return {"enabled": False}
         raise AuthError("two-factor authentication is not on", 409)
     # Same budget as signing in, so a stolen session cannot guess codes to turn the second factor off.
-    _reserve_code_attempt(conn, user["id"])
+    locked = _reserve_code_attempt(conn, user["id"])
     step = totp.verify(user["totp_secret"], code, user["totp_last_step"])
     if step is None or not _claim_step(conn, user["id"], step):
+        # Locking drops pending sign-in tokens, same as a failed code at the sign-in step.
+        if locked:
+            conn.execute("DELETE FROM mfa_pending WHERE user_id = ?", (user["id"],))
         audit(conn, username, "mfa_disable_failed", username)
         raise AuthError("invalid authentication code", 400)
     conn.execute("UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = ?", (user["id"],))
