@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -77,6 +78,9 @@ CREATE TABLE IF NOT EXISTS ingest_batches (
     submitted_by TEXT NOT NULL,
     detection_status TEXT NOT NULL
 );
+-- Health counts recent batches; detection recovery updates failed ones by time.
+CREATE INDEX IF NOT EXISTS idx_ingest_batches_created ON ingest_batches(created_at);
+CREATE INDEX IF NOT EXISTS idx_ingest_batches_detection ON ingest_batches(detection_status, created_at);
 
 CREATE TABLE IF NOT EXISTS rules (
     id TEXT PRIMARY KEY,
@@ -102,6 +106,8 @@ CREATE TABLE IF NOT EXISTS rule_history (
     change_request_id INTEGER,
     note TEXT
 );
+-- One rule's versions, newest first (watchpost/improve.py list_rule_history).
+CREATE INDEX IF NOT EXISTS idx_rule_history_rule ON rule_history(rule_id, version);
 
 CREATE TABLE IF NOT EXISTS alerts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -141,6 +147,8 @@ CREATE TABLE IF NOT EXISTS alert_notes (
     body TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+-- Alert detail reads one alert's notes, newest id first.
+CREATE INDEX IF NOT EXISTS idx_alert_notes_alert ON alert_notes(alert_id, id);
 
 CREATE TABLE IF NOT EXISTS alert_activity (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -150,6 +158,8 @@ CREATE TABLE IF NOT EXISTS alert_activity (
     detail TEXT,
     created_at TEXT NOT NULL
 );
+-- Alert detail reads one alert's activity, newest id first.
+CREATE INDEX IF NOT EXISTS idx_alert_activity_alert ON alert_activity(alert_id, id);
 
 CREATE TABLE IF NOT EXISTS detection_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -182,6 +192,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL
 );
+-- Login deletes expired sessions; the session list keeps ones that have not expired.
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 
 -- 8.0: the password step of a login for an account with TOTP enrolled. Short-lived; only the hash is stored.
 CREATE TABLE IF NOT EXISTS mfa_pending (
@@ -243,6 +255,8 @@ CREATE TABLE IF NOT EXISTS error_log (
     message TEXT NOT NULL,
     guidance TEXT
 );
+-- Health counts one component's recent errors.
+CREATE INDEX IF NOT EXISTS idx_error_log_component ON error_log(component, created_at);
 
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -326,6 +340,9 @@ CREATE TABLE IF NOT EXISTS rule_suppression_windows (
 );
 CREATE INDEX IF NOT EXISTS idx_rule_suppression_windows_active
     ON rule_suppression_windows(rule_id, starts_at, expires_at);
+-- Every detection reads windows that are open now (ended_at IS NULL).
+CREATE INDEX IF NOT EXISTS idx_rule_windows_open
+    ON rule_suppression_windows(expires_at, starts_at) WHERE ended_at IS NULL;
 
 -- 5.0: hunting. A saved search stores the query text; time terms like last:24h resolve when it runs.
 -- 9.0: imported Sigma rules. The rule itself is a row in `rules` (id sigma_<slug>); this keeps the original
@@ -467,34 +484,113 @@ def connect(db_path, audit_key=None):
     return conn
 
 
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_COLUMN_TYPE_RE = re.compile(
+    r"(?:TEXT|INTEGER|REAL|BLOB|NUMERIC)"
+    r"(?: NOT NULL)?"
+    r"(?: DEFAULT (?:NULL|-?\d+|'(?:[^']|'')*'))?\Z"
+)
+
+
+def _sql_ident(name):
+    """A quoted identifier. Callers pass schema constants; anything else is refused."""
+    if not isinstance(name, str) or len(name) > 64 or _IDENT_RE.fullmatch(name) is None:
+        raise ValueError(f"invalid SQL identifier: {name!r}")
+    return '"' + name + '"'
+
+
+def _column_type_sql(kind):
+    """A column type ALTER TABLE may add. A quoted default is a string literal, not SQL."""
+    if not isinstance(kind, str) or len(kind) > 64 or _COLUMN_TYPE_RE.fullmatch(kind) is None:
+        raise ValueError(f"invalid SQL column type: {kind!r}")
+    return kind
+
+
+def _ensure_column(conn, table, column, kind):
+    table_sql = _sql_ident(table)
+    column_sql = _sql_ident(column)
+    type_sql = _column_type_sql(kind)
+    existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table_sql})")}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table_sql} ADD COLUMN {column_sql} {type_sql}")
+
+
+def _audit_columns_sql():
+    return ", ".join(_sql_ident(name) for name in AUDIT_FIELDS)
+
+
+def _end_transaction(conn, savepoint, commit):
+    """Commit or roll back what this call opened. No-op when that transaction is already closed."""
+    if not conn.in_transaction:
+        return
+    if savepoint is None:
+        conn.execute("COMMIT" if commit else "ROLLBACK")
+        return
+    if commit:
+        conn.execute(f"RELEASE {savepoint}")
+        return
+    conn.execute(f"ROLLBACK TO {savepoint}")
+    conn.execute(f"RELEASE {savepoint}")
+
+
 @contextmanager
 def transaction(conn):
-    conn.execute("BEGIN IMMEDIATE")
+    """A write transaction. A nested call uses a savepoint on the open transaction.
+
+    The outer BEGIN IMMEDIATE takes the write lock before any read, which the audit chain needs.
+    A nested call rolls back only its savepoint. If the body already committed, or SQLite committed
+    for it, the exit does not raise.
+    """
+    if conn.in_transaction:
+        depth = getattr(conn, "_tx_depth", 0)
+        if type(depth) is not int or depth < 0:
+            raise ValueError("invalid transaction depth")
+        savepoint = f"wp_{depth}"
+        conn.execute(f"SAVEPOINT {savepoint}")
+        conn._tx_depth = depth + 1
+        restore = depth
+    else:
+        conn.execute("BEGIN IMMEDIATE")
+        savepoint = None
+        conn._tx_depth = 0
+        restore = 0
     try:
         yield conn
     except BaseException:
-        conn.execute("ROLLBACK")
+        try:
+            _end_transaction(conn, savepoint, False)
+        except Exception:
+            pass
         raise
     else:
-        conn.execute("COMMIT")
+        try:
+            _end_transaction(conn, savepoint, True)
+        except BaseException:
+            try:
+                _end_transaction(conn, savepoint, False)
+            except Exception:
+                pass
+            raise
+    finally:
+        conn._tx_depth = restore
 
 
 def init_schema(conn):
     conn.executescript(SCHEMA)
     for table, column, kind in ADDED_COLUMNS:
-        existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
-        if column not in existing:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+        _ensure_column(conn, table, column, kind)
+    # revoked_at is added above (it is not in the 1.0 CREATE TABLE), so this partial index cannot live in SCHEMA.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_suppressions_active ON suppressions(expires_at) WHERE revoked_at IS NULL"
+    )
     # Sessions from before 8.0 get an id so they can be listed and revoked like new ones.
     conn.execute("UPDATE sessions SET sid = lower(hex(randomblob(8))) WHERE sid IS NULL")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_sid ON sessions(sid)")
     # 4.0: hash-chained audit log. Rows written before the chain existed are never hashed here: the server
     # would be signing whatever the database file says, including rows someone rewrote before a restart.
     with transaction(conn):
-        audit_columns = {r["name"] for r in conn.execute("PRAGMA table_info(audit_log)")}
         for column in ("prev_hash", "hash"):
-            if column not in audit_columns:
-                conn.execute(f"ALTER TABLE audit_log ADD COLUMN {column} TEXT")
+            _ensure_column(conn, "audit_log", column, "TEXT")
         _start_audit_chain(conn)
         _check_chain_key(conn)
     conn.execute(
@@ -567,7 +663,7 @@ def _set_meta_key_id(conn, key_id):
 
 def _check_chain_key(conn):
     """At startup: refuse to run with a key other than the one the chain was started with."""
-    first = conn.execute(f"SELECT {', '.join(AUDIT_FIELDS)} FROM audit_log WHERE hash IS NOT NULL"
+    first = conn.execute(f"SELECT {_audit_columns_sql()} FROM audit_log WHERE hash IS NOT NULL"
                          " ORDER BY id LIMIT 1").fetchone()
     declared = _declared(first)["key_id"] if first else _UNDECLARED
     key_id = audit_key_id(conn.audit_key)
@@ -601,12 +697,23 @@ def audit(conn, actor, action, target=None, detail=None):
         digest = audit_hash(prev_hash, dict(zip(AUDIT_FIELDS, (cur.lastrowid, *values))), key)
         conn.execute("UPDATE audit_log SET prev_hash = ?, hash = ? WHERE id = ?", (prev_hash, digest, cur.lastrowid))
     except BaseException:
-        if own:
-            conn.execute("ROLLBACK")
+        if own and conn.in_transaction:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
         raise
     else:
-        if own:
-            conn.execute("COMMIT")
+        if own and conn.in_transaction:
+            try:
+                conn.execute("COMMIT")
+            except BaseException:
+                if conn.in_transaction:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except Exception:
+                        pass
+                raise
 
 
 _CONFIGURED_KEY = object()
@@ -632,7 +739,9 @@ def verify_chain(conn, key=_CONFIGURED_KEY):
     entries, prev_id, prev_hash, head, first_break, started = 0, None, GENESIS_HASH, None, None, None
     legacy = {"entries": 0, "last_id": None}
     # One SELECT reads one consistent snapshot, even while other connections append.
-    cur = conn.execute(f"SELECT {', '.join(AUDIT_FIELDS)}, prev_hash, hash FROM audit_log ORDER BY id")
+    cur = conn.execute(
+        f"SELECT {_audit_columns_sql()}, {_sql_ident('prev_hash')}, {_sql_ident('hash')} FROM audit_log ORDER BY id"
+    )
     for row in cur:
         row_id, stored_prev, stored_hash = row[0], row[6], row[7]
         if started is None and stored_hash is None:
