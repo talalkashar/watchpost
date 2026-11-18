@@ -1,9 +1,10 @@
 """Chronological incident case records and JSON/Markdown rendering."""
 
 import json
+from datetime import timezone
 
 from . import __version__, attack, incidents
-from .db import now_iso
+from .db import now_iso, parse_iso
 from .report import LEVEL_NOTE as _LEVEL_NOTE
 from .report import md as _md
 
@@ -18,6 +19,28 @@ def _audit_detail(value):
     except (TypeError, json.JSONDecodeError):
         return {}
     return detail if isinstance(detail, dict) else {}
+
+
+def _time_key(value):
+    """Real time when the stamp parses. Unparsed text sorts after every real time.
+
+    `2026-10-07T12:00:00.100Z` is later than `2026-10-07T12:00:00Z`, but as text '.' sorts
+    before 'Z'. A stamp that does not parse must not fail the export.
+    """
+    if isinstance(value, str):
+        try:
+            parsed = parse_iso(value)
+        except (TypeError, ValueError):
+            return (1, value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return (0, parsed)
+    return (1, "" if value is None else str(value))
+
+
+def _blank(value):
+    """Missing text stays empty. An f-string would print the word None."""
+    return "" if value is None else value
 
 
 def _newest(conn, table_where, args):
@@ -47,7 +70,10 @@ def build(conn, incident_id):
     for row in conn.execute(
             "SELECT ia.alert_id, ia.added_at FROM incident_alerts ia WHERE ia.incident_id = ?",
             (incident_id,)):
-        alert = alerts[row["alert_id"]]
+        # alert_id is not a foreign key, so a removed alert can leave a link behind.
+        alert = alerts.get(row["alert_id"])
+        if alert is None:
+            continue
         timeline.append({"ts": row["added_at"], "type": "alert_added", "alert_id": row["alert_id"],
                          "rule_id": alert["rule_id"], "severity": alert["severity"], "title": alert["title"]})
 
@@ -79,7 +105,7 @@ def build(conn, incident_id):
 
     order = {"evidence": 0, "incident_created": 1, "alert_added": 2, "assigned": 3,
              "status_changed": 4, "analyst_note": 5, "incident_status_changed": 6}
-    timeline.sort(key=lambda item: (item["ts"], order.get(item["type"], 99),
+    timeline.sort(key=lambda item: (_time_key(item["ts"]), order.get(item["type"], 99),
                                     item.get("alert_id", 0), item.get("event", {}).get("id", 0)))
     for sequence, item in enumerate(timeline, 1):
         item["sequence"] = sequence
@@ -130,14 +156,16 @@ def _timeline_detail(item):
     if kind == "alert_added":
         return "Alert added", f"Alert #{item['alert_id']} ({item['rule_id']}): {item['title']}"
     if kind == "assigned":
-        return "Alert assigned", f"Alert #{item['alert_id']} by {item['actor']}: {item['detail']}"
+        return "Alert assigned", f"Alert #{item['alert_id']} by {item['actor']}: {_blank(item.get('detail'))}"
     if kind == "status_changed":
-        return "Alert status changed", f"Alert #{item['alert_id']} by {item['actor']}: {item['detail']}"
+        return "Alert status changed", f"Alert #{item['alert_id']} by {item['actor']}: {_blank(item.get('detail'))}"
     if kind == "analyst_note":
         return "Analyst note", f"Alert #{item['alert_id']} by {item['author']}: {item['body']}"
     if kind == "incident_status_changed":
         note = f" — {item['note']}" if item.get("note") else ""
-        return "Incident status changed", f"{item['actor']}: {item.get('from')} → {item.get('to')}{note}"
+        src = "-" if item.get("from") is None else item.get("from")
+        dst = "-" if item.get("to") is None else item.get("to")
+        return "Incident status changed", f"{item['actor']}: {src} → {dst}{note}"
     return "Alert activity", f"Alert #{item['alert_id']} by {item['actor']}: {kind} — {item.get('detail') or ''}"
 
 
