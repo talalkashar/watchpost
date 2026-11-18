@@ -5,10 +5,13 @@ evidence, notes, and ATT&CK techniques. `build_from_alert(conn, alert_id)` repor
 Both return the same model shape.
 """
 
+import ipaddress
 import json
+from datetime import timedelta
 
 from . import __version__, attack, incidents
-from .db import now_iso
+from .correlate import entity_key
+from .db import iso, now_iso, parse_iso
 from .pdfwriter import Document
 from .queries import QueryError, get_alert
 
@@ -40,7 +43,10 @@ ACTIONS = {
     "T1190": ["Check web server logs for successful exploitation and patch the exposed application."],
     "T1548": ["Review sudoers/admin group membership on the host; remove rights that are not needed."],
     "T1548.003": ["Audit /etc/sudoers and sudo logs on the host; require re-authentication for sudo."],
+    # T1562.008 was revoked; rules still name it, and the catalog stores T1685.002. Same response either way.
     "T1562.008": ["Turn cloud audit logging back on (StartLogging, or recreate the trail) and restrict who may stop it.",
+                  "Treat the time logging was off as a blind spot and review it from other sources."],
+    "T1685.002": ["Turn cloud audit logging back on (StartLogging, or recreate the trail) and restrict who may stop it.",
                   "Treat the time logging was off as a blind spot and review it from other sources."],
     "T1068": ["Patch the host's kernel and local services; rebuild it if root was obtained."],
     "T1136": ["Disable accounts created during the incident window and confirm who requested them."],
@@ -125,7 +131,13 @@ def actions_for(techniques):
     """Recommended actions keyed by technique, de-duplicated, with a generic fallback."""
     rows, seen = [], set()
     for t in techniques:
-        for action in ACTIONS.get(t["id"]) or ACTIONS.get(t["id"].split(".")[0]) or []:
+        # A stored technique may still carry a revoked id. The action is keyed by the current one.
+        try:
+            current_id = attack.technique(t["id"])["id"]
+        except KeyError:
+            current_id = t["id"]
+        for action in (ACTIONS.get(current_id) or ACTIONS.get(t["id"])
+                       or ACTIONS.get(current_id.split(".")[0]) or ACTIONS.get(t["id"].split(".")[0]) or []):
             if action not in seen:
                 seen.add(action)
                 rows.append({"technique": t["id"], "action": action})
@@ -134,20 +146,97 @@ def actions_for(techniques):
     return rows
 
 
+def _folded_entity(kind, value):
+    """Entity list key. Accounts and hosts use the correlation fold. An IP uses the form ingest stores."""
+    if not value:
+        return None
+    if kind in ("src_ip", "dest_ip"):
+        text = str(value)
+        try:
+            return str(ipaddress.ip_address(text))
+        except ValueError:
+            return text
+    return entity_key(kind, value)
+
+
+def _timeline_bounds(alert, pad_minutes=30):
+    """Window and entity predicates for one alert. None when the related timeline would be empty.
+
+    Same match as queries.related_timeline: entities taken from the evidence already on the alert,
+    source IPs exact, users and hosts COLLATE NOCASE, from pad_minutes before first_seen through
+    pad_minutes after last_seen.
+    """
+    ips = {e["src_ip"] for e in alert["evidence"] if e["src_ip"]}
+    users = {e["user"] for e in alert["evidence"] if e["user"]}
+    hosts = {e["host"] for e in alert["evidence"] if e.get("host")}
+    if not ips and not users and not hosts:
+        return None
+    start = iso(parse_iso(alert["first_seen"]) - timedelta(minutes=pad_minutes))
+    end = iso(parse_iso(alert["last_seen"]) + timedelta(minutes=pad_minutes))
+    clauses, args = [], []
+    if ips:
+        clauses.append(f"src_ip IN ({','.join('?' for _ in ips)})")
+        args += sorted(ips)
+    if users:
+        clauses.append(f"user COLLATE NOCASE IN ({','.join('?' for _ in users)})")
+        args += sorted(users)
+    if hosts:
+        clauses.append(f"host COLLATE NOCASE IN ({','.join('?' for _ in hosts)})")
+        args += sorted(hosts)
+    return f"ts BETWEEN ? AND ? AND ({' OR '.join(clauses)})", [start, end] + args
+
+
+def _merged_timeline_total(conn, alerts):
+    """Distinct events inside any alert's related window.
+
+    Each alert detail keeps 300 of those events. Adding the per-alert omitted counts would
+    count a shared event twice, and an event dropped from one alert can still be inside another's
+    returned rows. The in-memory merge is the floor when this predicate undercounts.
+    """
+    seen = set()
+    for alert in alerts:
+        bounds = _timeline_bounds(alert)
+        if bounds is None:
+            continue
+        where_sql, bound = bounds
+        for row in conn.execute(f"SELECT id FROM events WHERE {where_sql}", bound):
+            seen.add(row["id"])
+    return len(seen)
+
+
+def _all_notes(conn, alert_ids):
+    """Every note on these alerts, oldest first. The alert page keeps the newest 100."""
+    if not alert_ids:
+        return []
+    marks = ",".join("?" * len(alert_ids))
+    return [dict(r) for r in conn.execute(
+        "SELECT id, alert_id, author, body, created_at FROM alert_notes"
+        f" WHERE alert_id IN ({marks}) ORDER BY created_at, id",
+        alert_ids)]
+
+
+def _evidence_total(alert):
+    """Live evidence rows. A model built before that total existed falls back to the stored count."""
+    total = alert.get("evidence_total")
+    if total is None:
+        return alert.get("event_count") or 0
+    return total
+
+
 def _assemble(conn, kind, ident, title, alerts, extra):
     """Merge full alert details into the shared report model."""
-    ips, users, hosts, timeline, notes, techniques = set(), set(), set(), {}, [], {}
+    ips, users, hosts, timeline, techniques = set(), set(), set(), {}, {}
     for a in alerts:
         for e in a["evidence"]:
-            ips.update(filter(None, (e.get("src_ip"), e.get("dest_ip"))))
-            users.update(filter(None, (e.get("user"),)))
-            hosts.update(filter(None, (e.get("host"),)))
+            for field, bucket in (("src_ip", ips), ("dest_ip", ips), ("user", users), ("host", hosts)):
+                folded = _folded_entity(field, e.get(field))
+                if folded:
+                    bucket.add(folded)
         for e in a["timeline"]:
             timeline.setdefault(e["id"], {**e, "alert_ids": []})
             if e["is_evidence"]:
                 timeline[e["id"]]["alert_ids"].append(a["id"])
                 timeline[e["id"]]["is_evidence"] = True
-        notes += [{**n, "alert_id": a["id"]} for n in a["notes"]]
         a["techniques"] = rule_techniques(conn, a["rule_id"])
         for t in a["techniques"]:
             techniques.setdefault(t["id"], t)
@@ -164,6 +253,8 @@ def _assemble(conn, kind, ident, title, alerts, extra):
     # One row per event. A second alert that saw the same event does not add a second row.
     ordered = sorted(timeline.values(), key=lambda e: (e["ts"], e["id"]))
     shown = ordered[:TIMELINE_LIMIT]
+    timeline_total = max(len(ordered), _merged_timeline_total(conn, alerts))
+    notes = _all_notes(conn, [a["id"] for a in alerts])
     model = {
         "kind": kind, "id": ident, "title": title, "severity": severity, "status": None,
         "assets": [matched[k] for k in sorted(matched)],
@@ -173,9 +264,10 @@ def _assemble(conn, kind, ident, title, alerts, extra):
         "alerts": [{k: a.get(k) for k in ("id", "title", "rule_id", "rule_version", "severity", "base_severity",
                                           "severity_note", "status", "disposition", "explanation", "first_seen",
                                           "last_seen", "event_count", "techniques", "assets")}
-                   | {"evidence": a["evidence"][:EVIDENCE_PER_ALERT]} for a in alerts],
+                   | {"evidence": a["evidence"][:EVIDENCE_PER_ALERT],
+                      "evidence_total": len(a["evidence"]) + (a.get("evidence_omitted") or 0)} for a in alerts],
         "timeline": shown,
-        "timeline_omitted": len(ordered) - len(shown),
+        "timeline_omitted": timeline_total - len(shown),
         "techniques_by_tactic": by_tactic,
         "notes": sorted(notes, key=lambda n: (n["created_at"], n["id"])),
         "actions": actions_for([t for items in by_tactic.values() for t in items]),
@@ -239,7 +331,12 @@ def build(conn, incident_id):
     if incident["severity"] in SEVERITY_ORDER:
         model["severity"] = incident["severity"]
     for key, name in (("ips", "src_ip"), ("users", "user"), ("hosts", "host")):
-        model["entities"][key] = sorted(set(model["entities"][key]) | set(incident["entities"].get(name) or []))
+        extra = set()
+        for value in incident["entities"].get(name) or []:
+            folded = _folded_entity(name, value)
+            if folded:
+                extra.add(folded)
+        model["entities"][key] = sorted(set(model["entities"][key]) | extra)
     known = {a["name"]: a for a in model["assets"]}
     for a in incident.get("assets") or []:
         known.setdefault(a["name"], a)
@@ -348,8 +445,9 @@ def to_markdown(m):
         out += _md_table(["Time", "Type", "User", "Source IP", "Host", "Message"],
                          [[e["ts"], e["event_type"], e.get("user"), e.get("src_ip"), e.get("host"), e.get("message")]
                           for e in a["evidence"]])
-        if shown < (a["event_count"] or 0):
-            out.append(f"\n_First {shown} of {a['event_count']} evidence events shown._")
+        total = _evidence_total(a)
+        if shown < total:
+            out.append(f"\n_First {shown} of {total} evidence events shown._")
         out.append("")
     out += ["## Analyst notes", ""]
     out += [f"- {md(n['created_at'])} **{md(n['author'])}**"
@@ -424,8 +522,10 @@ def to_pdf_bytes(m):
         doc.table(["Time", "Type", "User", "Source IP", "Host", "Message"],
                   [[e["ts"], e["event_type"], e.get("user"), e.get("src_ip"), e.get("host"), e.get("message")]
                    for e in a["evidence"]], widths=[2.3, 1.5, 1, 1.4, 0.9, 3.9], size=7)
-        if len(a["evidence"]) < (a["event_count"] or 0):
-            doc.text(f"First {len(a['evidence'])} of {a['event_count']} evidence events shown.", size=8,
+        shown = len(a["evidence"])
+        total = _evidence_total(a)
+        if shown < total:
+            doc.text(f"First {shown} of {total} evidence events shown.", size=8,
                      color=(0.4, 0.4, 0.4))
     doc.heading("Analyst notes")
     if m["notes"]:

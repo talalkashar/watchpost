@@ -91,7 +91,10 @@ def validate(data):
                           f"kind must be one of {', '.join(KINDS)}")
     criticality = _catalog_field(data.get("criticality"), CRITICALITIES, "medium",
                                  f"criticality must be one of {', '.join(CRITICALITIES)}")
-    tags = data.get("data_tags") or []
+    # Missing is an empty list. false, 0, and {} must not wipe tags the way `or []` would.
+    tags = data.get("data_tags")
+    if tags is None:
+        tags = []
     if isinstance(tags, str):
         tags = [t for t in re.split(r"[,\s]+", tags) if t]
     if not isinstance(tags, list) or any(not isinstance(t, str) for t in tags):
@@ -100,7 +103,10 @@ def validate(data):
     unknown = [t for t in tags if t not in DATA_TAGS]
     if unknown:
         raise AssetError(f"unknown data tag(s) {', '.join(unknown)}; use {', '.join(sorted(DATA_TAGS))}")
-    addresses = data.get("addresses") or []
+    # Same for addresses: a falsy non-list is invalid, not "no addresses".
+    addresses = data.get("addresses")
+    if addresses is None:
+        addresses = []
     if isinstance(addresses, str):
         addresses = [a for a in re.split(r"[,\s]+", addresses) if a]
     if not isinstance(addresses, list) or len(addresses) > 32:
@@ -115,7 +121,7 @@ def validate(data):
     description = str(data.get("description") or "").strip()[:500] or None
     return {"name": name, "kind": kind, "criticality": criticality, "data_tags": tags,
             "addresses": sorted(set(clean)), "owner": owner, "description": description,
-            "synthetic": int(bool(data.get("synthetic")))}
+            "synthetic": _synthetic_flag(data.get("synthetic"))}
 
 
 # --- Review gate ------------------------------------------------------------------------------
@@ -157,14 +163,38 @@ def _catalog_field(value, names, default, message):
     """A missing or empty value is `default`. Any other value must match one catalog spelling.
 
     `Server` is `server`. A non-string, a value that is only spaces, and a non-ASCII
-    lookalike stay unset so the caller raises `message`.
+    lookalike stay unset so the caller raises `message`. `false` and `0` are not empty:
+    storing them as the default would raise a low asset to medium with no such request.
     """
-    if not value:
+    if value is None or value == "":
         return default
     name = catalog_name(value, names)
     if name is None:
         raise AssetError(message)
     return name
+
+
+def _synthetic_flag(value):
+    """0 or 1. Missing is 0. Booleans, 0, 1, and the words true/false are accepted.
+
+    The string "false" is 0. `bool("false")` is 1, which would mark a real asset as synthetic.
+    """
+    if value is None or value == "":
+        return 0
+    if isinstance(value, str):
+        folded = value.strip().translate(_ASCII_FOLD)
+        if folded in ("1", "true"):
+            return 1
+        if folded in ("0", "false"):
+            return 0
+        raise AssetError("synthetic must be 0, 1, true or false")
+    # True == 1 and False == 0, so this also accepts the JSON booleans the editor sends
+    # and the integers stored on the row (plan_change validates the merged asset).
+    if value is True or value == 1:
+        return 1
+    if value is False or value == 0:
+        return 0
+    raise AssetError("synthetic must be 0, 1, true or false")
 
 
 def _host_key(name):

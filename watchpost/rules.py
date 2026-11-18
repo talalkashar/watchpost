@@ -237,6 +237,48 @@ class RuleConfigError(ValueError):
     pass
 
 
+# Same control characters ingest replaces before it stores a field. A list entry that still has one,
+# or surrounding whitespace, cannot match the stored value.
+def _has_control(value):
+    return any(ch <= "\x08" or "\x0b" <= ch <= "\x1f" or ch == "\x7f" for ch in value)
+
+
+def _shown(value, limit=60):
+    text = repr(value)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
+def _check_list_entry(key, index, entry):
+    """Reject one list entry that cannot match a stored event.
+
+    Ingest strips surrounding whitespace and replaces control characters. A service or logging
+    action is one word. A sanctioned name is compared after the same leading-dot strip as
+    list_entry, and without the trailing .,;() the service parser removes.
+    """
+    where = f"{key}[{index}]"
+    if not isinstance(entry, str):
+        raise RuleConfigError(f"{key} entries must be non-empty strings ({where} is {type(entry).__name__})")
+    if not entry or len(entry) > 128:
+        raise RuleConfigError(
+            f"{key} entries must be non-empty strings of at most 128 characters ({where} has length {len(entry)})")
+    if entry != entry.strip() or _has_control(entry):
+        raise RuleConfigError(
+            f"{key} entry {_shown(entry)} has surrounding whitespace or control characters; "
+            "stored events do not keep them, so this entry would match nothing")
+    if key in ("sanctioned_services", "logging_actions") and any(ch.isspace() for ch in entry):
+        raise RuleConfigError(f"{key} entry {_shown(entry)} must be a single word; a space never matches")
+    if key == "sanctioned_services":
+        folded = entry.lower().lstrip(".")
+        if not folded:
+            raise RuleConfigError(f"sanctioned_services entry {_shown(entry)} is only dots and matches no service")
+        if folded != folded.strip(".,;()"):
+            raise RuleConfigError(
+                f"sanctioned_services entry {_shown(entry)} has punctuation the service parser strips, "
+                "so it would match nothing")
+
+
 def validate_params(rule_id, params):
     import ipaddress
 
@@ -244,40 +286,60 @@ def validate_params(rule_id, params):
         try:
             return sigma.validate_params(params)
         except sigma.SigmaError as exc:
-            raise RuleConfigError(str(exc))
+            raise RuleConfigError(str(exc)) from exc
     if search_rules.is_search(rule_id):  # a promoted saved search: only threshold and window_seconds are tunable
         try:
             return search_rules.validate_params(params)
         except search_rules.SearchRuleError as exc:
-            raise RuleConfigError(str(exc))
+            raise RuleConfigError(str(exc)) from exc
     defaults = next((r["params"] for r in DEFAULT_RULES if r["id"] == rule_id), None)
     if defaults is None:
         raise RuleConfigError(f"unknown rule {rule_id!r}")
     if not isinstance(params, dict):
-        raise RuleConfigError("params must be an object")
+        raise RuleConfigError(f"params must be an object (got {type(params).__name__})")
     unknown = set(params) - set(defaults)
     if unknown:
-        raise RuleConfigError(f"unknown parameter(s) for {rule_id}: {', '.join(sorted(unknown))}")
+        if all(isinstance(name, str) for name in unknown):
+            names = ", ".join(sorted(unknown))
+        else:
+            names = ", ".join(sorted((repr(name) for name in unknown)))
+        known = ", ".join(sorted(defaults))
+        raise RuleConfigError(f"unknown parameter(s) for {rule_id}: {names}. Known parameters: {known}")
     merged = dict(defaults)
     for key, value in params.items():
         kind, low, high = PARAM_SCHEMA[key]
         if kind == "int":
-            if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
-                raise RuleConfigError(f"{key} must be an integer between {low} and {high}")
+            if isinstance(value, bool) or not isinstance(value, int):
+                got = "a boolean" if isinstance(value, bool) else f"a {type(value).__name__}"
+                raise RuleConfigError(
+                    f"{key} must be an integer between {low} and {high} (got {_shown(value)}, {got})")
+            if not low <= value <= high:
+                raise RuleConfigError(f"{key} must be an integer between {low} and {high} (got {value})")
         else:
-            if not isinstance(value, list) or not low <= len(value) <= high:
-                raise RuleConfigError(f"{key} must be a list with {low}-{high} entries")
-            if not all(isinstance(v, str) and 0 < len(v) <= 128 for v in value):
-                raise RuleConfigError(f"{key} entries must be non-empty strings")
+            if not isinstance(value, list):
+                raise RuleConfigError(
+                    f"{key} must be a list with {low}-{high} entries (got a {type(value).__name__})")
+            if not low <= len(value) <= high:
+                raise RuleConfigError(f"{key} must be a list with {low}-{high} entries (got {len(value)})")
+            for index, entry in enumerate(value):
+                _check_list_entry(key, index, entry)
             if key == "ignore_ips":
-                for v in value:
+                for entry in value:
                     try:
-                        ipaddress.ip_address(v)
+                        ipaddress.ip_address(entry)
                     except ValueError:
-                        raise RuleConfigError(f"ignore_ips entry {v!r} is not an IP address")
+                        reason = f"ignore_ips entry {entry!r} is not an IP address"
+                        try:
+                            ipaddress.ip_network(entry, strict=False)
+                        except ValueError:
+                            raise RuleConfigError(reason)
+                        raise RuleConfigError(f"{reason} (a prefix is not one address)")
         merged[key] = value
-    if merged.get("business_start_hour", 0) >= merged.get("business_end_hour", 24):
-        raise RuleConfigError("business_start_hour must be before business_end_hour")
+    if "business_start_hour" in merged and "business_end_hour" in merged:
+        start, end = merged["business_start_hour"], merged["business_end_hour"]
+        if start >= end:
+            raise RuleConfigError(
+                f"business_start_hour must be before business_end_hour (got {start} and {end})")
     return merged
 
 

@@ -1,0 +1,55 @@
+# User agents of common web scanners. Watchpost's access-log message ends in " ua=<agent>".
+# Slash and "ua=" forms also catch an agent string ingested without that prefix.
+# Written for Watchpost's Sigma subset (docs/REFERENCE.md, "Sigma rule import").
+title: Web Scanner User Agent
+id: c1f6a8af-b27f-4416-a6d1-20a4a28e8381
+status: experimental
+description: |
+  A web request whose message carries a scanner token: sqlmap, nikto, nuclei, gobuster,
+  dirbuster, wpscan, masscan, acunetix, zgrab, or Nmap. A normal browser request, including
+  one whose path merely mentions a tool, does not match. Each matching event is evidence;
+  Watchpost groups them per source IP.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1595/002/
+tags:
+  - attack.reconnaissance
+  - attack.t1595.002
+logsource:
+  category: webserver
+  product: linux
+detection:
+  web:
+    event.action:
+      - web_request
+      - web_scan
+      - web_error
+  agent:
+    message|contains:
+      - ua=sqlmap
+      - sqlmap/
+      - ua=nikto
+      - nikto/
+      - ua=nuclei
+      - nuclei/
+      - ua=gobuster
+      - gobuster/
+      - ua=dirbuster
+      - dirbuster-
+      - ua=wpscan
+      - wpscan/
+      - 'wpscan '
+      - ua=masscan
+      - masscan/
+      - ua=acunetix
+      - acunetix
+      - ua=zgrab
+      - zgrab/
+      - ua=nmap
+      - 'nmap scripting'
+  condition: web and agent
+falsepositives:
+  - A URL path that contains the same token, such as /tools/nikto/ or /docs/acunetix
+  - A security team's scheduled scan from an approved host
+level: medium

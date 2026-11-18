@@ -1,0 +1,48 @@
+# Path traversal toward a sensitive file, including the encodings common in access logs.
+# Watchpost stores the path undecoded, so both raw and percent-encoded forms are listed.
+# A direct request for /etc/passwd with no traversal marker is a different rule.
+# Written for Watchpost's Sigma subset (docs/REFERENCE.md, "Sigma rule import").
+title: Web Request Path Traversal
+id: f4be1c96-f7a5-4991-89c3-08a4cedf7341
+status: experimental
+description: |
+  A web request whose path walks upward and names passwd, shadow, win.ini, or boot.ini.
+  The walk may be "../", "..%2f", "..%5c", or a percent-encoded dot-dot. A sensitive name
+  with no walk, or a walk that does not name one of those files, does not match.
+  Each matching event is evidence; Watchpost groups them per source IP.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1190/
+tags:
+  - attack.initial_access
+  - attack.t1190
+logsource:
+  category: webserver
+  product: linux
+detection:
+  markers:
+    event.action:
+      - web_request
+      - web_scan
+      - web_error
+    message|contains:
+      - '../'
+      - '..%2f'
+      - '..%5c'
+      - '%2e%2e%2f'
+      - '%2e%2e/'
+      - '%2e%2e%5c'
+  sensitive:
+    message|contains:
+      - etc/passwd
+      - etc/shadow
+      - etc%2fpasswd
+      - etc%5cpasswd
+      - win.ini
+      - boot.ini
+  condition: markers and sensitive
+falsepositives:
+  - A tutorial or document URL that contains both a traversal marker and one of these names
+  - A literal backslash walk that was not percent-encoded (the log then has no marker above)
+level: high

@@ -527,6 +527,9 @@ class EngineSuppressionTests(unittest.TestCase):
         conn = connect(":memory:")
         self.addCleanup(conn.close)
         init_schema(conn)
+        # idx_suppressions_active is a partial index on revoked_at. SQLite will not drop that
+        # column while the index exists. A 3.0 database has neither the columns nor the index.
+        conn.execute("DROP INDEX IF EXISTS idx_suppressions_active")
         for column in ("revoked_at", "revoked_by"):
             conn.execute(f"ALTER TABLE suppressions DROP COLUMN {column}")
         conn.execute(

@@ -1,0 +1,31 @@
+# Lockout of a privileged account name. One event is enough: the lockout is the signal.
+# Written for Watchpost's Sigma subset (docs/REFERENCE.md, "Sigma rule import").
+title: Privileged Account Lockout
+id: 139b3a55-0936-4826-9857-978d2275371d
+status: experimental
+description: |
+  An account lockout for root, admin, or administrator. A lockout of any other name,
+  and a failed login that has not locked the account, do not match. Each matching event
+  is evidence; Watchpost groups them per source IP.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1110/001/
+tags:
+  - attack.credential_access
+  - attack.t1110.001
+logsource:
+  category: authentication
+  product: windows
+detection:
+  selection:
+    event.action: account_lockout
+    TargetUserName:
+      - root
+      - admin
+      - administrator
+  condition: selection
+falsepositives:
+  - An administrator mistyping a password until the domain policy locks the account
+  - A name that is exactly admin but is a lab account
+level: medium

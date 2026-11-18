@@ -162,7 +162,7 @@ def route(method, pattern, role="viewer", csrf=True):
 def body_json(req):
     try:
         data = json.loads(req.body or b"{}")
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         raise ApiError(400, "request body must be valid JSON")
     if not isinstance(data, dict):
         raise ApiError(400, "request body must be a JSON object")
@@ -324,6 +324,28 @@ def detection_run(req):
 
 # ASCII letters only, the same fold as COLLATE NOCASE. Not str.lower().
 _ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+# random.Random treats a bool as 0 or 1 and will hash a multi-megabyte int. A seed is a 64-bit integer.
+_SEED_MIN = -2**63
+_SEED_MAX = 2**63 - 1
+
+
+def _seed(value):
+    if isinstance(value, bool) or not isinstance(value, int) or not _SEED_MIN <= value <= _SEED_MAX:
+        raise ApiError(400, "seed must be an integer")
+    return value
+
+
+def _one_json_content_type(headers):
+    """Exactly one Content-Type whose media type is application/json.
+
+    Parameters such as charset are allowed. A substring match is not: text/plain
+    with a parameter that contains the letters json would pass the ingest gate.
+    """
+    values = headers.get_all("Content-Type")
+    if not values or len(values) != 1:
+        return False
+    media = values[0].split(";", 1)[0].strip().translate(_ASCII_FOLD)
+    return media == "application/json"
 
 
 def _synthetic_flag(value):
@@ -373,7 +395,7 @@ def ingest_json(req):
     """
     try:
         data = json.loads(req.body or b"null")
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         raise ApiError(400, "request body must be valid JSON")
     source, synthetic = "api", False
     if isinstance(data, dict) and "events" in data:
@@ -431,9 +453,7 @@ def demo_load(req):
     existing = req.conn.execute("SELECT COUNT(*) FROM events WHERE synthetic = 1").fetchone()[0]
     if existing and not data.get("force"):
         raise ApiError(409, f"{existing} synthetic events already loaded; send force=true to add another copy")
-    seed = data.get("seed", 7)
-    if not isinstance(seed, int):
-        raise ApiError(400, "seed must be an integer")
+    seed = _seed(data.get("seed", 7))
     results = {}
     demo_assets = assets.seed_demo_assets(req.conn, req.user["username"])
     for name, events in simulate.build(seed=seed).items():
@@ -457,8 +477,7 @@ def demo_simulate(req):
     name, seed = data.get("scenario"), data.get("seed", 7)
     if name not in simulate.SCENARIOS:
         raise ApiError(400, f"scenario must be one of {', '.join(simulate.SCENARIOS)}")
-    if not isinstance(seed, int):
-        raise ApiError(400, "seed must be an integer")
+    seed = _seed(seed)
     events = simulate.build([name], seed=seed)[name]
     normalized, rejections = parse_payload(json.dumps(events), "json", f"demo:{name}")
     req.status = 201
@@ -473,8 +492,7 @@ def storyline_start(req):
     speed, seed = data.get("speed", 1.0), data.get("seed", 7)
     if not isinstance(speed, (int, float)) or isinstance(speed, bool) or not (0.1 <= speed <= 10000):
         raise ApiError(400, "speed must be a number between 0.1 and 10000")
-    if not isinstance(seed, int) or isinstance(seed, bool):
-        raise ApiError(400, "seed must be an integer")
+    seed = _seed(seed)
     if not req.app.storyline.start(speed=speed, seed=seed, started_by=req.user["username"]):
         raise ApiError(409, "a storyline is already running; stop it first")
     audit(req.conn, req.user["username"], "storyline_started", None, {"speed": speed, "seed": seed})
@@ -1215,12 +1233,18 @@ VIEWER_WRITES = (logout,)
 # --- Request handling --------------------------------------------------------------------
 
 SECURITY_HEADERS = {
-    "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+    # object-src, frame-src, worker-src, and script-src-attr are stricter than default-src.
+    # COOP and CORP keep this console from being embedded or opened cross-origin.
+    "Content-Security-Policy": "default-src 'self'; script-src 'self'; script-src-attr 'none'; "
+                               "style-src 'self'; img-src 'self' data:; connect-src 'self'; "
+                               "object-src 'none'; frame-src 'none'; worker-src 'none'; "
                                "frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
     "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
 }
 
 
@@ -1238,6 +1262,53 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self._handle()
+
+    def do_PUT(self):
+        self._method_not_routed()
+
+    def do_PATCH(self):
+        self._method_not_routed()
+
+    def do_DELETE(self):
+        self._method_not_routed()
+
+    def do_OPTIONS(self):
+        self._method_not_routed()
+
+    def do_TRACE(self):
+        self._method_not_routed()
+
+    def _method_not_routed(self):
+        """PUT, PATCH, DELETE, OPTIONS, and TRACE are not routes.
+
+        The base handler would answer 501 as HTML without the security headers.
+        A body is not read, so the connection closes.
+        """
+        parsed = urlparse(self.path)
+        if self._rate_limited(parsed.path):
+            return
+        self.close_connection = True
+        extra = {"Cache-Control": "no-store", "Connection": "close"}
+        if not parsed.path.startswith("/api/"):
+            self._send(405, {"error": "method not allowed"}, extra_headers=extra)
+            return
+        allowed = any(pattern.match(parsed.path) for _, pattern, _, _, _ in ROUTES)
+        if allowed:
+            self._send(405, {"error": "method not allowed"}, extra_headers=extra)
+        else:
+            self._send(404, {"error": "not found"}, extra_headers=extra)
+
+    def _unread_body_headers(self, extra=None):
+        """Close when a POST body is still on the socket.
+
+        A 413, 414, 404, or 405 can be decided before the body is read. Leaving
+        those bytes would desync the next request if the server spoke HTTP/1.1.
+        """
+        extra = dict(extra or {})
+        if getattr(self, "_body_pending", False):
+            self.close_connection = True
+            extra["Connection"] = "close"
+        return extra
 
     def _send(self, status, payload, content_type="application/json", extra_headers=None):
         body = payload if isinstance(payload, bytes) else json.dumps(payload, default=str).encode()
@@ -1348,6 +1419,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._reject_unframed_post():
             return
+        # Set before routing so a 404, 405, or 414 still closes an unread POST body.
+        self._body_pending = self.command == "POST"
         if not parsed.path.startswith("/api/"):
             return self._static(parsed.path)
         self.status = 200
@@ -1366,8 +1439,9 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(405 if allowed else 404, "method not allowed" if allowed else "not found")
 
             self.body = self._read_body() if self.command == "POST" else b""
+            self._body_pending = False
             if self.command == "POST" and self.body and \
-                    fn not in (ingest_upload,) and "json" not in self.headers.get("Content-Type", ""):
+                    fn not in (ingest_upload,) and not _one_json_content_type(self.headers):
                 raise ApiError(415, "Content-Type must be application/json")
             self.conn = self.app.conn()
             self._authorize(role, csrf, fn)
@@ -1396,10 +1470,13 @@ class Handler(BaseHTTPRequestHandler):
         except (auth.AuthError, queries.QueryError, improve.ChangeError, assets.AssetError,
                 sources.WindowError, masking.Unavailable) as exc:
             self._send_error(getattr(exc, "status", 400), str(exc))
+        except OverflowError:
+            # A path id or JSON integer past SQLite's signed 64-bit range. Not a Health incident.
+            self._send_error(400, "integer is out of range")
         except Exception as exc:
             record_error(self.conn, "api", exc, guidance=f"Unhandled error on {self.command} {parsed.path}")
             self._send(500, {"error": "internal error; it has been recorded on the Health page"},
-                       extra_headers={"Cache-Control": "no-store"})
+                       extra_headers=self._unread_body_headers({"Cache-Control": "no-store"}))
         finally:
             if self.conn is not None:
                 self.conn.close()
@@ -1411,7 +1488,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         payload = {"error": message}
         self._send(status, self.masker.mask(payload) if self.masker is not None else payload,
-                   extra_headers={"Cache-Control": "no-store"})
+                   extra_headers=self._unread_body_headers({"Cache-Control": "no-store"}))
 
     def _download_body(self, download):
         if download.render is not None:
@@ -1526,7 +1603,7 @@ class Handler(BaseHTTPRequestHandler):
         """A file that exists is no-cache. A missing path or a non-GET is no-store, like an API error."""
         if self.command != "GET":
             return self._send(405, {"error": "method not allowed"},
-                              extra_headers={"Cache-Control": "no-store"})
+                              extra_headers=self._unread_body_headers({"Cache-Control": "no-store"}))
         name = "index.html" if path in ("", "/") else path.lstrip("/")
         target = (STATIC_DIR / name).resolve()
         if STATIC_DIR.resolve() not in target.parents or not target.is_file():
