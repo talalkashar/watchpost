@@ -154,6 +154,11 @@ def list_entities(conn, params):
     `kind` folds ASCII case onto `user`, `src_ip`, or `host` (`User` is `user`).
     An unknown kind is 400. An empty kind lists every kind. The entity path stays
     those three lowercase spellings.
+
+    `entities` is the highest scores, at most `limit` (default 10, max 100).
+    Ties keep `kind`, then `value`. `entities_omitted` is how many scored
+    entities were past that cap. A list that fits returns 0. A false positive
+    or benign close is not scored, so it is not part of that count.
     """
     kind = params.get("kind")
     if kind:
@@ -183,8 +188,10 @@ def list_entities(conn, params):
             "last_seen": max(c["last_seen"] for c in parts), "contributions": parts,
         })
     rows.sort(key=lambda r: (-r["score"], r["kind"], r["value"]))
+    shown = rows[:limit]
     return {"anchor": anchor, "half_life_hours": HALF_LIFE_HOURS, "severity_weights": SEVERITY_WEIGHTS,
-            "excluded_dispositions": list(EXCLUDED_DISPOSITIONS), "entities": rows[:limit]}
+            "excluded_dispositions": list(EXCLUDED_DISPOSITIONS), "entities": shown,
+            "entities_omitted": len(rows) - len(shown)}
 
 
 def get_entity(conn, kind, value):
