@@ -165,6 +165,7 @@ def backtest(conn, rule_id, new_params, window_days=DEFAULT_WINDOW_DAYS, max_eve
     }
 
 
+PREVIEW_GROUP_KEYS = 10  # first sorted keys on a new-rule preview; the rest are group_keys_omitted
 PREVIEW_SAMPLE_FINDINGS = 5  # findings listed in a new rule's preview; the count is complete
 
 
@@ -179,7 +180,8 @@ def preview_new_rule(conn, rule_id, params, matches, window_days=DEFAULT_WINDOW_
     max_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
     end = conn.execute("SELECT MAX(ts) FROM events WHERE id <= ?", (max_id,)).fetchone()[0]
     out = {"window": None, "max_event_id": max_id, "events_scanned": 0, "synthetic_events": 0,
-           "matched_events": 0, "findings": 0, "group_keys": [], "sample_findings": [], "capped": False}
+           "matched_events": 0, "findings": 0, "group_keys": [], "group_keys_omitted": 0,
+           "sample_findings": [], "capped": False}
     if end is None:
         return out
     start = iso(parse_iso(end) - timedelta(days=window_days))
@@ -191,11 +193,12 @@ def preview_new_rule(conn, rule_id, params, matches, window_days=DEFAULT_WINDOW_
     events = [e for e in events if e["ts"] >= start]
     findings, _ = engine.rule_findings(rule, events, [], None, set())
     keys = sorted({f["group_key"] for f in findings})
+    shown = keys[:PREVIEW_GROUP_KEYS]
     newest = sorted(findings, key=lambda f: (f["last_seen"], f["group_key"]), reverse=True)
     out.update(window={"start": start, "end": end}, events_scanned=len(events),
                synthetic_events=sum(1 for e in events if e["synthetic"]), capped=bool(over),
                matched_events=sum(1 for e in events if matches(e)), findings=len(findings),
-               group_keys=keys[:10],
+               group_keys=shown, group_keys_omitted=len(keys) - len(shown),
                sample_findings=[{"group_key": f["group_key"], "event_count": len(f["event_ids"]),
                                  "first_seen": f["first_seen"], "last_seen": f["last_seen"], "title": f["title"]}
                                 for f in newest[:PREVIEW_SAMPLE_FINDINGS]])
