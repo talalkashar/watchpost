@@ -18,7 +18,7 @@ replayed with older timestamps and would otherwise decay to nothing.
 from datetime import date, timedelta
 
 from .db import parse_iso
-from .queries import EVENT_FIELDS, QueryError, _int, canonical_ip
+from .queries import EVENT_FIELDS, QueryError, _int, canonical_ip, catalog_name
 
 KINDS = ("user", "src_ip", "host")
 # SQLite COLLATE NOCASE folds these letters only. User and host keys use the same fold.
@@ -150,10 +150,17 @@ def list_entities(conn, params):
     The alert read and the evidence walk both keep only alerts that can score, using
     `EXCLUDED_DISPOSITIONS` in SQL. A false positive still scores 0 on the entity page
     and is absent here.
+
+    `kind` folds ASCII case onto `user`, `src_ip`, or `host` (`User` is `user`).
+    An unknown kind is 400. An empty kind lists every kind. The entity path stays
+    those three lowercase spellings.
     """
     kind = params.get("kind")
-    if kind and kind not in KINDS:
-        raise QueryError(f"kind must be one of {', '.join(KINDS)}")
+    if kind:
+        # ASCII case folds onto the catalog spelling (`User` is `user`). A non-ASCII lookalike stays 400.
+        kind = catalog_name(kind, KINDS)
+        if kind is None:
+            raise QueryError(f"kind must be one of {', '.join(KINDS)}")
     limit = _int(params.get("limit"), "limit", 10, 1, 100)
     anchor = _anchor(conn)
     clause, bound = _scoreable_disposition()
