@@ -122,7 +122,16 @@ body.authed[data-view="dashboard"] main { padding: 14px 0 0; }
 #main :is(a, button, input, select, summary, textarea, [tabindex]) { scroll-margin-top: var(--chrome-clearance); }
 #main:target #view::before { content: ""; display: block; height: var(--chrome-clearance); }
 .rail, .strip, dialog { border: 1px solid; border-color: #898989 #424242 #2d2d2d #6f6f6f; box-shadow: var(--rim), var(--float-shadow); }
-body.scrolled { --float-shadow: 0 6px 9px -4px rgb(5 5 5 / .65), 0 18px 30px -9px rgb(5 5 5 / .65); }
+@supports (animation-timeline: scroll()) {
+  body {
+    animation: chrome-shadow 1s steps(1, end) forwards;
+    animation-timeline: scroll(root);
+    animation-range: 0 8px;
+  }
+  @keyframes chrome-shadow {
+    to { --float-shadow: 0 6px 9px -4px rgb(5 5 5 / .65), 0 18px 30px -9px rgb(5 5 5 / .65); }
+  }
+}
 body:not(.authed) main { max-width: 1280px; margin: 0 auto; min-height: 100dvh; display: flex; flex-direction: column;
   align-items: center; justify-content: safe center; padding: 32px 16px; }
 body:not(.authed) #view:empty { display: none; }
@@ -272,6 +281,7 @@ dialog::backdrop { background: rgb(8 8 8 / .72); }
 #p-rules, #p-health { overflow: visible; }
 #p-rules .chartbox { height: auto; }
 @media (min-width: 1101px) {
+  #attack-chart .heat { max-width: 100%; height: auto; }
   #ent-list:has(.erow:nth-child(5)), #health-body:has(.hrow2:nth-child(5)) {
     display: grid; height: 100%; align-content: stretch;
   }
