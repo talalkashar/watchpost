@@ -219,9 +219,13 @@ def _term_sql(term, now):
         text = prefix if prefix else value  # a trailing * on a word adds nothing to "contains"
         return "message LIKE ? ESCAPE '\\'", ["%" + _escape_like(text) + "%"], f'message contains "{text}"'
     if kind == "port":
-        if not value.isdigit() or int(value) > 65535:
+        # ASCII digits only. 443, 0, and 01 stay ports 443, 0, and 1.
+        # Fullwidth ４４３, Arabic-Indic ١٠, ², and ① are the error below,
+        # not port 443 or 10, and not a 500. The conversion runs only after this check.
+        if not value.isascii() or not value.isdigit() or int(value) > 65535:
             raise HuntError("dest_port must be an integer between 0 and 65535")
-        return "dest_port = ?", [int(value)], f"dest_port = {int(value)}"
+        port = int(value)
+        return "dest_port = ?", [port], f"dest_port = {port}"
     if kind == "bytes":
         op, number = bytes_bound(value)
         return f"{column} {op} ?", [number], f"{field} {op} {number}"
