@@ -54,6 +54,21 @@ class FailureOmittedTests(unittest.TestCase):
         self.assertEqual(body["top_failure_ips"][0], {"src_ip": "198.51.100.1", "count": TOP_FAILURE_LIMIT + 1})
         self.assertEqual(body["top_failure_users"][0], {"user": "user0", "count": TOP_FAILURE_LIMIT + 1})
 
+    def test_equal_counts_keep_the_earlier_address(self):
+        # The later address is inserted first. Order is src_ip, not insert order.
+        add_event(self.conn, user="quiet", src_ip="198.51.100.90")
+        kept = [f"198.51.100.{i:02d}" for i in range(1, TOP_FAILURE_LIMIT + 1)]
+        for src_ip in reversed(kept):
+            add_event(self.conn, user="alice", src_ip=src_ip)
+        add_event(self.conn, user="sam", src_ip="198.51.100.99", event_type="auth_success", n=5)
+        add_event(self.conn, user="bob", src_ip=None, n=5)
+        body = self.body()
+        self.assertEqual(body["top_failure_ips_omitted"], 1)
+        self.assertEqual([row["src_ip"] for row in body["top_failure_ips"]], kept)
+        self.assertTrue(all(row["count"] == 1 for row in body["top_failure_ips"]))
+        self.assertNotIn("198.51.100.90", [row["src_ip"] for row in body["top_failure_ips"]])
+        self.assertNotIn("198.51.100.99", [row["src_ip"] for row in body["top_failure_ips"]])
+
     def test_folded_spellings_are_one_group_and_stored_addresses_stay_apart(self):
         for i in range(TOP_FAILURE_LIMIT):
             add_event(self.conn, user=f"user{i}", src_ip=f"198.51.100.{i + 1}", n=4)
@@ -118,6 +133,8 @@ class FailureOmittedTests(unittest.TestCase):
         self.assertIn("A success is not a group", api)
         self.assertIn("A missing address or account is not a group", api)
         self.assertIn("`top_failure_ips` groups the stored address", api)
+        self.assertIn("`top_failure_ips` is `count` descending, then `src_ip`", api)
+        self.assertIn("Equal counts keep the earlier address", api)
 
 
 class FailureOmittedApiTests(ServerTestCase):
