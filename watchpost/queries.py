@@ -48,6 +48,10 @@ ALERTS_BY_RULE_LIMIT = 100
 # false_positive_rate_by_rule_omitted is how many of those rule ids were past that cap.
 # A rule with no disposition is not a row and is not omitted.
 FP_RATE_BY_RULE_LIMIT = 100
+# Metrics events_by_type is this many event types, most events first, then event_type.
+# events_by_type_omitted is how many event types were past that cap.
+# A type with no events is not a row and is not omitted. The field still counts every stored event.
+EVENTS_BY_TYPE_LIMIT = 100
 # Event detail returns this many linked alerts, newest by alert id, then id order.
 # alerts_omitted is how many linked alerts were past that cap.
 EVENT_ALERT_LIMIT = 50
@@ -567,6 +571,12 @@ def metrics(conn, hours=24):
         "SELECT rule_id, COUNT(*) AS count FROM alerts GROUP BY rule_id"
         f" ORDER BY count DESC, rule_id LIMIT {ALERTS_BY_RULE_LIMIT}")
     alerts_by_rule_omitted = one("SELECT COUNT(DISTINCT rule_id) FROM alerts") - len(alerts_by_rule)
+    # Equal counts keep the earlier event_type. A type with no events is not a row.
+    # hours does not filter this list; it still counts every stored event.
+    events_by_type = by(
+        "SELECT event_type, COUNT(*) AS count FROM events GROUP BY event_type"
+        f" ORDER BY count DESC, event_type LIMIT {EVENTS_BY_TYPE_LIMIT}")
+    events_by_type_omitted = one("SELECT COUNT(DISTINCT event_type) FROM events") - len(events_by_type)
     return {
         "window_hours": hours,
         "window_scope": {
@@ -592,8 +602,8 @@ def metrics(conn, hours=24):
         "top_failure_ips_omitted": ips_omitted,
         "top_failure_users": top_users,
         "top_failure_users_omitted": users_omitted,
-        "events_by_type": by("SELECT event_type, COUNT(*) AS count FROM events GROUP BY event_type"
-                             " ORDER BY count DESC"),
+        "events_by_type": events_by_type,
+        "events_by_type_omitted": events_by_type_omitted,
         "activity_last_24h_of_data": histogram,
         "time_to_resolve_by_severity": resolve_by_severity,
         "false_positive_rate_by_rule": fp_by_rule,
