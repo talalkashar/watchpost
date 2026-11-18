@@ -291,17 +291,34 @@ HIDING_EDITS = {"ignore_ips": "added", "ignore_users": "added", "sanctioned_serv
                 "privileged_users": "removed", "logging_actions": "removed"}
 
 
+def _stored_ip(value):
+    """The address form ingest stores, or None when value is not one complete address.
+
+    A prefix and any other non-address are None. Comparing them is a non-match, not an error.
+    """
+    if isinstance(value, str):
+        import ipaddress
+        try:
+            return str(ipaddress.ip_address(value))
+        except ValueError:
+            return None
+    return None
+
+
 def list_entry(param, value):
     """One list entry in the form the rules compare it in."""
     if param == "ignore_ips":
-        return value
+        stored = _stored_ip(value)
+        # A prefix or other non-address is kept as written. covers will not treat it as an address.
+        return value if stored is None else stored
     return value.lower().lstrip(".") if param == "sanctioned_services" else value.lower()
 
 
 def covers(param, entries, event):
     """Whether `event` matches any of `entries` (already passed through list_entry) of a list parameter."""
     if param == "ignore_ips":
-        return event.get("src_ip") in entries
+        address = _stored_ip(event.get("src_ip"))
+        return address is not None and address in entries
     if param == "sanctioned_services":  # the service itself or any subdomain of an entry
         service = _service(event)
         return bool(service) and any(service == s or service.endswith("." + s) for s in entries)

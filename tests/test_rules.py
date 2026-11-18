@@ -47,6 +47,35 @@ class BruteForceTests(unittest.TestCase):
         self.assertEqual(rules.brute_force_ip(events, params("brute_force_ip", ignore_ips=["203.0.113.1"])), [])
         self.assertEqual(rules.brute_force_ip(events, params("brute_force_ip", ignore_users=["ADMIN"])), [])
 
+    def test_ignore_ips_matches_stored_address_form(self):
+        # Ingest stores str(ipaddress.ip_address), so a mixed-case or expanded entry must still ignore.
+        events = make([fail(i, ip="2001:db8::1") for i in range(12)])
+        for entry in ("2001:DB8::1", "2001:0db8:0000:0000:0000:0000:0000:0001"):
+            with self.subTest(entry=entry):
+                self.assertEqual(rules.list_entry("ignore_ips", entry), "2001:db8::1")
+                self.assertEqual(
+                    rules.brute_force_ip(events, params("brute_force_ip", ignore_ips=[entry])), [])
+        self.assertEqual(len(rules.brute_force_ip(
+            events, params("brute_force_ip", ignore_ips=["2001:db8::2"]))), 1)
+        # An event that was not rewritten still matches the stored form.
+        self.assertTrue(rules.covers(
+            "ignore_ips", {rules.list_entry("ignore_ips", "2001:DB8::1")}, {"src_ip": "2001:DB8::1"}))
+
+    def test_ignore_ip_prefix_or_non_address_does_not_match(self):
+        event = {"src_ip": "2001:db8::1"}
+        for raw in ("2001:db8::/32", "2001:db8::1/128", "not-an-ip", ""):
+            with self.subTest(raw=raw):
+                entry = rules.list_entry("ignore_ips", raw)
+                self.assertEqual(entry, raw)
+                self.assertFalse(rules.covers("ignore_ips", {entry}, event))
+                self.assertFalse(rules.covers("ignore_ips", {entry}, {"src_ip": raw}))
+                self.assertFalse(rules.covers("ignore_ips", {entry}, {"src_ip": None}))
+        # A list that skipped validation does not raise, and the burst still alerts.
+        p = params("brute_force_ip")
+        p["ignore_ips"] = ["2001:DB8::/32", "not-an-ip"]
+        events = make([fail(i, ip="2001:db8::1") for i in range(10)])
+        self.assertEqual(len(rules.brute_force_ip(events, p)), 1)
+
     def test_unordered_input_and_missing_ip(self):
         events = [fail(i) for i in reversed(range(10))] + [{**fail(1), "src_ip": None}]
         self.assertEqual(len(rules.brute_force_ip(make(events), params("brute_force_ip"))), 1)
