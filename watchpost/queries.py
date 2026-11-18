@@ -20,6 +20,10 @@ MAX_SEARCH_Q = 200
 EVIDENCE_LIMIT = 500
 # Related timeline returns this many events, earliest in the window. The rest are timeline_omitted.
 TIMELINE_LIMIT = 300
+# Alert detail returns this many notes and this many activity rows, newest by id.
+# Each list stays in id order. The older rows are notes_omitted and activity_omitted.
+NOTE_LIMIT = 100
+ACTIVITY_LIMIT = 100
 EVENT_FIELDS = "id, ts, ingested_at, source, host, event_type, outcome, severity, user, src_ip, dest_ip, dest_port, " \
                "bytes, message, synthetic, batch_id"
 
@@ -242,12 +246,27 @@ def get_alert(conn, alert_id):
         " JOIN alert_events ae ON ae.event_id = e.id WHERE ae.alert_id = ?",
         (alert_id,)).fetchone()["n"]
     alert["evidence_omitted"] = total - len(alert["evidence"])
-    alert["notes"] = [dict(r) for r in conn.execute(
-        "SELECT * FROM alert_notes WHERE alert_id = ? ORDER BY id", (alert_id,))]
-    alert["activity"] = [dict(r) for r in conn.execute(
-        "SELECT * FROM alert_activity WHERE alert_id = ? ORDER BY id", (alert_id,))]
+    # Newest by id, then id order in the response. A later created_at on a lower id is still the older row.
+    alert["notes"], alert["notes_omitted"] = _newest_by_id(conn, "alert_notes", alert_id, NOTE_LIMIT)
+    alert["activity"], alert["activity_omitted"] = _newest_by_id(
+        conn, "alert_activity", alert_id, ACTIVITY_LIMIT)
     alert["timeline"] = related_timeline(conn, alert)
     return alert
+
+
+def _newest_by_id(conn, table, alert_id, limit):
+    """The newest `limit` rows for this alert (highest id), returned in id order.
+
+    The second value is how many older rows were left out (0 when the table fits).
+    `table` is a fixed name in this module, never a request value.
+    """
+    total = conn.execute(
+        f"SELECT COUNT(*) AS n FROM {table} WHERE alert_id = ?", (alert_id,)).fetchone()["n"]
+    rows = [dict(r) for r in conn.execute(
+        f"SELECT * FROM (SELECT * FROM {table} WHERE alert_id = ? ORDER BY id DESC LIMIT ?)"
+        " ORDER BY id",
+        (alert_id, limit))]
+    return rows, total - len(rows)
 
 
 def related_timeline(conn, alert, pad_minutes=30):
