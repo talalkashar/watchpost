@@ -405,12 +405,19 @@ def _ascii_fold(value):
     return value.translate(_ASCII_FOLD)
 
 
+def _account_name(user):
+    """Account spelling for a count. Alice and alice are one name."""
+    return user.lower()
+
+
 def brute_force_ip(events, params):
     threshold, window = params["threshold"], params["window_seconds"]
     findings = []
     for ip, group in _group(_filtered(events, params, "auth_failure"), "src_ip").items():
         for cluster in _clusters(group, window, lambda w: len(w) >= threshold):
-            users = Counter(e.get("user") or "?" for e in cluster)
+            # The raw spelling lists Alice and alice as two accounts. The
+            # threshold still counts events, and the finding key stays the IP.
+            users = Counter(_account_name(e["user"]) if e.get("user") else "?" for e in cluster)
             top = ", ".join(f"{u} ({n})" for u, n in users.most_common(3))
             findings.append(_finding(
                 ip, cluster,
@@ -424,7 +431,7 @@ def brute_force_ip(events, params):
 
 def _account_names(events):
     """Distinct account names, ignoring case. Alice and alice are one account."""
-    return {e["user"].lower() for e in events if e.get("user")}
+    return {_account_name(e["user"]) for e in events if e.get("user")}
 
 
 def password_spray(events, params):

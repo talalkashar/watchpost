@@ -80,6 +80,27 @@ class BruteForceTests(unittest.TestCase):
         events = [fail(i) for i in reversed(range(10))] + [{**fail(1), "src_ip": None}]
         self.assertEqual(len(rules.brute_force_ip(make(events), params("brute_force_ip"))), 1)
 
+    def test_targeted_accounts_fold_case(self):
+        # Alice (4) and alice (3) used to take two of the three named slots and drop carol.
+        events = make(
+            [fail(i, user="Alice") for i in range(4)]
+            + [fail(4 + i, user="alice") for i in range(3)]
+            + [fail(7 + i, user="bob") for i in range(2)]
+            + [fail(9, user="carol")]
+        )
+        found = rules.brute_force_ip(events, params("brute_force_ip"))
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "203.0.113.1")
+        self.assertEqual(found[0]["event_ids"], list(range(1, 11)))
+        self.assertIn("threshold of 10", found[0]["explanation"])
+        self.assertIn("Most targeted accounts: alice (7), bob (2), carol (1).", found[0]["explanation"])
+        self.assertNotIn("Alice", found[0]["explanation"])
+        # Nine events still miss the threshold. The fold does not count accounts.
+        short = make(
+            [fail(i, user="Alice") for i in range(5)] + [fail(5 + i, user="alice") for i in range(4)]
+        )
+        self.assertEqual(rules.brute_force_ip(short, params("brute_force_ip")), [])
+
 
 class OtherRuleTests(unittest.TestCase):
     def test_password_spray(self):
