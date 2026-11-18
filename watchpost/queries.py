@@ -398,17 +398,29 @@ def update_status(conn, alert_id, actor, status, disposition=None, note=None):
 
 
 def assign(conn, alert_id, actor, assignee):
-    """Hand an alert to an enabled analyst or admin account. Ownership only: the status does not change."""
+    """Hand an alert to an enabled analyst or admin account. Ownership only: the status does not change.
+
+    The name matches ASCII case, and the alert stores that account's saved spelling.
+    `Admin` is `admin` when that is the only match. Two enabled analyst or admin
+    accounts that share the fold are 409 and the assignee stays as it was.
+    `Érin` does not match `érin`. A disabled account and a viewer do not match.
+    """
     if not isinstance(assignee, str) or not assignee.strip():
         raise QueryError("assignee must be a username")
+    name = assignee.strip()
     with transaction(conn):
         alert = conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone()
         if alert is None:
             raise QueryError("alert not found", 404)
-        user = conn.execute("SELECT username FROM users WHERE username = ? AND disabled = 0"
-                            " AND role IN ('analyst', 'admin')", (assignee.strip(),)).fetchone()
-        if user is None:
+        # COLLATE NOCASE folds ASCII only, the same letters entity keys use.
+        users = conn.execute(
+            "SELECT username FROM users WHERE username = ? COLLATE NOCASE AND disabled = 0"
+            " AND role IN ('analyst', 'admin')", (name,)).fetchall()
+        if len(users) > 1:
+            raise QueryError("assignee matches more than one enabled analyst or admin", 409)
+        if not users:
             raise QueryError("assignee must be an enabled analyst or admin account")
+        user = users[0]
         now = now_iso()
         conn.execute("UPDATE alerts SET assignee = ?, updated_at = ? WHERE id = ?", (user["username"], now, alert_id))
         conn.execute("INSERT INTO alert_activity(alert_id, actor, action, detail, created_at) VALUES (?,?,?,?,?)",
