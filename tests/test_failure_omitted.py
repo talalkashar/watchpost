@@ -69,6 +69,25 @@ class FailureOmittedTests(unittest.TestCase):
         self.assertNotIn("198.51.100.90", [row["src_ip"] for row in body["top_failure_ips"]])
         self.assertNotIn("198.51.100.99", [row["src_ip"] for row in body["top_failure_ips"]])
 
+    def test_equal_counts_keep_the_earlier_folded_name(self):
+        # The later name is inserted first. Order is the folded user, not insert order.
+        add_event(self.conn, user="zebra")
+        kept = [f"user{i:02d}" for i in range(TOP_FAILURE_LIMIT)]
+        for name in reversed(kept):
+            add_event(self.conn, user=name.upper())
+        add_event(self.conn, user="sam", src_ip="198.51.100.99", event_type="auth_success", n=5)
+        add_event(self.conn, user=None, n=5)
+        add_event(self.conn, user="ÉRIN")
+        add_event(self.conn, user="érin")
+        body = self.body()
+        self.assertEqual(body["top_failure_users_omitted"], 3)
+        self.assertEqual([row["user"] for row in body["top_failure_users"]], kept)
+        self.assertTrue(all(row["count"] == 1 for row in body["top_failure_users"]))
+        self.assertNotIn("zebra", [row["user"] for row in body["top_failure_users"]])
+        self.assertNotIn("sam", [row["user"] for row in body["top_failure_users"]])
+        self.assertNotIn("Érin", [row["user"] for row in body["top_failure_users"]])
+        self.assertNotIn("érin", [row["user"] for row in body["top_failure_users"]])
+
     def test_folded_spellings_are_one_group_and_stored_addresses_stay_apart(self):
         for i in range(TOP_FAILURE_LIMIT):
             add_event(self.conn, user=f"user{i}", src_ip=f"198.51.100.{i + 1}", n=4)
@@ -135,6 +154,8 @@ class FailureOmittedTests(unittest.TestCase):
         self.assertIn("`top_failure_ips` groups the stored address", api)
         self.assertIn("`top_failure_ips` is `count` descending, then `src_ip`", api)
         self.assertIn("Equal counts keep the earlier address", api)
+        self.assertIn("`top_failure_users` is `count` descending, then the folded user", api)
+        self.assertIn("Equal counts keep the earlier folded name", api)
 
 
 class FailureOmittedApiTests(ServerTestCase):
