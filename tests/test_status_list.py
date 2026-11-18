@@ -74,7 +74,8 @@ class StatusListTests(unittest.TestCase):
                         listing(self.conn, {"status": bad})
                     self.assertEqual(caught.exception.status, 400)
                     self.assertIn("status must be from", str(caught.exception))
-        self.assertEqual(self.alert_ids(), [1, 2, 3])
+        # Same severity and last_seen: not-resolved first, then the newer id.
+        self.assertEqual(self.alert_ids(), [2, 1, 3])
         self.assertEqual(sorted(self.incident_ids()), [1, 2, 3])
 
 

@@ -59,6 +59,10 @@ CREATE INDEX IF NOT EXISTS idx_events_source_nocase ON events(source COLLATE NOC
 -- Outcome equality compares with COLLATE NOCASE (ASCII). Grouping by outcome stays exact.
 -- An outcome prefix uses this index too.
 CREATE INDEX IF NOT EXISTS idx_events_outcome_nocase ON events(outcome COLLATE NOCASE, ts);
+-- batch_id equality compares with COLLATE NOCASE (ASCII). A stored uuid hex matches ABCDEF….
+-- Grouping by batch_id stays the stored spelling. A prefix uses this index too.
+-- Exact batch reads (ingest publish) still use idx_events_batch.
+CREATE INDEX IF NOT EXISTS idx_events_batch_nocase ON events(batch_id COLLATE NOCASE, ts);
 
 CREATE TABLE IF NOT EXISTS ingest_batches (
     id TEXT PRIMARY KEY,
@@ -120,6 +124,8 @@ CREATE TABLE IF NOT EXISTS alerts (
 );
 CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status);
 CREATE INDEX IF NOT EXISTS idx_alerts_rule_group ON alerts(rule_id, group_key);
+-- Alert list rule_id compares with COLLATE NOCASE (ASCII). The group index stays exact.
+CREATE INDEX IF NOT EXISTS idx_alerts_rule_nocase ON alerts(rule_id COLLATE NOCASE);
 
 CREATE TABLE IF NOT EXISTS alert_events (
     alert_id INTEGER NOT NULL,

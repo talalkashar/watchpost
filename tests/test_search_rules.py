@@ -294,6 +294,7 @@ class PromoteWorkflowTests(ServerTestCase):
         self.assertEqual((data["compiled"]["rule_id"], data["compiled"]["query"]), (RULE_ID, WEB_QUERY))
         bt = data["backtest"]
         self.assertEqual((bt["matched_events"], bt["findings"], bt["group_keys"]), (6, 1, ["203.0.113.9"]))
+        self.assertEqual(bt["group_keys_omitted"], 0)
         self.assertEqual(bt["sample_findings"][0]["event_count"], 4)
         self.assertIsNone(data["sample"])
         self.assertEqual(analyst.get("/api/changes")[1], [])

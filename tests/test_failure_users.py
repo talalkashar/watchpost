@@ -76,9 +76,11 @@ class FailureUserTests(unittest.TestCase):
         self.assertEqual(len(user_sql), 1)
         self.assertIn("SELECT lower(user) AS user", user_sql[0])
         self.assertIn("GROUP BY lower(user)", user_sql[0])
+        self.assertIn("ORDER BY count DESC, lower(user)", user_sql[0])
         self.assertNotIn("GROUP BY user", user_sql[0].replace("GROUP BY lower(user)", ""))
         self.assertEqual(len(ip_sql), 1)
         self.assertIn("GROUP BY src_ip", ip_sql[0])
+        self.assertIn("ORDER BY count DESC, src_ip", ip_sql[0])
         self.assertNotIn("lower(", ip_sql[0])
 
     def test_the_docs_name_the_ascii_fold(self):

@@ -321,7 +321,8 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(tuple(user), (None, None))
             result = auth.login(conn, "alice", "alice-password-123", 3600)
             self.assertIsInstance(result, tuple)  # not enrolled: one step, as before
-            listed = auth.list_sessions(conn, "alice")
+            listed, omitted = auth.list_sessions(conn, "alice")
+            self.assertEqual(omitted, 0)
             self.assertEqual(len(listed), 3)
             init_schema(conn)  # idempotent
             self.assertEqual(sorted(r[0] for r in conn.execute("SELECT sid FROM sessions")),

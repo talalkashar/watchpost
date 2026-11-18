@@ -4,7 +4,8 @@ Health details keeps the newest error_log rows by id (20) and the newest
 detection runs by id (10), and names the rest in the body. Audit (200) and
 ingest batches (50) stay bare arrays. Their leftover count is
 X-Watchpost-Omitted, including 0 when the table fits. A later timestamp on an
-older id is still the row past the id cap. Batches drop the oldest created_at.
+older id is still the row past the id cap. Batches drop the oldest created_at,
+then the lower id. The same timestamp keeps the higher id.
 """
 
 import sqlite3
@@ -141,6 +142,54 @@ class ListOmittedTests(ServerTestCase):
         self.assertEqual(headers[OMITTED], "0")
         self.assertEqual(fitted[-1]["id"], "batch-0")
 
+    def test_equal_created_at_keeps_the_higher_id(self):
+        # b00 is inserted last. The timestamp is shared, so id DESC leaves it out.
+        viewer = self.client("viewer")
+        stamp = "2026-06-01T00:00:00"
+        with sqlite3.connect(self.db_path) as db:
+            db.execute("DELETE FROM ingest_batches")
+            rows = [(f"b{i:02d}", stamp, f"b{i:02d}") for i in range(50, -1, -1)]
+            _insert(db,
+                    "INSERT INTO ingest_batches(id, created_at, source, format, received, accepted,"
+                    " rejected, errors, submitted_by, detection_status)"
+                    " VALUES (?,?,?,'json',1,1,0,'[]','admin','ok')",
+                    rows)
+        status, body, headers = viewer.get("/api/ingest/batches")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(headers[OMITTED], "1")
+        self.assertEqual(len(body), 50)
+        self.assertEqual([row["id"] for row in body], [f"b{i:02d}" for i in range(50, 0, -1)])
+        self.assertNotIn("b00", [row["id"] for row in body])
+        self.assertGreater(body[0]["id"], body[-1]["id"])
+
+    def test_a_newer_created_at_still_outranks_a_higher_id(self):
+        viewer = self.client("viewer")
+        with sqlite3.connect(self.db_path) as db:
+            db.execute("DELETE FROM ingest_batches")
+            rows = [(f"z{i:02d}", "2026-01-01T00:00:00", f"z{i:02d}") for i in range(50)]
+            rows.append(("a00", "2026-06-01T00:00:00", "a00"))
+            _insert(db,
+                    "INSERT INTO ingest_batches(id, created_at, source, format, received, accepted,"
+                    " rejected, errors, submitted_by, detection_status)"
+                    " VALUES (?,?,?,'json',1,1,0,'[]','admin','ok')",
+                    rows)
+        status, body, headers = viewer.get("/api/ingest/batches")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(headers[OMITTED], "1")
+        self.assertEqual(body[0]["id"], "a00")
+        self.assertEqual(body[1]["id"], "z49")
+        self.assertNotIn("z00", [row["id"] for row in body])
+        self.assertLess(body[0]["id"], body[1]["id"])
+
+    def test_the_batch_query_orders_by_created_at_then_id(self):
+        source = Path(__file__).resolve().parent.parent.joinpath("watchpost", "server.py").read_text()
+        self.assertIn("ORDER BY created_at DESC, id DESC LIMIT ?", source)
+
+    def test_a_signed_out_batch_list_sends_no_header(self):
+        status, _, headers = self.client().get("/api/ingest/batches")
+        self.assertEqual(status, 401)
+        self.assertIsNone(headers.get(OMITTED))
+
     def test_the_docs_name_the_omitted_counts(self):
         api = API.read_text()
         self.assertIn(
@@ -155,6 +204,8 @@ class ListOmittedTests(ServerTestCase):
         self.assertIn(
             "`X-Watchpost-Omitted` is how many batches were past that cap (0 when the table fits)",
             api)
+        self.assertIn("then `id` descending", api)
+        self.assertIn("The same timestamp keeps the higher id", api)
         self.assertIn("The body stays a bare array", api)
 
 

@@ -235,7 +235,8 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.alerts(), [])
         health = {(r["source"], r["host"]): r for r in sources.inventory(self.conn)["sources"]}
         self.assertEqual(health[("fw", "fw01")]["status"], "healthy")
-        self.assertIsNotNone(health[("fw", "fw01")]["maintenance"])
+        self.assertEqual(len(health[("fw", "fw01")]["maintenance"]), 1)
+        self.assertEqual(health[("fw", "fw01")]["maintenance_omitted"], 0)
 
     def test_ascii_case_is_one_source_and_a_window_covers_it(self):
         now = utcnow()
@@ -258,7 +259,8 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.alerts(), [])
         row = sources.inventory(self.conn)["sources"][0]
         self.assertEqual((row["source"], row["host"], row["status"]), ("demo", "web01", "healthy"))
-        self.assertIsNotNone(row["maintenance"])
+        self.assertEqual([(w["source"], w["host"]) for w in row["maintenance"]], [("demo", "web01")])
+        self.assertEqual(row["maintenance_omitted"], 0)
 
     def test_non_ascii_case_stays_two_sources(self):
         now = utcnow()
@@ -378,7 +380,8 @@ class ApiTests(ServerTestCase):
         viewer = self.client("viewer")
         status, data, _ = viewer.get("/api/sources/health")
         self.assertEqual(status, 200)
-        self.assertEqual(set(data), {"checked_at", "thresholds", "sources", "summary", "maintenance_windows"})
+        self.assertEqual(set(data), {"checked_at", "thresholds", "sources", "sources_omitted", "summary",
+                                     "maintenance_windows", "maintenance_windows_omitted"})
         self.assertEqual(viewer.post("/api/sources/maintenance", self.window())[0], 403)
         self.assertEqual(viewer.post("/api/sources/maintenance/1/end")[0], 403)
         self.assertEqual(self.client("analyst").post("/api/sources/maintenance", self.window())[0], 403)

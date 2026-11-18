@@ -1,9 +1,10 @@
 """The dashboard attacker list says how many source IPs the cap dropped.
 
-The rows stay ordered by alerts, then events. A newer source with fewer events
-is the one left out when 40 busier sources fill the list. A list that fits,
-including an empty table, returns attackers_omitted 0. An event that is not
-alert evidence is not a source IP in that count.
+The rows stay ordered by alerts, then events, then ip. A newer source with fewer
+events is the one left out when 40 busier sources fill the list. Equal alerts
+and events keep the earlier address, so the row past 40 is fixed. A list that
+fits, including an empty table, returns attackers_omitted 0. An event that is
+not alert evidence is not a source IP in that count.
 """
 
 import sqlite3
@@ -68,6 +69,30 @@ class AttackersOmittedTests(unittest.TestCase):
         self.assertEqual(row["203.0.113.20"]["events"], 3)
         self.assertEqual(row["203.0.113.10"]["max_severity"], "medium")
 
+    def test_equal_alerts_and_events_keep_the_earlier_ip(self):
+        # The later address is inserted first. Order is ip, not insert order.
+        later = "198.51.100.90"
+        source(self.conn, later)
+        kept = [f"198.51.100.{i:02d}" for i in range(1, ATTACKER_LIMIT + 1)]
+        for ip in reversed(kept):
+            source(self.conn, ip)
+        add_event(self.conn, ANCHOR, src_ip="198.51.100.99")
+        add_alert(self.conn, "high", ANCHOR, [add_event(self.conn, ANCHOR, src_ip=None)])
+        omitted, ips = self.board()
+        self.assertEqual(omitted, 1)
+        self.assertEqual(ips, kept)
+        self.assertNotIn(later, ips)
+        self.assertNotIn("198.51.100.99", ips)
+        rows = {a["ip"]: a for a in dashboard(self.conn)["attackers"]}
+        self.assertTrue(all(row["alerts"] == 1 and row["events"] == 1 for row in rows.values()))
+
+    def test_more_events_still_outrank_an_earlier_ip(self):
+        source(self.conn, "198.51.100.01", events=1, alerts=1)
+        source(self.conn, "198.51.100.90", events=2, alerts=1)
+        omitted, ips = self.board()
+        self.assertEqual(omitted, 0)
+        self.assertEqual(ips, ["198.51.100.90", "198.51.100.01"])
+
     def test_a_resolved_alert_still_counts_and_an_unlinked_event_does_not(self):
         source(self.conn, "203.0.113.7", status="resolved")
         add_event(self.conn, ANCHOR, src_ip="192.0.2.8")
@@ -96,7 +121,7 @@ class AttackersOmittedTests(unittest.TestCase):
             " (0 when there are 40 or fewer)",
             api)
         self.assertIn("An event that is not alert evidence is not a source IP in that count", api)
-        self.assertIn("the top 40 by alerts, then events", api)
+        self.assertIn("the top 40 by alerts, then events, then `ip`", api)
 
 
 class AttackersOmittedApiTests(ServerTestCase):
@@ -123,3 +148,19 @@ class AttackersOmittedApiTests(ServerTestCase):
         status, denied, _ = self.client().get("/api/dashboard")
         self.assertEqual(status, 401)
         self.assertNotIn("attackers_omitted", denied)
+
+    def test_equal_counts_keep_the_earlier_ip(self):
+        later = "198.51.100.90"
+        kept = [f"198.51.100.{i:02d}" for i in range(1, ATTACKER_LIMIT + 1)]
+        with sqlite3.connect(self.db_path) as db:
+            source(db, later)
+            for ip in reversed(kept):
+                source(db, ip)
+            add_event(db, ANCHOR, src_ip="198.51.100.99")
+        viewer = self.client("viewer")
+        status, body, _ = viewer.get("/api/dashboard")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["attackers_omitted"], 1)
+        self.assertEqual([row["ip"] for row in body["attackers"]], kept)
+        self.assertNotIn(later, [row["ip"] for row in body["attackers"]])
+        self.assertNotIn("198.51.100.99", [row["ip"] for row in body["attackers"]])

@@ -10,7 +10,7 @@ import sqlite3
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, unquote_plus, urlparse
 
 from . import (__version__, assets, attack, auth, case_record, dashboard_views, ecs, engine, entities, geo, hunt, improve, incidents,
                masking, portability, queries, report, search_rules, sigma, simulate, sources, storyline, stream,
@@ -31,9 +31,23 @@ MAX_QUERY_BYTES = 8192
 RECENT_ERRORS_LIMIT = 20
 # Health details returns this many detection runs, newest by id. The rest are recent_detection_runs_omitted.
 RECENT_RUNS_LIMIT = 10
-# These two stay bare arrays. The rows past the cap are X-Watchpost-Omitted.
+# These stay bare arrays. The rows past the cap are X-Watchpost-Omitted.
 AUDIT_LIMIT = 200
+# Ingest batches, newest by created_at, then id. The same timestamp keeps the higher id.
 BATCH_LIMIT = 50
+# Change requests, newest by id. A status filter counts only that status.
+CHANGES_LIMIT = 100
+# Approved tuning exceptions, newest by id. `active` stays on each row.
+SUPPRESSIONS_LIMIT = 100
+# Approved rule-wide windows, newest by id. Each row keeps upcoming, active, expired, or ended.
+WINDOWS_LIMIT = 100
+# Evaluation history, newest by id.
+EVALUATIONS_LIMIT = 20
+# One rule's versions, newest by version. An unknown rule is an empty array.
+RULE_HISTORY_LIMIT = 50
+# The rules list, first by id. A Sigma rule on that page still includes its YAML.
+# The rest of the catalog is X-Watchpost-Omitted.
+RULES_LIMIT = 100
 OMITTED_HEADER = "X-Watchpost-Omitted"
 
 
@@ -58,7 +72,36 @@ def query_params(raw):
     for key, values in pairs.items():
         if len(values) > 1:
             raise ApiError(400, f"repeated query key '{key}'")
-    return {key: values[0] for key, values in pairs.items()}
+    params = {key: values[0] for key, values in pairs.items()}
+    # parse_qs drops a blank value, so `synthetic=` never arrived and event
+    # search treated the filter as absent. Keep that one empty value. Two
+    # blanks are a repeated key. Scan the raw pieces so a query with no
+    # synthetic key still calls parse_qs once.
+    if "synthetic" not in params:
+        blank = _blank_synthetic(raw)
+        if blank is not None:
+            params["synthetic"] = blank
+    return params
+
+
+def _blank_synthetic(raw):
+    """`""` when a `synthetic` key was present and blank, else None.
+
+    Two blanks raise the same repeated-key 400 as two copies of any other
+    value. A non-blank value is already in the parsed params, so this is
+    only called when parse_qs dropped every copy.
+    """
+    found = False
+    for piece in raw.split("&"):
+        name, sep, value = piece.partition("=")
+        if unquote_plus(name) != "synthetic":
+            continue
+        if (unquote_plus(value) if sep else "") != "":
+            continue
+        if found:
+            raise ApiError(400, "repeated query key 'synthetic'")
+        found = True
+    return "" if found else None
 
 
 class Download:
@@ -195,7 +238,10 @@ def mfa_disable(req):
 
 @route("GET", "/api/auth/sessions")
 def my_sessions(req):
-    return auth.list_sessions(req.conn, req.user["username"], req.user.get("sid"))
+    rows, omitted = auth.list_sessions(
+        req.conn, req.user["username"], req.user.get("sid"))
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", r"/api/auth/sessions/([0-9a-f]{16})/revoke", role="analyst")
@@ -276,6 +322,28 @@ def detection_run(req):
 
 # Ingestion ---------------------------------------------------------------------------
 
+# ASCII letters only, the same fold as COLLATE NOCASE. Not str.lower().
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def _synthetic_flag(value):
+    """One present synthetic flag: the hunt set, folded on ASCII letters.
+
+    JSON true/false and the integers 0 and 1 are those words. Any other
+    present value is 400. The caller treats an absent flag as not synthetic.
+    """
+    if isinstance(value, str):
+        folded = value.translate(_ASCII_FOLD)
+    elif isinstance(value, int) and value in (0, 1):
+        # bool is an int, so True is 1. str(True) is "True", then the ASCII fold.
+        folded = str(value).translate(_ASCII_FOLD)
+    else:
+        folded = None
+    if folded not in hunt.FLAGS:
+        raise ApiError(400, "synthetic must be 0, 1, true or false")
+    return bool(hunt.FLAGS[folded])
+
+
 def _ingest(req, text, fmt, source, synthetic, year=None):
     try:
         source = validate_source(source)
@@ -299,7 +367,10 @@ def _ingest(req, text, fmt, source, synthetic, year=None):
 
 @route("POST", "/api/ingest", role="ingest", csrf=True)
 def ingest_json(req):
-    """Body: a single event object, an array, or {"source": ..., "synthetic": bool, "events": [...]}."""
+    """Body: one event, an array, or {"source", "synthetic", "events"}.
+
+    synthetic, when present, is 0, 1, true, or false (ASCII case).
+    """
     try:
         data = json.loads(req.body or b"null")
     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -307,14 +378,15 @@ def ingest_json(req):
     source, synthetic = "api", False
     if isinstance(data, dict) and "events" in data:
         source = data.get("source") or source
-        synthetic = data.get("synthetic") is True
+        if "synthetic" in data:
+            synthetic = _synthetic_flag(data["synthetic"])
         data = data["events"]
     return _ingest(req, json.dumps(data), "json", source, synthetic)
 
 
 @route("POST", "/api/ingest/upload", role="ingest", csrf=True)
 def ingest_upload(req):
-    """Raw file body. Query: format=auto|json|jsonl|csv|authlog, source=name, synthetic=1, year=YYYY."""
+    """Raw file body. Query: format, source, synthetic=0|1|true|false, year=YYYY."""
     try:
         text = req.body.decode("utf-8")
     except UnicodeDecodeError:
@@ -325,14 +397,29 @@ def ingest_upload(req):
     if year is not None and not (year.isdigit() and 2000 <= int(year) <= 2100):
         raise ApiError(400, "year must be between 2000 and 2100")
     return _ingest(req, text, req.query.get("format", "auto"), req.query.get("source", "upload"),
-                   req.query.get("synthetic") == "1", int(year) if year else None)
+                   _upload_synthetic(req), int(year) if year else None)
+
+
+def _upload_synthetic(req):
+    """The upload query flag. A blank `synthetic=` is present, not absent.
+
+    parse_qs drops a blank value, so that key never reaches req.query.
+    """
+    if "synthetic" in req.query:
+        return _synthetic_flag(req.query["synthetic"])
+    values = parse_qs(urlparse(req.path).query, keep_blank_values=True).get("synthetic")
+    if not values:
+        return False
+    if len(values) > 1:
+        raise ApiError(400, "repeated query key 'synthetic'")
+    return _synthetic_flag(values[0])
 
 
 @route("GET", "/api/ingest/batches")
 def batches(req):
     total = req.conn.execute("SELECT COUNT(*) FROM ingest_batches").fetchone()[0]
     rows = req.conn.execute(
-        "SELECT * FROM ingest_batches ORDER BY created_at DESC LIMIT ?", (BATCH_LIMIT,))
+        "SELECT * FROM ingest_batches ORDER BY created_at DESC, id DESC LIMIT ?", (BATCH_LIMIT,))
     shown = [row_to_dict(r, ["errors"]) for r in rows]
     _set_omitted(req, total - len(shown))
     return shown
@@ -423,7 +510,9 @@ def hunt_run(req):
 
 @route("GET", "/api/hunt/saved")
 def hunt_saved(req):
-    return hunt.list_saved(req.conn)
+    rows, omitted = hunt.list_saved(req.conn)
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", "/api/hunt/saved", role="analyst")
@@ -611,7 +700,9 @@ DASHBOARD_ENTITIES = 8
 
 @route("GET", "/api/dashboard/views")
 def dashboard_view_list(req):
-    return dashboard_views.list_views(req.conn, req.user["username"])
+    rows, omitted = dashboard_views.list_views(req.conn, req.user["username"])
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", "/api/dashboard/views", role="analyst")
@@ -632,8 +723,12 @@ def dashboard_view_delete(req, view_id):
 
 @route("GET", "/api/dashboard")
 def dashboard(req):
+    # The entity list already drops false positives. Keep that score, and say how many
+    # scored entities sit past the eight shown.
+    ranked = entities.list_entities(req.conn, {"limit": DASHBOARD_ENTITIES})
     return {**queries.dashboard(req.conn),
-            "risky_entities": entities.list_entities(req.conn, {"limit": DASHBOARD_ENTITIES})["entities"]}
+            "risky_entities": ranked["entities"],
+            "risky_entities_omitted": ranked["entities_omitted"]}
 
 
 @route("GET", "/api/entities")
@@ -654,18 +749,31 @@ for _kind in entities.KINDS:
 
 @route("GET", "/api/geo")
 def geo_lookup(req):
-    """Positions from the synthetic geo table only. Addresses outside it come back null ("unknown")."""
-    ips = [ip.strip() for ip in req.query.get("ips", "").split(",") if ip.strip()]
-    if len(ips) > GEO_MAX_IPS:
-        raise ApiError(400, f"at most {GEO_MAX_IPS} ips per request")
-    for ip in ips:
+    """Positions from the synthetic geo table only. Addresses outside it come back null ("unknown").
+
+    The response key is the compressed form ipaddress uses, so 2001:DB8::1 and 2001:db8::1 are one key.
+    A repeated address counts once toward GEO_MAX_IPS.
+    """
+    keys = []
+    seen = set()
+    for raw in req.query.get("ips", "").split(","):
+        text = raw.strip()
+        if not text:
+            continue
         try:
-            ipaddress.ip_address(ip)
+            key = str(ipaddress.ip_address(text))
         except ValueError:
             raise ApiError(400, "ips must be a comma-separated list of IP addresses")
-    located = {ip: geo.locate(ip) for ip in ips}
-    return {"label": geo.LABEL,
-            "ips": {ip: ({**loc, "internal": geo.is_internal(ip)} if loc else None) for ip, loc in located.items()}}
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+    if len(keys) > GEO_MAX_IPS:
+        raise ApiError(400, f"at most {GEO_MAX_IPS} ips per request")
+    ips = {}
+    for key in keys:
+        loc = geo.locate(key)
+        ips[key] = {**loc, "internal": geo.is_internal(key)} if loc else None
+    return {"label": geo.LABEL, "ips": ips}
 
 
 class _StreamResponse:
@@ -684,13 +792,16 @@ def event_stream(req):
 
 @route("GET", "/api/rules")
 def rules(req):
+    catalog = engine.load_rules(req.conn, enabled_only=False)
+    shown = catalog[:RULES_LIMIT]
+    _set_omitted(req, len(catalog) - len(shown))
     perf = improve.rule_performance(req.conn)
-    latest = improve.list_evaluations(req.conn, limit=1)
+    latest, _eval_omitted = improve.list_evaluations(req.conn, limit=1)
     evaluation = latest[0]["results"]["rules"] if latest else {}
     return [{**r, "performance": perf.get(r["id"]), "evaluation": evaluation.get(r["id"]),
              **({"sigma": _sigma_detail(req.conn, r)} if sigma.is_sigma(r["id"]) else {}),
              **({"search": _search_detail(req.conn, r)} if search_rules.is_search(r["id"]) else {})}
-            for r in engine.load_rules(req.conn, enabled_only=False)]
+            for r in shown]
 
 
 def _search_detail(conn, rule):
@@ -717,8 +828,9 @@ def _sigma_detail(conn, rule):
 
 @route("GET", r"/api/rules/([a-z_]+)/history")
 def rule_history(req, rule_id):
-    rows = req.conn.execute("SELECT * FROM rule_history WHERE rule_id = ? ORDER BY version DESC", (rule_id,))
-    return [row_to_dict(r, ["params", "grouping"]) for r in rows]
+    rows, omitted = improve.list_rule_history(req.conn, rule_id, RULE_HISTORY_LIMIT)
+    _set_omitted(req, omitted)
+    return rows
 
 
 def _backtest_quota(req, limiter, cost=1):
@@ -864,7 +976,9 @@ def suppression_propose(req, rule_id):
 
 @route("GET", "/api/suppressions")
 def suppressions(req):
-    return improve.list_suppressions(req.conn)
+    rows, omitted = improve.list_suppressions(req.conn, SUPPRESSIONS_LIMIT)
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", r"/api/rules/([a-z_]+)/suppression-windows", role="analyst")
@@ -878,7 +992,9 @@ def rule_suppression_propose(req, rule_id):
 
 @route("GET", "/api/rule-suppression-windows")
 def rule_suppression_windows(req):
-    return improve.list_rule_suppression_windows(req.conn)
+    rows, omitted = improve.list_rule_suppression_windows(req.conn, WINDOWS_LIMIT)
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", r"/api/rule-suppression-windows/(\d+)/end", role="admin")
@@ -920,7 +1036,9 @@ def setting_propose(req, key):
 
 @route("GET", "/api/changes")
 def changes(req):
-    return improve.list_changes(req.conn, req.query.get("status"))
+    rows, omitted = improve.list_changes(req.conn, req.query.get("status"), CHANGES_LIMIT)
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", r"/api/changes/(\d+)/review", role="admin")
@@ -937,7 +1055,9 @@ def change_review(req, change_id):
 
 @route("GET", "/api/evaluations")
 def evaluations(req):
-    return improve.list_evaluations(req.conn)
+    rows, omitted = improve.list_evaluations(req.conn, EVALUATIONS_LIMIT)
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", "/api/evaluations", role="analyst")
@@ -950,9 +1070,11 @@ def evaluation_run(req):
 
 @route("GET", "/api/assets")
 def asset_list(req):
-    pending = [c for c in improve.list_changes(req.conn, "pending") if c["kind"] in improve.ASSET_KINDS]
-    return {"assets": assets.list_assets(req.conn), "criticalities": list(assets.CRITICALITIES),
-            "kinds": list(assets.KINDS), "data_tags": assets.DATA_TAGS, "pending": pending}
+    listed, assets_omitted = assets.list_assets_page(req.conn)
+    pending, pending_omitted = improve.list_changes(req.conn, "pending", kinds=improve.ASSET_KINDS)
+    return {"assets": listed, "criticalities": list(assets.CRITICALITIES),
+            "kinds": list(assets.KINDS), "data_tags": assets.DATA_TAGS, "pending": pending,
+            "pending_omitted": pending_omitted, "assets_omitted": assets_omitted}
 
 
 def _asset_saved(req, asset):
@@ -1026,9 +1148,9 @@ def asset_propose(req, asset_id):
 
 @route("GET", "/api/tokens", role="admin")
 def tokens(req):
-    return [row_to_dict(r, json_fields=("capabilities",)) for r in req.conn.execute(
-        "SELECT id, name, prefix, created_by, created_at, last_used_at, revoked_at, role, capabilities, expires_at"
-        " FROM api_tokens ORDER BY id")]
+    rows, omitted = auth.list_api_tokens(req.conn)
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", "/api/tokens", role="admin")
@@ -1053,7 +1175,12 @@ def token_revoke(req, token_id):
 
 @route("GET", "/api/sessions", role="admin")
 def sessions(req):
-    return auth.list_sessions(req.conn, req.query.get("user") or None, req.user.get("sid"))
+    # ?user= folds ASCII case. The signed-in list does not.
+    rows, omitted = auth.list_sessions(
+        req.conn, req.query.get("user") or None, req.user.get("sid"),
+        fold_user=bool(req.query.get("user")))
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", r"/api/sessions/([0-9a-f]{16})/revoke", role="admin")
@@ -1061,9 +1188,10 @@ def session_revoke(req, sid):
     return auth.revoke_session(req.conn, sid, req.user["username"])
 
 
-@route("POST", r"/api/users/(\w{3,32})/mfa/reset", role="admin")
+@route("POST", r"/api/users/([^/]+)/mfa/reset", role="admin")
 def user_mfa_reset(req, username):
-    return auth.mfa_admin_reset(req.conn, username, req.user["username"])
+    # The path may be percent-encoded (Érin). Length and the ASCII fold are checked below.
+    return auth.mfa_admin_reset(req.conn, unquote(username), req.user["username"])
 
 
 @route("GET", "/api/audit", role="admin")

@@ -6,11 +6,12 @@ import hmac
 import json
 import os
 import secrets
+import sqlite3
 from datetime import timedelta
 from pathlib import Path
 
 from . import totp
-from .db import audit, iso, now_iso, parse_iso, transaction, utcnow
+from .db import audit, iso, now_iso, parse_iso, row_to_dict, transaction, utcnow
 
 ROLES = {"viewer": 1, "analyst": 2, "admin": 3}
 TOKEN_CAPABILITIES = {"read", "ingest", "triage"}
@@ -55,17 +56,42 @@ def validate_password_strength(password):
         raise AuthError("password is too long", 400)
 
 
+def _stored_username(conn, username):
+    """The saved spelling of `username`. `COLLATE NOCASE` folds ASCII letters only.
+
+    `Admin` is the stored `admin`. `Érin` is not `érin`. The table's UNIQUE index is
+    case-sensitive, so this lookup is what refuses the second spelling.
+    """
+    row = conn.execute(
+        "SELECT username FROM users WHERE username = ? COLLATE NOCASE", (username,)).fetchone()
+    return None if row is None else row["username"]
+
+
+def _username_taken(stored):
+    raise AuthError(f"a user named {stored!r} already exists", 409)
+
+
 def create_user(conn, username, password, role, actor="system"):
     if role not in ROLES:
         raise AuthError(f"role must be one of {', '.join(ROLES)}", 400)
     if not isinstance(username, str) or not (3 <= len(username) <= 32) or not username.replace("_", "").isalnum():
         raise AuthError("username must be 3-32 letters, digits, or underscores", 400)
     validate_password_strength(password)
-    conn.execute(
-        "INSERT INTO users(username, pw_hash, role, created_at) VALUES (?,?,?,?)",
-        (username, hash_password(password), role, now_iso()),
-    )
-    audit(conn, actor, "user_created", username, {"role": role})
+    with transaction(conn):
+        stored = _stored_username(conn, username)
+        if stored is not None:
+            _username_taken(stored)
+        try:
+            # Hash only after the name is free. A taken spelling never reaches PBKDF2.
+            conn.execute(
+                "INSERT INTO users(username, pw_hash, role, created_at) VALUES (?,?,?,?)",
+                (username, hash_password(password), role, now_iso()),
+            )
+        except sqlite3.IntegrityError:
+            # A concurrent insert of the same spelling can pass the lookup and still hit UNIQUE.
+            stored = _stored_username(conn, username)
+            _username_taken(stored if stored is not None else username)
+        audit(conn, actor, "user_created", username, {"role": role})
 
 
 def bootstrap_users(conn, config, data_dir):
@@ -394,31 +420,70 @@ def mfa_disable(conn, username, code):
 
 
 def mfa_admin_reset(conn, username, actor):
-    """The recovery path: an admin turns off another user's TOTP. There are no recovery codes."""
-    if username == actor:
-        raise AuthError("use your own disable step (with a current code) for your account", 400)
-    user = _user_row(conn, username)
-    if not user["totp_secret"] and not user["totp_pending"]:
-        raise AuthError("that user has no two-factor authentication to reset", 409)
-    _clear_mfa(conn, user["id"])
-    audit(conn, actor, "mfa_reset", username)
+    """The recovery path: an admin turns off another user's TOTP. There are no recovery codes.
+
+    The name matches ASCII case (`COLLATE NOCASE`) and the reset applies to the stored
+    account. `Admin` resets `admin` when that is the only match. Two accounts that share
+    the fold are 409 and nobody is reset. `Érin` does not match `érin`. A name outside
+    3–32 stays unmatched (404), with no slice. Resetting your own account stays 400.
+    """
+    if not isinstance(username, str) or not (3 <= len(username) <= 32):
+        raise AuthError("user not found", 404)
+    with transaction(conn):
+        users = conn.execute(
+            "SELECT * FROM users WHERE username = ? COLLATE NOCASE", (username,)).fetchall()
+        if len(users) > 1:
+            raise AuthError("username matches more than one account", 409)
+        if not users:
+            raise AuthError("user not found", 404)
+        user = users[0]
+        if user["username"] == actor:
+            raise AuthError("use your own disable step (with a current code) for your account", 400)
+        if not user["totp_secret"] and not user["totp_pending"]:
+            raise AuthError("that user has no two-factor authentication to reset", 409)
+        _clear_mfa(conn, user["id"])
+        audit(conn, actor, "mfa_reset", user["username"])
     return {"enabled": False}
 
 
 # --- Sessions -------------------------------------------------------------------------------
 
-def list_sessions(conn, username=None, current_sid=None):
-    """Active sessions (all users when `username` is None). Never includes the token or its hash."""
-    sql = ("SELECT s.sid, u.username, s.created_at, s.last_seen_at, s.expires_at FROM sessions s"
-           " JOIN users u ON u.id = s.user_id WHERE s.expires_at >= ?")
+# Active sessions returned by the list routes, newest by created_at then sid.
+SESSION_LIST_LIMIT = 100
+# API tokens, newest by id. A revoked row in that page keeps revoked_at.
+TOKEN_LIST_LIMIT = 100
+_TOKEN_LIST_COLUMNS = (
+    "id, name, prefix, created_by, created_at, last_used_at, revoked_at, role, capabilities, expires_at"
+)
+
+
+def list_sessions(conn, username=None, current_sid=None, limit=SESSION_LIST_LIMIT, *, fold_user=False):
+    """Active sessions, newest by created_at then sid, and how many were left out.
+
+    All users when `username` is None. With `fold_user`, the name matches ASCII
+    case only (`Admin` is `admin` and `Admin`; `Érin` is not `érin`). The count
+    is only those matches. The second value is 0 when the list fits, including
+    when none are active and when the name matches nobody. An expired session
+    is not a row and is not part of that count. The rows never include the
+    token or its hash. A later created_at wins. The same timestamp keeps the
+    greater sid.
+    """
+    where = " WHERE s.expires_at >= ?"
     args = [now_iso()]
     if username is not None:
-        sql += " AND u.username = ?"
+        # The signed-in list stays that account. Only the admin ?user= filter folds.
+        where += " AND u.username = ? COLLATE NOCASE" if fold_user else " AND u.username = ?"
         args.append(username)
-    rows = conn.execute(sql + " ORDER BY s.created_at DESC", args).fetchall()
-    return [{"id": r["sid"], "username": r["username"], "created_at": r["created_at"],
-             "last_seen_at": r["last_seen_at"], "expires_at": r["expires_at"],
-             "current": r["sid"] == current_sid} for r in rows]
+    base = "FROM sessions s JOIN users u ON u.id = s.user_id" + where
+    total = conn.execute("SELECT COUNT(*) " + base, args).fetchone()[0]
+    rows = conn.execute(
+        "SELECT s.sid, u.username, s.created_at, s.last_seen_at, s.expires_at " + base
+        + " ORDER BY s.created_at DESC, s.sid DESC LIMIT ?",
+        (*args, limit)).fetchall()
+    listed = [{"id": r["sid"], "username": r["username"], "created_at": r["created_at"],
+               "last_seen_at": r["last_seen_at"], "expires_at": r["expires_at"],
+               "current": r["sid"] == current_sid} for r in rows]
+    return listed, total - len(listed)
 
 
 def revoke_session(conn, sid, actor, owner=None):
@@ -434,6 +499,21 @@ def revoke_session(conn, sid, actor, owner=None):
     conn.execute("DELETE FROM sessions WHERE token_hash = ?", (row["token_hash"],))
     audit(conn, actor, "session_revoked", row["username"], {"session": sid})
     return {"ok": True}
+
+
+def list_api_tokens(conn, limit=TOKEN_LIST_LIMIT):
+    """API tokens, newest id first, and how many the limit left out.
+
+    The second value is 0 when the list fits, including an empty table.
+    A later created_at on a lower id is the one left out. A revoked row
+    in the page keeps revoked_at. The rows never include the secret or
+    its hash. Callers that return the bare array send that count as
+    X-Watchpost-Omitted.
+    """
+    total = conn.execute("SELECT COUNT(*) FROM api_tokens").fetchone()[0]
+    rows = [row_to_dict(r, json_fields=("capabilities",)) for r in conn.execute(
+        "SELECT " + _TOKEN_LIST_COLUMNS + " FROM api_tokens ORDER BY id DESC LIMIT ?", (limit,))]
+    return rows, total - len(rows)
 
 
 def create_api_token(conn, name, actor, role="analyst", capabilities=None, expires_in_days=None):

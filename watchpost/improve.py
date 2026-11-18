@@ -150,27 +150,68 @@ def run_evaluation(conn, actor):
 
 
 def list_evaluations(conn, limit=20):
-    rows = conn.execute("SELECT * FROM evaluation_runs ORDER BY id DESC LIMIT ?", (limit,))
-    return [row_to_dict(r, ["results"]) for r in rows]
+    """Evaluation runs, newest id first, and how many the limit left out.
+
+    The second value is 0 when the history fits. A later created_at on a
+    lower id is the one left out. Callers that return the bare array send
+    that count as X-Watchpost-Omitted.
+    """
+    total = conn.execute("SELECT COUNT(*) FROM evaluation_runs").fetchone()[0]
+    rows = [row_to_dict(r, ["results"]) for r in conn.execute(
+        "SELECT * FROM evaluation_runs ORDER BY id DESC LIMIT ?", (limit,))]
+    return rows, total - len(rows)
+
+
+def list_rule_history(conn, rule_id, limit=50):
+    """One rule's versions, newest version first, and how many the limit left out.
+
+    The second value is 0 when that rule's history fits, including an unknown
+    rule. A later changed_at on a lower version is the one left out. Another
+    rule's rows are not counted. Callers that return the bare array send
+    that count as X-Watchpost-Omitted.
+    """
+    total = conn.execute(
+        "SELECT COUNT(*) FROM rule_history WHERE rule_id = ?", (rule_id,)).fetchone()[0]
+    rows = [row_to_dict(r, ["params", "grouping"]) for r in conn.execute(
+        "SELECT * FROM rule_history WHERE rule_id = ? ORDER BY version DESC LIMIT ?",
+        (rule_id, limit))]
+    return rows, total - len(rows)
 
 
 # --- Analyst feedback -> rule performance ---------------------------------------------
 
 def rule_performance(conn):
-    perf = {}
-    for rule in load_rules(conn, enabled_only=False):
-        row = conn.execute(
-            "SELECT COUNT(*) AS total,"
-            " SUM(status = 'open') AS open, SUM(status = 'investigating') AS investigating,"
-            " SUM(status = 'resolved') AS resolved,"
-            " SUM(disposition = 'true_positive') AS tp, SUM(disposition = 'false_positive') AS fp,"
-            " SUM(disposition = 'benign') AS benign"
-            " FROM alerts WHERE rule_id = ?", (rule["id"],)
-        ).fetchone()
-        stats = {k: row[k] or 0 for k in row.keys()}
+    """Alert counts for every rule, from one GROUP BY rule_id.
+
+    A rule with no alerts is still present, with those counts at 0 and
+    precision None. A resolved alert with no disposition counts as resolved
+    and not as tp, fp, or benign. Precision is tp / (tp + fp), or None when
+    neither is set. Benign is not part of that ratio. An alert whose rule_id
+    is not in the catalog is not a key.
+    """
+    rows = conn.execute(
+        "SELECT rule_id, COUNT(*) AS total,"
+        " SUM(status = 'open') AS open,"
+        " SUM(status = 'investigating') AS investigating,"
+        " SUM(status = 'resolved') AS resolved,"
+        " SUM(disposition = 'true_positive') AS tp,"
+        " SUM(disposition = 'false_positive') AS fp,"
+        " SUM(disposition = 'benign') AS benign"
+        " FROM alerts GROUP BY rule_id"
+    ).fetchall()
+    counted = {}
+    for row in rows:
+        stats = {k: row[k] or 0 for k in (
+            "total", "open", "investigating", "resolved", "tp", "fp", "benign")}
         labeled = stats["tp"] + stats["fp"]
         stats["precision"] = round(stats["tp"] / labeled, 3) if labeled else None
-        perf[rule["id"]] = stats
+        counted[row["rule_id"]] = stats
+    perf = {}
+    for rule in load_rules(conn, enabled_only=False):
+        perf[rule["id"]] = counted.get(rule["id"]) or {
+            "total": 0, "open": 0, "investigating": 0, "resolved": 0,
+            "tp": 0, "fp": 0, "benign": 0, "precision": None,
+        }
     return perf
 
 
@@ -423,7 +464,7 @@ def _validate_search(conn, kind, target, payload):
         raise ChangeError(str(exc))
 
 
-LIVE_IMPACT_RECENT = 5  # newest matching alerts listed in an exception's evidence
+LIVE_IMPACT_RECENT = 5  # matching alerts, and the proposer's status changes, listed in evidence
 BACKTEST_EVIDENCE_LIMIT = 10  # kept/new/lost findings listed in a rule change's evidence; counts are complete
 
 
@@ -454,12 +495,18 @@ def _alert_impact(alerts, history, ids, proposer):
         by_status[row["status"]] = by_status.get(row["status"], 0) + 1
         if row["disposition"]:
             by_disposition[row["disposition"]] = by_disposition.get(row["disposition"], 0) + 1
+    recent = rows[:LIVE_IMPACT_RECENT]
+    own_recent = own[:LIVE_IMPACT_RECENT]
     return {
         "alerts": len(rows), "by_status": by_status, "by_disposition": by_disposition,
-        "recent": rows[:LIVE_IMPACT_RECENT],
+        "recent": recent,
+        # How many matching alerts were past the newest LIVE_IMPACT_RECENT by id. 0 when the list fits.
+        "recent_omitted": len(rows) - len(recent),
         "ever_true_positive": len(ever_true_positive),
         # Status and verdict changes the proposer made on these alerts, so the reviewer sees them.
-        "proposer_verdict_changes": {"count": len(own), "recent": own[:LIVE_IMPACT_RECENT]},
+        # `omitted` is how many of those rows were past the newest LIVE_IMPACT_RECENT by activity id.
+        "proposer_verdict_changes": {
+            "count": len(own), "recent": own_recent, "omitted": len(own) - len(own_recent)},
     }
 
 
@@ -711,14 +758,25 @@ def get_change(conn, change_id):
     return _change(conn.execute("SELECT * FROM change_requests WHERE id = ?", (change_id,)).fetchone())
 
 
-def list_changes(conn, status=None, limit=100):
-    sql, args = "SELECT * FROM change_requests", []
+def list_changes(conn, status=None, limit=100, kinds=None):
+    """Change requests, newest id first, and how many the limit left out.
+
+    The second value is 0 when every match fits. A status filter counts only
+    that status. `kinds` counts only those kinds. Callers that return the bare
+    array send that count as X-Watchpost-Omitted.
+    """
+    clauses, args = [], []
     if status:
-        sql += " WHERE status = ?"
+        clauses.append("status = ?")
         args.append(status)
-    sql += " ORDER BY id DESC LIMIT ?"
-    args.append(limit)
-    return [_change(r) for r in conn.execute(sql, args)]
+    if kinds:
+        clauses.append(f"kind IN ({','.join('?' for _ in kinds)})")
+        args.extend(kinds)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    total = conn.execute(f"SELECT COUNT(*) FROM change_requests{where}", args).fetchone()[0]
+    rows = [_change(r) for r in conn.execute(
+        f"SELECT * FROM change_requests{where} ORDER BY id DESC LIMIT ?", args + [limit])]
+    return rows, total - len(rows)
 
 
 def review_change(conn, change_id, decision, reviewer, note="", digest=None, acknowledge_detection_loss=False):
@@ -848,11 +906,25 @@ def review_change(conn, change_id, decision, reviewer, note="", digest=None, ack
 
 # --- Tuning exceptions and the noise lab ------------------------------------------------
 
-def list_suppressions(conn):
-    """Every approved tuning exception, newest first; `active` is false once it has expired or been revoked."""
+def _suppression_row(row, now):
+    """One approved exception. `active` is false once it has expired or been revoked."""
+    item = dict(row)
+    item["active"] = item["expires_at"] > now and item["revoked_at"] is None
+    return item
+
+
+def list_suppressions(conn, limit=100):
+    """Approved tuning exceptions, newest id first, and how many the limit left out.
+
+    The second value is 0 when the list fits. A later created_at on a lower
+    id is the one left out. `active` is false once expired or revoked.
+    Callers that return the bare array send that count as X-Watchpost-Omitted.
+    """
     now = now_iso()
-    return [{**dict(r), "active": r["expires_at"] > now and r["revoked_at"] is None}
-            for r in conn.execute("SELECT * FROM suppressions ORDER BY id DESC")]
+    total = conn.execute("SELECT COUNT(*) FROM suppressions").fetchone()[0]
+    rows = [_suppression_row(r, now) for r in conn.execute(
+        "SELECT * FROM suppressions ORDER BY id DESC LIMIT ?", (limit,))]
+    return rows, total - len(rows)
 
 
 def revoke_suppression(conn, suppression_id, actor):
@@ -869,25 +941,40 @@ def revoke_suppression(conn, suppression_id, actor):
                      (now_iso(), actor, suppression_id))
         audit(conn, actor, "suppression_revoked", row["rule_id"],
               {"id": suppression_id, "group_key": row["group_key"], "change_request": row["change_request_id"]})
-    return next(s for s in list_suppressions(conn) if s["id"] == suppression_id)
+    # The revoked row may sit past the list cap. Read it back on its own.
+    stored = conn.execute("SELECT * FROM suppressions WHERE id = ?", (suppression_id,)).fetchone()
+    return _suppression_row(stored, now_iso())
 
 
-def list_rule_suppression_windows(conn):
-    """Every approved rule-wide window, including upcoming, expired and ended history."""
+def _window_row(row, now):
+    """One approved rule-wide window. `active` is true only while the window is in force."""
+    item = dict(row)
+    if item["ended_at"] is not None:
+        state = "ended"
+    elif item["starts_at"] > now:
+        state = "upcoming"
+    elif item["expires_at"] <= now:
+        state = "expired"
+    else:
+        state = "active"
+    item["state"] = state
+    item["active"] = state == "active"
+    return item
+
+
+def list_rule_suppression_windows(conn, limit=100):
+    """Approved rule-wide windows, newest id first, and how many the limit left out.
+
+    The second value is 0 when the list fits. A later created_at on a lower
+    id is the one left out. Each row keeps `upcoming`, `active`, `expired`,
+    or `ended`, and `active` is true only for `active`. Callers that return
+    the bare array send that count as X-Watchpost-Omitted.
+    """
     now = now_iso()
-    result = []
-    for row in conn.execute("SELECT * FROM rule_suppression_windows ORDER BY id DESC"):
-        item = dict(row)
-        if item["ended_at"] is not None:
-            state = "ended"
-        elif item["starts_at"] > now:
-            state = "upcoming"
-        elif item["expires_at"] <= now:
-            state = "expired"
-        else:
-            state = "active"
-        result.append({**item, "state": state, "active": state == "active"})
-    return result
+    total = conn.execute("SELECT COUNT(*) FROM rule_suppression_windows").fetchone()[0]
+    rows = [_window_row(r, now) for r in conn.execute(
+        "SELECT * FROM rule_suppression_windows ORDER BY id DESC LIMIT ?", (limit,))]
+    return rows, total - len(rows)
 
 
 def end_rule_suppression_window(conn, window_id, actor):
@@ -905,7 +992,9 @@ def end_rule_suppression_window(conn, window_id, actor):
                      (ended, actor, window_id))
         audit(conn, actor, "rule_suppression_window_ended", row["rule_id"],
               {"id": window_id, "change_request": row["change_request_id"]})
-    return next(w for w in list_rule_suppression_windows(conn) if w["id"] == window_id)
+    # The ended row may sit past the list cap. Read it back on its own.
+    stored = conn.execute("SELECT * FROM rule_suppression_windows WHERE id = ?", (window_id,)).fetchone()
+    return _window_row(stored, now_iso())
 
 
 def _verdict(rule, r, other):

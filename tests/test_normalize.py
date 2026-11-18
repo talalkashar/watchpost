@@ -265,7 +265,7 @@ class RedactionTests(unittest.TestCase):
                 self.assertIn('"[REDACTED]"', redact(raw))
 
     def test_json_keys_use_the_same_secret_names_as_key_value(self):
-        # Quoted JSON only named password, passwd, secret, token, and api_key.
+        # Quoted JSON only named password, passwd, sample, token, and api_key.
         # api-key, authorization, and session stayed in the message and the error log.
         sample = "hunter2value"
         keys = ("pwd", "api-key", "apikey", "api_key", "authorization", "cookie", "session",
@@ -277,6 +277,55 @@ class RedactionTests(unittest.TestCase):
                 self.assertNotIn(sample, out)
                 self.assertEqual(out, '{"%s": "[REDACTED]", "user": "alice"}' % key)
         self.assertIn(sample, redact('{"session_id": "%s"}' % sample))
+        self.assertEqual(redact("session_id=%s" % sample), "session_id=%s" % sample)
+
+    def test_token_and_key_names_are_redacted(self):
+        # access_token, refresh_token, id_token, client_secret, and private_key
+        # stayed in the message. token and sample do not cover those names.
+        sample = "hunter2value"
+        keys = ("access_token", "refresh_token", "id_token", "client_secret", "private_key",
+                "Access_Token", "PRIVATE_KEY")
+        for key in keys:
+            with self.subTest(key=key):
+                raw = '{"%s": "a\\"%s", "user": "alice"}' % (key, sample)
+                out = redact(raw)
+                self.assertNotIn(sample, out)
+                self.assertEqual(out, '{"%s": "[REDACTED]", "user": "alice"}' % key)
+                self.assertEqual(redact("%s=%s" % (key, sample)), "%s=[REDACTED]" % key)
+                self.assertEqual(redact('%s: "%s"' % (key, sample)), "%s: [REDACTED]" % key)
+        self.assertIn(sample, redact('{"session_id": "a\\"%s"}' % sample))
+        self.assertEqual(redact("session_id=%s" % sample), "session_id=%s" % sample)
+
+        message = ('{"access_token": "a\\"%s", "refresh_token": "%s", '
+                   '"id_token": "%s", "client_secret": "%s", "private_key": "%s", '
+                   '"session_id": "keep-%s", "user": "alice"}') % (
+                       sample, sample, sample, sample, sample, sample)
+        event = normalize_record({"ts": "2026-09-15T10:00:00Z", "message": message}, "api", NOW)
+        self.assertNotIn('"a\\"%s"' % sample, event["message"])
+        self.assertIn("[REDACTED]", event["message"])
+        self.assertIn('"session_id": "keep-%s"' % sample, event["message"])
+        self.assertIn('"user": "alice"', event["message"])
+        for key in ("access_token", "refresh_token", "id_token", "client_secret", "private_key"):
+            self.assertIn('"%s": "[REDACTED]"' % key, event["message"])
+
+        top = normalize_record({"ts": "2026-09-15T10:00:00Z", "message": "line",
+                                "access_token": sample, "client_secret": sample,
+                                "private_key": sample, "session_id": sample}, "api", NOW)
+        self.assertIn('"access_token": "[REDACTED]"', top["raw"])
+        self.assertIn('"client_secret": "[REDACTED]"', top["raw"])
+        self.assertIn('"private_key": "[REDACTED]"', top["raw"])
+        self.assertIn('"session_id": "%s"' % sample, top["raw"])
+
+        conn = connect(":memory:")
+        init_schema(conn)
+        self.addCleanup(conn.close)
+        stored = record_error(conn, "ingest", message)
+        self.assertNotIn("a\\\"%s" % sample, stored)
+        self.assertIn("keep-%s" % sample, stored)
+        logged = conn.execute("SELECT message FROM error_log").fetchone()[0]
+        self.assertNotIn("a\\\"%s" % sample, logged)
+        self.assertIn("[REDACTED]", logged)
+        self.assertIn("keep-%s" % sample, logged)
 
         message = ('{"api-key": "%s", "authorization": "Bearer %s", '
                    '"session": "a\\"%s", "user": "alice"}') % (sample, sample, sample)

@@ -22,7 +22,10 @@ from datetime import datetime, timedelta, timezone
 
 from .db import audit, iso, now_iso, transaction, utcnow
 from .normalize import EVENT_TYPES, MAX_BYTES, SEVERITIES, EventError, parse_timestamp
-from .queries import QueryError, _escape_like, canonical_ip, catalog_name, event_offset, page_events
+from .queries import (
+    QueryError, _escape_like, canonical_ip, catalog_name, event_offset, page_events,
+    synthetic_flag,
+)
 
 # Same 400/404/409 handling in the server as every other query error.
 HuntError = QueryError
@@ -42,9 +45,12 @@ FIELDS = {
     "last": ("time", None), "since": ("time", None), "until": ("time", None),
 }
 ENUMS = {"event_type": sorted(EVENT_TYPES), "severity": SEVERITIES}
+# Same four words as queries.synthetic_flag. ASCII letters only. Not str.lower().
 FLAGS = {"1": 1, "true": 1, "0": 0, "false": 0}
 LAST_UNITS = {"m": 1, "h": 60, "d": 1440}
 LAST_MAX_MINUTES = 365 * 1440
+# ASCII letters only. 24H is 24h. 24İ is not a unit. Not str.lower().
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 
 # bytes:>=N (and >, <=, <, =). The operator is chosen from this tuple; the integer is a bound parameter.
 BYTES_OPS = (">=", ">", "<=", "<", "=")
@@ -189,7 +195,10 @@ def _term_sql(term, now):
         if term["negate"]:
             raise HuntError(f"{field} cannot be negated")
         if field == "last":
-            match = _LAST.fullmatch(value)
+            # ASCII letters only. 24H is 24 hours. 24İ, a bare number, and a window
+            # past 365 days stay the error below.
+            folded = value.translate(_ASCII_FOLD) if isinstance(value, str) else ""
+            match = _LAST.fullmatch(folded)
             minutes = int(match.group(1)) * LAST_UNITS[match.group(2)] if match else 0
             if not 1 <= minutes <= LAST_MAX_MINUTES:
                 raise HuntError("last must be a number with m, h or d, such as 15m, 24h or 7d (at most 365d)")
@@ -212,9 +221,10 @@ def _term_sql(term, now):
         op, number = bytes_bound(value)
         return f"{column} {op} ?", [number], f"{field} {op} {number}"
     if kind == "flag":
-        if value.lower() not in FLAGS:
-            raise HuntError("synthetic must be 0, 1, true or false")
-        return "synthetic = ?", [FLAGS[value.lower()]], f"synthetic = {FLAGS[value.lower()]}"
+        # ASCII letters only, the same fold as event search. Not str.lower().
+        # TRUE is true. truİe, trüe, and yes stay the named error.
+        flag = synthetic_flag(value)
+        return "synthetic = ?", [flag], f"synthetic = {flag}"
     if kind == "ip":
         if prefix is not None:
             # A prefix stays the typed text. It is not parsed as an address.
@@ -234,9 +244,10 @@ def _term_sql(term, now):
         if name is None:
             raise HuntError(f"{field} must be one of {', '.join(ENUMS[field])}")
         return f"{column} = ?", [name], f"{field} = {name}"
-    # Same matching as the Events filter: account, host, source, and outcome compare
-    # case-insensitively (ASCII, like SQLite NOCASE). Grouping by source and outcome stays exact.
-    collate = " COLLATE NOCASE" if field in ("user", "host", "source", "outcome") else ""
+    # Same matching as the Events filter: account, host, source, outcome, and batch_id
+    # compare case-insensitively (ASCII, like SQLite NOCASE). Grouping by source, outcome,
+    # and batch_id stays exact.
+    collate = " COLLATE NOCASE" if field in ("user", "host", "source", "outcome", "batch_id") else ""
     return f"{column} = ?{collate}", [value], f"{field} = {value}"
 
 
@@ -449,17 +460,24 @@ def _top(conn, where, args, stage):
     """The N most common values. Percents are shares of every matched event, including ones with no value.
 
     `total` is that match count. `missing` is how many of them have no value in the grouped field, which
-    is why the shown percents can sum under 100 even when `truncated` is false. The column is from FIELDS.
+    is why the shown percents can sum under 100 even when `truncated` is false. `groups_omitted` is how
+    many groups were past N (0 when the list fits). `truncated` is true exactly when that count is not 0.
+    Events with no value in the field are not groups. The column is from FIELDS.
     """
     (field, column), = stage["by"]
     expr = _group_expr(field, column)
     total, missing = conn.execute(
         f"SELECT COUNT(*), COALESCE(SUM({column} IS NULL), 0) FROM events{_where(where)}", args).fetchone()
-    rows = conn.execute(f"SELECT {expr}, COUNT(*) FROM events{_where(where, [f'{column} IS NOT NULL'])}"
-                        f" GROUP BY {expr} ORDER BY 2 DESC, 1 LIMIT ?", args + [stage["limit"] + 1]).fetchall()
+    present = f"{column} IS NOT NULL"
+    # Count every group, then read only the capped page. A limit+1 fetch cannot name the leftover.
+    grouped = f"SELECT 1 FROM events{_where(where, [present])} GROUP BY {expr}"
+    groups = conn.execute(f"SELECT COUNT(*) FROM ({grouped})", args).fetchone()[0]
+    rows = conn.execute(f"SELECT {expr}, COUNT(*) FROM events{_where(where, [present])}"
+                        f" GROUP BY {expr} ORDER BY 2 DESC, 1 LIMIT ?", args + [stage["limit"]]).fetchall()
+    omitted = groups - len(rows)
     return {"columns": [field, "count", "percent"],
-            "rows": [[value, count, round(100 * count / total, 2)] for value, count in rows[:stage["limit"]]],
-            "truncated": len(rows) > stage["limit"], "total": total, "missing": missing}
+            "rows": [[value, count, round(100 * count / total, 2)] for value, count in rows],
+            "truncated": omitted != 0, "groups_omitted": omitted, "total": total, "missing": missing}
 
 
 def _window(compiled, now):
@@ -567,9 +585,22 @@ def _text(value, name, limit, required=False):
     return value
 
 
-def list_saved(conn):
-    return [dict(r) for r in conn.execute(
-        "SELECT id, name, query, description, owner, created_at FROM saved_searches ORDER BY name COLLATE NOCASE")]
+# Saved searches returned by GET /api/hunt/saved. The rest are X-Watchpost-Omitted.
+SAVED_LIST_LIMIT = 100
+
+
+def list_saved(conn, limit=SAVED_LIST_LIMIT):
+    """Saved searches in name COLLATE NOCASE order, and how many the limit left out.
+
+    The second value is 0 when the list fits. Callers that return the bare array
+    send that count as X-Watchpost-Omitted. Names are unique under COLLATE NOCASE,
+    so two spellings of one name are not two rows.
+    """
+    total = conn.execute("SELECT COUNT(*) FROM saved_searches").fetchone()[0]
+    rows = conn.execute(
+        "SELECT id, name, query, description, owner, created_at FROM saved_searches"
+        " ORDER BY name COLLATE NOCASE LIMIT ?", (limit,)).fetchall()
+    return [dict(r) for r in rows], total - len(rows)
 
 
 def _stored_saved_name(conn, name):

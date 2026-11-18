@@ -112,6 +112,14 @@ class QueryPlanTests(unittest.TestCase):
         for plan in self.plans(lambda: queries.search_events(self.conn, {"outcome": "fail*"})):
             self.assertIn("idx_events_outcome_nocase (outcome>? AND outcome<?)", plan)
 
+    def test_batch_id_equality_uses_the_nocase_index(self):
+        self.assert_all_use(self.plans(lambda: queries.search_events(self.conn, {"batch_id": "ABCDEF"})),
+                            "idx_events_batch_nocase (batch_id=?)")
+        self.assert_all_use(self.plans(lambda: hunt.run(self.conn, {"q": "batch_id:abcdef"})),
+                            "idx_events_batch_nocase")
+        for plan in self.plans(lambda: queries.search_events(self.conn, {"batch_id": "abcd*"})):
+            self.assertIn("idx_events_batch_nocase (batch_id>? AND batch_id<?)", plan)
+
 
 class HistoryOnIngestTests(unittest.TestCase):
     def test_every_rule_with_history_declares_the_types_it_reads(self):

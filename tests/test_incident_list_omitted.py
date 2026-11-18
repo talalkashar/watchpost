@@ -1,9 +1,10 @@
 """GET /api/incidents stays a bare array and names the rows past the limit.
 
-The order stays not-resolved first, then severity, then last_seen. A newer
-low incident is the one left out when two open critical incidents fill the page.
-X-Watchpost-Omitted is that count, including 0 when the list fits. A filter
-counts only its matches. The default cap is 100.
+The order stays not-resolved first, then severity, then last_seen, then id
+descending. A newer low incident is the one left out when two open critical
+incidents fill the page. Two incidents that share those three keys keep the
+newer id. X-Watchpost-Omitted is that count, including 0 when the list fits.
+A filter counts only its matches. The default cap is 100.
 """
 
 import json
@@ -75,6 +76,41 @@ class IncidentListOmittedTests(unittest.TestCase):
         self.assertEqual(rows, [])
         self.assertEqual(omitted, 0)
 
+    def test_equal_status_severity_and_last_seen_keep_the_newer_id(self):
+        # The lowest id is inserted first and given a later created_at. Order is id, not that stamp.
+        self.conn.execute("DELETE FROM incidents")
+        stamp = "2026-06-01T00:00:00.000Z"
+        _insert(self.conn, [
+            ("early", "critical", "open", stamp),
+            ("mid", "critical", "open", stamp),
+            ("late", "critical", "open", stamp),
+        ])
+        self.conn.execute(
+            "UPDATE incidents SET created_at = ? WHERE title = 'early'",
+            ("2026-12-01T00:00:00.000Z",))
+        rows, omitted = list_incidents(self.conn, {"limit": "2"})
+        self.assertEqual([row["title"] for row in rows], ["late", "mid"])
+        self.assertGreater(rows[0]["id"], rows[1]["id"])
+        early = self.conn.execute("SELECT id FROM incidents WHERE title = 'early'").fetchone()["id"]
+        self.assertLess(early, rows[1]["id"])
+        self.assertEqual(omitted, 1)
+        self.assertNotIn("early", [row["title"] for row in rows])
+
+    def test_a_newer_last_seen_still_outranks_a_higher_id(self):
+        self.conn.execute("DELETE FROM incidents")
+        _insert(self.conn, [
+            ("newer", "critical", "open", "2026-06-01T00:00:00.000Z"),
+            ("older", "critical", "open", "2026-01-01T00:00:00.000Z"),
+        ])
+        rows, omitted = list_incidents(self.conn, {"limit": "2"})
+        self.assertEqual([row["title"] for row in rows], ["newer", "older"])
+        self.assertEqual(omitted, 0)
+        self.assertLess(rows[0]["id"], rows[1]["id"])
+
+    def test_the_query_ends_in_last_seen_then_id(self):
+        source = Path(__file__).resolve().parent.parent.joinpath("watchpost", "incidents.py").read_text()
+        self.assertIn("last_seen DESC, id DESC LIMIT ?", source)
+
     def test_the_default_cap_is_100(self):
         self.conn.execute("DELETE FROM incidents")
         specs = [
@@ -117,6 +153,20 @@ class IncidentListOmittedApiTests(ServerTestCase):
         self.assertEqual(empty, [])
         self.assertEqual(headers[OMITTED], "0")
 
+    def test_equal_keys_keep_the_newer_id(self):
+        stamp = "2026-06-01T00:00:00.000Z"
+        self._load([
+            ("early", "critical", "open", stamp),
+            ("mid", "critical", "open", stamp),
+            ("late", "critical", "open", stamp),
+        ])
+        status, body, headers = self.client("viewer").get("/api/incidents?limit=2")
+        self.assertEqual(status, 200, body)
+        self.assertIsInstance(body, list)
+        self.assertEqual([row["title"] for row in body], ["late", "mid"])
+        self.assertEqual(headers[OMITTED], "1")
+        self.assertNotIn("early", [row["title"] for row in body])
+
     def test_a_rejected_request_does_not_send_the_header(self):
         self._load(ORDERED)
         status, _body, headers = self.client().get("/api/incidents")
@@ -152,6 +202,7 @@ class IncidentListOmittedApiTests(ServerTestCase):
             "`X-Watchpost-Omitted` is how many matched incidents were past that cap (0 when the list fits)",
             api)
         self.assertIn("The body stays a bare array", api)
+        self.assertIn("then `id` descending (the newer id stays)", api)
 
 
 if __name__ == "__main__":
