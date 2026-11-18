@@ -107,12 +107,18 @@ def ingest(conn, events, rejections, source, fmt, submitted_by, synthetic=False)
 
 # --- Detection --------------------------------------------------------------------
 
-def _existing_alert(conn, rule_id, group_key, first_seen, window):
-    cutoff = iso(parse_iso(first_seen) - timedelta(seconds=window))
+def _existing_alert(conn, rule_id, group_key, first_seen, last_seen, window):
+    """Open alert for this group whose span is within `window` seconds of the finding.
+
+    A gap of exactly `window` still matches. Rules split a cluster only when the gap is greater.
+    When more than one open alert is that close, the newest one wins.
+    """
+    earliest = iso(parse_iso(first_seen) - timedelta(seconds=window))
+    latest = iso(parse_iso(last_seen) + timedelta(seconds=window))
     return conn.execute(
         "SELECT * FROM alerts WHERE rule_id = ? AND group_key = ? AND status != 'resolved'"
-        " AND last_seen >= ? ORDER BY id DESC LIMIT 1",
-        (rule_id, group_key, cutoff),
+        " AND last_seen >= ? AND first_seen <= ? ORDER BY id DESC LIMIT 1",
+        (rule_id, group_key, earliest, latest),
     ).fetchone()
 
 
@@ -140,20 +146,23 @@ def _apply_finding(conn, rule, finding, synthetic, assets_idx):
 
     now = now_iso()
     window = rule["params"].get("window_seconds", 3600)
-    existing = _existing_alert(conn, rule["id"], finding["group_key"], finding["first_seen"], window)
+    existing = _existing_alert(conn, rule["id"], finding["group_key"], finding["first_seen"],
+                               finding["last_seen"], window)
     if existing:
         conn.executemany("INSERT OR IGNORE INTO alert_events(alert_id, event_id) VALUES (?,?)",
                          [(existing["id"], i) for i in ids])
         count = conn.execute("SELECT COUNT(*) FROM alert_events WHERE alert_id = ?",
                              (existing["id"],)).fetchone()[0]
         weighed = _weigh(conn, rule, existing["id"], assets_idx)
+        # Synthetic only while every attached event is synthetic. Real evidence clears the flag.
+        synthetic_flag = int(bool(existing["synthetic"]) and synthetic)
         conn.execute(
             "UPDATE alerts SET last_seen = MAX(last_seen, ?), first_seen = MIN(first_seen, ?),"
             " event_count = ?, explanation = ?, title = ?, updated_at = ?, severity = ?, base_severity = ?,"
-            " assets = ?, severity_note = ? WHERE id = ?",
+            " assets = ?, severity_note = ?, synthetic = ? WHERE id = ?",
             (finding["last_seen"], finding["first_seen"], count, finding["explanation"],
              finding["title"], now, weighed["severity"], weighed["base_severity"], weighed["assets"],
-             weighed["severity_note"], existing["id"]),
+             weighed["severity_note"], synthetic_flag, existing["id"]),
         )
         conn.execute(
             "INSERT INTO alert_activity(alert_id, actor, action, detail, created_at) VALUES (?,?,?,?,?)",
