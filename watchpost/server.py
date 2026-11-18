@@ -1073,8 +1073,10 @@ def token_revoke(req, token_id):
 
 @route("GET", "/api/sessions", role="admin")
 def sessions(req):
+    # ?user= folds ASCII case. The signed-in list does not.
     rows, omitted = auth.list_sessions(
-        req.conn, req.query.get("user") or None, req.user.get("sid"))
+        req.conn, req.query.get("user") or None, req.user.get("sid"),
+        fold_user=bool(req.query.get("user")))
     _set_omitted(req, omitted)
     return rows
 

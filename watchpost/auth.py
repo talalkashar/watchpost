@@ -411,18 +411,22 @@ def mfa_admin_reset(conn, username, actor):
 SESSION_LIST_LIMIT = 100
 
 
-def list_sessions(conn, username=None, current_sid=None, limit=SESSION_LIST_LIMIT):
+def list_sessions(conn, username=None, current_sid=None, limit=SESSION_LIST_LIMIT, *, fold_user=False):
     """Active sessions, newest by created_at then sid, and how many were left out.
 
-    All users when `username` is None. The second value is 0 when the list fits,
-    including when none are active. An expired session is not a row and is not
-    part of that count. The rows never include the token or its hash. A later
-    created_at wins. The same timestamp keeps the greater sid.
+    All users when `username` is None. With `fold_user`, the name matches ASCII
+    case only (`Admin` is `admin` and `Admin`; `Érin` is not `érin`). The count
+    is only those matches. The second value is 0 when the list fits, including
+    when none are active and when the name matches nobody. An expired session
+    is not a row and is not part of that count. The rows never include the
+    token or its hash. A later created_at wins. The same timestamp keeps the
+    greater sid.
     """
     where = " WHERE s.expires_at >= ?"
     args = [now_iso()]
     if username is not None:
-        where += " AND u.username = ?"
+        # The signed-in list stays that account. Only the admin ?user= filter folds.
+        where += " AND u.username = ? COLLATE NOCASE" if fold_user else " AND u.username = ?"
         args.append(username)
     base = "FROM sessions s JOIN users u ON u.id = s.user_id" + where
     total = conn.execute("SELECT COUNT(*) " + base, args).fetchone()[0]
