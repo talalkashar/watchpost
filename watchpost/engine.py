@@ -426,10 +426,13 @@ def _publish_events(conn, batch_id, count, synthetic):
     if not count or not stream.BROKER.active():
         return
     try:
-        rows = conn.execute(f"SELECT {STREAM_EVENT_FIELDS} FROM events WHERE batch_id = ?"
-                            " ORDER BY ts DESC, id DESC LIMIT ?", (batch_id, STREAM_EVENT_LIMIT))
-        stream.BROKER.publish("event", {"batch_id": batch_id, "count": count, "synthetic": bool(synthetic),
-                                        "events": [dict(r) for r in rows]})
+        rows = [dict(r) for r in conn.execute(
+            f"SELECT {STREAM_EVENT_FIELDS} FROM events WHERE batch_id = ?"
+            " ORDER BY ts DESC, id DESC LIMIT ?", (batch_id, STREAM_EVENT_LIMIT))]
+        stream.BROKER.publish("event", {
+            "batch_id": batch_id, "count": count, "synthetic": bool(synthetic),
+            "events": rows, "events_omitted": count - len(rows),
+        })
     except Exception as exc:  # the stream is best-effort; storage already succeeded
         record_error(conn, "stream", exc, guidance="Live dashboard updates may lag; reload the dashboard.")
 
