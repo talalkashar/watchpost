@@ -530,8 +530,9 @@ Send `{"value": 0}` the same way to turn it off. A viewer with masking on gets `
 | `NOT term` or `-term` | `NOT src_ip:10.0.0.5` | Excludes; events with no value in that field are kept |
 | `last:` | `last:15m`, `last:24h`, `last:7d` | Window up to now, at most 365 days |
 | `since:` / `until:` | `since:2026-10-01 until:2026-10-02T06:00Z` | ISO times, UTC unless an offset is given |
+| `bytes:opN` | `bytes:>=1000000` | Byte count on the event. `op` is `>=`, `>`, `<=`, `<` or `=`, and `N` is an integer from 0 to 1000000000000000. The number is a bound parameter. Events with no byte count do not match. Any other `bytes:` value is an error that lists those operators. |
 
-Fields: `user`, `host`, `source`, `outcome`, `src_ip`, `dest_ip`, `ip` (source or destination), `batch_id`, `event_type`, `severity`, `dest_port`, `synthetic` (`0`/`1`), `message`. An unknown field is an error that lists these. Queries are capped at 500 characters and 20 terms, and results page and sort like event search (newest first, up to 1000 per page).
+Fields: `user`, `host`, `source`, `outcome`, `src_ip`, `dest_ip`, `ip` (source or destination), `batch_id`, `event_type`, `severity`, `dest_port`, `bytes` (a comparison, not an exact token), `synthetic` (`0`/`1`), `message`. An unknown field is an error that lists these. Queries are capped at 500 characters and 20 terms, and results page and sort like event search (newest first, up to 1000 per page).
 
 ```
 user:alice event_type:auth_failure NOT src_ip:10.0.0.5 host:web* "invalid password" last:24h
@@ -554,7 +555,7 @@ Caps and rules:
 - `stats` returns at most 1000 groups, and `top` at most N values. The response says `"truncated": true` when there were more.
 - Groups compare values exactly, so `by user` lists `Alice` and `alice` separately even though the `user:` filter ignores case. A pivot on either one shows both.
 - `timechart` covers the query's time window (`last:`, `since:`, `until:`), or the first to last matching event when there is none, and draws at most 500 buckets. A larger range is refused with the bucket count and a hint to narrow the time range or use a wider span, rather than silently trimmed. `last:24h` works with every span, `last:7d` needs `1h` or wider.
-- Group-by and `dc()` fields come from the same whitelist as filter terms: any of them except `message` (free text), `ip` (use `src_ip` or `dest_ip`) and the time filters, each refused with the reason. Events with no value in a `by` field are left out of `stats` and `top` groups, but still count toward `top`'s percent.
+- Group-by and `dc()` fields come from the same whitelist as filter terms: any of them except `message` (free text), `ip` (use `src_ip` or `dest_ip`), `bytes` (a numeric comparison, not a group) and the time filters, each refused with the reason. Events with no value in a `by` field are left out of `stats` and `top` groups, but still count toward `top`'s percent.
 - Only one stage. A second `|`, an unknown command, an unknown aggregate, or a field name that is not on the whitelist is a 400 that lists what is supported. Field names in the stage become SQL only through the whitelist, and values stay bound parameters.
 - A `|` starts the stage only at the start of a word. Inside a quoted value (`"a | b"`) or an unquoted word (`host:a|b`) it is part of the value.
 

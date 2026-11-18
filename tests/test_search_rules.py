@@ -34,6 +34,7 @@ HOSTS = ["web01", "WEB02", "db01", None, "Web-03"]
 SRC = ["203.0.113.5", "10.0.0.5", None, "10.1.2.3"]
 DEST = ["10.0.0.5", "198.51.100.1", None]
 PORTS = [22, 443, None, 8080]
+BYTE_COUNTS = [0, 100, 1_000_000, None]
 TYPES = ["auth_failure", "auth_success", "web_request", "fw_deny"]
 SOURCES = ["ssh", "web", "FW", "SSH-gw"]
 MESSAGES = ["Invalid password for alice", "GET /admin 100% done", "under_score here", None, "ÉCOLE fermée",
@@ -44,7 +45,8 @@ QUERIES = [
     "NOT user:alice", "-user:bob", "host:web*", "host:WEB*", "host:web01", "host:WEB01", "host:*", "NOT host:*",
     "src_ip:10.0.0.5", "ip:10.0.0.5", "ip:10.*", "NOT ip:10.*", "dest_ip:198.51.100.1", "dest_port:22",
     "NOT dest_port:22", "event_type:auth_failure", "event_type:auth*", "NOT event_type:web_request",
-    "synthetic:1", "synthetic:false", "password", "PASSWORD", '"100%"', "under_score", '"under_"', "école",
+    "synthetic:1", "synthetic:false", "bytes:>=1000000", "bytes:>100", "bytes:<=100", "bytes:<100",
+    "bytes:=0", "NOT bytes:>=1000000", "password", "PASSWORD", '"100%"', "under_score", '"under_"', "école",
     "ÉCOLE", "message:admin*", "message:*", '"back\\\\slash"', "source:ssh", "source:SSH", "source:s*",
     'user:alice event_type:auth_failure NOT src_ip:10.0.0.5', "dest_ip:198.51.100.1 NOT user:al*",
     '"invalid password"', "-message:admin host:w*", "user:* NOT user:a*",
@@ -65,6 +67,7 @@ class MatcherCrossCheckTests(unittest.TestCase):
                 batch.append({"ts": iso(T0 + timedelta(seconds=n)), "source": SOURCES[k % 4], "severity": "low",
                               "host": HOSTS[k % 5], "event_type": TYPES[k % 4], "user": USERS[k % 10],
                               "src_ip": SRC[k % 4], "dest_ip": DEST[k % 3], "dest_port": PORTS[k % 4],
+                              "bytes": BYTE_COUNTS[k % 4],
                               "message": MESSAGES[k % 8]})
             engine.store_batch(self.conn, batch, [], "test", "json", "test", synthetic=synthetic)
         self.events = [dict(r) for r in self.conn.execute(f"SELECT {engine.RULE_EVENT_FIELDS} FROM events")]
