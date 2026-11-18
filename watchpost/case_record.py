@@ -4,12 +4,8 @@ import json
 
 from . import __version__, attack, incidents
 from .db import now_iso
+from .report import LEVEL_NOTE as _LEVEL_NOTE
 from .report import md as _md
-
-# Printed above the technique table. "mapped" is a rule name, not a proved detection.
-_LEVEL_NOTE = ("Evidence level is the labeled-scenario grade. "
-               "Only validated means a scenario proved the technique. "
-               "mapped means an enabled rule names it and is not proof.")
 
 
 def _audit_detail(value):
