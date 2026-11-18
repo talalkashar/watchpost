@@ -57,6 +57,10 @@ def load_rules(conn, enabled_only=True):
 
 # --- Ingestion ------------------------------------------------------------------
 
+# The response and the stored batch errors slice keep this many rejection reasons.
+REJECTION_LIMIT = 100
+
+
 def store_batch(conn, events, rejections, source, fmt, submitted_by, synthetic=False):
     """Persist a batch atomically and return its id. Detection is run separately."""
     batch_id = uuid.uuid4().hex
@@ -71,19 +75,21 @@ def store_batch(conn, events, rejections, source, fmt, submitted_by, synthetic=F
             "INSERT INTO ingest_batches(id, created_at, source, format, received, accepted, rejected,"
             " errors, synthetic, submitted_by, detection_status) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (batch_id, now, source, fmt, len(events) + len(rejections), len(events), len(rejections),
-             json.dumps(rejections[:100]), int(synthetic), submitted_by, "pending"),
+             json.dumps(rejections[:REJECTION_LIMIT]), int(synthetic), submitted_by, "pending"),
         )
     return batch_id
 
 
 def ingest(conn, events, rejections, source, fmt, submitted_by, synthetic=False):
     batch_id = store_batch(conn, events, rejections, source, fmt, submitted_by, synthetic)
+    shown = rejections[:REJECTION_LIMIT]
     result = {
         "batch_id": batch_id,
         "received": len(events) + len(rejections),
         "accepted": len(events),
         "rejected": len(rejections),
-        "rejections": rejections[:100],
+        "rejections": shown,
+        "rejections_omitted": len(rejections) - len(shown),
     }
     _publish_events(conn, batch_id, len(events), synthetic)
     if not events:

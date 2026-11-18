@@ -84,9 +84,12 @@ Response:
 ```json
 {"batch_id": "…", "received": 3, "accepted": 2, "rejected": 1,
  "rejections": [{"index": 2, "reason": "src_ip is not a valid IP address"}],
+ "rejections_omitted": 0,
  "detection": {"run_id": 7, "status": "ok", "events_scanned": 40, "alerts_created": 1, "alerts_updated": 0,
                "correlation": {"status": "ok", "incidents_created": 1, "incidents_updated": 0}}}
 ```
+
+`rejections` is the first 100 reasons. `rejections_omitted` is `rejected` minus that array (0 when every reason is listed). The stored batch `errors` field is that same first 100, not the full list.
 
 Status codes: **201** all accepted · **207** some rejected · **422** none accepted · **400** malformed body or bad source name · **413** body too large · **415** wrong content type · **401/403** auth · **429** rate limited (see Rate limiting).
 If `detection.status` is `"failed"`, the events **were stored**. Fix the cause, then run `POST /api/detection/run`.
