@@ -22,7 +22,10 @@ from datetime import datetime, timedelta, timezone
 
 from .db import audit, iso, now_iso, transaction, utcnow
 from .normalize import EVENT_TYPES, MAX_BYTES, SEVERITIES, EventError, parse_timestamp
-from .queries import QueryError, _escape_like, canonical_ip, catalog_name, event_offset, page_events
+from .queries import (
+    QueryError, _escape_like, canonical_ip, catalog_name, event_offset, page_events,
+    synthetic_flag,
+)
 
 # Same 400/404/409 handling in the server as every other query error.
 HuntError = QueryError
@@ -42,6 +45,7 @@ FIELDS = {
     "last": ("time", None), "since": ("time", None), "until": ("time", None),
 }
 ENUMS = {"event_type": sorted(EVENT_TYPES), "severity": SEVERITIES}
+# Same four words as queries.synthetic_flag. ASCII letters only. Not str.lower().
 FLAGS = {"1": 1, "true": 1, "0": 0, "false": 0}
 LAST_UNITS = {"m": 1, "h": 60, "d": 1440}
 LAST_MAX_MINUTES = 365 * 1440
@@ -212,9 +216,10 @@ def _term_sql(term, now):
         op, number = bytes_bound(value)
         return f"{column} {op} ?", [number], f"{field} {op} {number}"
     if kind == "flag":
-        if value.lower() not in FLAGS:
-            raise HuntError("synthetic must be 0, 1, true or false")
-        return "synthetic = ?", [FLAGS[value.lower()]], f"synthetic = {FLAGS[value.lower()]}"
+        # ASCII letters only, the same fold as event search. Not str.lower().
+        # TRUE is true. truİe, trüe, and yes stay the named error.
+        flag = synthetic_flag(value)
+        return "synthetic = ?", [flag], f"synthetic = {flag}"
     if kind == "ip":
         if prefix is not None:
             # A prefix stays the typed text. It is not parsed as an address.
