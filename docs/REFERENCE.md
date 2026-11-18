@@ -441,7 +441,7 @@ What it is not: a scheduled search. It does not re-run SQL on a timer; the filte
 | `source` | `event.module` | closest fit; Watchpost's source is a free-form log-source label |
 | `host` | `host.name` | |
 | `event_type` | `event.action` | also sets `event.category` / `event.type` where a clear pairing exists (below) |
-| `outcome` | `event.outcome` | only for `success`, `failure` or `unknown`; any other text stays as `watchpost.outcome` |
+| `outcome` | `event.outcome` | ASCII fold onto `success`, `failure` or `unknown` (`Failure` is `failure`); any other value, including a dotted capital I, stays as `watchpost.outcome` unchanged |
 | `user` | `user.name` | |
 | `src_ip` | `source.ip` | |
 | `dest_ip` | `destination.ip` | |
