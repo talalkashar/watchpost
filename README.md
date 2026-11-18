@@ -1,6 +1,6 @@
 # Watchpost
 
-**A small, working SIEM in pure Python.** Ingest logs, detect attacks with explainable rules, correlate alerts into incidents, and work them from triage to resolution, with nothing to install beyond Python.
+Watchpost is a SIEM in the Python standard library. It ingests logs, runs explainable detection rules, correlates alerts into incidents, and tracks each case from triage to resolution. It has no third-party dependencies.
 
 [![tests](https://github.com/talalkashar/watchpost/actions/workflows/tests.yml/badge.svg)](https://github.com/talalkashar/watchpost/actions/workflows/tests.yml)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776ab)
@@ -18,15 +18,41 @@
 
 ## What it does
 
-- **Ingests** JSON, CSV, Linux `auth.log`, Windows Security events, nginx/Apache, firewall/VPN, and cloud audit logs, through file upload, an authenticated API, a syslog listener or a file shipper. Everything is normalized into one schema.
-- **Detects** with fifteen built-in rules written as pure functions, each with a plain-English explanation and the evidence behind every alert.
-- **Maps to MITRE ATT&CK** and grades coverage by evidence: a technique is only "validated" when an enabled rule catches a labeled attack scenario.
-- **Correlates** alerts that share an IP, account or host into incidents with kill-chain stages, then exports case records and PDF reports.
-- **Hunts** with a one-line query language (`field:value`, `NOT`, `last:7d`, plus `| stats`, `| top`, `| timechart`) compiled from a field whitelist with bound values, and turns saved searches into detections.
-- **Tunes safely.** Rule changes come from analyst feedback, are backtested against stored events first, and need approval from a second person. Rules export and import as versioned JSON, and a Sigma subset imports.
-- **Secures itself:** PBKDF2 passwords, lockout, server-side sessions, TOTP two-factor, CSRF protection, a tamper-evident audit log (hash chain), and data masking for viewers.
+- **Ingests** JSON, CSV, Linux `auth.log`, Windows Security events, nginx and Apache access logs, firewall and VPN logs, and cloud audit logs. Input is a file upload, an authenticated API, a syslog listener, or `scripts/shipper.py`. Normalization writes one schema.
+- **Detects** with fifteen built-in rules. Each rule is a pure function. Each alert stores a plain-English explanation and the event ids behind it. The rules are listed under [Detections](#detections).
+- **Maps to MITRE ATT&CK.** A technique is validated only when an enabled rule catches a labeled attack scenario. The other grades are mapped, disabled, and gap.
+- **Correlates** alerts that share an IP, account, or host into incidents with kill-chain stages. An incident exports a case record as JSON or Markdown, and a report as Markdown or PDF.
+- **Hunts** with one line: `field:value`, `NOT`, `last:7d`, and one of `| stats`, `| top`, or `| timechart`. The compiler uses a field whitelist and bound values. A saved search can be promoted to a detection.
+- **Tunes** from analyst feedback. The proposal is backtested on stored events. A second person approves it. Rules export and import as versioned JSON. A subset of Sigma imports.
+- **Secures itself** with PBKDF2 password hashes, lockout, server-side sessions, TOTP, and CSRF protection. The audit log is a hash chain. Viewer responses are masked.
+
+## Detections
+
+Fifteen threshold rules. No machine learning. Default parameters are in `watchpost/rules.py`. Asset criticality can raise an alert after the rule fires. Imported Sigma rules and promoted saved searches run on the same engine. They are not in this list.
+
+| Rule | What it catches | Severity | ATT&CK |
+|---|---|---|---|
+| `brute_force_ip` | Many failed logins from one source IP | high | T1110.001 |
+| `password_spray` | One source IP failing across many accounts | high | T1110.003 |
+| `account_repeated_failures` | Many failures against one account, from any IPs | medium | T1110 |
+| `success_after_failures` | A successful login after repeated failures | critical | T1110, T1078 |
+| `off_hours_privileged_login` | A privileged login outside business hours (UTC) | medium | T1078.003 |
+| `web_scanner` | Scanner-like web probes from one source IP | medium | T1595.002, T1595.003, T1190 |
+| `firewall_port_sweep` | The firewall denies one source IP on many ports | medium | T1046, T1595.001 |
+| `impossible_geo_login` | The same account in two places, faster than travel allows | high | T1078, T1133 |
+| `privilege_escalation_after_login` | sudo, su, or runas soon after a login that followed failures | critical | T1548.003, T1078 |
+| `cloud_iam_change_by_new_principal` | An IAM change by a principal with no recent cloud activity | high | T1098.001, T1136.003, T1078.004 |
+| `data_exfil_volume` | A large outbound transfer, or many cloud data reads, by one principal | high | T1530, T1048 |
+| `unsanctioned_cloud_service` | Use of a cloud service that is not on the sanctioned list | medium | T1567 |
+| `cloud_logging_disabled` | A cloud audit event that stops or deletes logging | high | T1562.008 |
+| `admin_action_from_new_source` | A privileged action from a source IP new to that principal | medium | T1078, T1078.004 |
+| `log_source_silent` | A log source with a learned cadence stops sending | medium | T1562.006 |
+
+Impossible-travel positions come from a synthetic geo table for demo address ranges. An unmapped address does not alert. `data_exfil_volume` stays on flat thresholds unless an approved exception turns on a per-principal baseline. `log_source_silent` uses arrival gaps, not a fixed event count.
 
 ## How it works
+
+One process. SQLite stores the events. Detection runs on ingest and when an analyst runs it.
 
 ```
  log files ──► POST /api/ingest/upload ─┐
@@ -51,10 +77,10 @@ cd watchpost
 ./start.sh        # http://127.0.0.1:8080
 ```
 
-Passwords are generated on first start and written to `data/initial_credentials.txt` (mode 0600); set `SIEM_ADMIN_PASSWORD`, `SIEM_ANALYST_PASSWORD` and `SIEM_VIEWER_PASSWORD` to choose your own. Sign in as `admin`, then open **Admin → Load synthetic demo data**.
+On first start, generated passwords are written to `data/initial_credentials.txt` (mode 0600). Set `SIEM_ADMIN_PASSWORD`, `SIEM_ANALYST_PASSWORD`, and `SIEM_VIEWER_PASSWORD` to choose them. Sign in as `admin`. Open **Admin → Load synthetic demo data**.
 
 ```bash
-./run_tests.sh    # 599 unit and integration tests + a 26-step end-to-end smoke check
+./run_tests.sh    # 1326 unit and integration tests + a 26-step end-to-end smoke check
 ```
 
 CI runs the suite on Python 3.11 through 3.14.
