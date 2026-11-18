@@ -365,7 +365,7 @@ const Live = {
       try {
         const r = await api(`/api/events?limit=50&since_id=${this.lastEventId}`);
         if (this.lastEventId && r.events.length) this.onEvents(r.events, r.total);
-        this.lastEventId = Math.max(this.lastEventId, ...r.events.map((e) => e.id));
+        this.lastEventId = Math.max(0, this.lastEventId || 0, ...r.events.map((e) => e.id || 0));
         if (ticks % 5 === 0) this.refreshSummary();
       } catch { /* api() already handles 401 */ }
     };
@@ -429,7 +429,7 @@ const Live = {
       const d = await api("/api/dashboard");
       this.summary = d;
       this.epm = d.events_per_minute.slice();
-      if (!this.lastEventId) this.lastEventId = Math.max(0, ...d.recent_events.map((e) => e.id));
+      if (!this.lastEventId) this.lastEventId = Math.max(0, ...(d.recent_events || []).map((e) => e.id || 0));
       this.renderStrip();
       if (Dash.mounted) Dash.update(d);
     } catch { /* offline; the strip keeps its last values */ }
@@ -520,7 +520,7 @@ const Dash = {
     this.mounted = true;
     this.mapSize = null;
     this.feedCount = 0;
-    const pause = el("button", { class: "mini ghost", id: "feed-pause", onclick: () => this.togglePause() }, "Pause");
+    const pause = el("button", { class: "mini ghost", id: "feed-pause", type: "button", "aria-pressed": "false", onclick: () => this.togglePause() }, "Pause");
     render(el("div", { class: "view-bar", id: "dashboard-view-bar" }, el("p", { class: "muted" }, "Loading saved dashboard views…")),
       el("div", { id: "dash-empty", hidden: true }),
       el("div", { class: "soc", id: "soc" },
@@ -531,13 +531,14 @@ const Dash = {
           el("span", {}, el("i", { class: "dot hq" }), "HQ target"))),
       panel("p-feed", "Live event stream", [el("span", { class: "muted", id: "feed-poll", hidden: true }), el("span", { class: "muted", id: "feed-rate" }), pause],
         el("div", { class: "feed-head" }, el("span", {}, "Time"), el("span", {}, "Sev"), el("span", {}, "Event")),
-        el("div", { class: "feed", id: "feed", onmouseenter: () => this.hover(true), onmouseleave: () => this.hover(false) })),
+        el("div", { class: "feed", id: "feed", onmouseenter: () => this.hover(true), onmouseleave: () => this.hover(false),
+          onfocusin: () => this.focusFeed(true), onfocusout: (ev) => { if (!ev.currentTarget.contains(ev.relatedTarget)) this.focusFeed(false); } })),
       panel("p-timeline", "Alerts over time", [el("span", { class: "muted", id: "tl-bucket" })], el("div", { class: "chartbox", id: "tl-chart" }),
         el("div", { class: "legend" }, ...["critical", "high", "medium", "low"].map((s) => el("span", {}, el("i", { class: `dot sev-${s}` }), s)),
           el("span", {}, el("i", { class: "dot volume" }), "event volume"))),
       panel("p-attackers", "Top attacker IPs", [el("span", { class: "muted" }, "by evidence events")], el("div", { class: "chartbox", id: "atk-chart" })),
-      panel("p-attack", "MITRE ATT&CK coverage", [el("span", { class: "muted", id: "attack-meta" }), el("a", { href: "/api/attack/navigator.json", download: "watchpost-navigator-layer.json", title: "MITRE ATT&CK Navigator layer (JSON) colored by evidence level" }, "Export Navigator layer")], el("div", { class: "chartbox", id: "attack-chart", tabindex: "0", role: "region", "aria-label": "ATT&CK technique matrix" }), el("div", { class: "heat-legend", id: "attack-legend" })),
-      panel("p-board", "Incident board", [el("span", { id: "board-meta" })], el("div", { class: "board", id: "board" })),
+      panel("p-attack", "MITRE ATT&CK coverage", [el("span", { class: "muted", id: "attack-meta" }), el("a", { href: "/api/attack/navigator.json", download: "watchpost-navigator-layer.json", title: "MITRE ATT&CK Navigator layer (JSON) colored by evidence level" }, "Export Navigator layer")], el("div", { class: "chartbox", id: "attack-chart", tabindex: "0", role: "region", "aria-label": "ATT&CK technique matrix", onkeydown: (ev) => this.scrollChart(ev) }), el("div", { class: "heat-legend", id: "attack-legend" })),
+      panel("p-board", "Incident board", [el("span", { id: "board-meta" })], el("div", { class: "board", id: "board", "data-kbd-list": "board" })),
       panel("p-rules", "Top rules", [el("span", { class: "muted" }, "alerts all time")], el("div", { class: "chartbox", id: "rules-chart" })),
       panel("p-health", "Health", [el("a", { href: "#health", class: "muted" }, "details →")], el("div", { id: "health-body" })),
       panel("p-entities", "Riskiest entities", [el("span", { class: "muted" }, "alert weight, decayed by age")], el("div", { id: "ent-list" })),
@@ -573,7 +574,8 @@ const Dash = {
     this.data = d;
     if (this.renderEmpty()) return;
     if (!this.feedCount) this.fillFeed(d.recent_events);
-    const ips = [...d.attackers.map((a) => a.ip), ...d.recent_events.map((e) => e.src_ip), ...d.recent_events.map((e) => e.dest_ip), "10.0.0.10"].filter(Boolean);
+    const recent = d.recent_events || [];
+    const ips = [...(d.attackers || []).map((a) => a.ip), ...recent.map((e) => e.src_ip), ...recent.map((e) => e.dest_ip), "10.0.0.10"].filter(Boolean);
     this.redraw();
     if (await Geo.resolve(ips)) this.renderMarks();
     this.renderAttackers();
@@ -627,13 +629,14 @@ const Dash = {
   },
   redraw() {
     if (!this.mounted || !this.data || emptyDashboard(this.data.events_total, false)) return;
+    this.applyLayout();
     this.renderMap(); this.renderTimeline(); this.renderAttackers(); this.renderRules(); this.renderEntities(); this.renderMatrix(); this.renderBoard(); this.renderHealth();
     this.applyView();
   },
   async loadViews() {
     if (!this.mounted) return;
     try { this.views = await api("/api/dashboard/views"); }
-    catch (e) { return $("#dashboard-view-bar")?.replaceChildren(el("p", { class: "error" }, e.message)); }
+    catch (e) { return $("#dashboard-view-bar")?.replaceChildren(el("p", { class: "error", role: "alert" }, e.message)); }
     this.renderViewBar();
   },
   viewPayload(form) {
@@ -652,7 +655,7 @@ const Dash = {
       this.currentView = selected || null;
       this.severities = selected ? selected.filters.severities : DASH_FILTERS.all;
       this.layout = selected ? selected.layout : DASH_LAYOUTS.full;
-      this.applyView(); this.renderViewBar();
+      this.applyView(); this.redraw(); this.renderViewBar();
     };
     picker.value = this.currentView ? String(this.currentView.id) : "";
     const controls = [picker, el("button", { type: "button", class: "ghost", onclick: apply }, "Apply")];
@@ -662,7 +665,7 @@ const Dash = {
         el("button", { type: "button", class: "danger", onclick: () => confirm(`Delete dashboard view "${this.currentView.name}"?`) && guarded(async () => {
           await api(`/api/dashboard/views/${this.currentView.id}/delete`, { method: "POST" });
           this.currentView = null; this.severities = DASH_FILTERS.all; this.layout = DASH_LAYOUTS.full;
-          await this.loadViews(); this.applyView();
+          await this.loadViews(); this.applyView(); this.redraw();
         }) }, "Delete mine"));
       const form = el("form", { class: "view-save-form" },
         el("label", {}, "Name", el("input", { name: "name", required: true, maxlength: 80 })),
@@ -676,7 +679,7 @@ const Dash = {
       form.addEventListener("submit", (ev) => { ev.preventDefault(); guarded(async () => {
         this.currentView = await api("/api/dashboard/views", { method: "POST", body: this.viewPayload(form) });
         this.severities = this.currentView.filters.severities; this.layout = this.currentView.layout;
-        await this.loadViews(); this.applyView(); toast(`Saved dashboard view "${this.currentView.name}"`);
+        await this.loadViews(); this.applyView(); this.redraw(); toast(`Saved dashboard view "${this.currentView.name}"`);
       }); });
       save = el("details", { class: "view-save" }, el("summary", {}, "Save a view"), form);
     }
@@ -689,7 +692,7 @@ const Dash = {
     }
     bar.replaceChildren(...lead, el("div", { class: "view-controls" }, ...controls), ...(save ? [save] : []));
   },
-  applyView() {
+  applyLayout() {
     const soc = $("#soc");
     if (!soc) return;
     for (const id of DASH_PANELS) {
@@ -698,11 +701,34 @@ const Dash = {
       panelNode.hidden = !this.layout.includes(id);
       if (!panelNode.hidden) soc.append(panelNode);
     }
+  },
+  applySeverity() {
+    const soc = $("#soc");
+    if (!soc) return;
     for (const severity of SEV_ORDER) {
       for (const node of soc.querySelectorAll(`.sev-${severity}`)) node.hidden = !this.severities.includes(severity);
     }
   },
-  width(id, fallback = 300) { const n = $(id); return n ? Math.max(120, n.clientWidth) : fallback; },
+  applyView() {
+    this.applyLayout();
+    this.applySeverity();
+  },
+  // A hidden panel reports 0. Keep the fallback until it is on screen, and do not
+  // inflate a narrow box to 120px (that clips the SVG inside overflow:hidden).
+  width(id, fallback = 300) { const n = $(id); const w = n ? n.clientWidth : 0; return w >= 2 ? w : fallback; },
+  scrollChart(ev) {
+    const box = ev.currentTarget;
+    if (!box) return;
+    const step = Math.max(48, box.clientWidth * 0.8);
+    let left = null;
+    if (ev.key === "ArrowRight") left = box.scrollLeft + step;
+    else if (ev.key === "ArrowLeft") left = box.scrollLeft - step;
+    else if (ev.key === "Home") left = 0;
+    else if (ev.key === "End") left = box.scrollWidth;
+    if (left === null) return;
+    box.scrollTo({ left });
+    ev.preventDefault();
+  },
 
   // --- map ---
   hq() {
@@ -712,7 +738,9 @@ const Dash = {
   renderMap() {
     const box = $("#map");
     if (!box) return;
-    const w = Math.max(320, box.clientWidth), h = Math.max(160, box.clientHeight);
+    // Use the laid-out box. A 320px floor draws past a phone panel and overflow:hidden clips it.
+    const w = box.clientWidth, h = box.clientHeight;
+    if (w < 2 || h < 2) return;
     const size = `${w}x${h}`;
     if (this.mapSize !== size) {
       // Fit the 360x140-degree projection inside the box, centered.
@@ -787,6 +815,7 @@ const Dash = {
       `<text class="ml" x="${hqx.toFixed(1)}" y="${hqy.toFixed(1)}" text-anchor="${hqEnd ? "end" : "start"}">HQ</text></g>`;
     setSvgChildren(svg.querySelector("g.arcs"), arcs);
     setSvgChildren(svg.querySelector("g.marks"), marks);
+    this.applySeverity();
     const summary = mapSide(this.sources(), (ip) => Geo.get(ip));
     const count = $("#map-count");
     if (count) count.textContent = `${summary.locations} ${summary.locations === 1 ? "arc" : "arcs"} · ${summary.unknown} no geo entry`;
@@ -799,6 +828,7 @@ const Dash = {
     side.replaceChildren(
       el("div", { class: "ms-h" }, "Busiest arcs"),
       ...(summary.arcs.length ? summary.arcs.map(arcRow) : [el("div", { class: "muted" }, "No external arcs yet")]));
+    this.applySeverity();
   },
   pulse(e) {
     const svg = $("#map svg");
@@ -815,6 +845,7 @@ const Dash = {
       `<path class="shot s-${s}" pathLength="100" d="${WPMap.arcPath([loc.lon, loc.lat], [target.lon, target.lat], w, h)}"/></svg>`);
     const nodes = [...wrap.childNodes];
     fx.append(...nodes);
+    this.applySeverity();
     setTimeout(() => nodes.forEach((n) => n.remove()), 1700);
   },
 
@@ -822,9 +853,11 @@ const Dash = {
   fillFeed(events) {
     const feed = $("#feed");
     if (!feed) return;
-    feed.replaceChildren(...(events.length ? events.slice(0, FEED_MAX).map((e) => this.feedRow(e, false))
+    const list = events || [];
+    feed.replaceChildren(...(list.length ? list.slice(0, FEED_MAX).map((e) => this.feedRow(e, false))
       : [el("p", { class: "empty-note" }, "No events received yet.")]));
-    this.feedCount = events.length || 1;
+    this.feedCount = list.length || 1;
+    this.applySeverity();
   },
   enqueue(events) {
     // Batches arrive newest-first; drip them in oldest-first so the stream reads in order.
@@ -855,6 +888,7 @@ const Dash = {
     }
     this.feedCount += take;
     while (feed.childElementCount > FEED_MAX) feed.lastElementChild.remove();
+    this.applySeverity();
   },
   feedRow(e, fresh) {
     const s = sevOf(e.severity);
@@ -878,24 +912,36 @@ const Dash = {
       el("span", { class: "fy" }, el("span", { class: "fn" }, a.title)),
       el("span", { class: "fd" }, el("span", { class: "fm" }, a.rule_id)));
     feed.prepend(row);
+    this.applySeverity();
     const p = $("#p-feed");
     if (p) { p.classList.remove("flash"); void p.offsetWidth; p.classList.add("flash"); }
   },
-  hover(on) { this.hovering = on; this.paused = on || this.userPaused; },
+  hover(on) { this.hovering = on; this.syncPause(); },
+  focusFeed(on) { this.feedFocused = on; this.syncPause(); },
+  syncPause() { this.paused = !!(this.userPaused || this.hovering || this.feedFocused); },
   togglePause() {
     this.userPaused = !this.userPaused;
-    this.paused = this.userPaused || this.hovering;
-    $("#feed-pause").textContent = this.userPaused ? "Resume" : "Pause";
+    this.syncPause();
+    const btn = $("#feed-pause");
+    if (!btn) return;
+    btn.textContent = this.userPaused ? "Resume" : "Pause";
+    btn.setAttribute("aria-pressed", this.userPaused ? "true" : "false");
   },
 
   // --- charts ---
   renderTimeline() {
-    const t = this.data.alert_timeline;
+    const t = this.data && this.data.alert_timeline;
     const box = $("#tl-chart");
     if (!box) return;
-    $("#tl-bucket").textContent = t.bins.length ? `${t.bucket_minutes === 60 ? "hourly" : `${t.bucket_minutes}-min`} · event time` : "";
+    const bucket = $("#tl-bucket");
+    if (!t || !Array.isArray(t.bins)) {
+      if (bucket) bucket.textContent = "";
+      box.replaceChildren(el("p", { class: "empty-note" }, "No alerts yet. Load demo data or run the storyline."));
+      return;
+    }
+    if (bucket) bucket.textContent = t.bins.length ? `${t.bucket_minutes === 60 ? "hourly" : `${t.bucket_minutes}-min`} · event time` : "";
     if (!t.bins.length) { box.replaceChildren(el("p", { class: "empty-note" }, "No alerts yet. Load demo data or run the storyline.")); return; }
-    const w = this.width("#tl-chart"), h = Math.max(110, box.clientHeight || 130);
+    const w = this.width("#tl-chart"), h = box.clientHeight >= 2 ? box.clientHeight : 130;
     const keys = ["low", "medium", "high", "critical"];
     mountSvg(box, WPCharts.stackedBars(t.bins, keys, {
       w, h, overlay: t.bins.map((b) => b.events), labels: t.bins.map((b) => shortTime(b.start)),
@@ -906,7 +952,7 @@ const Dash = {
   renderAttackers() {
     const box = $("#atk-chart");
     if (!box || !this.data) return;
-    const rows = this.data.attackers.slice(0, 6).map((a) => {
+    const rows = (this.data.attackers || []).slice(0, 6).map((a) => {
       const loc = Geo.get(a.ip);
       return { label: a.ip, value: a.events, cls: sevOf(a.max_severity),
         sub: loc === undefined ? "…" : loc === null ? "no geo entry" : loc.city,
@@ -919,7 +965,7 @@ const Dash = {
   renderRules() {
     const box = $("#rules-chart");
     if (!box) return;
-    const rows = this.data.top_rules.map((r) => ({ label: r.name || r.rule_id, sub: `${r.rule_id} · ${r.open} open`, value: r.alerts, cls: sevOf(r.severity) }));
+    const rows = (this.data.top_rules || []).map((r) => ({ label: r.name || r.rule_id, sub: `${r.rule_id} · ${r.open} open`, value: r.alerts, cls: sevOf(r.severity) }));
     if (!rows.length) { box.replaceChildren(el("p", { class: "empty-note" }, "No rule has fired yet.")); return; }
     // The rules column is a third of the board. A side label cannot hold these names, so the
     // name sits on its own line and the bar uses the full width under it.
@@ -1005,10 +1051,12 @@ const Dash = {
   renderBoard() {
     const box = $("#board");
     if (!box) return;
-    box.replaceChildren(...incidentBoard(Live.incidents, this.data ? this.data.alerts : [], 5));
+    const inc = Live.incidents;
+    box.replaceChildren(...incidentBoard(inc, this.data ? this.data.alerts : [], 5));
     const meta = $("#board-meta");
-    meta.replaceChildren(Live.incidents.state === "ok" ? el("a", { href: "#incidents", class: "muted" }, "all incidents →")
-      : chip(Live.incidents.state === "loading" ? "LOADING" : "INCIDENTS PENDING · SHOWING ALERTS", "pendingchip"));
+    if (!meta) return;
+    meta.replaceChildren(inc.state === "ok" ? el("a", { href: "#incidents", class: "muted" }, "all incidents →")
+      : incidentFallbackChip(inc.state));
   },
 
   // --- health ---
@@ -1027,11 +1075,18 @@ const Dash = {
       ...checks.map(([name, s, msg, ms]) => el("div", { class: "hrow2", title: msg || "" },
         el("span", { class: `hc st-${s}` }, el("i"), el("span", { class: "sr-only" }, `${s}: `)), el("b", {}, name), el("span", { class: "muted hmsg" }, msg), el("span", { class: "hms" }, ms === null ? "" : `${ms} ms`))),
       el("div", { class: "hrow2" }, el("span", { class: `hc st-${Live.mode === "live" ? "ok" : Live.mode === "poll" ? "degraded" : "failing"}` }, el("i")),
-        el("b", {}, "stream"), el("span", { class: "muted hmsg" }, `${$("#k-live-text").textContent}${Live.subscribers ? ` · ${Live.subscribers} viewer(s)` : ""}`), el("span", { class: "hms" }, "")),
+        el("b", {}, "stream"), el("span", { class: "muted hmsg" }, `${$("#k-live-text") ? $("#k-live-text").textContent : ""}${Live.subscribers ? ` · ${Live.subscribers} viewer(s)` : ""}`), el("span", { class: "hms" }, "")),
       runs.length ? el("div", { class: "runs" }, el("span", { class: "muted" }, "detection runs"),
         el("span", { class: "rundots", role: "img", "aria-label": `${runs.length} recent runs: ${runs.filter((r) => r.status === "ok").length} ok, ${runs.filter((r) => r.status === "failed").length} failed` }, ...runs.map((r) => el("i", { class: `st-${r.status === "ok" ? "ok" : r.status === "failed" ? "failing" : "degraded"}`, title: `#${r.id} ${r.trigger} · ${r.status} · ${r.events_scanned} scanned · +${r.alerts_created}` })))) : null].filter(Boolean));
   },
 };
+
+function incidentFallbackChip(state) {
+  const label = state === "loading" ? "LOADING"
+    : state === "error" ? "INCIDENTS UNAVAILABLE · SHOWING ALERTS"
+    : "INCIDENTS PENDING · SHOWING ALERTS";
+  return chip(label, "pendingchip");
+}
 
 // Board columns shared by the dashboard panel and the incidents page.
 function incidentBoard(inc, alerts, perColumn) {
@@ -1075,7 +1130,7 @@ async function incidentsView() {
   const alerts = inc.state === "ok" ? [] : await api("/api/alerts?limit=200");
   render(
     el("div", { class: "page-head" }, el("h1", {}, "Incidents"),
-      inc.state === "ok" ? null : chip("INCIDENTS PENDING · SHOWING ALERTS", "pendingchip")),
+      inc.state === "ok" ? null : incidentFallbackChip(inc.state)),
     inc.state !== "ok" ? el("p", { class: "muted" }, inc.state === "error" ? inc.error
       : "Alerts become incidents once the correlation engine ships (GET /api/incidents). Until then this board groups alerts by status.") : null,
     el("div", { class: "board big", "data-kbd-list": "incidents" }, ...incidentBoard(inc, alerts, 50)));
