@@ -268,8 +268,10 @@ An incident detail page links to a chronological case export in JSON and Markdow
 and `.md` (viewer and above) combine the incident creation and alert-membership
 times, every linked evidence event, alert assignments and status transitions, analyst notes, and incident status
 changes and their notes. Entries carry a stable `sequence` after timestamp ordering. The JSON also includes the
-current incident and alert summaries; the Markdown is a portable timeline table. Each download is audited as
-`case_exported`.
+current incident and alert summaries, and each ATT&CK technique with its evidence level (`validated`, `mapped`,
+`disabled`, or `gap`, the same grade as coverage). The Markdown timeline is preceded by that technique table.
+Only `validated` is described as proved; `mapped` means an enabled rule names the technique and is not proof.
+Each download is audited as `case_exported`.
 
 The case is assembled from existing append-only activity, note, membership, evidence, and tamper-evident audit
 records; it creates no parallel case database. Viewer masking is applied to the structured case model before
