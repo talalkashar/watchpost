@@ -32,6 +32,19 @@ class ApiError(Exception):
         self.status = status
 
 
+def query_params(raw):
+    """One value per query key. A repeated key is a 400 that names it.
+
+    parse_qs keeps every value, and taking the first would hide the rest
+    (severity=low&severity=critical would filter as low).
+    """
+    pairs = parse_qs(raw)
+    for key, values in pairs.items():
+        if len(values) > 1:
+            raise ApiError(400, f"repeated query key '{key}'")
+    return {key: values[0] for key, values in pairs.items()}
+
+
 class Download:
     """A non-JSON response body sent as a file attachment.
 
@@ -1115,12 +1128,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not parsed.path.startswith("/api/"):
             return self._static(parsed.path)
-        self.query = {k: v[0] for k, v in parse_qs(parsed.query).items()}
         self.status = 200
         self.set_cookie = None
         self.conn = None
         self.masker = None
         try:
+            self.query = query_params(parsed.query)
             for method, pattern, fn, role, csrf in ROUTES:
                 match = pattern.match(parsed.path)
                 if match and method == self.command:
