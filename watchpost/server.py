@@ -534,7 +534,9 @@ def alert_assign(req, alert_id):
 
 @route("GET", "/api/incidents")
 def incident_list(req):
-    return incidents.list_incidents(req.conn, req.query)
+    rows, omitted = incidents.list_incidents(req.conn, req.query)
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("GET", r"/api/incidents/(\d+)")

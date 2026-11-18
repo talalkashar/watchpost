@@ -58,7 +58,8 @@ class FilterCaseTests(unittest.TestCase):
         return [row["id"] for row in rows]
 
     def incident_ids(self, **params):
-        return [row["id"] for row in list_incidents(self.conn, params)]
+        rows, _omitted = list_incidents(self.conn, params)
+        return [row["id"] for row in rows]
 
     def test_filters_bind_the_catalog_spelling(self):
         self.assertEqual(self.alert_ids(status="Open"), [1])
