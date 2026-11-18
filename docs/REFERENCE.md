@@ -407,7 +407,7 @@ Like a scheduled saved search with an alert condition: a hunt that finds somethi
 
 The rule id is `search_<name as lowercase letters and underscores>`. Its `params` are the compiled definition `{title, query, terms, group_by, threshold, window_seconds}`; `validate_params` re-parses the query and refuses stored terms that disagree with it.
 
-**Matching.** The filter runs in Python over the event dicts the engine already passes (`engine.RULE_EVENT_FIELDS`), with the hunt's SQL semantics: the same fields and value checks, a trailing `*` on an unquoted value is a prefix match, message terms mean "contains", and `NOT` keeps events missing the field. Case follows SQLite, which folds ASCII letters only: `user:` and `host:` equality, every prefix match and message contains ignore ASCII case; other equality (source, IPs, event_type) is exact. Grouping by `host` stays exact, so `WEB01` and `web01` are still two groups. `tests/test_search_rules.py` runs some 45 queries through both this matcher and `hunt.compile_query` in SQL over a varied event set (mixed case, non-ASCII, `%`/`_` in values, missing fields) and requires the same events, so the two cannot drift.
+**Matching.** The filter runs in Python over the event dicts the engine already passes (`engine.RULE_EVENT_FIELDS`), with the hunt's SQL semantics: the same fields and value checks, a trailing `*` on an unquoted value is a prefix match, message terms mean "contains", and `NOT` keeps events missing the field. Case follows SQLite, which folds ASCII letters only: `user:`, `host:`, `source:`, and `outcome:` equality, every prefix match and message contains ignore ASCII case; other equality (IPs, event_type) is exact. Grouping by `host`, `source`, and `outcome` stays exact, so `WEB01` and `web01` are still two groups, and so are `Failure` and `failure`. `tests/test_search_rules.py` runs some 45 queries through both this matcher and `hunt.compile_query` in SQL over a varied event set (mixed case, non-ASCII, `%`/`_` in values, missing fields) and requires the same events, so the two cannot drift.
 
 **Workflow and the gate.**
 
@@ -523,7 +523,7 @@ Send `{"value": 0}` the same way to turn it off. A viewer with masking on gets `
 
 | Form | Example | Meaning |
 |---|---|---|
-| `field:value` | `user:alice` | Exact match (user, host, and source ignore ASCII case; grouping by source stays the stored spelling) |
+| `field:value` | `user:alice` | Exact match (user, host, source, and outcome ignore ASCII case; grouping by source and outcome stays the stored spelling) |
 | `field:prefix*` | `host:web*` | Starts with; unquoted values only |
 | `field:"quoted"` | `user:"svc backup"` | Literal value; spaces and `*` are not special, `\"` escapes a quote |
 | word or `"phrase"` | `"invalid password"` | Message contains (`%` and `_` are literal) |

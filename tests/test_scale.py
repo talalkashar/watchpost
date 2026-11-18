@@ -104,6 +104,14 @@ class QueryPlanTests(unittest.TestCase):
         for plan in self.plans(lambda: queries.search_events(self.conn, {"source": "de*"})):
             self.assertIn("idx_events_source_nocase (source>? AND source<?)", plan)
 
+    def test_outcome_equality_uses_the_nocase_index(self):
+        self.assert_all_use(self.plans(lambda: queries.search_events(self.conn, {"outcome": "Failure"})),
+                            "idx_events_outcome_nocase (outcome=?)")
+        self.assert_all_use(self.plans(lambda: hunt.run(self.conn, {"q": "outcome:failure"})),
+                            "idx_events_outcome_nocase")
+        for plan in self.plans(lambda: queries.search_events(self.conn, {"outcome": "fail*"})):
+            self.assertIn("idx_events_outcome_nocase (outcome>? AND outcome<?)", plan)
+
 
 class HistoryOnIngestTests(unittest.TestCase):
     def test_every_rule_with_history_declares_the_types_it_reads(self):

@@ -79,14 +79,15 @@ def search_events(conn, params):
             raise QueryError(f"event_type must be one of {', '.join(sorted(EVENT_TYPES))}")
         where.append("event_type = ?")
         args.append(params["event_type"])
-    for field, column in (("source", "source"), ("host", "host"), ("user", "user"), ("batch_id", "batch_id")):
+    for field, column in (("source", "source"), ("host", "host"), ("user", "user"),
+                          ("outcome", "outcome"), ("batch_id", "batch_id")):
         if params.get(field):
             if params[field].endswith("*"):
                 where.append(f"{column} LIKE ? ESCAPE '\\'")
                 args.append(_escape_like(params[field][:-1]) + "%")
             else:
                 where.append(f"{column} = ? COLLATE NOCASE"
-                             if field in ("user", "host", "source") else f"{column} = ?")
+                             if field in ("user", "host", "source", "outcome") else f"{column} = ?")
                 args.append(params[field])
     if params.get("ip"):
         # Equality only. A trailing * is a hunt prefix, not an address, so it is 400 here.

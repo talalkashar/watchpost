@@ -230,9 +230,9 @@ def _term_sql(term, now):
         return f"{column} = ?", [address], f"{field} = {address}"
     if kind == "enum" and value not in ENUMS[field]:
         raise HuntError(f"{field} must be one of {', '.join(ENUMS[field])}")
-    # Same matching as the Events filter: account, host, and source compare case-insensitively
-    # (ASCII, like SQLite NOCASE). Grouping by source stays exact.
-    collate = " COLLATE NOCASE" if field in ("user", "host", "source") else ""
+    # Same matching as the Events filter: account, host, source, and outcome compare
+    # case-insensitively (ASCII, like SQLite NOCASE). Grouping by source and outcome stays exact.
+    collate = " COLLATE NOCASE" if field in ("user", "host", "source", "outcome") else ""
     return f"{column} = ?{collate}", [value], f"{field} = {value}"
 
 

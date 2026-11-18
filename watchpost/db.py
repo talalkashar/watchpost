@@ -56,6 +56,9 @@ CREATE INDEX IF NOT EXISTS idx_events_source_host ON events(source, host, ingest
 -- Source equality compares with COLLATE NOCASE (ASCII), the same way host does. Grouping by source
 -- stays exact and still reads the stored spelling. A source prefix uses this index too.
 CREATE INDEX IF NOT EXISTS idx_events_source_nocase ON events(source COLLATE NOCASE, ts);
+-- Outcome equality compares with COLLATE NOCASE (ASCII). Grouping by outcome stays exact.
+-- An outcome prefix uses this index too.
+CREATE INDEX IF NOT EXISTS idx_events_outcome_nocase ON events(outcome COLLATE NOCASE, ts);
 
 CREATE TABLE IF NOT EXISTS ingest_batches (
     id TEXT PRIMARY KEY,
