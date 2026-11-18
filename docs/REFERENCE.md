@@ -718,7 +718,10 @@ Alert grouping and incident correlation are deliberately separate. A reviewed pe
 the stable key used to deduplicate that rule's alerts (up to three allowlisted event fields) while retaining the
 finding's evidence event IDs. `user` and `host` in that key fold ASCII case only, so Alice and alice share a key
 and ÉRIN stays apart from érin. `src_ip` and `dest_ip` stay the stored address. `event_type` and `source` stay
-the stored spelling. Correlation still combines distinct alerts into incidents using its own entities and
+the stored spelling. A grouping preview scans the newest 10000 events by id. `events_omitted` is how many
+stored events were past that cap (0 when the table fits), and `capped` is true only when that count is not 0.
+`before` and `after` each keep the first 20 sorted keys, and `group_keys_omitted` counts the rest (0 when the set fits).
+Correlation still combines distinct alerts into incidents using its own entities and
 time window; changing an alert grouping key does not change that incident logic.
 
 **Synthetic:** all bundled data. The demo dataset and simulator scenarios (`watchpost/simulate.py`) and the files in `samples/` are invented. External IPs come from the RFC 5737 documentation ranges. Synthetic events are stored with `synthetic=1`, sourced `demo:*`, and tagged in the UI. The evaluation scores (recall and precision) measure the rules against these hand-labeled scenarios only. They say nothing about real-world accuracy.

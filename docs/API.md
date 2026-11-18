@@ -330,6 +330,8 @@ Asset fields: `id`, `name`, `kind` (`server`, `workstation`, `network`, `cloud`,
 | `POST /api/changes/{id}/review` | admin | `{decision: approve\|reject, note, evidence_digest?, acknowledge_detection_loss?}`. Approval must send the `evidence_digest` of the evidence the reviewer was shown; if the evidence changed, nothing is applied and the answer is 409. A rule change that loses a labeled detection also needs `acknowledge_detection_loss: true`. Self-review → 403; already reviewed → 409 |
 | `GET /api/evaluations` / `POST /api/evaluations` | viewer / analyst | Evaluation history / run one now |
 
+A `rule_update` that sets `grouping` includes `grouping_preview`. It scans the newest 10000 events by `id`. `events_omitted` is how many stored events were past that cap (0 when the table has 10000 or fewer). `capped` is true only when `events_omitted` is not 0. `before` and `after` each keep the first 20 sorted `group_keys`. `group_keys_omitted` is how many keys were past that cap (0 when the set fits).
+
 ## SOC dashboard and live stream
 
 | Endpoint | Role | Notes |
