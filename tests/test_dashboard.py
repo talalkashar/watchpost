@@ -228,7 +228,8 @@ class DashboardTests(ServerTestCase):
         self.assertGreater(sum(m["count"] for m in d["events_per_minute"]), 0)  # just ingested
         timeline = d["alert_timeline"]
         self.assertEqual(len(timeline["bins"]), 24)
-        self.assertEqual(sum(b["critical"] + b["high"] + b["medium"] + b["low"] for b in timeline["bins"]),
+        self.assertEqual(sum(b["critical"] + b["high"] + b["medium"] + b["low"] + b["info"]
+                             for b in timeline["bins"]),
                          d["alerts_total"])
         ips = {a["ip"] for a in d["attackers"]}
         self.assertIn("203.0.113.45", ips)

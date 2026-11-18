@@ -676,7 +676,8 @@ def _alert_timeline(conn):
 
     The window ends at the newest alert so demo data dated yesterday still shows. When
     every recent alert falls inside the last two hours (a live storyline run), it zooms
-    in to 5-minute buckets; otherwise it shows 24 hourly buckets.
+    in to 5-minute buckets; otherwise it shows 24 hourly buckets. info is its own count
+    and is not added to low. A bin with none of a severity is 0. events counts event ts.
     """
     newest = conn.execute("SELECT MAX(last_seen) FROM alerts").fetchone()[0] or \
         conn.execute("SELECT MAX(ts) FROM events").fetchone()[0]
@@ -691,7 +692,7 @@ def _alert_timeline(conn):
     end = end.replace(minute=end.minute - end.minute % minutes) + timedelta(minutes=minutes)
     start = end - timedelta(minutes=minutes * count)
     bins = [{"start": iso(start + timedelta(minutes=minutes * i)), "critical": 0, "high": 0, "medium": 0,
-             "low": 0, "events": 0} for i in range(count)]
+             "low": 0, "info": 0, "events": 0} for i in range(count)]
 
     def index(ts):
         i = int((parse_iso(ts) - start).total_seconds() // (minutes * 60))
