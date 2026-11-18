@@ -385,7 +385,7 @@ intentionally still fire on known benign look-alikes in the noise lab, so a full
 
 **Compiled form.** The detection compiles to a small JSON tree (`and`/`or`/`not`/`match`), stored as the rule's `params`, and an interpreter walks it over each event. There is no `eval` or `exec`, and no regular expression is built from the rule: wildcards are matched by a linear-time glob routine. The params are not tunable; change the YAML and import it again under a new title. The original YAML and its sha256 are stored with the rule (`sigma_rules` table, schema 9) and shown read-only on the rule card.
 
-**Findings.** Every matching event is evidence (there is no threshold). Matching events are grouped by source IP; events without one by host, then by user. Within a group, events more than an hour apart start a new finding. The rule id is `sigma_<title as lowercase letters and underscores>`, so it never collides with a built-in rule.
+**Findings.** Every matching event is evidence (there is no threshold). Matching events are grouped by source IP; events without one by host, then by user. A host or user key folds ASCII letters only, and only when that field is the key (`WEB01` and `web01` are one host `web01`; `Alice` and `alice` are one account `alice`; `ÉRIN` and `érin` stay two keys). An address stays the stored form, so `2001:DB8::1` is not folded. Value matching still uses Sigma's full case fold. Within a group, events more than an hour apart start a new finding. The rule id is `sigma_<title as lowercase letters and underscores>`, so it never collides with a built-in rule.
 
 **Workflow.** `POST /api/rules/sigma` (analyst and above) takes `{source, sample (optional), reason (optional)}`.
 

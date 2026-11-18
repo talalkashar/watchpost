@@ -35,6 +35,8 @@ MAX_COMPILED_VALUES = 2000
 MAX_COMPILED_CHARS = 128 * 1024
 SAMPLE_VALUE_LIMIT = 2048
 GROUP_GAP_SECONDS = 3600  # matching events of one group key further apart than this become separate findings
+# SQLite COLLATE NOCASE folds these letters only. Host and user group keys use the same fold.
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 RULE_PREFIX = "sigma_"
 SAMPLE_PREFIX = "sigma_sample:"
 
@@ -765,8 +767,22 @@ def matches(params, event):
 
 
 def group_key(event):
-    """Findings are grouped per source IP; events without one by host, then by user."""
-    return event.get("src_ip") or event.get("host") or event.get("user") or "unknown"
+    """Findings are grouped per source IP; events without one by host, then by user.
+
+    A host or user is folded only when that field is the key, and only ASCII letters.
+    WEB01 and web01 are one host. Alice and alice are one account. ÉRIN and érin stay
+    two keys. An address stays the stored form, so 2001:DB8::1 is not folded.
+    """
+    src = event.get("src_ip")
+    if src:
+        return src
+    host = event.get("host")
+    if host:
+        return host.translate(_ASCII_FOLD) if isinstance(host, str) else host
+    user = event.get("user")
+    if user:
+        return user.translate(_ASCII_FOLD) if isinstance(user, str) else user
+    return "unknown"
 
 
 def run(events, params):
