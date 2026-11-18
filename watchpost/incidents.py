@@ -20,8 +20,30 @@ _SEVERITY_ORDER = ("CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN
                    "WHEN 'low' THEN 3 ELSE 4 END")
 
 
+def _json_field(value, kind, fallback):
+    """Decoded JSON of `kind`, or `fallback` when the column is null, corrupt, or another type."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return fallback
+    return value if isinstance(value, kind) else fallback
+
+
+def _entity_values(value):
+    """One host or address when the column stored a string. A list keeps its non-empty strings."""
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, (list, tuple)):
+        return [item for item in value if isinstance(item, str) and item]
+    return []
+
+
 def _incident(row):
-    return row_to_dict(row, ["entities", "stages"])
+    item = row_to_dict(row)
+    item["entities"] = _json_field(item.get("entities"), dict, {})
+    item["stages"] = _json_field(item.get("stages"), list, [])
+    return item
 
 
 def _technique_objects(raw, include_unlisted=False):
@@ -202,8 +224,8 @@ def get_incident(conn, incident_id, *, include_unlisted=False):
         " JOIN incident_alerts ia ON ia.alert_id = ae.alert_id"
         " WHERE ia.incident_id = ? AND e.dest_ip IS NOT NULL AND e.dest_ip != ''", (incident_id,))
     incident["assets"] = assets.for_entities(
-        conn, incident["entities"].get("host"),
-        chain(incident["entities"].get("src_ip") or (), (row[0] for row in addresses)))
+        conn, _entity_values(incident["entities"].get("host")),
+        chain(_entity_values(incident["entities"].get("src_ip")), (row[0] for row in addresses)))
     return incident
 
 
@@ -218,14 +240,18 @@ def update_status(conn, incident_id, actor, status, note=None):
             raise QueryError("incident not found", 404)
         now = now_iso()
         if status == "resolved":
-            conn.execute("UPDATE incidents SET status = ?, resolved_at = ?, updated_at = ? WHERE id = ?",
-                         (status, now, now, incident_id))
+            # A note added after resolve must not move the time the incident page shows.
+            conn.execute(
+                "UPDATE incidents SET status = ?, resolved_at = COALESCE(resolved_at, ?), updated_at = ?"
+                " WHERE id = ?",
+                (status, now, now, incident_id))
         else:
             conn.execute("UPDATE incidents SET status = ?, resolved_at = NULL,"
                          " assignee = CASE WHEN ? = 'investigating' THEN ? ELSE assignee END, updated_at = ?"
                          " WHERE id = ?", (status, status, actor, now, incident_id))
+        recorded = note.strip() if note else None
         audit(conn, actor, "incident_status_changed", str(incident_id),
-              {"from": row["status"], "to": status, "note": note.strip() if note else None})
+              {"from": row["status"], "to": status, "note": recorded or None})
     return _incident(conn.execute("SELECT * FROM incidents WHERE id = ?", (incident_id,)).fetchone())
 
 
