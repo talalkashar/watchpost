@@ -64,6 +64,22 @@ class QueryError(ValueError):
         self.status = status
 
 
+# Same four words as hunt.FLAGS. ASCII letters only. Not str.lower().
+_SYNTHETIC_FLAGS = {"1": 1, "true": 1, "0": 0, "false": 0}
+
+
+def synthetic_flag(value):
+    """The bound 0 or 1 when `value` is one of the hunt flag words.
+
+    `True` is `true` and `FALSE` is `false`. A blank, `yes`, `trüe`, or any
+    other present value is QueryError naming those four words.
+    """
+    folded = value.translate(_ASCII_FOLD) if isinstance(value, str) else None
+    if folded not in _SYNTHETIC_FLAGS:
+        raise QueryError("synthetic must be 0, 1, true or false")
+    return _SYNTHETIC_FLAGS[folded]
+
+
 def catalog_name(value, names):
     """The catalog spelling when `value` matches one name by ASCII case, else None.
 
@@ -179,9 +195,11 @@ def search_events(conn, params):
             raise QueryError(f"q must be at most {MAX_SEARCH_Q} characters")
         where.append("message LIKE ? ESCAPE '\\'")
         args.append("%" + _escape_like(needle) + "%")
-    if params.get("synthetic") in ("0", "1"):
+    # A present flag is the hunt set. `true` used to be ignored, so the list looked filtered.
+    # An absent key stays unfiltered. The caller passes a blank `synthetic=` as "".
+    if "synthetic" in params:
         where.append("synthetic = ?")
-        args.append(int(params["synthetic"]))
+        args.append(synthetic_flag(params["synthetic"]))
     # since_id: only events stored after that id, newest stored first (the dashboard's polling fallback).
     since_id = _int(params.get("since_id"), "since_id", None, 0, 2**63 - 1)
     if since_id is not None:

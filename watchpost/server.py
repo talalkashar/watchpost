@@ -10,7 +10,7 @@ import sqlite3
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, unquote_plus, urlparse
 
 from . import (__version__, assets, attack, auth, case_record, dashboard_views, ecs, engine, entities, geo, hunt, improve, incidents,
                masking, portability, queries, report, search_rules, sigma, simulate, sources, storyline, stream,
@@ -68,7 +68,36 @@ def query_params(raw):
     for key, values in pairs.items():
         if len(values) > 1:
             raise ApiError(400, f"repeated query key '{key}'")
-    return {key: values[0] for key, values in pairs.items()}
+    params = {key: values[0] for key, values in pairs.items()}
+    # parse_qs drops a blank value, so `synthetic=` never arrived and event
+    # search treated the filter as absent. Keep that one empty value. Two
+    # blanks are a repeated key. Scan the raw pieces so a query with no
+    # synthetic key still calls parse_qs once.
+    if "synthetic" not in params:
+        blank = _blank_synthetic(raw)
+        if blank is not None:
+            params["synthetic"] = blank
+    return params
+
+
+def _blank_synthetic(raw):
+    """`""` when a `synthetic` key was present and blank, else None.
+
+    Two blanks raise the same repeated-key 400 as two copies of any other
+    value. A non-blank value is already in the parsed params, so this is
+    only called when parse_qs dropped every copy.
+    """
+    found = False
+    for piece in raw.split("&"):
+        name, sep, value = piece.partition("=")
+        if unquote_plus(name) != "synthetic":
+            continue
+        if (unquote_plus(value) if sep else "") != "":
+            continue
+        if found:
+            raise ApiError(400, "repeated query key 'synthetic'")
+        found = True
+    return "" if found else None
 
 
 class Download:
