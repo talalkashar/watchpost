@@ -65,8 +65,10 @@ def search_events(conn, params):
         where.append("ts <= ?")
         args.append(_ts(params["end"], "end"))
     if params.get("severity"):
-        levels = params["severity"].split(",")
-        if not set(levels) <= set(SEVERITIES):
+        # One level or a comma list. Spaces around a name are ignored, as on alerts and incidents.
+        # A blank piece is invalid, same as an unknown name.
+        levels = [part.strip() for part in params["severity"].split(",")]
+        if not levels or not set(levels) <= set(SEVERITIES):
             raise QueryError(f"severity must be from {', '.join(SEVERITIES)}")
         if params.get("severity_mode") == "min" and len(levels) == 1:
             levels = SEVERITIES[SEVERITIES.index(levels[0]):]
