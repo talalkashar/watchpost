@@ -1884,16 +1884,18 @@ function sourceHealthCard(s) {
   if (!s) return el("div", { class: "card", id: "source-health" }, el("h2", {}, "Log source health"), el("p", { class: "muted" }, "Could not load source health."));
   const t = s.thresholds;
   const where = (r) => `${r.source}${r.host ? ` on ${r.host}` : ""}`;
-  const rows = s.sources.map((r) => ({ cells: [
+  const rows = s.sources.map((r) => {
+    const maint = Array.isArray(r.maintenance) ? r.maintenance[0] : r.maintenance;
+    return { cells: [
     el("span", {}, el("code", {}, r.source), " ", synth(r.synthetic)),
     r.host ?? el("span", { class: "muted" }, "(no host)"),
     el("span", { class: "row" }, el("span", { class: `pill ${SOURCE_STATUS[r.status]}` }, r.status),
-      r.maintenance ? el("span", { class: "pill st-pending", title: r.maintenance.reason }, `maintenance until ${fmtTime(r.maintenance.effective_end)}`) : null),
+      maint ? el("span", { class: "pill st-pending", title: maint.reason }, `maintenance until ${fmtTime(maint.effective_end)}`) : null),
     el("time", { datetime: r.last_seen, title: fmtTime(r.last_seen) }, agoText(r.last_seen)),
     durationText(r.cadence_seconds), { num: r.events_24h },
     el("span", {}, r.reasons.join("; "),
       r.status === "late" || r.status === "silent"
-        ? [" ", el("a", { href: huntHref(sourceHunt(r)), "aria-label": `Hunt its events: ${where(r)}` }, "Hunt its events")] : null)] }));
+        ? [" ", el("a", { href: huntHref(sourceHunt(r)), "aria-label": `Hunt its events: ${where(r)}` }, "Hunt its events")] : null)] }; });
   const card = el("div", { class: "card", id: "source-health" },
     el("h2", {}, "Log source health"),
     el("p", { class: "muted" }, `Each source and host, by when its events arrived (not their timestamps) against the clock now. Cadence is the median gap between arrivals. `
