@@ -33,6 +33,9 @@ TOP_RULE_LIMIT = 10
 # Dashboard alert board is this many alerts. Not resolved first, then severity,
 # then last_seen. board_omitted is how many alerts were past that cap.
 BOARD_LIMIT = 60
+# Dashboard recent events are this many, newest by ts, then id.
+# recent_events_omitted is how many stored events were past that cap.
+RECENT_LIMIT = 60
 _ATTACKER_FROM = (
     " FROM alerts a JOIN alert_events ae ON ae.alert_id = a.id"
     " JOIN events e ON e.id = ae.event_id WHERE e.src_ip IS NOT NULL")
@@ -600,10 +603,11 @@ def dashboard(conn):
         + f" DESC, last_seen DESC LIMIT {BOARD_LIMIT}")]
     board_omitted = one("SELECT COUNT(*) FROM alerts") - len(board)
     recent = [dict(r) for r in conn.execute(
-        f"SELECT {EVENT_FIELDS} FROM events ORDER BY ts DESC, id DESC LIMIT 60")]
+        f"SELECT {EVENT_FIELDS} FROM events ORDER BY ts DESC, id DESC LIMIT {RECENT_LIMIT}")]
+    events_total = one("SELECT COUNT(*) FROM events")
     return {
         "generated_at": now_iso(),
-        "events_total": one("SELECT COUNT(*) FROM events"),
+        "events_total": events_total,
         "synthetic_events": one("SELECT COUNT(*) FROM events WHERE synthetic = 1"),
         "alerts_open": one("SELECT COUNT(*) FROM alerts WHERE status = 'open'"),
         "alerts_investigating": one("SELECT COUNT(*) FROM alerts WHERE status = 'investigating'"),
@@ -619,4 +623,5 @@ def dashboard(conn):
         "alerts": board,
         "board_omitted": board_omitted,
         "recent_events": recent,
+        "recent_events_omitted": events_total - len(recent),
     }
