@@ -51,7 +51,7 @@ class StatsTests(unittest.TestCase):
         self.assertEqual(data["kind"], "stats")
         self.assertEqual(data["columns"], ["src_ip", "count"])
         self.assertEqual(data["rows"], [["10.0.0.5", 4], ["203.0.113.45", 2], ["10.0.0.6", 1]])
-        self.assertFalse(data["truncated"])
+        self.assertEqual((data["truncated"], data["groups_omitted"]), (False, 0))
         self.assertEqual(data["query"], "event_type:auth_failure | stats count by src_ip")
         self.assertEqual(data["filter"], "event_type:auth_failure")
         self.assertEqual([t["text"] for t in data["terms"]], ["event_type = auth_failure"])
@@ -65,6 +65,7 @@ class StatsTests(unittest.TestCase):
         self.assertEqual(self.run_q("event_type:auth_failure | stats count by src_ip,host")["rows"], data["rows"])
         total = self.run_q("| stats count")
         self.assertEqual((total["columns"], total["rows"]), (["count"], [[len(EVENTS)]]))
+        self.assertEqual((total["truncated"], total["groups_omitted"]), (False, 0))
 
     def test_dc_and_count_distinct(self):
         data = self.run_q("| stats count, dc(user) by src_ip")
@@ -90,9 +91,33 @@ class StatsTests(unittest.TestCase):
         conn = memory_db(rows)
         self.addCleanup(conn.close)
         data = hunt.run(conn, {"q": "| stats count by src_ip"}, now=NOW)
-        self.assertEqual((len(data["rows"]), data["truncated"]), (1000, True))
+        self.assertEqual((len(data["rows"]), data["truncated"], data["groups_omitted"]), (1000, True, 3))
         data = hunt.run(conn, {"q": "src_ip:10.9.0.* | stats count by src_ip"}, now=NOW)
-        self.assertEqual((len(data["rows"]), data["truncated"]), (250, False))
+        self.assertEqual((len(data["rows"]), data["truncated"], data["groups_omitted"]), (250, False, 0))
+
+    def test_groups_omitted_names_the_group_past_the_cap(self):
+        # One event per account, so the order is the folded name. The last name is the one left out.
+        # An event with no account is not a group and is not omitted.
+        rows = [("2026-10-07T09:00:00.000Z", "auth_failure", f"user-{n:04d}", "203.0.113.10", "web01", None, "d")
+                for n in range(1001)]
+        rows.append(("2026-10-07T09:00:00.000Z", "auth_failure", None, "203.0.113.10", "web01", None, "blank"))
+        conn = memory_db(rows)
+        self.addCleanup(conn.close)
+        data = hunt.run(conn, {"q": "| stats count by user"}, now=NOW)
+        self.assertEqual(len(data["rows"]), 1000)
+        self.assertEqual((data["truncated"], data["groups_omitted"]), (True, 1))
+        self.assertEqual(data["rows"][0], ["user-0000", 1])
+        self.assertEqual(data["rows"][-1], ["user-0999", 1])
+        self.assertNotIn("user-1000", [row[0] for row in data["rows"]])
+        exact = memory_db(rows[:1000])
+        self.addCleanup(exact.close)
+        fitted = hunt.run(exact, {"q": "| stats count by user"}, now=NOW)
+        self.assertEqual((len(fitted["rows"]), fitted["truncated"], fitted["groups_omitted"]), (1000, False, 0))
+        self.assertEqual(fitted["rows"][-1], ["user-0999", 1])
+        empty = self.run_q("user:nobody | stats count by src_ip")
+        self.assertEqual((empty["rows"], empty["truncated"], empty["groups_omitted"]), ([], False, 0))
+        text = (Path(__file__).resolve().parent.parent / "docs" / "REFERENCE.md").read_text()
+        self.assertIn("`groups_omitted` is how many groups were past that cap", text)
 
 
 class TopTests(unittest.TestCase):
@@ -400,6 +425,9 @@ class HuntStatsApiTests(ServerTestCase):
         self.assertEqual((data["kind"], data["rows"][0][0]), ("top", "10.0.0.5"))
         status, data, _ = viewer.get("/api/hunt?q=" + quote("| stats count by user, host"))
         self.assertEqual((status, data["kind"]), (200, "stats"))
+        self.assertEqual((data["truncated"], data["groups_omitted"]), (False, 0))
+        status, plain, _ = viewer.get("/api/hunt?q=" + quote("| stats count"))
+        self.assertEqual((status, plain["groups_omitted"], plain["truncated"]), (200, 0, False))
         self.assertEqual(viewer.post("/api/hunt/saved", {"name": "v", "query": "| top user"})[0], 403)
 
     def test_bad_stage_is_a_400(self):

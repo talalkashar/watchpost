@@ -418,19 +418,31 @@ def _aggregate_sql(field, column):
 
 
 def _stats(conn, where, args, stage):
+    """One row per group, largest first, at most MAX_GROUPS rows.
+
+    `groups_omitted` is how many groups were past that cap (0 when the list fits, including a
+    stats with no `by`). `truncated` is true exactly when that count is not 0. Events with no
+    value in a `by` field are not groups. The row order stays count, then the group values.
+    """
     by = stage["by"]
     exprs = [_group_expr(f, c) for f, c in by]
     selects = exprs + [_aggregate_sql(field, column) for _, field, column in stage["aggregates"]]
     # NULL stays on the stored column. lower(NULL) is NULL, and the column can use an index.
     sql = f"SELECT {', '.join(selects)} FROM events{_where(where, [f'{c} IS NOT NULL' for _, c in by])}"
     if by:
+        # Count every group, then read only the capped page. The page query stays last so a plan
+        # check still sees the grouped SELECT.
+        grouped = f"SELECT 1 FROM events{_where(where, [f'{c} IS NOT NULL' for _, c in by])} GROUP BY {', '.join(exprs)}"
+        total = conn.execute(f"SELECT COUNT(*) FROM ({grouped})", args).fetchone()[0]
         order = [f"{len(by) + 1} DESC"] + [str(n + 1) for n in range(len(by))]
         sql += f" GROUP BY {', '.join(exprs)} ORDER BY {', '.join(order)} LIMIT ?"
-        rows = [list(r) for r in conn.execute(sql, args + [MAX_GROUPS + 1])]
+        rows = [list(r) for r in conn.execute(sql, args + [MAX_GROUPS])]
+        omitted = total - len(rows)
     else:
         rows = [list(conn.execute(sql, args).fetchone())]
+        omitted = 0
     return {"columns": [f for f, _ in by] + [name for name, _, _ in stage["aggregates"]],
-            "rows": rows[:MAX_GROUPS], "truncated": len(rows) > MAX_GROUPS}
+            "rows": rows, "truncated": omitted != 0, "groups_omitted": omitted}
 
 
 def _top(conn, where, args, stage):
