@@ -275,7 +275,7 @@ The dashboard also reads `GET /api/incidents`, `GET /api/attack/coverage`, and `
 | Endpoint | Role | Notes |
 |---|---|---|
 | `GET /api/health` | public | `{status, checks: {name: status}}`; HTTP 503 when failing. `checks` includes `syslog` while the listener is enabled and always includes `storyline` |
-| `GET /api/health/details` | viewer | Full checks with guidance, recent redacted errors, recent detection runs |
+| `GET /api/health/details` | viewer | Full checks with guidance, a `means` sentence (what failing or degraded means on this demo), recent redacted errors, recent detection runs |
 | `GET /api/tokens` / `POST /api/tokens` | admin | `{name}` → `{token}` (shown once; only a SHA-256 hash is stored) |
 | `POST /api/tokens/{id}/revoke` | admin | |
 | `GET /api/audit` | admin | Last 200 audit entries |

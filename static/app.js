@@ -1795,6 +1795,12 @@ async function coverageView() {
 }
 
 // ---------- health ----------
+// The server owns the sentence. A blank or non-string value draws nothing.
+function checkMeans(check) {
+  const text = typeof check?.means === "string" ? check.means.trim() : "";
+  return text;
+}
+
 // ---------- log source health ----------
 // GET /api/sources/health: per (source, host) status computed from arrival times against the wall clock.
 const SOURCE_STATUS = { healthy: "st-ok", late: "st-degraded", silent: "st-failing", learning: "st-pending" };
@@ -1865,11 +1871,15 @@ async function health() {
           can("analyst") ? el("button", { onclick: () => guarded(async () => { const r = await api("/api/detection/run", { method: "POST" }); toast(`Detection ${r.status}: ${r.alerts_created} created, ${r.alerts_updated} updated${r.error ? ` — ${r.error}` : ""}`); health(); refreshBanner(); }) }, "Run detection (full scan)") : null,
           el("button", { class: "ghost", onclick: () => guarded(() => { refreshBanner(); return health(); }) }, "Re-check"))),
       el("p", { class: "muted" }, `Checked ${fmtTime(h.checked_at)}. Unauthenticated monitors can poll GET /api/health (statuses only; HTTP 503 when failing).`),
-      h.checks.map((c) => el("div", { class: "check" },
-        el("div", {}, el("strong", {}, c.name), el("div", {}, status(c.status)), el("div", { class: "muted" }, `${c.latency_ms} ms`)),
-        el("div", {}, el("div", {}, c.message),
-          c.guidance ? el("div", { class: "guidance" }, el("strong", {}, "What to do: "), c.guidance) : null,
-          el("details", {}, el("summary", { class: "muted" }, "details"), el("pre", {}, JSON.stringify(c.details, null, 2))))))),
+      h.checks.map((c) => {
+        const means = checkMeans(c);
+        return el("div", { class: "check" },
+          el("div", {}, el("strong", {}, c.name), el("div", {}, status(c.status)), el("div", { class: "muted" }, `${c.latency_ms} ms`)),
+          el("div", {}, el("div", {}, c.message),
+            c.guidance ? el("div", { class: "guidance" }, el("strong", {}, "What to do: "), c.guidance) : null,
+            el("details", {}, el("summary", { class: "muted" }, "details"), el("pre", {}, JSON.stringify(c.details, null, 2)))),
+          means ? el("p", { class: "check-means" }, means) : null);
+      })),
     sourceHealthCard(srcs),
     el("div", { class: "card" }, el("h2", {}, "Recent errors (redacted)"),
       table(["When", "Component", "Error", "Guidance"], h.recent_errors.map((e) => ({ cells: [fmtTime(e.created_at), e.component, el("code", {}, e.message), e.guidance ?? ""] })))),

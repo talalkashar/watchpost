@@ -225,6 +225,7 @@ tr.evidence td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .check { display: grid; grid-template-columns: 120px 1fr; gap: 8px 16px; padding: 12px 0; border-bottom: 1px solid var(--line); }
 .check:last-child { border-bottom: 0; }
 .guidance { background: var(--bg-2); border-left: 3px solid var(--warn); padding: 6px 10px; margin-top: 6px; }
+.check-means { grid-column: 1 / -1; margin: 0; color: var(--ink-2); font-size: 13px; line-height: 1.45; }
 pre { white-space: pre-wrap; word-break: break-word; background: var(--bg-2); padding: 8px; border-radius: 4px; margin: 0;
   font: 11.5px var(--mono); border: 1px solid var(--line); }
 .explain { background: var(--bg-2); border-left: 3px solid var(--line-3); padding: 8px 12px; border-radius: 3px; }
