@@ -320,7 +320,7 @@ The longest-gap terms are what keep bursty sources quiet: a nightly backup or an
 
 ### Continuous improvement (what it actually does)
 
-1. When analysts resolve an alert, they record a verdict: `true_positive`, `false_positive`, or `benign`.
+1. When analysts resolve an alert, they record a verdict: `true_positive`, `false_positive`, or `benign`. ASCII case folds onto that spelling (`False_Positive` stores `false_positive`). A blank, a missing verdict, and a non-ASCII lookalike are rejected. Incidents have no verdict.
 2. **Rules** shows per-rule alert counts and precision, TP / (TP + FP).
 3. **Suggest improvements** applies fixed heuristics. If ≥ 2 false-positive alerts share an IP (or account) that never appears in a true positive, it proposes excluding that IP (or account). Otherwise, if false-positive event counts sit below every true-positive count, it proposes a higher threshold.
 4. Each proposal, from the system or a person, is scored against the labeled synthetic scenarios before and after the change.

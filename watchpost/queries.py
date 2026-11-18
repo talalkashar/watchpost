@@ -334,9 +334,14 @@ def add_note(conn, alert_id, author, body):
 def update_status(conn, alert_id, actor, status, disposition=None, note=None):
     if status not in ALERT_STATUSES:
         raise QueryError(f"status must be one of {', '.join(ALERT_STATUSES)}")
-    if status == "resolved" and disposition not in DISPOSITIONS:
-        raise QueryError(f"resolving requires a disposition: {', '.join(DISPOSITIONS)}")
-    if status != "resolved" and disposition is not None:
+    if status == "resolved":
+        # False_Positive stores false_positive. A blank, a missing value, and a
+        # non-ASCII lookalike stay the same error. Status is not folded.
+        folded = catalog_name(disposition, DISPOSITIONS)
+        if folded is None:
+            raise QueryError(f"resolving requires a disposition: {', '.join(DISPOSITIONS)}")
+        disposition = folded
+    elif disposition is not None:
         raise QueryError("disposition can only be set when resolving")
     with transaction(conn):
         alert = conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone()
