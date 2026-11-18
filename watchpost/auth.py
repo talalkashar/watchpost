@@ -10,7 +10,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from . import totp
-from .db import audit, iso, now_iso, parse_iso, transaction, utcnow
+from .db import audit, iso, now_iso, parse_iso, row_to_dict, transaction, utcnow
 
 ROLES = {"viewer": 1, "analyst": 2, "admin": 3}
 TOKEN_CAPABILITIES = {"read", "ingest", "triage"}
@@ -409,6 +409,11 @@ def mfa_admin_reset(conn, username, actor):
 
 # Active sessions returned by the list routes, newest by created_at then sid.
 SESSION_LIST_LIMIT = 100
+# API tokens, newest by id. A revoked row in that page keeps revoked_at.
+TOKEN_LIST_LIMIT = 100
+_TOKEN_LIST_COLUMNS = (
+    "id, name, prefix, created_by, created_at, last_used_at, revoked_at, role, capabilities, expires_at"
+)
 
 
 def list_sessions(conn, username=None, current_sid=None, limit=SESSION_LIST_LIMIT, *, fold_user=False):
@@ -453,6 +458,21 @@ def revoke_session(conn, sid, actor, owner=None):
     conn.execute("DELETE FROM sessions WHERE token_hash = ?", (row["token_hash"],))
     audit(conn, actor, "session_revoked", row["username"], {"session": sid})
     return {"ok": True}
+
+
+def list_api_tokens(conn, limit=TOKEN_LIST_LIMIT):
+    """API tokens, newest id first, and how many the limit left out.
+
+    The second value is 0 when the list fits, including an empty table.
+    A later created_at on a lower id is the one left out. A revoked row
+    in the page keeps revoked_at. The rows never include the secret or
+    its hash. Callers that return the bare array send that count as
+    X-Watchpost-Omitted.
+    """
+    total = conn.execute("SELECT COUNT(*) FROM api_tokens").fetchone()[0]
+    rows = [row_to_dict(r, json_fields=("capabilities",)) for r in conn.execute(
+        "SELECT " + _TOKEN_LIST_COLUMNS + " FROM api_tokens ORDER BY id DESC LIMIT ?", (limit,))]
+    return rows, total - len(rows)
 
 
 def create_api_token(conn, name, actor, role="analyst", capabilities=None, expires_in_days=None):
