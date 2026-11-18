@@ -18,18 +18,50 @@ _SEVERITY_ORDER = ("CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN
                    "WHEN 'low' THEN 3 ELSE 4 END")
 
 
+def _json_field(value, kind, fallback):
+    """Decoded JSON of `kind`, or `fallback` when the column is null, corrupt, or another type."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return fallback
+    return value if isinstance(value, kind) else fallback
+
+
+def _entity_values(value):
+    """One host or address when the column stored a string. A list keeps its non-empty strings."""
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, (list, tuple)):
+        return [item for item in value if isinstance(item, str) and item]
+    return []
+
+
+def _technique_id_ok(value):
+    if isinstance(value, str):
+        return bool(value)
+    # bool is an int subclass. True is not a technique id.
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _incident(row):
-    return row_to_dict(row, ["entities", "stages"])
+    item = row_to_dict(row)
+    item["entities"] = _json_field(item.get("entities"), dict, {})
+    item["stages"] = _json_field(item.get("stages"), list, [])
+    return item
 
 
 def _technique_objects(raw):
-    """Technique dicts stored on a rule. Missing or non-list JSON contributes nothing."""
+    """Technique dicts stored on a rule. Missing, corrupt, or non-list JSON contributes nothing."""
     if not raw:
         return []
-    parsed = json.loads(raw) if isinstance(raw, str) else raw
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        return []
     if not isinstance(parsed, list):
         return []
-    return [t for t in parsed if isinstance(t, dict) and t.get("id")]
+    return [t for t in parsed if isinstance(t, dict) and _technique_id_ok(t.get("id"))]
 
 
 def top_techniques(conn, incident_ids):
@@ -50,7 +82,7 @@ def top_techniques(conn, incident_ids):
         for technique in _technique_objects(row["techniques"]):
             candidate = {"id": technique["id"], "name": technique.get("name") or "",
                          "tactic": technique.get("tactic") or ""}
-            key = (attack.tactic_rank(candidate["tactic"]), candidate["id"])
+            key = (attack.tactic_rank(candidate["tactic"]), str(candidate["id"]))
             current = best.get(row["incident_id"])
             if current is None or key < current[0]:
                 best[row["incident_id"]] = (key, candidate)
@@ -100,14 +132,18 @@ def linked_alerts(conn, incident_id):
 
     Case export and the incident report use this full list. Incident detail pages the same order.
     """
-    rules = {r["id"]: r for r in load_rules(conn, enabled_only=False)}
+    # Read technique JSON here. load_rules rejects the whole catalog when one rule's JSON is corrupt.
+    rules = {
+        row["id"]: (row["name"], _technique_objects(row["techniques"]))
+        for row in conn.execute("SELECT id, name, techniques FROM rules")
+    }
     alerts = [alert_row(r) for r in conn.execute(
         "SELECT a.* FROM alerts a JOIN incident_alerts ia ON ia.alert_id = a.id WHERE ia.incident_id = ?"
         " ORDER BY a.first_seen, a.id", (incident_id,))]
     for alert in alerts:
-        rule = rules.get(alert["rule_id"]) or {}
-        alert["rule_name"] = rule.get("name", alert["rule_id"])
-        alert["techniques"] = rule.get("techniques", [])
+        name, techniques = rules.get(alert["rule_id"], (None, []))
+        alert["rule_name"] = alert["rule_id"] if name is None else name
+        alert["techniques"] = techniques
     return alerts
 
 
@@ -120,8 +156,17 @@ def get_incident(conn, incident_id):
     alerts = linked_alerts(conn, incident_id)
     techniques = {}
     for alert in alerts:
+        seen = set()
         for t in alert["techniques"]:
-            techniques.setdefault(t["id"], {**t, "alert_ids": []})["alert_ids"].append(alert["id"])
+            technique_id = t["id"]
+            if technique_id in seen:
+                continue
+            seen.add(technique_id)
+            entry = techniques.get(technique_id)
+            if entry is None:
+                entry = {**t, "name": t.get("name") or "", "tactic": t.get("tactic") or "", "alert_ids": []}
+                techniques[technique_id] = entry
+            entry["alert_ids"].append(alert["id"])
     shown = alerts[:INCIDENT_ALERT_LIMIT]
 
     event_alerts = {}
@@ -140,7 +185,7 @@ def get_incident(conn, incident_id):
         " JOIN incident_alerts ia ON ia.alert_id = ae.alert_id WHERE ia.incident_id = ?",
         (incident_id,)).fetchone()["n"]
 
-    ordered = sorted(techniques.values(), key=lambda t: (attack.tactic_rank(t["tactic"]), t["id"]))
+    ordered = sorted(techniques.values(), key=lambda t: (attack.tactic_rank(t["tactic"]), str(t["id"])))
     incident["alerts"] = shown
     incident["alerts_omitted"] = len(alerts) - len(shown)
     incident["events"] = events
@@ -148,8 +193,8 @@ def get_incident(conn, incident_id):
     incident["timeline"] = [{
         "ts": a["first_seen"], "last_seen": a["last_seen"], "alert_id": a["id"], "rule_id": a["rule_id"],
         "title": a["title"], "severity": a["severity"], "status": a["status"],
-        "tactics": attack.tactic_order(t["tactic"] for t in a["techniques"]),
-        "techniques": [t["id"] for t in a["techniques"]],
+        "tactics": attack.tactic_order(t.get("tactic") or "" for t in a["techniques"]),
+        "techniques": list(dict.fromkeys(t["id"] for t in a["techniques"])),
     } for a in shown]
     incident["techniques"] = ordered
     incident["techniques_by_tactic"] = [
@@ -158,10 +203,18 @@ def get_incident(conn, incident_id):
     ]
     incident["escalated"] = len(incident["stages"]) >= 3
     incident["correlation_rule"] = correlate.rule_summary()
-    # Assets behind the incident: by host name and by the addresses its evidence reached.
+    # The event list above is capped. Addresses the incident reached still count past that page.
+    dest_ips = {
+        row["dest_ip"] for row in conn.execute(
+            "SELECT DISTINCT e.dest_ip AS dest_ip FROM events e"
+            " JOIN alert_events ae ON ae.event_id = e.id"
+            " JOIN incident_alerts ia ON ia.alert_id = ae.alert_id"
+            " WHERE ia.incident_id = ? AND e.dest_ip IS NOT NULL AND e.dest_ip != ''",
+            (incident_id,))
+    }
     incident["assets"] = assets.for_entities(
-        conn, incident["entities"].get("host"),
-        sorted({e["dest_ip"] for e in events if e.get("dest_ip")} | set(incident["entities"].get("src_ip") or [])))
+        conn, _entity_values(incident["entities"].get("host")),
+        sorted(dest_ips | set(_entity_values(incident["entities"].get("src_ip")))))
     return incident
 
 
@@ -176,14 +229,18 @@ def update_status(conn, incident_id, actor, status, note=None):
             raise QueryError("incident not found", 404)
         now = now_iso()
         if status == "resolved":
-            conn.execute("UPDATE incidents SET status = ?, resolved_at = ?, updated_at = ? WHERE id = ?",
-                         (status, now, now, incident_id))
+            # A note added after resolve must not move the time the incident page shows.
+            conn.execute(
+                "UPDATE incidents SET status = ?, resolved_at = COALESCE(resolved_at, ?), updated_at = ?"
+                " WHERE id = ?",
+                (status, now, now, incident_id))
         else:
             conn.execute("UPDATE incidents SET status = ?, resolved_at = NULL,"
                          " assignee = CASE WHEN ? = 'investigating' THEN ? ELSE assignee END, updated_at = ?"
                          " WHERE id = ?", (status, status, actor, now, incident_id))
+        recorded = note.strip() if note else None
         audit(conn, actor, "incident_status_changed", str(incident_id),
-              {"from": row["status"], "to": status, "note": note.strip() if note else None})
+              {"from": row["status"], "to": status, "note": recorded or None})
     return _incident(conn.execute("SELECT * FROM incidents WHERE id = ?", (incident_id,)).fetchone())
 
 
