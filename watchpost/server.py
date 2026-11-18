@@ -42,6 +42,8 @@ SUPPRESSIONS_LIMIT = 100
 WINDOWS_LIMIT = 100
 # Evaluation history, newest by id.
 EVALUATIONS_LIMIT = 20
+# One rule's versions, newest by version. An unknown rule is an empty array.
+RULE_HISTORY_LIMIT = 50
 OMITTED_HEADER = "X-Watchpost-Omitted"
 
 
@@ -728,8 +730,9 @@ def _sigma_detail(conn, rule):
 
 @route("GET", r"/api/rules/([a-z_]+)/history")
 def rule_history(req, rule_id):
-    rows = req.conn.execute("SELECT * FROM rule_history WHERE rule_id = ? ORDER BY version DESC", (rule_id,))
-    return [row_to_dict(r, ["params", "grouping"]) for r in rows]
+    rows, omitted = improve.list_rule_history(req.conn, rule_id, RULE_HISTORY_LIMIT)
+    _set_omitted(req, omitted)
+    return rows
 
 
 def _backtest_quota(req, limiter, cost=1):
