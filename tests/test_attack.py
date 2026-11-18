@@ -25,9 +25,26 @@ class CatalogTests(unittest.TestCase):
 
     def test_tactic_order(self):
         names = [t["name"] for t in attack.tactics()]
-        self.assertEqual((names[0], names[-1], len(names)), ("Reconnaissance", "Impact", 14))
+        self.assertEqual((names[0], names[-1], len(names)), ("Reconnaissance", "Impact", 15))
+        priv = names.index("Privilege Escalation")
+        self.assertEqual(names[priv:priv + 4],
+                         ["Privilege Escalation", "Stealth", "Defense Impairment", "Credential Access"])
         self.assertEqual(attack.tactic_order(["Exfiltration", "Reconnaissance", "Credential Access", "Exfiltration"]),
                          ["Reconnaissance", "Credential Access", "Exfiltration"])
+
+    def test_revoked_ids_resolve_to_current_attack(self):
+        cloud = {
+            "id": "T1685.002",
+            "name": "Disable or Modify Tools: Disable or Modify Cloud Log",
+            "tactic": "Defense Impairment",
+        }
+        tools = {"id": "T1685", "name": "Disable or Modify Tools", "tactic": "Defense Impairment"}
+        self.assertEqual(attack.technique("T1562.008"), cloud)
+        self.assertEqual(attack.technique("T1685.002"), cloud)
+        self.assertEqual(attack.technique("T1562.006"), tools)
+        self.assertEqual(attack.technique("T1685"), tools)
+        self.assertNotIn("T1562.006", attack.TECHNIQUES)
+        self.assertNotIn("T1562.008", attack.TECHNIQUES)
 
     def test_coverage(self):
         rule_list = [{**r, "enabled": r["id"] != "web_scanner"} for r in rules.DEFAULT_RULES]
@@ -147,10 +164,11 @@ class ScenarioTechniqueTests(unittest.TestCase):
                     self.assertEqual(tags, [])
                     continue
                 self.assertTrue(tags)
+                canonical = {attack.technique(t)["id"] for t in tags}
                 mapped = {t["id"] for rid in spec["expected"] for r in rules.DEFAULT_RULES if r["id"] == rid
                           for t in r["techniques"]}
                 # Every tag is a catalog technique that one of the scenario's expected rules maps to.
-                self.assertLessEqual(set(tags), mapped)
+                self.assertLessEqual(canonical, mapped)
 
     def test_default_rules_on_the_labeled_scenarios(self):
         conn = connect(":memory:")
@@ -175,13 +193,14 @@ class ScenarioTechniqueTests(unittest.TestCase):
         layer = {t["techniqueID"]: t for t in attack.navigator_layer(result)["techniques"]}
         self.assertIn(by_id["T1190"]["why"], layer["T1190"]["comment"])
         self.assertNotIn("never exploits", layer["T1110"]["comment"])
-        self.assertEqual(len(attack.TECHNIQUES), 20)  # milestone 5 added T1562.008, milestone 17 T1562.006
+        self.assertEqual(len(attack.TECHNIQUES), 20)  # cloud-log and log-source rules, now T1685.002 and T1685
         self.assertEqual(result["summary"]["levels"],
                          {"validated": len(attack.TECHNIQUES) - 3, "mapped": 3, "disabled": 0, "gap": 0})
-        # Each milestone-5 rule proves its technique with its own scenario, not by borrowing another rule's.
-        self.assertEqual(by_id["T1562.008"]["scenarios"], ["logging_disabled"])
-        self.assertEqual({r["id"]: r["proves"] for r in by_id["T1562.008"]["rules"]},
+        # Each of those rules proves its technique with its own scenario, not by borrowing another rule's.
+        self.assertEqual(by_id["T1685.002"]["scenarios"], ["logging_disabled"])
+        self.assertEqual({r["id"]: r["proves"] for r in by_id["T1685.002"]["rules"]},
                          {"cloud_logging_disabled": ["logging_disabled"]})
+        self.assertEqual(by_id["T1685"]["scenarios"], ["log_source_stops"])
         proves = {r["id"]: r["proves"] for r in by_id["T1078.004"]["rules"]}
         self.assertEqual(proves["admin_action_from_new_source"], ["admin_new_source"])
         self.assertEqual(proves["cloud_iam_change_by_new_principal"], ["cloud_new_principal"])
@@ -241,6 +260,8 @@ class NavigatorLayerTests(unittest.TestCase):
         by_id = {t["techniqueID"]: t for t in self.layer({"brute_force_ip": 3, "success_after_failures": 2})["techniques"]}
         self.assertEqual(set(by_id), set(attack.TECHNIQUES))
         self.assertEqual((by_id["T1110.001"]["score"], by_id["T1110.001"]["tactic"]), (3, "credential-access"))
+        self.assertEqual(by_id["T1685"]["tactic"], "defense-impairment")
+        self.assertEqual(by_id["T1685.002"]["tactic"], "defense-impairment")
         self.assertEqual(by_id["T1110"]["score"], 2)
         self.assertEqual(by_id["T1046"]["score"], 0)
         self.assertTrue(by_id["T1110.001"]["comment"].startswith("Validated"))

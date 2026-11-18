@@ -12,7 +12,8 @@ TACTICS = [
     ("TA0002", "Execution"),
     ("TA0003", "Persistence"),
     ("TA0004", "Privilege Escalation"),
-    ("TA0005", "Defense Evasion"),
+    ("TA0005", "Stealth"),
+    ("TA0112", "Defense Impairment"),
     ("TA0006", "Credential Access"),
     ("TA0007", "Discovery"),
     ("TA0008", "Lateral Movement"),
@@ -34,8 +35,8 @@ TECHNIQUES = {
     "T1098.001": ("Account Manipulation: Additional Cloud Credentials", "Persistence"),
     "T1136.003": ("Create Account: Cloud Account", "Persistence"),
     "T1548.003": ("Abuse Elevation Control Mechanism: Sudo and Sudo Caching", "Privilege Escalation"),
-    "T1562.006": ("Impair Defenses: Indicator Blocking", "Defense Evasion"),
-    "T1562.008": ("Impair Defenses: Disable or Modify Cloud Logs", "Defense Evasion"),
+    "T1685": ("Disable or Modify Tools", "Defense Impairment"),
+    "T1685.002": ("Disable or Modify Tools: Disable or Modify Cloud Log", "Defense Impairment"),
     "T1110": ("Brute Force", "Credential Access"),
     "T1110.001": ("Brute Force: Password Guessing", "Credential Access"),
     "T1110.003": ("Brute Force: Password Spraying", "Credential Access"),
@@ -47,9 +48,17 @@ TECHNIQUES = {
 
 _TACTIC_ORDER = {name: i for i, (_, name) in enumerate(TACTICS)}
 
+# ATT&CK v19 revoked these. Rules and labeled scenarios still pass the old ids.
+_REVOKED = {"T1562.006": "T1685", "T1562.008": "T1685.002"}
+
+
+def _canonical(technique_id):
+    return _REVOKED.get(technique_id, technique_id)
+
 
 def technique(technique_id):
     """Return {"id", "name", "tactic"} for a catalog technique. Raises KeyError if unknown."""
+    technique_id = _canonical(technique_id)
     name, tactic = TECHNIQUES[technique_id]
     return {"id": technique_id, "name": name, "tactic": tactic}
 
@@ -130,6 +139,7 @@ def mapped_why(technique_id, rules, scenarios):
     `rules` are evidence rows ({"id", "enabled", "detected": [scenario names]}). `scenarios` is
     {name: {"malicious", "techniques"}}. Returns None when no enabled rule is left to explain.
     """
+    technique_id = _canonical(technique_id)
     clauses = []
     for rule in rules:
         if not rule.get("enabled"):
@@ -142,7 +152,8 @@ def mapped_why(technique_id, rules, scenarios):
                 if fact:
                     clauses.append(f"{rule['id']} detects {name}, which {fact}")
                 else:
-                    others = [t for t in scenarios[name].get("techniques") or [] if t != technique_id]
+                    others = [_canonical(t) for t in scenarios[name].get("techniques") or []
+                              if _canonical(t) != technique_id]
                     shown = f"exercises {', '.join(others)}" if others else "is not tagged with it"
                     clauses.append(f"{rule['id']} detects {name}, which {shown}, not {technique_id}")
         else:
@@ -172,7 +183,8 @@ def evidence(cov, lab_rules, scenarios):
             row = lab.get(r["id"], {})
             detected = list(row.get("detected") or [])
             proves = sorted(n for n in detected if r["enabled"] and n in scenarios
-                            and scenarios[n]["malicious"] and t["id"] in scenarios[n].get("techniques", ()))
+                            and scenarios[n]["malicious"]
+                            and t["id"] in {_canonical(tag) for tag in scenarios[n].get("techniques", ())})
             proving.update(proves)
             rules.append({**r, "verdict": row.get("verdict"), "lookalikes_tested": row.get("lookalikes_tested", []),
                           "lookalikes_fired": row.get("lookalikes_fired", []) + row.get("other_benign_fired", []),
