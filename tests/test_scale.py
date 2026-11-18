@@ -87,8 +87,12 @@ class QueryPlanTests(unittest.TestCase):
             self.assertIn("idx_events_dest_ip", plan)
 
     def test_host_and_severity_filters_use_their_indexes(self):
-        self.assert_all_use(self.plans(lambda: queries.search_events(self.conn, {"host": "web01"})),
-                            "idx_events_host")
+        self.assert_all_use(self.plans(lambda: queries.search_events(self.conn, {"host": "WEB01"})),
+                            "idx_events_host_nocase (host=?)")
+        self.assert_all_use(self.plans(lambda: hunt.run(self.conn, {"q": "host:web01"})),
+                            "idx_events_host_nocase")
+        for plan in self.plans(lambda: queries.search_events(self.conn, {"host": "web*"})):
+            self.assertIn("idx_events_host_nocase (host>? AND host<?)", plan)
         self.assert_all_use(self.plans(lambda: queries.search_events(
             self.conn, {"severity": "high", "severity_mode": "min"})), "idx_events_severity")
 

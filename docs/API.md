@@ -122,7 +122,7 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 | Param | Meaning |
 |---|---|
 | `start`, `end` | ISO timestamps (inclusive) |
-| `source`, `host`, `user`, `batch_id` | Exact match (`user` ignores case); a trailing `*` makes it a prefix match |
+| `source`, `host`, `user`, `batch_id` | Exact match (`user` and `host` ignore ASCII case, the same way the asset inventory matches a host name); a trailing `*` makes it a prefix match |
 | `ip` | Matches `src_ip` or `dest_ip` |
 | `event_type` | One normalized type |
 | `severity` | Comma list, or a single level with `severity_mode=min` for "at least" |

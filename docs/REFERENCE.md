@@ -407,7 +407,7 @@ Like a scheduled saved search with an alert condition: a hunt that finds somethi
 
 The rule id is `search_<name as lowercase letters and underscores>`. Its `params` are the compiled definition `{title, query, terms, group_by, threshold, window_seconds}`; `validate_params` re-parses the query and refuses stored terms that disagree with it.
 
-**Matching.** The filter runs in Python over the event dicts the engine already passes (`engine.RULE_EVENT_FIELDS`), with the hunt's SQL semantics: the same fields and value checks, a trailing `*` on an unquoted value is a prefix match, message terms mean "contains", and `NOT` keeps events missing the field. Case follows SQLite, which folds ASCII letters only: `user:` equality, every prefix match and message contains ignore ASCII case; other equality (host, source, IPs, event_type) is exact. `tests/test_search_rules.py` runs some 45 queries through both this matcher and `hunt.compile_query` in SQL over a varied event set (mixed case, non-ASCII, `%`/`_` in values, missing fields) and requires the same events, so the two cannot drift.
+**Matching.** The filter runs in Python over the event dicts the engine already passes (`engine.RULE_EVENT_FIELDS`), with the hunt's SQL semantics: the same fields and value checks, a trailing `*` on an unquoted value is a prefix match, message terms mean "contains", and `NOT` keeps events missing the field. Case follows SQLite, which folds ASCII letters only: `user:` and `host:` equality, every prefix match and message contains ignore ASCII case; other equality (source, IPs, event_type) is exact. Grouping by `host` stays exact, so `WEB01` and `web01` are still two groups. `tests/test_search_rules.py` runs some 45 queries through both this matcher and `hunt.compile_query` in SQL over a varied event set (mixed case, non-ASCII, `%`/`_` in values, missing fields) and requires the same events, so the two cannot drift.
 
 **Workflow and the gate.**
 
@@ -523,7 +523,7 @@ Send `{"value": 0}` the same way to turn it off. A viewer with masking on gets `
 
 | Form | Example | Meaning |
 |---|---|---|
-| `field:value` | `user:alice` | Exact match (user names ignore case, as in event search) |
+| `field:value` | `user:alice` | Exact match (user and host names ignore ASCII case, as in event search and the asset inventory) |
 | `field:prefix*` | `host:web*` | Starts with; unquoted values only |
 | `field:"quoted"` | `user:"svc backup"` | Literal value; spaces and `*` are not special, `\"` escapes a quote |
 | word or `"phrase"` | `"invalid password"` | Message contains (`%` and `_` are literal) |
@@ -697,7 +697,8 @@ What these numbers do and do not say:
   need: a week of the transfer and cloud events of the accounts involved. That is most of the per-batch
   detection time, and it grows with event density.
 - **Text search scans.** `q=` and hunt message terms are `LIKE '%text%'`, which no index serves, so they cost
-  one pass over the table (about 22 ms per 100,000 events here). Prefix searches on `host` scan too.
+  one pass over the table (about 22 ms per 100,000 events here). Host equality and `host` prefix now use
+  `idx_events_host_nocase`; those prefix numbers above were measured before that index.
 - **Very busy accounts cost more.** The user filters and entity page use an index, but the generator's busiest
   account has about a quarter of all events, so its entity page and a hunt that pairs it with a rare event type
   read tens of thousands of rows.

@@ -9,8 +9,8 @@ The filter is matched in Python over the event dicts the engine already scans (e
 with the hunt's SQL semantics: same fields and value checks, a trailing `*` on an unquoted value is a prefix
 match, message terms are "contains", NOT keeps events missing the field, and a bytes term uses the
 same >=, >, <=, < or = comparison as the hunt. Comparisons fold case the way SQLite does
-(ASCII only): user equality, every prefix match and message contains ignore ASCII case; other
-equality is exact. tests/test_search_rules.py cross-checks this matcher against hunt.compile_query in SQL.
+(ASCII only): user and host equality, every prefix match and message contains ignore ASCII case;
+other equality is exact. tests/test_search_rules.py cross-checks this matcher against hunt.compile_query in SQL.
 
 Hunt fields the engine does not load (outcome, severity, batch_id) are refused, and so are time terms: the
 window replaces them. The rule's params are the compiled definition; only `threshold` and `window_seconds`
@@ -128,9 +128,9 @@ def _predicate(term):
     if prefix is not None:
         p = _fold(prefix)
         return lambda e: _starts(e.get(column), p)
-    if field == "user":  # COLLATE NOCASE
+    if field in ("user", "host"):  # COLLATE NOCASE, ASCII only, same as the asset inventory's host names
         folded = _fold(value)
-        return lambda e: isinstance(e.get("user"), str) and _fold(e["user"]) == folded
+        return lambda e: isinstance(e.get(column), str) and _fold(e[column]) == folded
     return lambda e: e.get(column) == value
 
 
