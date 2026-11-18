@@ -1,0 +1,44 @@
+# curl or wget to a public file-drop or chat webhook (T1567). The tool and the site
+# must both be in the same command line, so a browser note about the site does not fire.
+title: Linux Exfiltration To Web Service
+id: 7f3a1c90-2b64-4e17-9d08-a11c0e100008
+status: experimental
+description: |
+  A host command used curl or wget against a paste, transfer, or webhook service.
+  That is a common way to push a file off a Linux host over HTTPS.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1567/
+tags:
+  - attack.exfiltration
+  - attack.t1567
+logsource:
+  product: linux
+  category: process_creation
+detection:
+  tool:
+    message|contains:
+      - '/usr/bin/curl '
+      - '/usr/bin/wget '
+      - 'exe="/usr/bin/curl"'
+      - 'exe="/usr/bin/wget"'
+      - 'curl http://'
+      - 'curl https://'
+      - 'wget http://'
+      - 'wget https://'
+  site:
+    message|contains:
+      - '://transfer.sh'
+      - '://pastebin.com'
+      - discord.com/api/webhooks
+      - api.telegram.org/bot
+      - '://0x0.st'
+      - '://file.io'
+      - '://mega.nz'
+      - '://temp.sh'
+      - '://dropbox.com'
+  condition: tool and site
+falsepositives:
+  - A developer uploading a file to one of these services on purpose
+level: high

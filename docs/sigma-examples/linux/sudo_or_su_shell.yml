@@ -1,0 +1,64 @@
+# Interactive root shell via sudo or su (T1548.003). A trailing space keeps "sh" off
+# shutdown, shred, and the other /bin/sh* tools. A bare command is matched with endswith.
+title: Linux Sudo Or Su To Interactive Shell
+id: 7f3a1c90-2b64-4e17-9d08-a11c0e100003
+status: experimental
+description: |
+  sudo ran a shell, interpreter, or netcat as another user, or su opened a root session.
+  Ordinary privileged commands such as systemctl restart do not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1548/003/
+tags:
+  - attack.privilege_escalation
+  - attack.t1548.003
+logsource:
+  product: linux
+  service: sudo
+detection:
+  shell_exact:
+    event.action: privilege_escalation
+    message|endswith:
+      - /bin/bash
+      - /usr/bin/bash
+      - /bin/sh
+      - /usr/bin/sh
+      - /bin/dash
+      - /usr/bin/dash
+      - /bin/zsh
+      - /usr/bin/zsh
+      - /usr/bin/python
+      - /usr/bin/python3
+      - /usr/bin/perl
+      - /usr/bin/ruby
+      - /bin/nc
+      - /usr/bin/nc
+      - /usr/bin/ncat
+      - /usr/bin/socat
+  shell_args:
+    event.action: privilege_escalation
+    message|contains:
+      - 'COMMAND=/bin/bash '
+      - 'COMMAND=/usr/bin/bash '
+      - 'COMMAND=/bin/sh '
+      - 'COMMAND=/usr/bin/sh '
+      - 'COMMAND=/bin/dash '
+      - 'COMMAND=/usr/bin/dash '
+      - 'COMMAND=/bin/zsh '
+      - 'COMMAND=/usr/bin/zsh '
+      - 'COMMAND=/usr/bin/python '
+      - 'COMMAND=/usr/bin/python3 '
+      - 'COMMAND=/usr/bin/perl '
+      - 'COMMAND=/usr/bin/ruby '
+      - 'COMMAND=/bin/nc '
+      - 'COMMAND=/usr/bin/nc '
+      - 'COMMAND=/usr/bin/ncat '
+      - 'COMMAND=/usr/bin/socat '
+  su_root:
+    event.action: privilege_escalation
+    message|startswith: '(to root) '
+  condition: shell_exact or shell_args or su_root
+falsepositives:
+  - An administrator opening a root shell during maintenance
+level: high

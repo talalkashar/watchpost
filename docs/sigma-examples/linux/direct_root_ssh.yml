@@ -1,0 +1,30 @@
+# Direct SSH acceptance for the root account (T1078.003). The account field and the sshd
+# "for root" phrase must both match, so a failed root guess does not fire.
+title: Linux Direct Root SSH Login
+id: 7f3a1c90-2b64-4e17-9d08-a11c0e100002
+status: experimental
+description: |
+  OpenSSH accepted a login as root. PermitRootLogin makes that account reachable without
+  a personal user, including from an internal jump host.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1078/003/
+tags:
+  - attack.initial_access
+  - attack.t1078.003
+logsource:
+  product: linux
+  service: sshd
+detection:
+  selection:
+    event.action: auth_success
+    user.name: root
+    message|contains:
+      - 'Accepted password for root '
+      - 'Accepted publickey for root '
+      - 'Accepted keyboard-interactive/pam for root '
+  condition: selection
+falsepositives:
+  - A break-glass root login during an outage
+level: high

@@ -1,0 +1,47 @@
+# nmap, masscan, zmap, or unicornscan on a Linux host (T1046). The path is bounded by
+# auditd quotes or by a sudo COMMAND= token so a web user-agent does not match.
+title: Linux Network Scanner Execution
+id: 7f3a1c90-2b64-4e17-9d08-a11c0e100005
+status: experimental
+description: |
+  auditd recorded a scanner binary, or sudo ran one. Service discovery from a host shell
+  is the signal; a remote scan that never executes on this host is out of scope.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1046/
+tags:
+  - attack.discovery
+  - attack.t1046
+logsource:
+  product: linux
+  category: process_creation
+detection:
+  audit:
+    event.action: process_start
+    message|contains:
+      - 'exe="/usr/bin/nmap"'
+      - 'exe="/usr/local/bin/nmap"'
+      - 'exe="/usr/bin/masscan"'
+      - 'exe="/usr/bin/zmap"'
+      - 'exe="/usr/bin/unicornscan"'
+  sudo_exact:
+    event.action: privilege_escalation
+    message|endswith:
+      - /usr/bin/nmap
+      - /usr/local/bin/nmap
+      - /usr/bin/masscan
+      - /usr/bin/zmap
+      - /usr/bin/unicornscan
+  sudo_args:
+    event.action: privilege_escalation
+    message|contains:
+      - 'COMMAND=/usr/bin/nmap '
+      - 'COMMAND=/usr/local/bin/nmap '
+      - 'COMMAND=/usr/bin/masscan '
+      - 'COMMAND=/usr/bin/zmap '
+      - 'COMMAND=/usr/bin/unicornscan '
+  condition: audit or sudo_exact or sudo_args
+falsepositives:
+  - An administrator running nmap during a change window
+level: medium

@@ -1,0 +1,38 @@
+# Stopping or wiping Linux audit and syslog (T1562.006). Restart and status commands
+# are not in the list, so a normal service bounce does not match.
+title: Linux Logging And Audit Tamper
+id: 7f3a1c90-2b64-4e17-9d08-a11c0e100007
+status: experimental
+description: |
+  A command disabled auditd, stopped rsyslog, turned off ufw logging, or deleted
+  auth or audit logs. The point is to keep events from being collected.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1562/006/
+tags:
+  - attack.defense_evasion
+  - attack.t1562.006
+logsource:
+  product: linux
+  category: process_creation
+detection:
+  selection:
+    message|contains:
+      - 'auditctl -e 0'
+      - 'auditctl -D'
+      - 'systemctl stop auditd'
+      - 'systemctl stop rsyslog'
+      - 'systemctl stop syslog.socket'
+      - 'systemctl disable auditd'
+      - 'systemctl disable rsyslog'
+      - 'service auditd stop'
+      - 'service rsyslog stop'
+      - 'ufw logging off'
+      - 'rm -f /var/log/auth.log'
+      - 'rm -rf /var/log/audit'
+      - 'truncate -s 0 /var/log/'
+  condition: selection
+falsepositives:
+  - Maintenance that deliberately stops auditd or rsyslog
+level: high

@@ -1,0 +1,35 @@
+# Successful OpenSSH login from outside the private ranges (T1133). Field names follow the
+# Watchpost subset: event.action and source.ip. logsource is informational only.
+title: Linux SSH Login From External Address
+id: 7f3a1c90-2b64-4e17-9d08-a11c0e100001
+status: experimental
+description: |
+  An accepted SSH authentication from an address outside the RFC1918 and loopback ranges.
+  Each matching event is one external login; Watchpost groups findings by source address.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1133/
+tags:
+  - attack.initial_access
+  - attack.t1133
+logsource:
+  product: linux
+  service: sshd
+detection:
+  selection:
+    event.action: auth_success
+    message|contains:
+      - 'Accepted password for '
+      - 'Accepted publickey for '
+      - 'Accepted keyboard-interactive/pam for '
+  internal:
+    source.ip|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+  condition: selection and not internal
+falsepositives:
+  - An administrator signing in from a home or hotel network
+level: medium
