@@ -131,6 +131,8 @@ class CompileTests(unittest.TestCase):
         self.assertTrue(sigma.matches(p, {"message": "GET /wp-login.php"}))
         self.assertFalse(sigma.matches(p, {"message": "GET /wp-login.php?x"}))
         p = compiled("  sel:\n    message|contains|all:\n      - ../\n      - etc/passwd\n  condition: sel\n")
+        self.assertEqual(p["detection"], {"op": "match", "field": "message", "mod": "contains", "all": True,
+                                          "values": ["../", "etc/passwd"]})
         self.assertTrue(sigma.matches(p, {"message": "GET /../../etc/passwd"}))
         self.assertFalse(sigma.matches(p, {"message": "GET /etc/passwd"}))
         p = compiled("  sel:\n    src_ip|cidr: 203.0.113.0/24\n  condition: sel\n")
@@ -145,6 +147,99 @@ class CompileTests(unittest.TestCase):
         p = compiled("  sel:\n    message: 'a\\*b'\n  condition: sel\n")  # an escaped star is literal
         self.assertTrue(sigma.matches(p, {"message": "a*b"}))
         self.assertFalse(sigma.matches(p, {"message": "axxb"}))
+
+    def test_cidr_rejects_host_bits(self):
+        for det in (
+            "  sel:\n    src_ip|cidr: 192.168.1.1/24\n  condition: sel\n",
+            "  sel:\n    src_ip|cidr: '2001:db8::1/64'\n  condition: sel\n",
+        ):
+            with self.subTest(detection=det):
+                with self.assertRaises(sigma.SigmaError) as ctx:
+                    compiled(det)
+                self.assertIn("not a CIDR", str(ctx.exception))
+        p = compiled("  sel:\n    src_ip|cidr: '2001:db8::/32'\n  condition: sel\n")
+        self.assertTrue(sigma.matches(p, {"src_ip": "2001:db8::1"}))
+        self.assertFalse(sigma.matches(p, {"src_ip": "2001:db9::1"}))
+        p = compiled("  sel:\n    src_ip|cidr: 203.0.113.9\n  condition: sel\n")  # a bare address is a /32
+        self.assertTrue(sigma.matches(p, {"src_ip": "203.0.113.9"}))
+        self.assertFalse(sigma.matches(p, {"src_ip": "203.0.113.10"}))
+        # A stored rule compiled under the old host-bit acceptance must fail closed, not widen.
+        stored = {"title": "t", "detection": {
+            "op": "match", "field": "src_ip", "mod": "cidr", "all": False, "values": ["192.168.1.1/24"],
+        }}
+        self.assertFalse(sigma.matches(stored, {"src_ip": "192.168.1.50"}))
+        self.assertFalse(sigma.matches(stored, {"src_ip": "192.168.1.1"}))
+
+    def test_empty_field_matches_star_and_empty_string(self):
+        star = compiled("  sel:\n    message: '*'\n  condition: sel\n")
+        self.assertTrue(sigma.matches(star, {"message": ""}))
+        self.assertTrue(sigma.matches(star, {"message": "x"}))
+        self.assertFalse(sigma.matches(star, {}))
+        self.assertFalse(sigma.matches(star, {"message": None}))
+        empty = compiled("  sel:\n    message: ''\n  condition: sel\n")
+        self.assertTrue(sigma.matches(empty, {"message": ""}))
+        self.assertFalse(sigma.matches(empty, {"message": "x"}))
+        self.assertFalse(sigma.matches(empty, {}))
+        for mod in ("startswith", "endswith", "contains"):
+            p = compiled(f"  sel:\n    message|{mod}: ''\n  condition: sel\n")
+            self.assertTrue(sigma.matches(p, {"message": ""}), mod)
+            self.assertTrue(sigma.matches(p, {"message": "x"}), mod)
+        one = compiled("  sel:\n    message: '?'\n  condition: sel\n")
+        self.assertFalse(sigma.matches(one, {"message": ""}))
+        self.assertTrue(sigma.matches(one, {"message": "a"}))
+        self.assertFalse(sigma.matches(one, {"message": "ab"}))
+
+    def test_windash_base64_and_base64offset(self):
+        p = compiled("  sel:\n    message|windash|contains: '-enc'\n  condition: sel\n")
+        self.assertTrue(sigma.matches(p, {"message": "powershell -enc AA"}))
+        self.assertTrue(sigma.matches(p, {"message": "powershell /enc AA"}))
+        self.assertTrue(sigma.matches(p, {"message": "powershell \u2013enc AA"}))
+        self.assertFalse(sigma.matches(p, {"message": "powershell enc AA"}))
+        # A dash between two word characters is not a Windows parameter dash.
+        inner = compiled("  sel:\n    message|windash|contains: param-name\n  condition: sel\n")
+        self.assertEqual(inner["detection"]["values"], ["param-name"])
+        self.assertFalse(sigma.matches(inner, {"message": "param/name"}))
+        # An en dash already in the rule is not a second expansion source.
+        typed = compiled("  sel:\n    message|windash|contains: '\u2013enc'\n  condition: sel\n")
+        self.assertTrue(sigma.matches(typed, {"message": "\u2013enc"}))
+        self.assertFalse(sigma.matches(typed, {"message": "-enc"}))
+        spec = compiled("  sel:\n    message|windash|contains: '-param-1 -param2'\n  condition: sel\n")
+        self.assertEqual(len(spec["detection"]["values"]), 25)
+        self.assertTrue(sigma.matches(spec, {"message": "run -param-1 /param2"}))
+        self.assertTrue(sigma.matches(spec, {"message": "run \u2013param-1 -param2"}))
+        self.assertFalse(sigma.matches(spec, {"message": "run param-1 param2"}))
+        both = compiled("  sel:\n    message|windash|contains|all:\n      - '-enc'\n      - '-w'\n"
+                        "  condition: sel\n")
+        self.assertEqual(both["detection"]["op"], "and")
+        self.assertTrue(sigma.matches(both, {"message": "powershell -enc AA -w hidden"}))
+        self.assertTrue(sigma.matches(both, {"message": "powershell /enc AA \u2013w hidden"}))
+        self.assertFalse(sigma.matches(both, {"message": "powershell -enc AA"}))
+        # windash runs before base64, so the slash form is encoded too.
+        encoded = compiled("  sel:\n    message|windash|base64: '-a'\n  condition: sel\n")
+        self.assertTrue(sigma.matches(encoded, {"message": "LWE="}))
+        self.assertTrue(sigma.matches(encoded, {"message": "L2E="}))
+        self.assertFalse(sigma.matches(encoded, {"message": "-a"}))
+        plain = compiled("  sel:\n    message|base64: foobar\n  condition: sel\n")
+        self.assertTrue(sigma.matches(plain, {"message": "Zm9vYmFy"}))
+        self.assertFalse(sigma.matches(plain, {"message": "foobar"}))
+        literal = compiled("  sel:\n    message|base64: 'x\\*y'\n  condition: sel\n")
+        self.assertTrue(sigma.matches(literal, {"message": "eCp5"}))
+        offset = compiled("  sel:\n    message|base64offset|contains: 'cmd\\?.exe'\n  condition: sel\n")
+        for frag in ("Y21kPy5leG", "NtZD8uZXhl", "jbWQ/LmV4Z"):
+            self.assertTrue(sigma.matches(offset, {"message": f"prefix {frag} suffix"}), frag)
+        self.assertFalse(sigma.matches(offset, {"message": "cmd.exe"}))
+        refused = {
+            "  sel:\n    message|windash: '-a -b -c -d'\n  condition: sel\n": "at most three",
+            "  sel:\n    message|base64: 'foo*bar'\n  condition: sel\n": "wildcard",
+            "  sel:\n    message|contains|base64: foobar\n  condition: sel\n": "unmodified",
+            "  sel:\n    message|base64: 123\n  condition: sel\n": "applies to strings",
+            "  sel:\n    src_ip|cidr|windash: 10.0.0.0/8\n  condition: sel\n": "cidr cannot",
+        }
+        for det, reason in refused.items():
+            with self.subTest(detection=det):
+                with self.assertRaises(sigma.SigmaError) as ctx:
+                    compiled(det)
+                self.assertIn(reason, str(ctx.exception))
 
     def test_conditions(self):
         det = ("  sel_a:\n    user: alice\n  sel_b:\n    src_ip: 203.0.113.9\n  other:\n    host: web01\n"
@@ -187,7 +282,7 @@ class CompileTests(unittest.TestCase):
             "  sel:\n    CommandLine: x\n  condition: sel\n": "field 'CommandLine'",
             "  sel:\n    EventID: 4625\n  condition: sel\n": "field 'EventID'",
             "  sel:\n    message|re: '.*'\n  condition: sel\n": "'re' refused",
-            "  sel:\n    message|base64: x\n  condition: sel\n": "base64",
+            "  sel:\n    message|wide: x\n  condition: sel\n": "encoding",
             "  sel:\n    message|foo: x\n  condition: sel\n": "'foo' is not supported",
             "  sel:\n    user: x\n  condition: sel | count() by src_ip > 5\n": "aggregations",
             "  sel:\n    user: x\n  condition: sel near other\n": "near",
