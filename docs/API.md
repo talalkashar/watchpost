@@ -332,6 +332,8 @@ Asset fields: `id`, `name`, `kind` (`server`, `workstation`, `network`, `cloud`,
 
 A `rule_update` that sets `grouping` includes `grouping_preview`. It scans the newest 10000 events by `id`. `events_omitted` is how many stored events were past that cap (0 when the table has 10000 or fewer). `capped` is true only when `events_omitted` is not 0. `before` and `after` each keep the first 20 sorted `group_keys`. `group_keys_omitted` is how many keys were past that cap (0 when the set fits).
 
+A new-rule preview (`backtest` on a Sigma import or a saved-search promotion, including `?dry_run=1`) keeps the first 10 sorted `group_keys`. `group_keys_omitted` is how many distinct keys were past that cap (0 when the set fits). `findings` stays the full count. `sample_findings` stays the newest 5. The scan window stays the last 7 days of stored event time.
+
 ## SOC dashboard and live stream
 
 | Endpoint | Role | Notes |
