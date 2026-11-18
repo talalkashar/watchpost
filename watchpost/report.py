@@ -20,6 +20,7 @@ LEVEL_NOTE = ("Evidence level is the labeled-scenario grade. "
               "Only validated means a scenario proved the technique. "
               "mapped means an enabled rule names it and is not proof.")
 EVIDENCE_PER_ALERT = 25
+# Merged timeline keeps this many events, earliest by ts, then id. The rest are timeline_omitted.
 TIMELINE_LIMIT = 200
 
 # Recommended response actions by ATT&CK technique id. Sub-techniques fall back to their parent id.
@@ -160,6 +161,9 @@ def _assemble(conn, kind, ident, title, alerts, extra):
     for a in alerts:
         for asset in a.get("assets") or []:
             matched.setdefault(asset["name"], asset)
+    # One row per event. A second alert that saw the same event does not add a second row.
+    ordered = sorted(timeline.values(), key=lambda e: (e["ts"], e["id"]))
+    shown = ordered[:TIMELINE_LIMIT]
     model = {
         "kind": kind, "id": ident, "title": title, "severity": severity, "status": None,
         "assets": [matched[k] for k in sorted(matched)],
@@ -170,7 +174,8 @@ def _assemble(conn, kind, ident, title, alerts, extra):
                                           "severity_note", "status", "disposition", "explanation", "first_seen",
                                           "last_seen", "event_count", "techniques", "assets")}
                    | {"evidence": a["evidence"][:EVIDENCE_PER_ALERT]} for a in alerts],
-        "timeline": sorted(timeline.values(), key=lambda e: (e["ts"], e["id"]))[:TIMELINE_LIMIT],
+        "timeline": shown,
+        "timeline_omitted": len(ordered) - len(shown),
         "techniques_by_tactic": by_tactic,
         "notes": sorted(notes, key=lambda n: (n["created_at"], n["id"])),
         "actions": actions_for([t for items in by_tactic.values() for t in items]),
@@ -285,6 +290,15 @@ def _technique_list(techniques):
     return ", ".join(_technique_phrase(t) for t in techniques)
 
 
+def timeline_note(m):
+    """How many merged events the cap dropped. None when the timeline fits, so the page stays quiet."""
+    omitted = m["timeline_omitted"]
+    if not omitted:
+        return None
+    shown = len(m["timeline"])
+    return f"First {shown} of {shown + omitted} timeline events shown."
+
+
 def to_markdown(m):
     label = "Incident" if m["kind"] == "incident" else "Alert"
     out = [f"# {label} report: {md(m['title'])}", ""]
@@ -316,6 +330,9 @@ def to_markdown(m):
     out += _md_table(["Time", "Type", "User", "Source IP", "Host", "Evidence", "Message"],
                      [[e["ts"], e["event_type"], e.get("user"), e.get("src_ip"), e.get("host"),
                        "yes" if e["is_evidence"] else "", e.get("message")] for e in m["timeline"]])
+    note = timeline_note(m)
+    if note:
+        out += ["", f"_{note}_"]
     out += ["", "## Alerts and evidence", ""]
     for a in m["alerts"]:
         out += [f"### Alert #{a['id']}: {md(a['title'])}", "",
@@ -390,6 +407,9 @@ def to_pdf_bytes(m):
               [[e["ts"], e["event_type"], e.get("user"), e.get("src_ip"), e.get("host"),
                 "*" if e["is_evidence"] else "", e.get("message")] for e in m["timeline"]],
               widths=[2.3, 1.5, 1, 1.4, 0.9, 0.4, 3.5], size=7)
+    note = timeline_note(m)
+    if note:
+        doc.text(note, size=8, color=(0.4, 0.4, 0.4))
     doc.heading("Alerts and evidence")
     for a in m["alerts"]:
         doc.text(f"Alert #{a['id']}: {a['title']}", size=11, bold=True)

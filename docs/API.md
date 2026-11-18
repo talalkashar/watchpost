@@ -248,7 +248,7 @@ viewers included (since 2.0 / F; before that, analyst and admin only). Each down
 Both formats carry the same sections: header (id, severity, status, first/last seen, generation time), summary,
 kill-chain stages (incidents only), entities (IPs, accounts, hosts), assets (inventory entries with criticality and
 sensitive-data tags; each alert also shows its asset weighting when it changed the severity), MITRE ATT&CK techniques grouped
-by tactic with the coverage evidence level on each one (the report says mapped is not proof; only validated is a labeled scenario), a merged timeline (evidence events marked), each alert with its explanation and up to 25 evidence events,
+by tactic with the coverage evidence level on each one (the report says mapped is not proof; only validated is a labeled scenario), a merged timeline (the first 200 events by `ts`, then `id`; one row per event even when two alerts share it; evidence events marked; `timeline_omitted` is how many merged events were past that cap, and 0 when the timeline fits; Markdown and PDF name that count when it is not 0), each alert with its explanation and up to 25 evidence events,
 analyst notes, and recommended actions keyed by technique (generic actions when no technique is mapped).
 Reports built from synthetic data open with a "SYNTHETIC DATA" banner and repeat it in the PDF page footer.
 Log-derived text is escaped in Markdown so it cannot inject tables, links, or HTML.
