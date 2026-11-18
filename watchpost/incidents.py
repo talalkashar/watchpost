@@ -111,6 +111,20 @@ def linked_alerts(conn, incident_id):
     return alerts
 
 
+def evidence_dest_ips(conn, incident_id):
+    """Destinations on this incident's evidence, including events past the detail page.
+
+    A blank destination is not an address. A destination on another incident is not included.
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT e.dest_ip AS dest_ip FROM events e"
+        " JOIN alert_events ae ON ae.event_id = e.id"
+        " JOIN incident_alerts ia ON ia.alert_id = ae.alert_id"
+        " WHERE ia.incident_id = ? AND e.dest_ip IS NOT NULL AND e.dest_ip != ''",
+        (incident_id,))
+    return {row["dest_ip"] for row in rows}
+
+
 def get_incident(conn, incident_id):
     row = conn.execute("SELECT * FROM incidents WHERE id = ?", (incident_id,)).fetchone()
     if row is None:
@@ -158,10 +172,12 @@ def get_incident(conn, incident_id):
     ]
     incident["escalated"] = len(incident["stages"]) >= 3
     incident["correlation_rule"] = correlate.rule_summary()
-    # Assets behind the incident: by host name and by the addresses its evidence reached.
+    # Hosts and source addresses stay the incident entity lists. Destinations include
+    # evidence left out of the events page. Those events are not added to `events`.
+    addresses = set(incident["entities"].get("src_ip") or [])
+    addresses.update(evidence_dest_ips(conn, incident_id))
     incident["assets"] = assets.for_entities(
-        conn, incident["entities"].get("host"),
-        sorted({e["dest_ip"] for e in events if e.get("dest_ip")} | set(incident["entities"].get("src_ip") or [])))
+        conn, incident["entities"].get("host"), sorted(addresses))
     return incident
 
 
