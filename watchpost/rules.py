@@ -290,6 +290,14 @@ def _epoch(event):
 HIDING_EDITS = {"ignore_ips": "added", "ignore_users": "added", "sanctioned_services": "added",
                 "privileged_users": "removed", "logging_actions": "removed"}
 
+# SQLite COLLATE NOCASE folds these letters only. User lists and host keys use the same fold.
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+_USER_LISTS = ("ignore_users", "privileged_users")
+
+
+def _ascii_fold(value):
+    return value.translate(_ASCII_FOLD)
+
 
 def _stored_ip(value):
     """The address form ingest stores, or None when value is not one complete address.
@@ -311,6 +319,10 @@ def list_entry(param, value):
         stored = _stored_ip(value)
         # A prefix or other non-address is kept as written. covers will not treat it as an address.
         return value if stored is None else stored
+    if param in _USER_LISTS:
+        # ASCII letters only. érin does not match ÉRIN, the same split entity keys keep.
+        return _ascii_fold(value)
+    # Sanctioned services and logging actions still fold the whole string.
     return value.lower().lstrip(".") if param == "sanctioned_services" else value.lower()
 
 
@@ -324,6 +336,8 @@ def covers(param, entries, event):
         return bool(service) and any(service == s or service.endswith("." + s) for s in entries)
     if param == "logging_actions":
         return (_action(event) or "").lower() in entries
+    if param in _USER_LISTS:
+        return _ascii_fold(event.get("user") or "") in entries
     return (event.get("user") or "").lower() in entries
 
 
@@ -395,14 +409,6 @@ def _group_users(events):
         if event.get("user"):
             groups[event["user"].lower()].append(event)
     return groups
-
-
-# SQLite COLLATE NOCASE folds these letters only. Host keys use the same fold as entities.
-_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
-
-
-def _ascii_fold(value):
-    return value.translate(_ASCII_FOLD)
 
 
 def _account_name(user):

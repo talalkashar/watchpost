@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from watchpost import rules
 from watchpost.db import iso
@@ -46,6 +47,42 @@ class BruteForceTests(unittest.TestCase):
         events = make([fail(i) for i in range(12)])
         self.assertEqual(rules.brute_force_ip(events, params("brute_force_ip", ignore_ips=["203.0.113.1"])), [])
         self.assertEqual(rules.brute_force_ip(events, params("brute_force_ip", ignore_users=["ADMIN"])), [])
+
+    def test_ignore_users_fold_ascii_case_only(self):
+        events = make([fail(i, user="Alice") for i in range(10)])
+        for entry in ("alice", "ALICE", "Alice"):
+            with self.subTest(entry=entry):
+                self.assertEqual(rules.list_entry("ignore_users", entry), "alice")
+                self.assertEqual(
+                    rules.brute_force_ip(events, params("brute_force_ip", ignore_users=[entry])), [])
+        self.assertTrue(rules.covers(
+            "ignore_users", {rules.list_entry("ignore_users", "Alice")}, {"user": "ALICE"}))
+        # É does not fold, so an érin entry leaves the ÉRIN burst in place.
+        accented = make([fail(i, user="ÉRIN") for i in range(10)])
+        self.assertEqual(len(rules.brute_force_ip(
+            accented, params("brute_force_ip", ignore_users=["érin"]))), 1)
+        self.assertEqual(rules.brute_force_ip(
+            accented, params("brute_force_ip", ignore_users=["ÉRIN"])), [])
+        self.assertFalse(rules.covers(
+            "ignore_users", {rules.list_entry("ignore_users", "érin")}, {"user": "ÉRIN"}))
+        jose = make([fail(i, user="josé") for i in range(10)])
+        self.assertEqual(rules.brute_force_ip(
+            jose, params("brute_force_ip", ignore_users=["josé"])), [])
+        self.assertTrue(rules.covers(
+            "ignore_users", {rules.list_entry("ignore_users", "josé")}, {"user": "josé"}))
+        # Those two lists are the only ones on the ASCII fold.
+        self.assertEqual(rules.list_entry("sanctioned_services", ".ÉXAMPLE.com"), "éxample.com")
+        self.assertEqual(rules.list_entry("logging_actions", "Éxport"), "éxport")
+        self.assertTrue(rules.covers(
+            "logging_actions", {rules.list_entry("logging_actions", "Éxport")},
+            {"message": "Éxport on cloudtrail.amazonaws.com"}))
+
+    def test_the_docs_name_the_ascii_fold(self):
+        text = (Path(__file__).resolve().parent.parent / "docs" / "REFERENCE.md").read_text()
+        self.assertIn("`Alice`, `alice`, and `ALICE` are one account", text)
+        self.assertIn("`érin` does not match `ÉRIN`", text)
+        self.assertIn("`josé` still matches `josé`", text)
+        self.assertIn("Sanctioned service names and logging actions still fold the whole string", text)
 
     def test_ignore_ips_matches_stored_address_form(self):
         # Ingest stores str(ipaddress.ip_address), so a mixed-case or expanded entry must still ignore.
@@ -224,6 +261,20 @@ class OtherRuleTests(unittest.TestCase):
         self.assertEqual(len(rules.off_hours_privileged_login(make([ok(0, "root", base=saturday)]), p)), 1)
         self.assertEqual(rules.off_hours_privileged_login(make([ok(0, "root")]), p), [])  # Tuesday 14:00
         self.assertEqual(rules.off_hours_privileged_login(make([ok(0, "alice", base=night)]), p), [])
+        # ROOT is the same account as root. The ASCII letters in ÉRIN fold, and érin stays apart.
+        folded = params("off_hours_privileged_login", privileged_users=["ROOT", "érin"])
+        self.assertEqual(rules.list_entry("privileged_users", "ROOT"), "root")
+        self.assertEqual(rules.list_entry("privileged_users", "ÉRIN"), "Érin")
+        self.assertEqual(len(rules.off_hours_privileged_login(make([ok(0, "root", base=night)]), folded)), 1)
+        self.assertEqual(len(rules.off_hours_privileged_login(make([ok(0, "érin", base=night)]), folded)), 1)
+        self.assertEqual(rules.off_hours_privileged_login(make([ok(0, "ÉRIN", base=night)]), folded), [])
+        same = params("off_hours_privileged_login", privileged_users=["ÉRIN"])
+        self.assertEqual(len(rules.off_hours_privileged_login(make([ok(0, "Érin", base=night)]), same)), 1)
+        self.assertEqual(rules.off_hours_privileged_login(make([ok(0, "érin", base=night)]), same), [])
+        self.assertTrue(rules.covers(
+            "privileged_users", {rules.list_entry("privileged_users", "josé")}, {"user": "josé"}))
+        self.assertFalse(rules.covers(
+            "privileged_users", {rules.list_entry("privileged_users", "érin")}, {"user": "ÉRIN"}))
 
 
 def ev(sec, event_type, user=None, ip="203.0.113.1", **extra):

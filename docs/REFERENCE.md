@@ -254,7 +254,7 @@ The scenarios are synthetic, so "validated" means a rule detected the project's 
 
 After each detection run, `watchpost/correlate.py` groups related alerts into incidents: alerts whose evidence shares a source IP, account, or host within 30 minutes. An incident needs two related alerts or one critical alert, lists its kill-chain stages (ATT&CK tactics in order), and is raised one severity level when it spans three or more tactics. Account and host values that differ only by case are stored as one lowercase entry (`WEB01` and `web01` are one host). Source IPs stay as written. Reruns change nothing; new alerts join an open incident.
 
-Every rule except `log_source_silent` accepts `ignore_ips` and `ignore_users`. The engine merges overlapping findings into one open alert instead of creating duplicates, and a rescan never re-alerts on evidence already attached to an alert.
+Every rule except `log_source_silent` accepts `ignore_ips` and `ignore_users`. `ignore_users` and `privileged_users` fold ASCII letters only, the same fold as entity keys: `Alice`, `alice`, and `ALICE` are one account, and `érin` does not match `ÉRIN`. `josé` still matches `josé`. Sanctioned service names and logging actions still fold the whole string. The review gate uses those same helpers. The engine merges overlapping findings into one open alert instead of creating duplicates, and a rescan never re-alerts on evidence already attached to an alert.
 
 An analyst can also propose a **rule suppression window** for a planned operational period. It pauses every
 finding from one rule between explicit start and expiry times (at most 30 days), so its review evidence shows
