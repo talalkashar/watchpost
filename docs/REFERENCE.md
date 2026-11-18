@@ -144,7 +144,7 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**.
 | `SIEM_RATE_LIMIT` | `1` | `0` turns off per-IP rate limiting |
 | `SIEM_LOGIN_RATE_BURST` / `SIEM_LOGIN_RATE_PER_MIN` | `10` / `10` | Token bucket for `POST /api/auth/login`, per client IP |
 | `SIEM_RATE_BURST` / `SIEM_RATE_PER_MIN` | `300` / `1200` | Token bucket for every other request (API and static), per client IP |
-| `SIEM_TRUST_PROXY` | `0` | `1` behind a local reverse proxy: the client IP is the last `X-Forwarded-For` entry on loopback connections |
+| `SIEM_TRUST_PROXY` | `0` | `1` behind a local reverse proxy: on a loopback connection, the client IP is the last entry of the one `X-Forwarded-For` header. Two headers, or a value that is not an address, stay the peer |
 | `SIEM_AUDIT_KEY` | unset (unkeyed) | HMAC key for the audit log hash chain; see [Tamper-evident audit log](#tamper-evident-audit-log) |
 
 ### Public deployment

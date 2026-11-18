@@ -1181,17 +1181,22 @@ class Handler(BaseHTTPRequestHandler):
         return morsel.value if morsel else None
 
     def _client_ip(self):
-        """The peer address, or with SIEM_TRUST_PROXY=1 and a loopback peer, the last X-Forwarded-For entry.
+        """The peer address, or the last entry of exactly one X-Forwarded-For header.
 
-        The last entry is the one the local proxy wrote itself; earlier entries are client-supplied.
+        With SIEM_TRUST_PROXY=1 and a loopback peer, one header is the line the local
+        proxy wrote. Its last comma-separated entry is the client. Two headers mean a
+        client-supplied line arrived as well, so neither is used. A value that is not
+        an address stays the peer address.
         """
         ip = self.client_address[0]
         if self.app.config.trust_proxy and ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
-            forwarded = self.headers.get("X-Forwarded-For", "").split(",")[-1].strip()
-            try:
-                return str(ipaddress.ip_address(forwarded))
-            except ValueError:
-                pass
+            forwarded = self.headers.get_all("X-Forwarded-For") or []
+            if len(forwarded) == 1:
+                candidate = forwarded[0].split(",")[-1].strip()
+                try:
+                    return str(ipaddress.ip_address(candidate))
+                except ValueError:
+                    pass
         return ip
 
     def _rate_limited(self, path):

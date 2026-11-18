@@ -35,7 +35,8 @@ An empty bucket answers **429** before authentication, with a `Retry-After: <sec
 `{"error": "too many login attempts; retry in 6 s", "retry_after": 6}` (or `too many requests`). The two buckets are
 independent, so a client locked out of login can still load the page. `SIEM_RATE_LIMIT=0` turns limiting off. The
 client IP is the TCP peer. With `SIEM_TRUST_PROXY=1` and a loopback peer (a local reverse proxy), it is the **last**
-`X-Forwarded-For` entry, the one the proxy wrote, so client-supplied entries earlier in the header are ignored.
+comma-separated entry of the one `X-Forwarded-For` header, the line the proxy wrote. Earlier entries in that header
+are ignored. Two `X-Forwarded-For` headers, or a value that is not an address, stay the peer address.
 Account lockout is separate: it is per account, also answers 429, and has no `Retry-After`.
 
 ```bash
