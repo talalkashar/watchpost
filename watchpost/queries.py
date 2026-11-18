@@ -632,12 +632,18 @@ def metrics(conn, hours=24):
         "alerts_open": one("SELECT COUNT(*) FROM alerts WHERE status = 'open'"),
         "alerts_investigating": one("SELECT COUNT(*) FROM alerts WHERE status = 'investigating'"),
         "alerts_resolved": one("SELECT COUNT(*) FROM alerts WHERE status = 'resolved'"),
-        "alerts_by_severity": by("SELECT severity, COUNT(*) AS count FROM alerts WHERE status != 'resolved'"
-                                 " GROUP BY severity"),
+        # Catalog rank, not scan order. A level or disposition with no rows is not invented.
+        # An empty table stays an empty list. A resolved alert stays out of alerts_by_severity.
+        "alerts_by_severity": by(
+            "SELECT severity, COUNT(*) AS count FROM alerts WHERE status != 'resolved'"
+            " GROUP BY severity ORDER BY "
+            + SEVERITY_RANK_SQL.format(col="severity") + " DESC"),
         "alerts_by_rule": alerts_by_rule,
         "alerts_by_rule_omitted": alerts_by_rule_omitted,
-        "dispositions": by("SELECT disposition, COUNT(*) AS count FROM alerts WHERE disposition IS NOT NULL"
-                           " GROUP BY disposition"),
+        "dispositions": by(
+            "SELECT disposition, COUNT(*) AS count FROM alerts WHERE disposition IS NOT NULL"
+            " GROUP BY disposition ORDER BY "
+            + DISPOSITION_ORDER_SQL.format(col="disposition")),
         "mean_time_to_resolve_minutes": round(mttr, 1) if mttr is not None else None,
         "top_failure_ips": top_ips,
         "top_failure_ips_omitted": ips_omitted,
@@ -656,6 +662,9 @@ def metrics(conn, hours=24):
 
 SEVERITY_RANK_SQL = ("CASE {col} WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2"
                      " WHEN 'low' THEN 1 ELSE 0 END")
+# Catalog order, not scan order. A name that is not one of these sorts last.
+DISPOSITION_ORDER_SQL = ("CASE {col} WHEN 'true_positive' THEN 0 WHEN 'false_positive' THEN 1"
+                         " WHEN 'benign' THEN 2 ELSE 3 END")
 RANK_SEVERITY = {4: "critical", 3: "high", 2: "medium", 1: "low", 0: "info"}
 
 
