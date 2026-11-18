@@ -302,7 +302,7 @@ If detection fails, the events stay stored, the ingest response says `"detection
 
 ### Log source health
 
-Silence hides attacks: a log forwarder that stops (crashed, uninstalled, or stopped by an intruder) looks exactly like a quiet network. Watchpost keeps no agent heartbeat; it reads the events it already stores. `GET /api/sources/health` (viewer) lists every (source, host) pair with its first and last arrival, events in the last 24 h, cadence, status and the reason for it, and the Health view shows it as the **Log source health** panel. A late or silent source links to its events in Hunt (`source:<x> host:<y>`). The code is `watchpost/sources.py`.
+Silence hides attacks: a log forwarder that stops (crashed, uninstalled, or stopped by an intruder) looks exactly like a quiet network. Watchpost keeps no agent heartbeat; it reads the events it already stores. `GET /api/sources/health` (viewer) lists (source, host) pairs with first and last arrival, events in the last 24 h, cadence, status and the reason for it. The response keeps 100 pairs (silent, then source, then host) and 100 maintenance windows that have not ended, and names how many of each were left out. The summary still counts every pair. The Health view shows it as the **Log source health** panel. A late or silent source links to its events in Hunt (`source:<x> host:<y>`). The code is `watchpost/sources.py`.
 
 | Term | Definition (constants in `watchpost/sources.py`) |
 |---|---|

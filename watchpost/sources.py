@@ -43,6 +43,8 @@ LATE_MULTIPLIER, LATE_FLOOR_SECONDS = 3, 15 * 60
 SILENT_MULTIPLIER, SILENT_FLOOR_SECONDS = 6, 3600
 MAX_WINDOW_DAYS = 30  # a maintenance window always ends
 MAINTENANCE_ON_SOURCE = 5  # active windows named on one source row
+SOURCE_LIST_LIMIT = 100  # source rows on GET /api/sources/health
+MAINTENANCE_LIST_LIMIT = 100  # future maintenance windows on that response
 
 THRESHOLDS = {
     "cadence_window_seconds": CADENCE_WINDOW_SECONDS, "cadence_sample": CADENCE_SAMPLE, "min_gaps": MIN_GAPS,
@@ -326,6 +328,12 @@ def inventory(conn, now=None):
     two rows. `maintenance` is the active windows that cover the row, at most MAINTENANCE_ON_SOURCE, in the
     list order (starts_at descending, then id descending). `maintenance_omitted` is how many active windows
     were past that cap (0 when the set fits, including none). Status still uses every window.
+
+    `sources` is the first SOURCE_LIST_LIMIT rows after silent, then source, then host. `sources_omitted`
+    is how many pairs were past that cap (0 when the inventory fits, including none). `summary` counts
+    every pair, including the ones left off the page. `maintenance_windows` is windows whose effective end
+    is still ahead, at most MAINTENANCE_LIST_LIMIT, in starts_at descending then id descending order.
+    `maintenance_windows_omitted` is how many of those were past that cap.
     """
     now = now or now_iso()
     now_s = _epoch(now)
@@ -346,9 +354,13 @@ def inventory(conn, now=None):
                      "maintenance_omitted": max(0, len(active) - MAINTENANCE_ON_SOURCE), **verdict})
     order = {"silent": 0, "late": 1, "healthy": 2, "learning": 3}
     rows.sort(key=lambda r: (order[r["status"]], r["source"], r["host"] or ""))
-    return {"checked_at": now, "thresholds": THRESHOLDS, "sources": rows,
+    future = [w for w in listed if w["effective_end"] > now]
+    return {"checked_at": now, "thresholds": THRESHOLDS,
+            "sources": rows[:SOURCE_LIST_LIMIT],
+            "sources_omitted": max(0, len(rows) - SOURCE_LIST_LIMIT),
             "summary": {s: sum(r["status"] == s for r in rows) for s in order},
-            "maintenance_windows": [w for w in listed if w["effective_end"] > now]}
+            "maintenance_windows": future[:MAINTENANCE_LIST_LIMIT],
+            "maintenance_windows_omitted": max(0, len(future) - MAINTENANCE_LIST_LIMIT)}
 
 
 # --- Maintenance windows (added through a reviewed change request; ended early by an admin) ------

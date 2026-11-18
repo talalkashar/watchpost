@@ -380,7 +380,8 @@ class ApiTests(ServerTestCase):
         viewer = self.client("viewer")
         status, data, _ = viewer.get("/api/sources/health")
         self.assertEqual(status, 200)
-        self.assertEqual(set(data), {"checked_at", "thresholds", "sources", "summary", "maintenance_windows"})
+        self.assertEqual(set(data), {"checked_at", "thresholds", "sources", "sources_omitted", "summary",
+                                     "maintenance_windows", "maintenance_windows_omitted"})
         self.assertEqual(viewer.post("/api/sources/maintenance", self.window())[0], 403)
         self.assertEqual(viewer.post("/api/sources/maintenance/1/end")[0], 403)
         self.assertEqual(self.client("analyst").post("/api/sources/maintenance", self.window())[0], 403)
