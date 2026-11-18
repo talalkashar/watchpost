@@ -254,11 +254,11 @@ class EcsTests(ServerTestCase):
         self.assertEqual(status, 200, doc)
         self.assertEqual(doc["event"]["outcome"], "failure")
         self.assertNotIn("outcome", doc.get("watchpost", {}))
-        status, doc, _ = analyst.get(f"/api/events/{by_outcome['fa\u0130lure']}/ecs")
+        status, doc, _ = analyst.get("/api/events/%s/ecs" % by_outcome["fa\u0130lure"])
         self.assertEqual(status, 200, doc)
         self.assertNotIn("outcome", doc["event"])
         self.assertEqual(doc["watchpost"]["outcome"], "fa\u0130lure")
-        stored = analyst.get(f"/api/events/{by_outcome['fa\u0130lure']}")[1]
+        stored = analyst.get("/api/events/%s" % by_outcome["fa\u0130lure"])[1]
         self.assertEqual(stored["outcome"], "fa\u0130lure")
 
     def test_ecs_route(self):
