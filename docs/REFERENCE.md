@@ -226,6 +226,8 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | `admin_action_from_new_source` | an account makes a privileged action (privilege use/escalation, cloud IAM change) from an IP it used for none of its privileged actions in the previous 7 days, and it made ≥ 3 in that span | medium |
 | `log_source_silent` | a source and host with a learned cadence stops sending: quiet for > 6× its median gap between arrivals, > 1 h, and > twice its longest recent gap ([Log source health](#log-source-health)) | medium |
 
+Rules that count or key an account (`brute_force_ip` targeted names, `password_spray`, `account_repeated_failures`, `success_after_failures`, `impossible_geo_login`, `privilege_escalation_after_login`, `cloud_iam_change_by_new_principal`, and `admin_action_from_new_source`) fold ASCII letters only, the same fold as `ignore_users`. `Alice`, `alice`, and `ALICE` are one account, and the finding key uses that spelling. `ÉRIN` and `érin` stay two accounts (`Érin` and `érin`).
+
 Every rule maps to MITRE ATT&CK techniques from a small static catalog (`watchpost/attack.py`, 20 techniques, no network fetch). `GET /api/attack/coverage` grades each technique by evidence (below) and counts how often its rules fired.
 
 The two newest rules use only fields the schema already carries, and each has a labeled attack and a benign look-alike in the noise lab (both detect their attack, tp 1 / fn 0 / fp 0, and stay quiet on their look-alike):

@@ -516,6 +516,114 @@ class AdminNewSourceTests(unittest.TestCase):
                     events, params("admin_action_from_new_source", **override)), [])
 
 
+class AccountAsciiFoldTests(unittest.TestCase):
+    """Account counts and finding keys use the ASCII fold, the same one as ignore_users.
+
+    Alice, alice, and ALICE stay one account. ÉRIN and érin stay two, so a spray of
+    only those two meets distinct_users 2. ÉRIN and Érin stay one account Érin and
+    stay quiet at that threshold.
+    """
+
+    def test_spray_keeps_accented_accounts_apart(self):
+        p = params("password_spray", distinct_users=2)
+        apart = make([fail(0, user="ÉRIN"), fail(30, user="érin")])
+        found = rules.password_spray(apart, p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "203.0.113.1")
+        self.assertIn("2 different accounts (Érin, érin)", found[0]["explanation"])
+        # The ASCII letters match, so this pair is one account and stays quiet.
+        same = make([fail(0, user="ÉRIN"), fail(30, user="Érin")])
+        self.assertEqual(rules.password_spray(same, p), [])
+        ascii_one = make([fail(0, user="Alice"), fail(10, user="alice"), fail(20, user="ALICE")])
+        self.assertEqual(rules.password_spray(ascii_one, p), [])
+        # The named accounts in a brute-force finding use the same spelling.
+        burst = make([fail(i, user="ÉRIN") for i in range(5)] + [fail(5 + i, user="érin") for i in range(5)])
+        named = rules.brute_force_ip(burst, params("brute_force_ip"))
+        self.assertIn("Most targeted accounts: Érin (5), érin (5).", named[0]["explanation"])
+
+    def test_repeated_failures_key_uses_the_folded_spelling(self):
+        p = params("account_repeated_failures")
+        merged = make(
+            [fail(i * 10, user="ÉRIN") for i in range(4)]
+            + [fail(40 + i * 10, user="Érin") for i in range(4)]
+        )
+        found = rules.account_repeated_failures(merged, p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "Érin")
+        self.assertEqual(found[0]["event_ids"], list(range(1, 9)))
+        split = make(
+            [fail(i * 10, user="ÉRIN") for i in range(4)]
+            + [fail(40 + i * 10, user="érin") for i in range(4)]
+        )
+        self.assertEqual(rules.account_repeated_failures(split, p), [])
+
+    def test_success_after_failures_looks_up_the_ascii_account(self):
+        p = params("success_after_failures")
+        failures = [fail(i * 10, user="ÉRIN") for i in range(3)] + [fail(30 + i * 10, user="Érin") for i in range(2)]
+        other = rules.success_after_failures(make(failures + [ok(80, user="érin")]), p)
+        self.assertEqual(other, [])
+        found = rules.success_after_failures(make(failures + [ok(80, user="ÉRIN")]), p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "Érin|203.0.113.1")
+        self.assertEqual(found[0]["event_ids"], list(range(1, 7)))
+        self.assertIn("ÉRIN", found[0]["title"])
+
+    def test_impossible_travel_keeps_accented_accounts_apart(self):
+        p = params("impossible_geo_login")
+        apart = make([
+            ev(0, "auth_success", "ÉRIN", "10.0.1.24"),
+            ev(25 * 60, "vpn_login", "érin", "203.0.113.150"),
+        ])
+        self.assertEqual(rules.impossible_geo_login(apart, p), [])
+        same = make([
+            ev(0, "auth_success", "ÉRIN", "10.0.1.24"),
+            ev(25 * 60, "vpn_login", "Érin", "203.0.113.150"),
+        ])
+        found = rules.impossible_geo_login(same, p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "Érin|10.0.1.24|203.0.113.150")
+
+    def test_privilege_escalation_looks_up_the_ascii_account(self):
+        p = params("privilege_escalation_after_login")
+
+        def attack(user, host="web01"):
+            rows = [ev(i * 20, "auth_failure", "ÉRIN", "192.0.2.140") for i in range(3)]
+            rows += [ev(60, "auth_success", "Érin", "192.0.2.140"),
+                     ev(420, "privilege_escalation", user, "192.0.2.140", host=host)]
+            return rows
+
+        self.assertEqual(rules.privilege_escalation_after_login(make(attack("érin")), p), [])
+        found = rules.privilege_escalation_after_login(make(attack("Érin")), p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "Érin|web01")
+        self.assertIn("Érin", found[0]["title"])
+
+    def test_new_principal_history_is_per_ascii_account(self):
+        p = params("cloud_iam_change_by_new_principal")
+        prior = [ev(0, "cloud_api_call", "ÉRIN")]
+        other = rules.cloud_iam_change_by_new_principal(
+            make(prior + [ev(900, "cloud_iam_change", "érin")]), p)
+        self.assertEqual([f["group_key"] for f in other], ["érin"])
+        self.assertEqual(rules.cloud_iam_change_by_new_principal(
+            make(prior + [ev(900, "cloud_iam_change", "Érin")]), p), [])
+        alone = rules.cloud_iam_change_by_new_principal(make([ev(0, "cloud_iam_change", "ÉRIN")]), p)
+        self.assertEqual([f["group_key"] for f in alone], ["Érin"])
+
+    def test_admin_new_source_baseline_is_per_ascii_account(self):
+        p = params("admin_action_from_new_source")
+        history = [priv(-DAY * back, user="ÉRIN", ip="10.0.1.33") for back in (3, 2, 1)]
+        other = priv(0, user="érin", ip="198.51.100.77")
+        self.assertEqual(rules.admin_action_from_new_source(make(history + [other]), p), [])
+        same = priv(0, user="Érin", ip="198.51.100.77")
+        found = rules.admin_action_from_new_source(make(history + [same]), p)
+        self.assertEqual([f["group_key"] for f in found], ["Érin|198.51.100.77"])
+
+    def test_the_docs_name_the_account_fold(self):
+        text = (Path(__file__).resolve().parent.parent / "docs" / "REFERENCE.md").read_text()
+        self.assertIn("fold ASCII letters only, the same fold as `ignore_users`", text)
+        self.assertIn("`ÉRIN` and `érin` stay two accounts (`Érin` and `érin`)", text)
+
+
 class TechniqueMappingTests(unittest.TestCase):
     def test_every_rule_has_techniques_and_a_function(self):
         for rule in rules.DEFAULT_RULES:
