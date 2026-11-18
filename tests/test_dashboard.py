@@ -497,7 +497,7 @@ process.stdout.write(JSON.stringify(out));
         chunk = self.source[start:self.source.index("pulse(e)")]
         self.assertIn("mapSide(this.sources()", chunk)
         self.assertIn("Busiest arcs", chunk)
-        self.assertIn("No geo entry", chunk)
+        self.assertNotIn('class: "ms-h" }, "No geo entry"', chunk)
         self.assertIn("ms-city", chunk)
         self.assertIn("no geo entry", chunk)
         self.assertNotIn("Top sources", chunk)

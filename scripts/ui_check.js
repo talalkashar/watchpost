@@ -159,13 +159,15 @@ async function main() {
       await p.goto(BASE);
       await p.waitForSelector("#login-view:not([hidden])");
       await auditView(p, "login form", width);
+      check(await p.locator("#login-view").getByText("Demo events and map locations are synthetic.").isVisible(),
+        `${width}px sign-in includes the data disclosure`);
       await ctx.close();
     }
 
     // Demo data, loaded through the Admin view like a person would.
     const admin = await login(browser, "admin", ADMIN_PW, 1440);
     await show(admin.page, "admin");
-    await admin.page.click("text=Load synthetic demo data");
+    await admin.page.click("text=Load demo data");
     await admin.page.waitForSelector("text=Alerts created", { timeout: 60000 });
     ok("demo data loaded");
     await admin.page.goto(BASE + "#dashboard");
@@ -230,6 +232,18 @@ async function main() {
       for (const v of views) {
         await show(page, v);
         await auditView(page, `#${v}`, width);
+        check(await page.locator("#strip .synthetic, #view .synthetic, #view .syn").count() === 0,
+          `${width}px #${v} has no repeated origin badges`);
+        if (v === "alerts") {
+          const related = page.locator(".active-incidents");
+          await related.locator("summary").click();
+          check(await related.locator("tbody tr[data-id]").first().isVisible(), `${width}px active incidents expand`);
+          await related.locator("summary").click();
+        }
+        if (v === "events") {
+          const message = await page.locator(".event-log tr[data-id] td:last-child").first().innerText();
+          check(message.length > 0 && !message.includes("[SYNTHETIC"), `${width}px event rows show the message without its fixture marker`);
+        }
         if (width >= 390 && v === "dashboard") {
           await page.waitForSelector("#attack-chart .cellg");
           const size = await page.locator("#attack-chart").evaluate((box) => {
@@ -251,7 +265,7 @@ async function main() {
       await show(page, "overview");
       const triage = await page.evaluate(() => { const c = document.querySelector("#triage-metrics");
         return { rows: c ? c.querySelectorAll("tbody tr").length : 0, synth: !!c?.querySelector(".pill.synthetic") }; });
-      check(triage.rows > 0 && triage.synth, `${width}px overview renders the triage metrics panel with the synthetic label (${triage.rows} rows)`);
+      check(triage.rows > 0 && !triage.synth, `${width}px overview renders triage metrics without a repeating origin badge (${triage.rows} rows)`);
       await show(page, "health");
       const sources = await page.evaluate(() => { const c = document.querySelector("#source-health");
         return { rows: c ? c.querySelectorAll("tbody tr").length : 0, pills: c ? c.querySelectorAll(".pill").length : 0 }; });

@@ -31,12 +31,12 @@ def function_body(source, name):
 
 
 class HealthMeansTests(unittest.TestCase):
-    def test_each_known_check_is_one_sentence_about_this_demo(self):
+    def test_each_known_check_explains_both_fault_states_in_one_sentence(self):
         sentences = {**CHECK_MEANS, "other": DEFAULT_MEANS}
         self.assertEqual(set(CHECK_MEANS), {"storage", "ingestion", "detection", "dependencies", "syslog", "storyline"})
         for name, text in sentences.items():
             self.assertEqual(status_means(name), text)
-            self.assertTrue(text.startswith("On this demo, failing means "))
+            self.assertTrue(text.startswith("Failing means "))
             self.assertIn(", and degraded means ", text)
             self.assertEqual(text.count("."), 1)
             self.assertTrue(text.endswith("."))

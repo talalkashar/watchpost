@@ -383,7 +383,7 @@ def related_timeline(conn, alert, pad_minutes=30):
     total = conn.execute(
         f"SELECT COUNT(*) AS n FROM events WHERE {where_sql}", bound).fetchone()["n"]
     rows = conn.execute(
-        f"SELECT id, ts, source, host, event_type, severity, user, src_ip, message FROM events"
+        f"SELECT id, ts, source, host, event_type, severity, user, src_ip, message, synthetic FROM events"
         f" WHERE {where_sql} ORDER BY ts, id LIMIT {TIMELINE_LIMIT}",
         bound,
     )

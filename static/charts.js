@@ -151,7 +151,7 @@ function hbars(rows, { w = 300, rowH = 22, labelW = 118, label = "ranking" } = {
 // from its hit count. mapped, disabled, and gap keep their own classes so a mapped technique is not
 // drawn as a gap. Cells past maxRows are named in a "+N" caption instead of disappearing.
 const LEVEL_TIP = {
-  validated: "validated on a labeled synthetic scenario",
+  validated: "validated on a labeled test scenario",
   mapped: "mapped only; no labeled scenario proves detection",
   disabled: "only disabled rules map here",
   gap: "no rule maps here",
