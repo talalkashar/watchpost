@@ -1,0 +1,36 @@
+# macOS network-service discovery: Bonjour browses for remote-access and file-sharing types, or nmap.
+# A browse for a service such as AirPlay does not match. Watchpost matches the command text on message.
+title: macOS Network Service Discovery
+id: c2d8f1a6-4e90-4b37-a15c-6f8e0d2b47aa
+status: experimental
+description: |
+  A process browsing _ssh, _rfb, _smb, or _afpovertcp over Bonjour, or running nmap.
+  The nmap check looks for the path element /nmap or the command name followed by a space,
+  so the letters inside an unrelated word do not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1046/
+tags:
+  - attack.discovery
+  - attack.t1046
+logsource:
+  category: process_creation
+  product: macos
+detection:
+  bonjour:
+    event.action: process_start
+    message|contains:
+      - dns-sd -B _ssh._tcp
+      - dns-sd -B _rfb._tcp
+      - dns-sd -B _smb._tcp
+      - dns-sd -B _afpovertcp._tcp
+  nmap:
+    event.action: process_start
+    message|contains:
+      - /nmap
+      - 'nmap '
+  condition: bonjour or nmap
+falsepositives:
+  - An administrator inventorying hosts with nmap
+level: medium
