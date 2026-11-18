@@ -397,13 +397,19 @@ def brute_force_ip(events, params):
     return findings
 
 
+def _account_names(events):
+    """Distinct account names, ignoring case. Alice and alice are one account."""
+    return {e["user"].lower() for e in events if e.get("user")}
+
+
 def password_spray(events, params):
     needed, window = params["distinct_users"], params["window_seconds"]
     findings = []
     for ip, group in _group(_filtered(events, params, "auth_failure"), "src_ip").items():
-        qualifies = lambda w: len({e.get("user") for e in w if e.get("user")}) >= needed
+        # Counting the raw spelling lets one account meet a threshold of 2.
+        qualifies = lambda w: len(_account_names(w)) >= needed
         for cluster in _clusters(group, window, qualifies):
-            users = sorted({e.get("user") for e in cluster if e.get("user")})
+            users = sorted(_account_names(cluster))
             findings.append(_finding(
                 ip, cluster,
                 f"Password spray from {ip}: {len(users)} accounts targeted",

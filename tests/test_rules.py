@@ -59,6 +59,32 @@ class OtherRuleTests(unittest.TestCase):
         same_user = make([fail(i * 30) for i in range(20)])
         self.assertEqual(rules.password_spray(same_user, params("password_spray")), [])
 
+    def test_password_spray_folds_account_case(self):
+        # One account written two ways does not meet a threshold of 2.
+        one = make([fail(0, user="Alice"), fail(30, user="alice")])
+        self.assertEqual(rules.password_spray(one, params("password_spray", distinct_users=2)), [])
+        # Five spellings of two accounts used to meet the default threshold of 5.
+        inflated = make([
+            fail(i * 20, user=name)
+            for i, name in enumerate(["Alice", "alice", "ALICE", "Bob", "bob"])
+        ])
+        self.assertEqual(rules.password_spray(inflated, params("password_spray")), [])
+        # Two accounts, each written twice, is one finding and the names are folded.
+        two = make([
+            fail(0, user="Alice"),
+            fail(10, user="alice"),
+            fail(20, user="Bob"),
+            fail(30, user="BOB"),
+        ])
+        found = rules.password_spray(two, params("password_spray", distinct_users=2))
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "203.0.113.1")
+        self.assertEqual(found[0]["event_ids"], [1, 2, 3, 4])
+        self.assertIn("2 accounts targeted", found[0]["title"])
+        self.assertIn("2 different accounts (alice, bob)", found[0]["explanation"])
+        self.assertNotIn("Alice", found[0]["explanation"])
+        self.assertNotIn("Bob", found[0]["explanation"])
+
     def test_account_repeated_failures_across_ips(self):
         events = make([fail(i * 10, ip=f"192.0.2.{i}") for i in range(8)])
         found = rules.account_repeated_failures(events, params("account_repeated_failures"))
