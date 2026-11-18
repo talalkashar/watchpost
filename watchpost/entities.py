@@ -30,6 +30,8 @@ _SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 _ALERT_FIELDS = "id, rule_id, severity, base_severity, severity_note, title, status, disposition, first_seen, last_seen, event_count, synthetic"
 # The entity page draws one bar per UTC day. A longer stored history keeps the newest month.
 _DAY_BARS = 31
+# Entity detail returns this many events, newest by ts, then id. The rest are recent_events_omitted.
+RECENT_EVENTS_LIMIT = 50
 
 
 def _anchor(conn):
@@ -181,6 +183,8 @@ def get_entity(conn, kind, value):
     An entity nothing has been seen for is not an error: it has a score of 0 and empty lists.
     A source IP is the form ingest stores (`2001:DB8::1` is `2001:db8::1`). Anything
     that is not one address is 400. A user or host path is the ASCII-folded key.
+    `recent_events` is the newest RECENT_EVENTS_LIMIT matching events. `recent_events_omitted`
+    is how many matching events were past that cap. `event_count` stays the full count.
     """
     if kind not in KINDS:
         raise QueryError("entity kind not found", 404)
@@ -202,12 +206,14 @@ def get_entity(conn, kind, value):
                         f" MAX(e.synthetic) AS synthetic FROM events e WHERE {match}", (value,)).fetchone()
     fields = ", ".join("e." + c.strip() for c in EVENT_FIELDS.split(","))
     recent = [dict(r) for r in conn.execute(
-        f"SELECT {fields} FROM events e WHERE {match} ORDER BY e.ts DESC, e.id DESC LIMIT 50", (value,))]
+        f"SELECT {fields} FROM events e WHERE {match}"
+        f" ORDER BY e.ts DESC, e.id DESC LIMIT {RECENT_EVENTS_LIMIT}", (value,))]
     return {
         "kind": kind, "value": value, "score": _score(contributions), "anchor": anchor,
         "half_life_hours": HALF_LIFE_HOURS, "severity_weights": SEVERITY_WEIGHTS,
         "excluded_dispositions": list(EXCLUDED_DISPOSITIONS), "contributions": contributions,
         "alerts": alerts, "incidents": incidents, "recent_events": recent,
+        "recent_events_omitted": seen["event_count"] - len(recent),
         "alerts_by_day": _alerts_by_day(conn, kind, value),
         "first_seen": seen["first_seen"], "last_seen": seen["last_seen"], "event_count": seen["event_count"],
         "synthetic": bool(seen["synthetic"]),
