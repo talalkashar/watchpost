@@ -1,0 +1,38 @@
+# Unix shell startup persistence (T1546.004). Writes to profile or rc files, not the shell sourcing them.
+title: Linux Shell Startup File Modification
+id: c4d92f58-1a7b-4e36-8d05-6b3c9a2e7f18
+status: experimental
+description: |
+  A command appended or rewrote a user or system shell startup file (.bashrc, .profile, .zshrc,
+  /etc/profile, /etc/bash.bashrc). A shell sourcing the file at login does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1546/004/
+tags:
+  - attack.persistence
+  - attack.t1546.004
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection_file:
+    message|contains:
+      - '.bashrc'
+      - '.bash_profile'
+      - '.bash_login'
+      - '.profile'
+      - '.zshrc'
+      - '.zprofile'
+      - '/etc/profile'
+      - '/etc/bash.bashrc'
+  selection_write:
+    message|contains:
+      - 'tee '
+      - 'echo '
+      - 'sed -i'
+      - '>>'
+  condition: selection_file and selection_write
+falsepositives:
+  - A user or configuration management editing a shell rc file
+level: high
