@@ -315,7 +315,7 @@ Asset fields: `id`, `name`, `kind` (`server`, `workstation`, `network`, `cloud`,
 
 | Endpoint | Role | Notes |
 |---|---|---|
-| `GET /api/rules` | viewer | Params, version, `techniques` (`[{id, name, tactic}]`), `performance` (from verdicts), latest `evaluation` |
+| `GET /api/rules` | viewer | Params, version, `techniques` (`[{id, name, tactic}]`), `performance` (from verdicts), latest `evaluation`. The body stays a bare array of the first 100 rules by `id`. A Sigma rule on that page still includes its YAML and sample. `X-Watchpost-Omitted` is how many rules were past that cap (0 when there are 100 or fewer, including none) |
 | `GET /api/rules/{id}/history` | viewer | Versions of one rule, newest by `version`, at most 50, with who proposed and who approved it. The body stays a bare array. An unknown rule is an empty array. `X-Watchpost-Omitted` is how many versions were past that cap (0 when the history fits) |
 | `GET /api/rules/export` | viewer | Download `watchpost-rules.json`: `{format: "watchpost-rules", format_version: 1, watchpost_version, exported_at, note, rules: [{id, name, version, enabled, severity, params, techniques, description}]}`, sorted. Tuning only; detection logic is code and is not exported |
 | `POST /api/rules/import` | analyst | Body: an exported document (max 256 KB). `?dry_run=1` proposes nothing; `?label=` names the file in each reason. Applies nothing: each changed rule becomes a `rule_update` change request. Returns `{dry_run, label, summary, rules: [{id, outcome: proposed\|would_propose\|unchanged\|refused, change_id?, changes?, reason?}]}`. 400 on a bad format, 413 when too large, 429 when the backtest quota cannot cover every changed rule |
