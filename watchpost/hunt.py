@@ -276,6 +276,10 @@ def run(conn, params, now=None):
     else:
         result = _timechart(conn, where, args, stage, _window(compiled, now))
     result.update(kind=stage["command"], terms=terms, query=text, filter=_parse_filter_text(text))
+    if stage["command"] == "timechart":
+        note = _timechart_note(text, result["span"], result["rows"])
+        if note is not None:
+            result["note"] = note
     return result
 
 
@@ -488,6 +492,21 @@ def _timechart(conn, where, args, stage, window):
     rows = [[iso(datetime.fromtimestamp(t, timezone.utc))] + [counts.get((t, k), 0) for k in keys]
             for t in range(first, last + 1, span)]
     return {"columns": columns, "rows": rows, "truncated": False, "span": stage["span"]}
+
+
+def _timechart_note(query, span, rows):
+    """Sentence when a timechart has no rows or every bucket count is 0. A hit returns None.
+
+    The rows stay as they are (an all-zero window is still the filled buckets). The note names
+    the query and the span, the same sentence the hunt page shows instead of an empty chart.
+    """
+    for row in rows:
+        if any(row[1:]):
+            return None
+    text = query.strip() if isinstance(query, str) else ""
+    if span not in SPANS or not text:
+        return "No matching events."
+    return f"No events match {text} in {span} buckets."
 
 
 # --- Saved searches ----------------------------------------------------------------------
