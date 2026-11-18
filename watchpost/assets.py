@@ -412,7 +412,9 @@ def change_evidence(conn, before, after, recent=5):
     changes = [{"field": f, "before": (before or {}).get(f), "after": (after or {}).get(f)}
                for f in fields if (before or {}).get(f) != (after or {}).get(f)]
     inventory = [a for a in list_assets(conn) if before is None or a["id"] != before["id"]] + ([after] if after else [])
-    inventory.sort(key=lambda a: (-CRITICALITIES.index(a["criticality"]), a["name"].lower()))  # as list_assets
+    # Same order as list_assets. ORDER BY name uses the column's NOCASE, which folds A-Z only.
+    # The stored spelling is kept. str.lower() would also fold Kelvin and dotted I and move those names.
+    inventory.sort(key=lambda a: (-CRITICALITIES.index(a["criticality"]), a["name"].translate(_ASCII_FOLD)))
     shifts = [{"id": alert["id"], "title": alert["title"], "from": alert["severity"], "to": weighed["severity"]}
               for alert, weighed in _reweigh_open(conn, index(inventory)) if weighed["severity"] != alert["severity"]]
     shifts.sort(key=lambda x: -x["id"])
