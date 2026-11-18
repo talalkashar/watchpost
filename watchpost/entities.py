@@ -18,7 +18,7 @@ replayed with older timestamps and would otherwise decay to nothing.
 from datetime import date, timedelta
 
 from .db import parse_iso
-from .queries import EVENT_FIELDS, QueryError, _int
+from .queries import EVENT_FIELDS, QueryError, _int, canonical_ip
 
 KINDS = ("user", "src_ip", "host")
 # SQLite COLLATE NOCASE folds these letters only. Host keys use the same fold.
@@ -65,7 +65,9 @@ def _entity_value(kind, value):
 
     Accounts use str.lower, which is what the list already did. Hosts fold ASCII
     letters only, the same fold as COLLATE NOCASE and event search, so WEB01 and
-    web01 are one host and Érin-host stays apart from érin-host. An IP stays as stored.
+    web01 are one host and Érin-host stays apart from érin-host. A source IP stays
+    as stored. `get_entity` canonicalizes the path before this, so the key is the
+    form ingest stores.
     """
     if kind == "user":
         return value.lower()
@@ -178,9 +180,13 @@ def get_entity(conn, kind, value):
     """Score breakdown, alerts, incidents, recent events, and alerts by day for one entity.
 
     An entity nothing has been seen for is not an error: it has a score of 0 and empty lists.
+    A source IP is the form ingest stores (`2001:DB8::1` is `2001:db8::1`). Anything
+    that is not one address is 400. User and host folding stay as they are.
     """
     if kind not in KINDS:
         raise QueryError("entity kind not found", 404)
+    if kind == "src_ip":
+        value = canonical_ip(value, "src_ip")
     match = _entity_match(kind)
     value = _entity_value(kind, value)
     anchor = _anchor(conn)
