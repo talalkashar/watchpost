@@ -2,8 +2,10 @@ import json
 import unittest
 from datetime import datetime, timezone
 
+from watchpost import engine
 from watchpost.db import connect, init_schema
 from watchpost.diagnostics import record_error, redact
+from watchpost.ecs import to_ecs
 from watchpost.normalize import (EventError, MAX_LEN, normalize_authlog_line, normalize_record,
                                  normalize_weblog_line, parse_payload)
 
@@ -385,6 +387,276 @@ class RedactionTests(unittest.TestCase):
         self.assertNotIn(secret, event["raw"])
         self.assertLessEqual(len(event["raw"]), MAX_LEN["raw"])
         self.assertIn("[REDACTED]", event["raw"])
+
+
+class CoverageTests(unittest.TestCase):
+    def test_windows_shapes_and_status(self):
+        nested = normalize_record({
+            "Event": {"System": {
+                "EventID": {"#text": "4625"},
+                "TimeCreated": {"SystemTime": "2026-09-15T10:00:00.0000000Z"},
+                "Computer": "dc01", "Channel": "Security"},
+                "EventData": {"Data": [
+                    {"Name": "TargetUserName", "#text": "bob"},
+                    {"Name": "IpAddress", "#text": "10.0.0.8"}]}}}, "win", NOW)
+        self.assertEqual((nested["event_type"], nested["user"], nested["src_ip"], nested["host"], nested["source"]),
+                         ("auth_failure", "bob", "10.0.0.8", "dc01", "Security"))
+        self.assertEqual(nested["ts"], "2026-09-15T10:00:00.000Z")
+        self.assertNotIn("EventID", nested)
+        beat = normalize_record({
+            "@timestamp": "2026-09-15T10:00:00Z",
+            "winlog": {"event_id": 4625, "computer_name": "dc02", "channel": "Security",
+                       "event_data": {"TargetUserName": "carol", "IpAddress": "10.0.0.9"}}}, "win", NOW)
+        self.assertEqual((beat["event_type"], beat["user"], beat["host"], beat["src_ip"]),
+                         ("auth_failure", "carol", "dc02", "10.0.0.9"))
+        self.assertEqual(normalize_record({"ts": "2026-09-15T10:00:00Z", "EventID": {"#text": 4625},
+                                           "TargetUserName": "bob"}, "win", NOW)["event_type"], "auth_failure")
+        self.assertEqual(normalize_record({"ts": "2026-09-15T10:00:00Z", "EventID": 4771}, "win", NOW)["event_type"],
+                         "auth_failure")
+        ok = normalize_record({"ts": "2026-09-15T10:00:00Z", "EventID": 4776, "Status": "0x0"}, "win", NOW)
+        bad = normalize_record({"ts": "2026-09-15T10:00:00Z", "EventID": 4776, "Status": "0xC000006A"}, "win", NOW)
+        guessed = normalize_record({"ts": "2026-09-15T10:00:00Z", "EventID": 4776}, "win", NOW)
+        garbled = normalize_record({"ts": "2026-09-15T10:00:00Z", "EventID": 4776, "Status": "0xZZZZ"}, "win", NOW)
+        self.assertEqual((ok["event_type"], bad["event_type"], guessed["event_type"], garbled["event_type"]),
+                         ("auth_success", "auth_failure", "other", "other"))
+        self.assertIsNone(garbled["outcome"])
+        for status in ("²", "9" * 5000):
+            with self.subTest(status=status[:10]):
+                rows, rejected = parse_payload(json.dumps([
+                    {"EventID": 4776, "Status": status}, {"EventID": 4624}
+                ]), "json", "win", now=NOW)
+                self.assertEqual(rejected, [])
+                self.assertEqual([row["event_type"] for row in rows], ["other", "auth_success"])
+        deny = normalize_record({"ts": "2026-09-15T10:00:00Z", "EventID": 5157, "SourceAddress": "198.51.100.10",
+                                 "DestAddress": "10.0.0.5", "DestPort": 3389}, "win", NOW)
+        allow = normalize_record({"ts": "2026-09-15T10:00:00Z", "EventID": 5156}, "win", NOW)
+        self.assertEqual((deny["event_type"], deny["src_ip"], deny["dest_ip"], deny["dest_port"]),
+                         ("fw_deny", "198.51.100.10", "10.0.0.5", 3389))
+        self.assertEqual(allow["event_type"], "fw_allow")
+
+    def test_user_domain_is_split_and_the_stored_name_stays(self):
+        corp = to_ecs({"user": "CORP\\bob", "event_type": "auth_success"})
+        self.assertEqual(corp["user"], {"name": "CORP\\bob", "domain": "CORP"})
+        upn = to_ecs({"user": "bob@corp", "event_type": "auth_success"})
+        self.assertEqual(upn["user"]["name"], "bob@corp")
+        self.assertEqual(upn["user"]["domain"], "corp")
+        self.assertEqual(to_ecs({"user": "alice", "event_type": "auth_success"})["user"], {"name": "alice"})
+
+    def test_authlog_fallbacks(self):
+        cases = [
+            ("Sep 15 10:00:01 web01 sshd[1]: Failed none for alice from 203.0.113.5 port 22 ssh2",
+             ("auth_failure", "alice", "203.0.113.5", "failure")),
+            ("Sep 15 10:00:01 web01 sshd[1]: Connection closed by authenticating user root 203.0.113.5 port 22 [preauth]",
+             ("other", "root", "203.0.113.5", None)),
+            ("Sep 15 10:00:01 web01 sshd[1]: Connection closed by 203.0.113.9 port 22 [preauth]",
+             ("other", None, "203.0.113.9", None)),
+            ("Sep 15 10:00:01 web01 sshd[1]: error: maximum authentication attempts exceeded for invalid user admin from 203.0.113.8 port 22 ssh2 [preauth]",
+             ("auth_failure", "admin", "203.0.113.8", "failure")),
+            ("Sep 15 10:00:01 web01 sshd[1]: Disconnected from user alice 10.0.0.5 port 22",
+             ("other", None, None, None)),
+            ("Sep 15 10:00:01 web01 sshd[1]: pam_unix(sudo:auth): authentication failure; logname=alice uid=1000 euid=0 tty=/dev/pts/0 ruser=alice rhost=  user=alice",
+             ("auth_failure", "alice", None, "failure")),
+            ("Sep 15 10:00:01 web01 sshd[1]: pam_faillock(sshd:auth): Consecutive login failures for user alice account temporarily locked",
+             ("account_lockout", "alice", None, None)),
+            ("Sep 15 10:00:01 web01 sudo: frank is not in the sudoers file. This incident will be reported.",
+             ("privilege_escalation", "frank", None, "failure")),
+            ("Sep 15 10:00:01 web01 sudo: frank : user NOT in sudoers ; TTY=pts/0 ; PWD=/home/frank ; USER=root ; COMMAND=/bin/bash",
+             ("privilege_escalation", "frank", None, "failure")),
+            ("Sep 15 10:00:01 web01 sshd[1]: Failed password for root from gateway.example port 22 ssh2",
+             ("auth_failure", "root", None, "failure")),
+            ("Sep 15 10:00:01 web01 sshd[1]: Failed password for root from 2001:db8::10 port 22 ssh2",
+             ("auth_failure", "root", "2001:db8::10", "failure")),
+            ("<34>Sep 15 10:00:01 web01 sshd[123]: Failed password for root from 203.0.113.5 port 22 ssh2",
+             ("auth_failure", "root", "203.0.113.5", "failure")),
+            ("<34>1 2026-09-15T10:00:01.000Z web01 sshd 123 - - Failed password for root from 203.0.113.5 port 22 ssh2",
+             ("auth_failure", "root", "203.0.113.5", "failure")),
+        ]
+        for line, expected in cases:
+            with self.subTest(line=line):
+                event = normalize_authlog_line(line, "authlog", now=NOW)
+                self.assertEqual((event["event_type"], event["user"], event["src_ip"], event["outcome"]), expected)
+
+    def test_firewall_syslog_formats(self):
+        iptables = normalize_authlog_line(
+            "Sep 15 10:00:00 fw01 kernel: IPTABLES DROPPED: IN=eth0 OUT= MAC= SRC=198.51.100.10 DST=10.0.0.5 "
+            "LEN=40 PROTO=TCP SPT=40000 DPT=22", "fw", now=NOW)
+        self.assertEqual((iptables["event_type"], iptables["src_ip"], iptables["dest_ip"], iptables["dest_port"]),
+                         ("fw_deny", "198.51.100.10", "10.0.0.5", 22))
+        asa = normalize_authlog_line(
+            "Sep 15 10:00:00 asa01 %ASA-4-106023: Deny tcp src outside:198.51.100.10/40000 "
+            "dst inside:10.0.0.10/3389 by access-group \"outside_in\"", "fw", now=NOW)
+        self.assertEqual((asa["event_type"], asa["src_ip"], asa["dest_ip"], asa["dest_port"], asa["host"]),
+                         ("fw_deny", "198.51.100.10", "10.0.0.10", 3389, "asa01"))
+        acl = normalize_authlog_line(
+            "Sep 15 10:00:00 asa01 %ASA-6-106100: access-list outside_in permitted tcp "
+            "outside/198.51.100.10(40000) -> inside/10.0.0.10(443)", "fw", now=NOW)
+        self.assertEqual((acl["event_type"], acl["dest_port"]), ("fw_allow", 443))
+        forti = normalize_authlog_line(
+            "Sep 15 10:00:00 fw01 date=2026-09-15 time=10:00:00 devname=\"fw01\" devid=FG100 type=traffic "
+            "subtype=forward level=warning vd=root srcip=198.51.100.10 srcport=40000 srcintf=wan "
+            "dstip=10.0.0.5 dstport=3389 dstintf=lan action=deny policyid=1 proto=6 sentbyte=60", "fw", now=NOW)
+        self.assertEqual((forti["event_type"], forti["src_ip"], forti["dest_ip"], forti["dest_port"], forti["bytes"]),
+                         ("fw_deny", "198.51.100.10", "10.0.0.5", 3389, 60))
+        pfsense = normalize_authlog_line(
+            "Sep 15 10:00:00 fw01 filterlog[123]: 5,,,1000000103,em0,match,block,in,4,0x0,,64,12345,0,DF,6,tcp,52,"
+            "198.51.100.10,10.0.0.5,40000,22,0,S,1024,,", "fw", now=NOW)
+        self.assertEqual((pfsense["event_type"], pfsense["src_ip"], pfsense["dest_ip"], pfsense["dest_port"]),
+                         ("fw_deny", "198.51.100.10", "10.0.0.5", 22))
+
+    def test_weblog_vhost_iis_and_apache(self):
+        vhost = normalize_weblog_line(
+            'example.com:8443 203.0.113.80 - - [15/Sep/2026:10:00:00 +0000] "GET /app HTTP/1.1" 200 162 "-" "Mozilla/5.0"',
+            "nginx", now=NOW)
+        self.assertEqual((vhost["host"], vhost["src_ip"], vhost["event_type"], vhost["bytes"]),
+                         ("example.com", "203.0.113.80", "web_request", 162))
+        empty = normalize_weblog_line(
+            '203.0.113.80 - - [15/Sep/2026:10:00:00 +0000] "-" 400 0 "-" "-"', "nginx", now=NOW)
+        self.assertEqual((empty["event_type"], empty["outcome"], empty["src_ip"]),
+                         ("web_request", "failure", "203.0.113.80"))
+        encoded = normalize_weblog_line(
+            '203.0.113.80 - - [15/Sep/2026:10:00:00 +0000] "GET /%252e%252e%252fetc%252fpasswd HTTP/1.1" 404 0 "-" "x"',
+            "nginx", now=NOW)
+        self.assertEqual(encoded["event_type"], "web_scan")
+        scan = normalize_weblog_line(
+            '203.0.113.80 - - [15/Sep/2026:10:00:00 +0000] "GET /wp-config.php HTTP/1.1" 404 0 "-" "x"',
+            "nginx", now=NOW)
+        self.assertEqual(scan["event_type"], "web_scan")
+        apache = ('[Tue Sep 15 10:00:00 2026] [authz_core:error] [pid 123] [client 203.0.113.9:51234] '
+                  'AH01630: client denied by server configuration: /var/www/html/.env')
+        event = normalize_weblog_line(apache, "apache", now=NOW)
+        self.assertEqual((event["event_type"], event["src_ip"], event["ts"]),
+                         ("web_scan", "203.0.113.9", "2026-09-15T10:00:00.000Z"))
+        events, rejections = parse_payload(apache + "\n", "auto", "apache", now=NOW)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(rejections, [])
+        iis = (
+            "#Software: Microsoft Internet Information Services 10.0\n"
+            "#Fields: date time s-ip cs-method cs-uri-stem cs-uri-query s-port cs-username c-ip "
+            "cs(User-Agent) cs(Referer) sc-status sc-substatus sc-win32-status time-taken\n"
+            "2026-09-15 10:00:00 10.0.0.5 GET /wp-config.php - 443 alice 203.0.113.80 Mozilla/5.0 - 404 0 0 15\n"
+        )
+        events, rejections = parse_payload(iis, "auto", "iis", now=NOW)
+        self.assertEqual([item["reason"] for item in rejections], ["log header directive", "log header directive"])
+        self.assertEqual(len(events), 1)
+        row = events[0]
+        self.assertEqual((row["event_type"], row["src_ip"], row["dest_ip"], row["dest_port"], row["user"]),
+                         ("web_scan", "203.0.113.80", "10.0.0.5", 443, "alice"))
+        self.assertEqual(row["ts"], "2026-09-15T10:00:00.000Z")
+        self.assertIsNone(row["host"])
+        with self.assertRaisesRegex(EventError, "no #Fields"):
+            normalize_weblog_line("2026-09-15 10:00:00 10.0.0.5 GET /only", "iis", now=NOW)
+
+    def test_preauth_close_is_not_a_failed_password(self):
+        # Ten real failures meet the seeded thresholds. Ten pre-auth closes from another
+        # IP, one Windows failure, and a garbled status must not add a rule hit.
+        stamp = "Sep 15 10:00:01"
+        failed = f"{stamp} web01 sshd[9]: Failed password for alice from 203.0.113.5 port 22 ssh2"
+        closed = f"{stamp} web01 sshd[9]: Connection closed by 203.0.113.50 port 22 [preauth]"
+        named = (f"{stamp} web01 sshd[9]: Connection closed by authenticating user root "
+                 "203.0.113.50 port 22 [preauth]")
+        firewall = (f"{stamp} fw01 kernel: IPTABLES DROPPED: IN=eth0 OUT= MAC= SRC=198.51.100.10 "
+                    "DST=10.0.0.5 LEN=40 PROTO=TCP SPT=40000 DPT=22")
+        bad_line = (f"Xxx 15 10:00:01 web01 sshd[9]: Failed password for secretuser "
+                    "from 203.0.113.99 port 22 ssh2")
+        auth_text = "\n".join([failed] * 10 + [closed] * 10 + [named, firewall, bad_line]) + "\n"
+        auth_events, auth_rej = parse_payload(auth_text, "authlog", "authlog", now=NOW)
+        self.assertEqual(len(auth_events), 22)
+        self.assertEqual(auth_rej, [{"index": 23, "reason": "unparseable timestamp"}])
+        self.assertNotIn("secretuser", json.dumps(auth_rej))
+        failures = [event for event in auth_events if event["user"] == "alice"]
+        self.assertEqual(len(failures), 10)
+        self.assertTrue(all(event["event_type"] == "auth_failure" and event["outcome"] == "failure"
+                            and event["src_ip"] == "203.0.113.5" for event in failures))
+        closes = [event for event in auth_events if event["src_ip"] == "203.0.113.50"]
+        self.assertEqual(len(closes), 11)
+        self.assertTrue(all(event["event_type"] == "other" and event["outcome"] is None for event in closes))
+        self.assertEqual(next(event["user"] for event in closes if event["user"]), "root")
+        denied = next(event for event in auth_events if event["event_type"] == "fw_deny")
+        self.assertEqual((denied["src_ip"], denied["dest_ip"], denied["dest_port"]),
+                         ("198.51.100.10", "10.0.0.5", 22))
+
+        windows = [
+            {"ts": "2026-09-15T10:00:01Z", "EventID": 4776, "Status": "0x0",
+             "TargetUserName": "bob", "IpAddress": "10.1.1.1"},
+            {"ts": "2026-09-15T10:00:01Z", "EventID": 4776, "Status": "0xC000006A",
+             "TargetUserName": "carol", "IpAddress": "10.1.1.2"},
+            {"ts": "2026-09-15T10:00:01Z", "EventID": 4776, "Status": "0xZZZZ",
+             "TargetUserName": "dave", "IpAddress": "10.1.1.3"},
+            {"EventID": 4625, "TargetUserName": "erin", "message": "SECRET-SIBLING"},
+            {"Event": {"System": {
+                "EventID": {"#text": "4624"},
+                "TimeCreated": {"SystemTime": "2026-09-15T10:00:01.0000000Z"},
+                "Computer": "dc01", "Channel": "Security"},
+                "EventData": {"Data": [
+                    {"Name": "TargetUserName", "#text": "dave2"},
+                    {"Name": "IpAddress", "#text": "10.1.1.9"}]}}},
+        ]
+        win_events, win_rej = parse_payload(json.dumps(windows), "json", "win", now=NOW)
+        self.assertEqual(len(win_events), 4)
+        self.assertEqual(win_rej, [{"index": 4, "reason": "missing timestamp"}])
+        self.assertNotIn("SECRET-SIBLING", json.dumps(win_rej))
+        self.assertNotIn("erin", json.dumps(win_rej))
+        by_user = {event["user"]: event for event in win_events}
+        self.assertEqual((by_user["bob"]["event_type"], by_user["bob"]["outcome"], by_user["bob"]["src_ip"]),
+                         ("auth_success", "success", "10.1.1.1"))
+        self.assertEqual((by_user["carol"]["event_type"], by_user["carol"]["outcome"], by_user["carol"]["src_ip"]),
+                         ("auth_failure", "failure", "10.1.1.2"))
+        self.assertEqual((by_user["dave"]["event_type"], by_user["dave"]["outcome"]), ("other", None))
+        self.assertEqual((by_user["dave2"]["event_type"], by_user["dave2"]["host"], by_user["dave2"]["src_ip"]),
+                         ("auth_success", "dc01", "10.1.1.9"))
+
+        iis = (
+            "#Software: Microsoft Internet Information Services 10.0\n"
+            "#Fields: date time s-ip cs-method cs-uri-stem cs-uri-query s-port cs-username c-ip "
+            "cs(User-Agent) cs(Referer) sc-status sc-substatus sc-win32-status time-taken\n"
+            "2026-09-15 10:00:01 10.0.0.5 GET /wp-config.php - 443 mallory 203.0.113.80 Mozilla/5.0 - 404 0 0 15\n"
+            "2026-09-15 10:00:01 10.0.0.5 GET /index.html - 443 mallory 203.0.113.81 Mozilla/5.0 - ZZZ 0 0 15\n"
+        )
+        iis_events, iis_rej = parse_payload(iis, "weblog", "iis", now=NOW)
+        self.assertEqual(len(iis_events), 1)
+        self.assertEqual((iis_events[0]["event_type"], iis_events[0]["user"], iis_events[0]["src_ip"]),
+                         ("web_scan", "mallory", "203.0.113.80"))
+        self.assertEqual([item["reason"] for item in iis_rej],
+                         ["log header directive", "log header directive", "IIS line does not match #Fields"])
+
+        accepted = auth_events + win_events + iis_events
+        rejections = auth_rej + win_rej + iis_rej
+        conn = connect(":memory:")
+        init_schema(conn)
+        self.addCleanup(conn.close)
+        engine.seed_rules(conn)
+        result = engine.ingest(conn, accepted, rejections, "mixed", "auto", "test")
+        self.assertEqual((result["received"], result["accepted"], result["rejected"]),
+                         (len(accepted) + len(rejections), len(accepted), len(rejections)))
+        batch = dict(conn.execute(
+            "SELECT received, accepted, rejected, errors FROM ingest_batches").fetchone())
+        self.assertEqual((batch["received"], batch["accepted"], batch["rejected"]),
+                         (result["received"], result["accepted"], 5))
+        stored_reasons = json.loads(batch["errors"])
+        self.assertNotIn("secretuser", json.dumps(stored_reasons))
+        self.assertNotIn("SECRET-SIBLING", json.dumps(stored_reasons))
+        self.assertNotIn("erin", json.dumps(stored_reasons))
+        rows = [dict(row) for row in conn.execute(
+            "SELECT event_type, outcome, user, src_ip FROM events")]
+        self.assertEqual(len(rows), len(accepted))
+        stored_fail = next(row for row in rows if row["user"] == "alice")
+        stored_ok = next(row for row in rows if row["user"] == "bob")
+        stored_close = next(row for row in rows if row["src_ip"] == "203.0.113.50" and row["user"] is None)
+        fail_ecs = to_ecs(stored_fail)
+        ok_ecs = to_ecs(stored_ok)
+        close_ecs = to_ecs(stored_close)
+        self.assertEqual(fail_ecs["event"]["category"], ["authentication"])
+        self.assertEqual(fail_ecs["event"]["type"], ["start"])
+        self.assertEqual(fail_ecs["event"]["outcome"], "failure")
+        self.assertEqual(ok_ecs["event"]["category"], ["authentication"])
+        self.assertEqual(ok_ecs["event"]["outcome"], "success")
+        self.assertNotIn("category", close_ecs["event"])
+        self.assertNotIn("outcome", close_ecs["event"])
+        self.assertEqual(close_ecs["event"]["action"], "other")
+        hits = {(row["rule_id"], row["group_key"]) for row in conn.execute(
+            "SELECT rule_id, group_key FROM alerts")}
+        self.assertEqual(hits, {("brute_force_ip", "203.0.113.5"), ("account_repeated_failures", "alice")})
+        self.assertEqual(result["detection"]["alerts_created"], 2)
 
 
 if __name__ == "__main__":
