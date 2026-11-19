@@ -1,9 +1,11 @@
+import hashlib
+import json
 import unittest
 from datetime import timedelta
 
 from tests.helpers import ServerTestCase
-from watchpost import grouping
-from watchpost.db import iso, utcnow
+from watchpost import engine, grouping
+from watchpost.db import connect, init_schema, iso, now_iso, utcnow
 
 
 class GroupingTests(unittest.TestCase):
@@ -152,3 +154,106 @@ class GroupingApiTests(ServerTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class StoredGroupTests(unittest.TestCase):
+    rule_id = "brute_force_ip"
+
+    def setUp(self):
+        self.conn = connect(":memory:")
+        self.addCleanup(self.conn.close)
+        init_schema(self.conn)
+        engine.seed_rules(self.conn)
+        self.conn.execute("UPDATE rules SET enabled=(id=?)", (self.rule_id,))
+        self.conn.execute("UPDATE rules SET grouping=? WHERE id=?", (json.dumps(["user"]), self.rule_id))
+        self.now = now_iso()
+
+    def events(self, names, ip="192.0.2.1"):
+        return [self.conn.execute(
+            "INSERT INTO events(ts,ingested_at,source,event_type,severity,user,src_ip) VALUES (?,?,?,'auth_failure','low',?,?)",
+            (self.now, self.now, "fixture", name, ip)).lastrowid for name in names]
+
+    def alert(self, key, ids, status="open", count=None):
+        alert_id = self.conn.execute(
+            "INSERT INTO alerts(rule_id,rule_version,group_key,severity,title,explanation,status,first_seen,"
+            " last_seen,event_count,created_at,updated_at) VALUES (?,1,?,'low','fixture','fixture',?,?,?,?,?,?)",
+            (self.rule_id, key, status, self.now, self.now, len(ids) if count is None else count,
+             self.now, self.now)).lastrowid
+        self.conn.executemany("INSERT INTO alert_events VALUES (?,?)", [(alert_id, n) for n in ids])
+        return alert_id
+
+    def suppress(self, key):
+        return self.conn.execute(
+            "INSERT INTO suppressions(rule_id,group_key,reason,expires_at,proposed_by,approved_by,created_at)"
+            " VALUES (?,?,'fixture',?,'analyst','admin',?)",
+            (self.rule_id, key, iso(utcnow()+timedelta(days=1)), self.now)).lastrowid
+
+    def test_unresolved_sibling_keeps_delimiter_exception_in_review(self):
+        ids = self.events(["a", "b"] * 5)
+        self.alert("a,b", ids)
+        incomplete = self.alert("a,b", ids[:2], count=10)
+        missing = self.alert("a,b", [], count=10)
+        exception = self.suppress("a,b")
+        for _ in range(2):
+            result = engine.run_detection(self.conn)
+            self.assertEqual(result["status"], "ok", result)
+            self.assertEqual(result["alerts_suppressed"], 0)
+            self.assertEqual(result["alerts_created"], 0)
+            self.assertNotIn((self.rule_id, "a,b"), engine.active_suppressions(self.conn))
+            reviews = self.conn.execute(
+                "SELECT detail FROM audit_log WHERE action='suppression_needs_review'").fetchall()
+            self.assertEqual(len(reviews), 1)
+            detail = json.loads(reviews[0][0])
+            self.assertEqual(detail["suppression_id"], exception)
+            self.assertEqual(detail["unresolved_alert_ids"], [incomplete, missing])
+            self.assertEqual(result["suppression_reviews"], [detail])
+
+    def test_proven_alias_only_suppresses_its_own_group(self):
+        for name in ("a,b", "(none)", "long," + "x" * 300):
+            with self.subTest(name=name[:8]):
+                ids = self.events([name] * 10, "192.0.2." + str(len(name) % 100 + 2))
+                key = name if len(name) <= 256 else "sha256:" + hashlib.sha256(name.encode()).hexdigest()
+                self.alert(key, ids)
+                self.suppress(key)
+        self.events(["a", "b"] * 5)
+        self.events([None] * 10, "192.0.2.99")
+        for created in (2, 0):
+            result = engine.run_detection(self.conn)
+            self.assertEqual(result["status"], "ok", result)
+            self.assertEqual((result["alerts_suppressed"], result["alerts_created"]), (3, created))
+
+    def test_resolved_alias_and_current_escaped_alert_survive_replay(self):
+        self.alert("a,b", self.events(["a,b"] * 10), status="resolved")
+        self.alert(r"c\,d", self.events(["c,d"] * 10, "192.0.2.2"))
+        for _ in range(2):
+            result = engine.run_detection(self.conn)
+            self.assertEqual((result["alerts_created"], result["alerts_updated"]), (0, 0))
+        self.assertEqual([r[0] for r in self.conn.execute("SELECT status FROM alerts ORDER BY id")],
+                         ["resolved", "open"])
+
+    def test_historical_identity_is_read_outside_writer_and_only_once(self):
+        ids = self.events(["a,b"] * 10)
+        old = self.alert("a,b", ids)
+        reads = []
+        def trace(sql):
+            if "FROM alert_events ae JOIN events e" in sql:
+                reads.append(self.conn.in_transaction)
+        self.conn.set_trace_callback(trace)
+        first = engine.run_detection(self.conn)
+        self.assertEqual((first["status"], first["alerts_created"]), ("ok", 0))
+        self.assertEqual(reads, [False])
+        self.events(["a,b"] * 10, "192.0.2.2")
+        second = engine.run_detection(self.conn)
+        self.assertEqual((second["status"], second["alerts_updated"]), ("ok", 1))
+        self.assertEqual(reads, [False])
+        self.assertEqual(self.conn.execute("SELECT event_count FROM alerts WHERE id=?", (old,)).fetchone()[0], 20)
+
+    def test_old_grouping_cannot_authorize_an_exception_after_fields_change(self):
+        ids = self.events(["a,b"] * 10)
+        self.alert("a,b", ids)
+        self.suppress("a,b")
+        self.conn.execute("UPDATE rule_history SET grouping=? WHERE rule_id=? AND version=1",
+                          (json.dumps(["host"]), self.rule_id))
+        self.conn.execute("UPDATE rules SET version=2 WHERE id=?", (self.rule_id,))
+        result = engine.run_detection(self.conn)
+        self.assertEqual((result["status"], result["alerts_suppressed"]), ("ok", 0))
+        self.assertEqual(len(result["suppression_reviews"]), 1)
