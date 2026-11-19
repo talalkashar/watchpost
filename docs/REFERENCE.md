@@ -741,7 +741,7 @@ time window; changing an alert grouping key does not change that incident logic.
 **Limitations:**
 - Single process with SQLite. Measured up to 250,000 events on one laptop (see [Performance](#performance)); larger volumes are untested, and this is not enterprise volume. No retention or rollup.
 - Live ingestion is basic: an optional syslog listener (unauthenticated, no TLS; loopback by default) and a single-file-per-flag shipper script. See [docs/LIVE_INGEST.md](LIVE_INGEST.md) for its limits.
-- Timestamps without a zone are treated as UTC. BSD syslog lines carry no year, so you pass one or the current year is assumed.
+- Timestamps without a zone are treated as UTC. BSD syslog lines carry no year, so you pass one or the current year is assumed. An upload `year` is ASCII digits from 2000 to 2100. `year=2024` stays. `year=２０２４`, `year=²`, and `year=2_024` are 400 `year must be between 2000 and 2100`, and `year=²` is not a 500.
 - Seeded accounts only (admin, analyst, and an optional viewer); there is no user-management UI or API. Accounts can be added with `watchpost.auth.create_user`. A second account whose name differs only by ASCII case is refused (`Admin` when `admin` is stored). `Érin` and `érin` stay two accounts. An exact duplicate is that same refusal.
 - No TLS in the app itself; `deploy/` puts Caddy or nginx in front for HTTPS. Rate limits live in memory and reset on restart.
 - Rules cover authentication, web, firewall/VPN, cloud audit, and host scenarios with fixed thresholds. Geo for impossible travel comes from a synthetic table covering only documentation and private ranges.

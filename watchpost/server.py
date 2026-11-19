@@ -393,11 +393,18 @@ def ingest_upload(req):
         raise ApiError(400, "upload must be UTF-8 text")
     if not text.strip():
         raise ApiError(400, "upload is empty")
-    year = req.query.get("year")
-    if year is not None and not (year.isdigit() and 2000 <= int(year) <= 2100):
-        raise ApiError(400, "year must be between 2000 and 2100")
+    year_text = req.query.get("year")
+    year = None
+    if year_text is not None:
+        # ASCII digits only. Fullwidth digits and ² pass str.isdigit and must stay this 400.
+        # ² is a digit but not ASCII, so it is the same 400, not a 500.
+        if not (year_text.isascii() and year_text.isdigit()):
+            raise ApiError(400, "year must be between 2000 and 2100")
+        year = int(year_text)
+        if not 2000 <= year <= 2100:
+            raise ApiError(400, "year must be between 2000 and 2100")
     return _ingest(req, text, req.query.get("format", "auto"), req.query.get("source", "upload"),
-                   _upload_synthetic(req), int(year) if year else None)
+                   _upload_synthetic(req), year)
 
 
 def _upload_synthetic(req):
