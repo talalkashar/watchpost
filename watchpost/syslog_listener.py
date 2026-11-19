@@ -20,11 +20,13 @@ import socketserver
 import threading
 import time
 from collections import deque
+from datetime import datetime, timezone
 
 from . import engine, health
 from .db import connect, iso, now_iso, utcnow
 from .diagnostics import describe_exception, log, record_error, redact_cut
-from .normalize import MAX_LEN, EventError, clean_text, normalize_authlog_line, normalize_weblog_line, stored_text
+from .normalize import (MAX_FUTURE, MAX_LEN, EventError, clean_text, normalize_authlog_line,
+                        normalize_weblog_line, stored_text)
 
 SOURCE = "syslog"
 SUBMITTED_BY = "syslog-listener"
@@ -38,16 +40,25 @@ RECENT_SECONDS = 600          # drops or flush failures this recent make the com
 PRI_SEVERITY = {0: "critical", 1: "critical", 2: "critical", 3: "high",
                 4: "medium", 5: "low", 6: "info", 7: "info"}
 
-_PRI = re.compile(r"^<(\d{1,3})>")
+_PRI = re.compile(r"^<(\d*)>")
 _RFC5424 = re.compile(
     r"^1 (?P<ts>\S+) (?P<host>\S+) (?P<app>\S+) (?P<procid>\S+) (?P<msgid>\S+) "
     r"(?P<sd>-|(?:\[(?:[^\]\\]|\\.)*\])+)(?: (?P<msg>.*))?$", re.S)
+# Optional Cisco sequence (`123: `), BSD timestamp with an optional year and fraction, or an ISO timestamp.
 _RFC3164 = re.compile(
-    r"^(?P<ts>[A-Z][a-z]{2}\s+\d{1,2}\s\d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2}T\S+)\s+(?P<host>\S+)\s+(?P<rest>.*)$",
+    r"^(?:\d{1,5}:\s+)?"
+    r"(?P<ts>[A-Z][a-z]{2}\s+\d{1,2}(?:\s+\d{4})?\s+\d{2}:\d{2}:\d{2}(?:[.,]\d+)?"
+    r"|\d{4}-\d{2}-\d{2}T\S+)\s+(?P<host>\S+)(?:\s+(?P<rest>.*))?$",
     re.S)
 _TAG = re.compile(r"^(?P<app>[^\s\[:]{1,48})(?:\[(?P<procid>[^\]\s]{1,32})\])?:\s?(?P<msg>.*)$", re.S)
 _FRACTION = re.compile(r"(T\d{2}:\d{2}:\d{2})\.(\d+)")
+_COMMA_FRACTION = re.compile(r"(T\d{2}:\d{2}:\d{2}),(\d+)")
+_BSD_EXTENDED = re.compile(
+    r"^(?P<mon>[A-Z][a-z]{2})\s+(?P<day>\d{1,2})(?:\s+(?P<year>\d{4}))?\s+"
+    r"(?P<hms>\d{2}:\d{2}:\d{2})(?:[.,](?P<frac>\d+))?$")
+_TS_PREFIX = re.compile(r"\d{4}-\d{2}-\d{2}T")
 _PROG_UNSAFE = re.compile(r"[^\w\-/.]")
+_MAX_HOST, _MAX_APP, _MAX_PROCID = 255, 48, 128
 
 
 def _nil(value):
@@ -56,49 +67,204 @@ def _nil(value):
 
 def _fix_fraction(ts):
     # RFC 5424 allows 1-6 fractional digits; Python 3.10's fromisoformat wants exactly 3 or 6.
-    return _FRACTION.sub(lambda m: f"{m.group(1)}.{m.group(2)[:6].ljust(6, '0')}", ts) if ts else ts
+    # Some devices use a comma as the decimal mark.
+    if not ts:
+        return ts
+    ts = _COMMA_FRACTION.sub(lambda m: f"{m.group(1)}.{m.group(2)[:6].ljust(6, '0')}", ts, count=1)
+    return _FRACTION.sub(lambda m: f"{m.group(1)}.{m.group(2)[:6].ljust(6, '0')}", ts)
+
+
+def _cut(value, limit):
+    if value is None:
+        return None
+    return value[:limit]
+
+
+def _bound(value, limit):
+    return _cut(_nil(value), limit)
+
+
+def _parsed(pri, msg, **fields):
+    out = {"pri": pri, "facility": pri >> 3, "level": pri & 7, "format": "raw",
+           "ts": None, "host": None, "app": None, "procid": None, "msg": msg}
+    out.update(fields)
+    return out
+
+
+def _from_5424(ts, host, app, procid, msg):
+    return {"format": "rfc5424", "ts": _fix_fraction(_nil(ts)), "host": _bound(host, _MAX_HOST),
+            "app": _bound(app, _MAX_APP), "procid": _bound(procid, _MAX_PROCID),
+            "msg": (msg or "").lstrip("﻿")}
+
+
+def _skip_sd(text):
+    """Index just after structured data, or None when the block does not close."""
+    i, n = 0, len(text)
+    if not text.startswith("["):
+        return None
+    while i < n and text[i] == "[":
+        i += 1
+        while i < n and text[i] not in " ]":
+            i += 1
+        if i >= n:
+            return None
+        while i < n and text[i] == " ":
+            i += 1
+            if i >= n or text[i] == "]":
+                break
+            eq = text.find("=", i)
+            if eq <= i or " " in text[i:eq] or "]" in text[i:eq]:
+                return None
+            i = eq + 1
+            if i >= n or text[i] != '"':
+                return None
+            i += 1
+            while i < n:
+                if text[i] == "\\":
+                    if i + 1 >= n:
+                        return None
+                    i += 2
+                    continue
+                if text[i] == '"':
+                    i += 1
+                    break
+                i += 1
+            else:
+                return None
+            if i >= n or text[i] not in " ]":
+                return None
+        if i >= n or text[i] != "]":
+            return None
+        i += 1
+    return i
+
+
+def _lenient_5424(text):
+    """Header split for a version-1 frame whose structured data is missing or unclosed."""
+    if not text.startswith("1 "):
+        return None
+    rest = text[2:].lstrip(" ")
+    fields = []
+    for _ in range(5):
+        if rest == "":
+            break
+        sp = rest.find(" ")
+        if sp == -1:
+            fields.append(rest)
+            rest = ""
+            break
+        fields.append(rest[:sp])
+        rest = rest[sp + 1:]
+    if len(fields) < 5:
+        return None
+    ts = fields[0]
+    if ts != "-" and not _TS_PREFIX.match(ts):
+        return None
+    msg = rest
+    if msg == "-" or msg.startswith("- "):
+        msg = "" if msg == "-" else msg[2:]
+    elif msg.startswith("["):
+        end = _skip_sd(msg)
+        if end is not None:
+            msg = msg[end:]
+            if msg.startswith(" "):
+                msg = msg[1:]
+    return _from_5424(ts, fields[1], fields[2], fields[3], msg)
+
+
+def _match_5424(text):
+    match = _RFC5424.match(text)
+    if match:
+        return _from_5424(match["ts"], match["host"], match["app"], match["procid"], match["msg"])
+    return _lenient_5424(text)
+
+
+def _timestamp_for_auth(ts, now):
+    """Timestamp text the auth.log parser accepts. Classic BSD timestamps pass through."""
+    if not ts:
+        return None
+    ts = _fix_fraction(ts)
+    match = _BSD_EXTENDED.match(ts)
+    if not match or (not match.group("year") and not match.group("frac")):
+        return ts
+    try:
+        year = int(match.group("year")) if match.group("year") else None
+        stamp = f"{match.group('mon')} {int(match.group('day')):02d} {match.group('hms')}"
+        dt = datetime.strptime(f"{year or now.year} {stamp}", "%Y %b %d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise EventError(f"unparseable timestamp {ts[:40]!r}")
+    if year is None and dt > now + MAX_FUTURE:
+        dt = dt.replace(year=dt.year - 1)
+    frac = match.group("frac")
+    if frac:
+        dt = dt.replace(microsecond=int(frac[:6].ljust(6, "0")))
+    return iso(dt)
 
 
 def parse_frame(frame):
     """Split one syslog message into PRI, header fields, and message text. Never raises."""
-    text = frame.strip("\r\n\x00")
+    if isinstance(frame, (bytes, bytearray)):
+        text = bytes(frame[:MAX_FRAME_BYTES]).decode("utf-8", "replace")
+    elif isinstance(frame, str):
+        text = frame[:MAX_FRAME_BYTES]
+    else:
+        return _parsed(DEFAULT_PRI, "")
+    text = text.strip("\r\n\x00").lstrip(" \t\ufeff")
     pri = DEFAULT_PRI
     match = _PRI.match(text)
-    if match and int(match.group(1)) <= 191:
-        pri, text = int(match.group(1)), text[match.end():]
-    out = {"pri": pri, "facility": pri >> 3, "level": pri & 7, "format": "raw",
-           "ts": None, "host": None, "app": None, "procid": None, "msg": text}
-
-    match = _RFC5424.match(text)
     if match:
-        out.update(format="rfc5424", ts=_fix_fraction(_nil(match["ts"])), host=_nil(match["host"]),
-                   app=_nil(match["app"]), procid=_nil(match["procid"]),
-                   msg=(match["msg"] or "").lstrip("﻿"))
-        return out
+        digits = match.group(1)
+        if len(digits) <= 3:
+            value = int(digits) if digits else 999
+            if value <= 191:
+                pri = value
+        text = text[match.end():]  # out-of-range PRI still leaves the header to be parsed
+    header = _match_5424(text)
+    if header:
+        return _parsed(pri, header.pop("msg"), **header)
 
     match = _RFC3164.match(text)
-    if match:
-        host, rest = match["host"], match["rest"]
-        if host.endswith(":") or "[" in host:   # no HOSTNAME field: this is already the TAG
-            host, rest = None, f"{host} {rest}"
-        out.update(format="rfc3164", ts=_fix_fraction(match["ts"]), host=host, msg=rest)
-        tag = _TAG.match(rest)
-        if tag:
-            out.update(app=tag["app"], procid=tag["procid"], msg=tag["msg"])
+    if not match:
+        return _parsed(pri, text)
+    host, rest = match["host"], match["rest"] or ""
+    if host.endswith(":") or "[" in host:   # no HOSTNAME field: this is already the TAG
+        host, rest = None, f"{host} {rest}".strip()
+    out = _parsed(pri, rest, format="rfc3164", ts=_fix_fraction(match["ts"]), host=_cut(host, _MAX_HOST))
+    tag = _TAG.match(rest)
+    if tag:
+        out.update(app=_cut(tag["app"], _MAX_APP), procid=_cut(tag["procid"], _MAX_PROCID), msg=tag["msg"])
     return out
 
 
 def frame_to_event(frame, peer_ip=None, now=None):
     """Normalize one frame. Raises EventError (e.g. a bad timestamp) so the caller can record a rejection."""
     now = now or utcnow()
+    if isinstance(frame, (bytes, bytearray)):
+        frame = bytes(frame[:MAX_FRAME_BYTES]).decode("utf-8", "replace")
+    elif not isinstance(frame, str):
+        raise EventError("malformed syslog frame")
+    elif len(frame) > MAX_FRAME_BYTES:
+        frame = frame[:MAX_FRAME_BYTES]
     parsed = parse_frame(frame)
     host = parsed["host"] or peer_ip or "unknown"
     app = _PROG_UNSAFE.sub("_", parsed["app"])[:48] if parsed["app"] else None
     msg = parsed["msg"].replace("\r", " ").replace("\n", " ")
-    prog = (app or "syslog") + (f"[{parsed['procid']}]" if parsed["procid"] else "")
+    # The auth.log parser only accepts a numeric pid. A string PROCID is valid RFC 5424;
+    # splicing it into the tag makes normalize_authlog_line reject the whole frame.
+    procid = parsed["procid"]
+    if not (procid and procid.isdigit() and len(procid) <= _MAX_PROCID):
+        procid = None
+    prog = (app or "syslog") + (f"[{procid}]" if procid else "")
     # Rebuild an auth.log-style line so the existing parser (and its timestamp rules) does the work.
-    line = f"{parsed['ts'] or iso(now)} {host} {prog}: {msg}"
-    event = normalize_authlog_line(line, SOURCE, now=now)
+    line = f"{_timestamp_for_auth(parsed['ts'], now) or iso(now)} {host} {prog}: {msg}"
+    try:
+        event = normalize_authlog_line(line, SOURCE, now=now)
+    except EventError:
+        raise
+    except ValueError as exc:
+        # An impossible BSD date (Sep 32) raises ValueError from strptime. That must be a
+        # rejection of this frame, not an exception that drops the rest of the batch.
+        raise EventError(f"unparseable timestamp {str(parsed['ts'])[:40]!r}") from exc
     if event["event_type"] == "other":
         event = _web_event(msg, host, now) or event
     if event["event_type"] == "other":
@@ -119,15 +285,89 @@ def _web_event(msg, host, now):
     return event
 
 
+def _pending(rfile):
+    return getattr(rfile, "_syslog_pending", b"")
+
+
+def _unread(rfile, data):
+    """Push bytes back. A NUL trailer must not swallow the next frame sitting behind it."""
+    if data:
+        rfile._syslog_pending = data + _pending(rfile)
+
+
+def _read1(rfile):
+    pending = _pending(rfile)
+    if pending:
+        rfile._syslog_pending = pending[1:]
+        return pending[:1]
+    return rfile.read(1)
+
+
+def _readn(rfile, n):
+    if n <= 0:
+        return b""
+    pending = _pending(rfile)
+    if not pending:
+        return rfile.read(n)
+    take, rfile._syslog_pending = pending[:n], pending[n:]
+    if len(take) == n:
+        return take
+    return take + rfile.read(n - len(take))
+
+
+def _trailer_at(buf):
+    newline, nul = buf.find(b"\n"), buf.find(b"\x00")
+    if newline == -1:
+        return nul
+    if nul == -1:
+        return newline
+    return min(newline, nul)
+
+
+def _read_until_trailer(rfile, max_bytes):
+    """Read at most max_bytes, stopping at LF, NUL, or EOF.
+
+    readline() ends a record only on LF. An RFC 6587 NUL trailer would then sit
+    unread until a later LF or the sender closes. One-byte reads return that
+    record while the writer is still idle, and the buffer never passes max_bytes.
+    """
+    if max_bytes <= 0:
+        return b""
+    buf = bytearray()
+    while len(buf) < max_bytes:
+        char = rfile.read(1)
+        if not char:
+            break
+        buf += char
+        if char in (b"\n", b"\x00"):
+            break
+    return bytes(buf)
+
+
+def _readline_limited(rfile, max_bytes):
+    pending = _pending(rfile)
+    if not pending:
+        return _read_until_trailer(rfile, max_bytes)
+    cut = _trailer_at(pending)
+    if cut != -1 and cut < max_bytes:
+        rfile._syslog_pending = pending[cut + 1:]
+        return pending[:cut + 1]
+    if len(pending) >= max_bytes:
+        rfile._syslog_pending = pending[max_bytes:]
+        return pending[:max_bytes]
+    rfile._syslog_pending = b""
+    return pending + _read_until_trailer(rfile, max_bytes - len(pending))
+
+
 def read_tcp_frame(rfile, max_bytes=MAX_FRAME_BYTES):
-    """Read one RFC 6587 frame: octet-counted ("LEN SP MSG") or newline-terminated. None at EOF."""
-    first = rfile.read(1)
+    """Read one RFC 6587 frame: octet-counted ("LEN SP MSG") or LF/NUL-terminated. None at EOF."""
+    first = _read1(rfile)
     if not first:
         return None
     if first.isdigit():
         digits = first
         while True:
-            char = rfile.read(1)
+            char = _read1(rfile)
             if not char:
                 return None
             if char == b" ":
@@ -136,10 +376,10 @@ def read_tcp_frame(rfile, max_bytes=MAX_FRAME_BYTES):
                 return _read_line(rfile, digits + char, max_bytes)  # not octet counting after all
             digits += char
         length = int(digits)
-        data = rfile.read(min(length, max_bytes))
+        data = _readn(rfile, min(length, max_bytes))
         remaining = length - len(data)
         while remaining > 0:  # discard the truncated tail of an oversized frame
-            chunk = rfile.read(min(remaining, 65536))
+            chunk = _readn(rfile, min(remaining, 65536))
             if not chunk:
                 break
             remaining -= len(chunk)
@@ -148,12 +388,25 @@ def read_tcp_frame(rfile, max_bytes=MAX_FRAME_BYTES):
 
 
 def _read_line(rfile, prefix, max_bytes):
-    line = prefix + rfile.readline(max_bytes)
-    if not line.endswith(b"\n") and len(line) > max_bytes:
-        while True:  # discard the rest of an oversized line
-            more = rfile.readline(65536)
-            if not more or more.endswith(b"\n"):
+    cut = _trailer_at(prefix)
+    if cut != -1:
+        _unread(rfile, prefix[cut + 1:])
+        return prefix[:cut + 1]
+    line = prefix + _readline_limited(rfile, max_bytes)
+    cut = _trailer_at(line)
+    if cut != -1:
+        _unread(rfile, line[cut + 1:])
+        return line[:cut + 1]
+    if len(line) > max_bytes:
+        while True:  # discard the rest of an oversized line, stopping at LF or NUL
+            more = _readline_limited(rfile, 65536)
+            if not more:
                 break
+            cut = _trailer_at(more)
+            if cut == -1:
+                continue
+            _unread(rfile, more[cut + 1:])
+            break
     return line
 
 
