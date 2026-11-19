@@ -133,8 +133,8 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 | `severity` | Comma list, or a single level with `severity_mode=min` for "at least". `severity_mode` folds ASCII onto `min` (`Min` is `min`). `minimum` is not an alias and stays ignored. Spaces around each name are ignored. ASCII case folds onto the catalog spelling (`High` binds `high`). A blank or unknown piece is 400 listing the catalog. Grouping by `severity` stays the stored spelling |
 | `q` | Substring of `message` (`%` and `_` are literal), at most 200 characters. A longer value is 400 naming that maximum |
 | `synthetic` | When present, `0`, `1`, `true`, or `false`. ASCII case folds, so `True` is `true` and `FALSE` is `false`. Any other present value, including a blank `synthetic=`, is 400 `synthetic must be 0, 1, true or false`. An absent parameter stays unfiltered |
-| `limit` (1–1000, default 100), `offset` (0–10000, default 0) | Paging; response includes `total`. An offset above 10000 is 400 naming that maximum |
-| `since_id` | Only events stored after that event id, newest stored first (ignores event time). This is how to walk newer events; it does not skip rows with `offset`. Used by the dashboard's polling fallback |
+| `limit` (1–1000, default 100), `offset` (0–10000, default 0) | Paging; response includes `total`. An offset above 10000 is 400 naming that maximum. Both are ASCII digits only. `limit=10` stays 10. `limit=1_0`, `limit=４`, `limit=+10`, and `limit=²` are 400 `limit must be an integer`, and `²` is not a 500. The same forms on `offset` are 400 `offset must be an integer`. `limit=0` and `limit=1001` stay `limit must be between 1 and 1000` |
+| `since_id` | Only events stored after that event id, newest stored first (ignores event time). This is how to walk newer events; it does not skip rows with `offset`. Used by the dashboard's polling fallback. ASCII digits only. `since_id=0` stays. `since_id=1_0`, `since_id=４`, `since_id=+10`, and `since_id=²` are 400 `since_id must be an integer`, and `²` is not a 500 |
 
 | Endpoint | Role | Notes |
 |---|---|---|
@@ -162,7 +162,7 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 
 ### `GET /api/metrics` window
 
-`hours` is an integer from 1 to 2160 (90 days), default 24. `window_hours` repeats that value. It does not scope the rest of the payload.
+`hours` is ASCII digits from 1 to 2160 (90 days), default 24. `hours=24` stays. `hours=1_0`, `hours=４`, `hours=+10`, and `hours=²` are 400 `hours must be an integer`, and `²` is not a 500. `hours=0` and `hours=2161` stay `hours must be between 1 and 2160`. `window_hours` repeats the accepted value. It does not scope the rest of the payload.
 
 `window_scope.honors_hours` is `events_ingested_window` only. That count is events whose `ingested_at` falls in the last `hours` hours.
 

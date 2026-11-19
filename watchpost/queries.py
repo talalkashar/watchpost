@@ -134,12 +134,20 @@ def canonical_ip(value, field):
 
 
 def _int(value, name, default, low, high):
+    # ASCII digits, or a real int. Underscores, a sign, and fullwidth digits are refused.
+    # ² is a digit but not ASCII, so it is the same 400, not a 500.
     if value in (None, ""):
         return default
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        raise QueryError(f"{name} must be an integer")
+    if isinstance(value, str):
+        text = value.strip()
+        if not text.isascii() or not text.isdigit():
+            raise QueryError(f"{name} must be an integer")
+        number = int(text)
+    else:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            raise QueryError(f"{name} must be an integer")
     if not low <= number <= high:
         raise QueryError(f"{name} must be between {low} and {high}")
     return number
