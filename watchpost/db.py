@@ -519,10 +519,33 @@ def _audit_columns_sql():
     return ", ".join(_sql_ident(name) for name in AUDIT_FIELDS)
 
 
+class TransactionBoundaryError(RuntimeError):
+    """The write this call is ending is not the transaction it opened.
+
+    A COMMIT, or the commit executescript issues first, may already have made earlier rows durable.
+    Raising does not undo them.
+    """
+
+
+def _tx_depth(conn):
+    """How many managed transaction() frames are open, or None when this connection is not in one."""
+    depth = getattr(conn, "_tx_depth", None)
+    if depth is None:
+        return None
+    if type(depth) is not int or depth < 0:
+        raise ValueError("invalid transaction depth")
+    return depth
+
+
 def _end_transaction(conn, savepoint, commit):
-    """Commit or roll back what this call opened. No-op when that transaction is already closed."""
+    """Commit or roll back what this call opened.
+
+    A transaction that is already closed raises. So does a savepoint SQLite no longer has.
+    Neither error puts those rows back.
+    """
     if not conn.in_transaction:
-        return
+        raise TransactionBoundaryError(
+            "transaction closed early; that commit is already durable and cannot be undone")
     if savepoint is None:
         conn.execute("COMMIT" if commit else "ROLLBACK")
         return
@@ -538,44 +561,59 @@ def transaction(conn):
     """A write transaction. A nested call uses a savepoint on the open transaction.
 
     The outer BEGIN IMMEDIATE takes the write lock before any read, which the audit chain needs.
-    A nested call rolls back only its savepoint. If the body already committed, or SQLite committed
-    for it, the exit does not raise.
+    A nested call rolls back only its savepoint. A premature COMMIT, the commit executescript issues
+    first, a missing savepoint, or a failed COMMIT raises. An error after an earlier commit does not
+    undo that commit. A nested call whose outer transaction is already closed refuses to open another
+    one, so that write does not become durable on its own.
     """
-    if conn.in_transaction:
-        depth = getattr(conn, "_tx_depth", 0)
-        if type(depth) is not int or depth < 0:
-            raise ValueError("invalid transaction depth")
-        savepoint = f"wp_{depth}"
-        conn.execute(f"SAVEPOINT {savepoint}")
-        conn._tx_depth = depth + 1
-        restore = depth
-    else:
-        conn.execute("BEGIN IMMEDIATE")
-        savepoint = None
-        conn._tx_depth = 0
-        restore = 0
+    depth = _tx_depth(conn)
+    if depth is not None and not conn.in_transaction:
+        raise TransactionBoundaryError(
+            "transaction closed early; refusing to open another write the caller can no longer roll back")
+    savepoint = None
+    restore = None
+    started = False
     try:
-        yield conn
-    except BaseException:
+        if conn.in_transaction:
+            # An external BEGIN is joined with a savepoint. Our own frames use the next name.
+            level = 0 if depth is None else depth
+            savepoint = f"wp_{level}"
+            conn.execute(f"SAVEPOINT {savepoint}")
+            conn._tx_depth = level + 1
+            restore = depth
+        else:
+            conn.execute("BEGIN IMMEDIATE")
+            conn._tx_depth = 0
+            restore = None
+        started = True
         try:
-            _end_transaction(conn, savepoint, False)
-        except Exception:
-            pass
-        raise
-    else:
-        try:
-            _end_transaction(conn, savepoint, True)
-        except BaseException:
+            yield conn
+        except BaseException as body_error:
             try:
                 _end_transaction(conn, savepoint, False)
-            except Exception:
-                pass
+            except Exception as boundary_error:
+                raise boundary_error from body_error
             raise
+        else:
+            try:
+                _end_transaction(conn, savepoint, True)
+            except BaseException:
+                try:
+                    _end_transaction(conn, savepoint, False)
+                except Exception:
+                    pass
+                raise
     finally:
-        conn._tx_depth = restore
+        if started:
+            conn._tx_depth = restore
 
 
 def init_schema(conn):
+    # executescript commits an open transaction before it runs. Refuse that so the caller's
+    # uncommitted rows do not become durable.
+    if _tx_depth(conn) is not None or conn.in_transaction:
+        raise TransactionBoundaryError(
+            "init_schema cannot run inside a transaction; executescript would commit it")
     conn.executescript(SCHEMA)
     for table, column, kind in ADDED_COLUMNS:
         _ensure_column(conn, table, column, kind)
@@ -676,8 +714,14 @@ def _check_chain_key(conn):
 def audit(conn, actor, action, target=None, detail=None):
     # Reading the previous hash and inserting must happen under one write lock, or two writers could link to
     # the same predecessor. Callers inside transaction() already hold it (BEGIN IMMEDIATE); otherwise take it.
+    # A managed transaction that has already been committed must not start a second one: that commit would
+    # make this audit row durable after the caller has lost the ability to roll the domain write back.
     key = getattr(conn, "audit_key", None)
-    own = not conn.in_transaction
+    depth = _tx_depth(conn)
+    if depth is not None and not conn.in_transaction:
+        raise TransactionBoundaryError(
+            "transaction closed early; refusing to write an audit row the caller can no longer roll back")
+    own = depth is None and not conn.in_transaction
     if own:
         conn.execute("BEGIN IMMEDIATE")
     try:
