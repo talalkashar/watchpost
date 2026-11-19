@@ -1,5 +1,6 @@
 """Example Sigma rules load, then match their events and reject look-alikes."""
 
+import ipaddress
 import unittest
 from pathlib import Path
 
@@ -24,6 +25,9 @@ CASES = [
              "src_ip": "198.51.100.8", "dest_port": 22},
             {"event_type": "auth_success", "user": "admin", "src_ip": "2001:db8::5", "dest_port": 22},
             {"event_type": "auth_success", "user": "root", "src_ip": "198.51.100.74", "dest_port": 22},
+            # Excluding the private /12 must still admit the next address in the same /8.
+            {"event_type": "auth_success", "user": "root", "dest_port": 22,
+             "src_ip": str(ipaddress.ip_network("172.16.0.0/12").broadcast_address + 1)},
         ],
         [
             {"event_type": "auth_success", "user": "root", "src_ip": "203.0.113.50"},
