@@ -1,0 +1,37 @@
+# GuardDuty or Security Hub delete or detach calls. UpdateDetector is omitted: the message
+# names the call, not the new settings. A denial still names the action.
+# The file tags revoked T1562.006. The compiler stores T1685.
+title: Cloud Threat Detection Disable Requested
+id: c2b8d491-5e62-4c8f-a0e5-6c9d2f8b1a37
+status: experimental
+description: |
+  An API call that deletes or detaches GuardDuty, or that disables or detaches Security Hub.
+  A denied call still matches. Creating a detector, reading one, or enabling Security Hub does not.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1562/001/
+tags:
+  - attack.defense_evasion
+  - attack.t1562.006
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    event.action: cloud_api_call
+    message|contains:
+      - DeleteDetector on guardduty.amazonaws.com
+      - DeleteMembers on guardduty.amazonaws.com
+      - StopMonitoringMembers on guardduty.amazonaws.com
+      - DeletePublishingDestination on guardduty.amazonaws.com
+      - DisassociateFromMasterAccount on guardduty.amazonaws.com
+      - DisassociateFromAdministratorAccount on guardduty.amazonaws.com
+      - DisassociateMembers on guardduty.amazonaws.com
+      - DisableSecurityHub on securityhub.amazonaws.com
+      - DeleteMembers on securityhub.amazonaws.com
+      - DisassociateFromAdministratorAccount on securityhub.amazonaws.com
+  condition: selection
+falsepositives:
+  - An administrator decommissioning GuardDuty or Security Hub
+level: high
