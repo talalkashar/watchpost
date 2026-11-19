@@ -1,0 +1,43 @@
+# A sudo command that would disable audit or syslog (T1685). The record is the command
+# that was requested. Restart and status are not in the list. A quoted command in a note
+# is not an escalation.
+title: Linux Logging Disable Command
+id: 7f3a1c90-2b64-4e17-9d08-a11c0e100007
+status: experimental
+description: |
+  A privilege_escalation line whose command would disable auditd, stop or disable
+  rsyslog, turn ufw logging off, or delete auth or audit logs. The sudo record
+  shows the command that was requested. It does not show that the service stopped
+  or that any log was removed. systemctl status and systemctl restart stay out.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1685/
+tags:
+  - attack.defense_evasion
+  - attack.t1685
+logsource:
+  product: linux
+  category: process_creation
+detection:
+  elevation:
+    event.action: privilege_escalation
+  disable:
+    message|contains:
+      - 'auditctl -e 0'
+      - 'auditctl -D'
+      - 'systemctl stop auditd'
+      - 'systemctl stop rsyslog'
+      - 'systemctl stop syslog.socket'
+      - 'systemctl disable auditd'
+      - 'systemctl disable rsyslog'
+      - 'service auditd stop'
+      - 'service rsyslog stop'
+      - 'ufw logging off'
+      - 'rm -f /var/log/auth.log'
+      - 'rm -rf /var/log/audit'
+      - 'truncate -s 0 /var/log/'
+  condition: elevation and disable
+falsepositives:
+  - Maintenance that deliberately requests a stop of auditd or rsyslog
+level: high

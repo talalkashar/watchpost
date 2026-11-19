@@ -1,0 +1,64 @@
+# sudo of a shell, interpreter, or netcat (T1548.003). The stored user is the invoker.
+# su does not record the command, so a bare "(to root)" line stays out. A trailing
+# space keeps "sh" off shutdown, shred, and sha256sum. A bare command uses endswith.
+title: Linux Sudo To Interactive Shell
+id: 7f3a1c90-2b64-4e17-9d08-a11c0e100003
+status: experimental
+description: |
+  sudo ran a shell, interpreter, or netcat. The stored user is the account that
+  invoked sudo, on the host in the syslog header. The target account is only in
+  the message. An su line does not carry the shell command, so it stays out. A
+  routine command such as systemctl restart does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1548/003/
+tags:
+  - attack.privilege_escalation
+  - attack.t1548.003
+logsource:
+  product: linux
+  service: sudo
+detection:
+  shell_exact:
+    event.action: privilege_escalation
+    message|endswith:
+      - /bin/bash
+      - /usr/bin/bash
+      - /bin/sh
+      - /usr/bin/sh
+      - /bin/dash
+      - /usr/bin/dash
+      - /bin/zsh
+      - /usr/bin/zsh
+      - /usr/bin/python
+      - /usr/bin/python3
+      - /usr/bin/perl
+      - /usr/bin/ruby
+      - /bin/nc
+      - /usr/bin/nc
+      - /usr/bin/ncat
+      - /usr/bin/socat
+  shell_args:
+    event.action: privilege_escalation
+    message|contains:
+      - 'COMMAND=/bin/bash '
+      - 'COMMAND=/usr/bin/bash '
+      - 'COMMAND=/bin/sh '
+      - 'COMMAND=/usr/bin/sh '
+      - 'COMMAND=/bin/dash '
+      - 'COMMAND=/usr/bin/dash '
+      - 'COMMAND=/bin/zsh '
+      - 'COMMAND=/usr/bin/zsh '
+      - 'COMMAND=/usr/bin/python '
+      - 'COMMAND=/usr/bin/python3 '
+      - 'COMMAND=/usr/bin/perl '
+      - 'COMMAND=/usr/bin/ruby '
+      - 'COMMAND=/bin/nc '
+      - 'COMMAND=/usr/bin/nc '
+      - 'COMMAND=/usr/bin/ncat '
+      - 'COMMAND=/usr/bin/socat '
+  condition: shell_exact or shell_args
+falsepositives:
+  - An administrator opening a root shell during maintenance
+level: high
