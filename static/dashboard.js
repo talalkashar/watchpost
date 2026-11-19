@@ -1133,17 +1133,3 @@ async function socDashboard() {
   Dash.mount();
   await Dash.load();
 }
-
-// ---------- incidents pages ----------
-async function incidentsView() {
-  await Live.refreshIncidents();
-  const inc = Live.incidents;
-  const alerts = inc.state === "ok" ? [] : await api("/api/alerts?limit=200");
-  render(
-    el("div", { class: "page-head" }, el("h1", {}, "Incidents"),
-      inc.state === "ok" ? null : incidentFallbackChip(inc.state)),
-    inc.state !== "ok" ? el("p", { class: "muted" }, inc.state === "error" ? inc.error
-      : "Alerts become incidents once the correlation engine ships (GET /api/incidents). Until then this board groups alerts by status.") : null,
-    el("div", { class: "board big", "data-kbd-list": "incidents" }, ...incidentBoard(inc, alerts, 50)));
-  restoreSelection(`[data-kbd-list] a.bcard[href="#incidents/${state.restore}"]`);
-}

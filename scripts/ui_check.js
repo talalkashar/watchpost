@@ -441,6 +441,21 @@ async function main() {
       check((await page.textContent("#modal h2")) === "Keyboard shortcuts", "? shows the shortcut help");
       await page.keyboard.press("Escape");
       await show(page, "incidents");
+      // Leave Hunt before its query returns, then reopen it without the shortcut.
+      let releaseQuery;
+      const held = new Promise((resolve) => { releaseQuery = resolve; });
+      await page.route("**/api/hunt?*", async (route) => { await held; await route.continue(); }, { times: 1 });
+      const started = page.waitForRequest("**/api/hunt?*");
+      await page.keyboard.press("/");
+      await started;
+      await page.click('#nav [data-view="incidents"]');
+      await page.waitForSelector('[data-kbd-list="incidents"]');
+      releaseQuery();
+      await page.click('#nav [data-view="hunt"]');
+      await page.waitForSelector("#view [data-search]");
+      check(await page.locator('#nav [data-view="hunt"]').evaluate((b) => b === document.activeElement),
+        "leaving a pending Hunt cancels shortcut focus on the next visit");
+      await show(page, "incidents");
       await page.keyboard.press("j");
       const inc = await page.evaluate(() => document.activeElement?.getAttribute("href"));
       check(/^#(incidents|alerts)\/\d+$/.test(inc || ""), `j selects the first incident card (${inc})`);
