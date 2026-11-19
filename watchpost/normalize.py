@@ -370,8 +370,9 @@ _WEBLOG = re.compile(
 SCAN_PATHS = ("/.env", "/.git", "/.svn", "/.aws", "/.ds_store", "/.htaccess", "/wp-login.php", "/wp-admin",
               "/xmlrpc.php", "/phpmyadmin", "/pma/", "/server-status", "/cgi-bin/", "/actuator",
               "/vendor/phpunit", "/boot.ini", "/etc/passwd", "/config.php", "/admin.php", "/manager/html")
+# Digits in sleep() and in a quoted or are ASCII. \d also matches ４.
 _SCAN_PATTERN = re.compile(
-    r"union\s+(?:all\s+)?select|'\s*or\s+'?\d|\bor\s+1\s*=\s*1|sleep\(\s*\d|benchmark\(|information_schema"
+    r"union\s+(?:all\s+)?select|'\s*or\s+'?[0-9]|\bor\s+1\s*=\s*1|sleep\(\s*[0-9]|benchmark\(|information_schema"
     r"|\.\./|<script|\$\{jndi:")
 _SCANNER_AGENT = re.compile(
     r"nikto|sqlmap|nmap|masscan|zgrab|gobuster|dirbuster|wpscan|nuclei|acunetix")
@@ -382,8 +383,10 @@ def classify_web_request(path, status, agent=None):
 
     The decoded path folds ASCII letters only, then the scanner-path list and the injection
     pattern run on that text. UNION SELECT and /.ENV are web_scan. A dotted I or a Kelvin
-    sign stays, so those lookalikes are not scans. The user agent folds the same way before
-    the scanner-name list. Nikto and sqlmap are web_scan. A Kelvin sign in the name is not.
+    sign stays, so those lookalikes are not scans. Digits in sleep() and in a quoted or
+    are ASCII [0-9]. sleep(4) and ' or 1 are web_scan. sleep(４) and ' or ４ are web_request.
+    The user agent folds the same way before the scanner-name list. Nikto and sqlmap are
+    web_scan. A Kelvin sign in the name is not.
     """
     decoded = unquote_plus(path or "").translate(_ASCII_FOLD)
     folded_agent = agent.translate(_ASCII_FOLD) if isinstance(agent, str) else ""
