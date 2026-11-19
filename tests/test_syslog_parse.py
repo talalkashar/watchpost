@@ -7,8 +7,11 @@ import threading
 import unittest
 from datetime import datetime, timezone
 
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 from watchpost.normalize import MAX_LEN, EventError, normalize_authlog_line
-from watchpost.syslog_listener import frame_to_event, parse_frame, read_tcp_frame
+from watchpost.syslog_listener import _TCPHandler, frame_to_event, parse_frame, read_tcp_frame
 
 NOW = datetime(2026, 11, 18, 12, 0, tzinfo=timezone.utc)
 
@@ -104,6 +107,9 @@ class SyslogParseTests(unittest.TestCase):
                 frame_to_event(frame, now=NOW)
             self.assertIn("unparseable timestamp", str(caught.exception))
 
+        with self.assertRaises(EventError):
+            frame_to_event("Feb 29 10:00:01.5 h app: m", now=datetime(2028, 1, 1, tzinfo=timezone.utc))
+
     def test_future_iso_timestamp_is_still_rejected(self):
         with self.assertRaises(EventError) as caught:
             frame_to_event("<13>1 2126-09-28T10:00:05Z host app - - - from the future", now=NOW)
@@ -170,6 +176,16 @@ class SyslogParseTests(unittest.TestCase):
         self.assertEqual(frames(b"12x not octet\n"), [b"12x not octet\n"])
         self.assertEqual(frames(b"1234567 extra digits\n"), [b"1234567 extra digits\n"])
         self.assertEqual(frames(b"0 \n<13>next\n"), [b"", b"\n", b"<13>next\n"])
+
+    def test_tcp_handler_submits_only_nonempty_records(self):
+        listener = Mock()
+        listener.stopping.is_set.return_value = False
+        with _OpenWriter() as pipe:
+            pipe.send(b"\x00one\n\x00 \x00two\x00")
+            pipe.writer.shutdown(socket.SHUT_WR)
+            _TCPHandler(pipe.reader, ("127.0.0.1", 0), SimpleNamespace(listener=listener))
+        self.assertEqual([c.args[0] for c in listener.submit.call_args_list], [b"one\n", b"two\x00"])
+        self.assertEqual(frames(b"17"), [b"17"])
 
     def test_tcp_oversize_octet_and_newline_do_not_merge(self):
         octet = frames(b"30 " + b"A" * 30 + b"<13>next\n", max_bytes=10)

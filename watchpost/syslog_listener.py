@@ -256,8 +256,8 @@ def frame_to_event(frame, peer_ip=None, now=None):
         procid = None
     prog = (app or "syslog") + (f"[{procid}]" if procid else "")
     # Rebuild an auth.log-style line so the existing parser (and its timestamp rules) does the work.
-    line = f"{_timestamp_for_auth(parsed['ts'], now) or iso(now)} {host} {prog}: {msg}"
     try:
+        line = f"{_timestamp_for_auth(parsed['ts'], now) or iso(now)} {host} {prog}: {msg}"
         event = normalize_authlog_line(line, SOURCE, now=now)
     except EventError:
         raise
@@ -327,20 +327,21 @@ def _trailer_at(buf):
 def _read_until_trailer(rfile, max_bytes):
     """Read at most max_bytes, stopping at LF, NUL, or EOF.
 
-    readline() ends a record only on LF. An RFC 6587 NUL trailer would then sit
-    unread until a later LF or the sender closes. One-byte reads return that
-    record while the writer is still idle, and the buffer never passes max_bytes.
+    BufferedReader.read1 returns available bytes even while the writer is idle.
+    Save the bytes after the first delimiter for the next frame.
     """
-    if max_bytes <= 0:
-        return b""
     buf = bytearray()
+    read = getattr(rfile, "read1", None)
     while len(buf) < max_bytes:
-        char = rfile.read(1)
-        if not char:
+        chunk = read(min(8192, max_bytes - len(buf))) if read else rfile.read(1)
+        if not chunk:
             break
-        buf += char
-        if char in (b"\n", b"\x00"):
+        cut = _trailer_at(chunk)
+        if cut != -1:
+            buf.extend(chunk[:cut + 1])
+            _unread(rfile, chunk[cut + 1:])
             break
+        buf.extend(chunk)
     return bytes(buf)
 
 
@@ -369,7 +370,7 @@ def read_tcp_frame(rfile, max_bytes=MAX_FRAME_BYTES):
         while True:
             char = _read1(rfile)
             if not char:
-                return None
+                return digits[:max_bytes]
             if char == b" ":
                 break
             if not char.isdigit() or len(digits) >= 6:
@@ -445,7 +446,7 @@ class _TCPHandler(socketserver.StreamRequestHandler):
                 frame = read_tcp_frame(self.rfile)
                 if frame is None:
                     return
-                if frame.strip():
+                if frame.strip(b" \t\r\n\v\f\x00"):
                     listener.submit(frame, peer, checked=True)
         except (socket.timeout, ConnectionError):
             return
