@@ -134,11 +134,14 @@ function panel(id, title, meta, ...body) {
 }
 
 // A store with zero events is one next action, not a map and not a saved-view form.
-// Analysts and admins may upload. Everyone else gets a read-only explanation and no control.
+// Keep the admin demo shortcut. Analysts can upload, and viewers get a read-only explanation.
 function emptyDashboard(eventsTotal, role) {
   if (typeof eventsTotal !== "number" || eventsTotal !== 0) return null;
   const title = "No events yet";
-  if (role === "analyst" || role === "admin") {
+  if (role === "admin") {
+    return { title, body: "No events are stored.", load: true, label: "Load demo data" };
+  }
+  if (role === "analyst") {
     return {
       title,
       body: "No events are stored.",
@@ -622,18 +625,38 @@ const Dash = {
       bar.hidden = true;
       bar.replaceChildren();
     }
-    const mode = copy.href ? "ingest" : "read";
+    const mode = copy.load ? "demo" : copy.href ? "ingest" : "read";
     if (box.hidden || box.dataset.mode !== mode) {
       box.dataset.mode = mode;
       box.hidden = false;
       box.replaceChildren(el("div", { class: "card dash-empty", role: "status" },
         el("h2", {}, copy.title),
         el("p", {}, copy.body),
-        copy.href
+        copy.load
+          ? el("button", { type: "button", id: "dash-load-demo", onclick: () => guarded(() => this.loadDemo()) }, copy.label)
+          : copy.href
           ? el("a", { class: "button", id: "dash-next", href: copy.href }, copy.label)
           : null));
     }
     return true;
+  },
+  async loadDemo() {
+    const button = $("#dash-load-demo");
+    if (button) button.disabled = true;
+    try {
+      let loaded;
+      try { loaded = await api("/api/demo/load", { method: "POST", body: {} }); }
+      catch (e) {
+        if (e.status !== 409 || !confirm(`${e.message}. Load another copy?`)) throw e;
+        loaded = await api("/api/demo/load", { method: "POST", body: { force: true } });
+      }
+      toast(`Demo loaded (${Object.keys(loaded).length} scenarios).`);
+      await Live.refreshSummary();
+      await Live.refreshIncidents();
+      this.loadCoverage();
+    } finally {
+      if (button && button.isConnected) button.disabled = false;
+    }
   },
   redraw() {
     if (!this.mounted || !this.data || emptyDashboard(this.data.events_total, false)) return;

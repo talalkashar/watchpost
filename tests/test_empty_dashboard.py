@@ -48,17 +48,20 @@ process.stdout.write(JSON.stringify(copy));
         return json.loads(out.stdout)
 
     def test_zero_events_offers_ingest_only_when_authorized(self):
-        for role in ("analyst", "admin"):
-            with self.subTest(role=role):
-                copy = self.copy(0, role)
-                self.assertEqual(copy["title"], "No events yet")
-                self.assertEqual(copy["body"], "No events are stored.")
-                self.assertEqual(copy["href"], "#ingest")
-                self.assertEqual(copy["label"], "Upload a log")
-                self.assertEqual(copy["hint"], "")
-                self.assertNotIn("synthetic", copy["body"].lower())
-                self.assertNotIn("real", copy["body"].lower())
+        copy = self.copy(0, "analyst")
+        self.assertEqual(copy["title"], "No events yet")
+        self.assertEqual(copy["body"], "No events are stored.")
+        self.assertEqual(copy["href"], "#ingest")
+        self.assertEqual(copy["label"], "Upload a log")
+        self.assertEqual(copy["hint"], "")
+        self.assertNotIn("synthetic", copy["body"].lower())
+        self.assertNotIn("real", copy["body"].lower())
 
+        admin = self.copy(0, "admin")
+        self.assertIs(admin["load"], True)
+        self.assertEqual(admin["label"], "Load demo data")
+        self.assertNotIn("href", admin)
+        self.assertNotIn("load", self.copy(0, "analyst"))
         for role in ("viewer", False, "", None):
             with self.subTest(role=role):
                 copy = self.copy(0, role)
@@ -66,6 +69,7 @@ process.stdout.write(JSON.stringify(copy));
                 self.assertIn("read-only", copy["body"].lower())
                 self.assertEqual(copy["href"], "")
                 self.assertEqual(copy["label"], "")
+                self.assertNotIn("load", copy)
                 self.assertNotIn("upload a log", copy["body"].lower())
                 self.assertNotIn("synthetic", copy["body"].lower())
 
@@ -80,7 +84,11 @@ class EmptyDashboardUiTests(unittest.TestCase):
     def test_the_empty_store_hides_the_map_and_the_saved_view_form(self):
         src = read("dashboard.js")
         self.assertNotIn("Loading saved dashboard views", src)
-        self.assertNotIn("dash-load-demo", src)
+        self.assertIn('id: "dash-load-demo"', method_body(src, "renderEmpty"))
+        load = method_body(src, "loadDemo")
+        self.assertIn('api("/api/demo/load", { method: "POST", body: {} })', load)
+        self.assertIn("force: true", load)
+        self.assertIn("Live.refreshSummary()", load)
 
         mount = method_body(src, "mount")
         self.assertLess(mount.index('id: "dash-empty"'), mount.index('id: "soc"'))
