@@ -288,8 +288,11 @@ def normalize_record(record, default_source, now=None):
 
 # --- Linux auth.log (OpenSSH) -------------------------------------------------
 
+# BSD day and clock are ASCII digits. \d also matches ２, and int("２８") is 28.
+# A fullwidth clock matches \d and then strptime raises ValueError.
 _SYSLOG_PREFIX = re.compile(
-    r"^(?:(?P<iso>\d{4}-\d{2}-\d{2}T\S+)|(?P<bsd>[A-Z][a-z]{2}\s+\d{1,2}\s\d{2}:\d{2}:\d{2}))"
+    r"^(?:(?P<iso>\d{4}-\d{2}-\d{2}T\S+)|"
+    r"(?P<bsd>[A-Z][a-z]{2}\s+[0-9]{1,2}\s[0-9]{2}:[0-9]{2}:[0-9]{2}))"
     r"\s+(?P<host>\S+)\s+(?P<prog>[\w\-/.]+)(?:\[\d+\])?:\s*(?P<msg>.*)$"
 )
 _SSH_PATTERNS = [
@@ -308,9 +311,11 @@ _SSH_PATTERNS = [
     (re.compile(r"type=PATH\b.*?\bname=\"(?P<path>[^\"]+)\""), "file_access"),
     (re.compile(r"\bexe=\"(?P<exe>[^\"]+)\"(?:.*?\bAUID=\"(?P<user>[^\"]+)\")?"), "process_start"),
     # Firewall (UFW / iptables-style prefixes) and OpenVPN sessions.
+    # DPT and the OpenVPN address are ASCII digits. \d also matches ４ and ２.
     (re.compile(r"\[(?:UFW )?(?P<action>BLOCK|DENY|DROP|REJECT|ALLOW|ACCEPT)\].*?\bSRC=(?P<ip>\S+) "
-                r"DST=(?P<dst>\S+)(?:.*?\bDPT=(?P<dpt>\d+))?"), "firewall"),
-    (re.compile(r"^(?P<ip>\d{1,3}(?:\.\d{1,3}){3}):\d+ \[(?P<user>[^\]]+)\] Peer Connection Initiated"),
+                r"DST=(?P<dst>\S+)(?:.*?\bDPT=(?P<dpt>[0-9]+))?"), "firewall"),
+    (re.compile(r"^(?P<ip>[0-9]{1,3}(?:\.[0-9]{1,3}){3}):[0-9]+ "
+                r"\[(?P<user>[^\]]+)\] Peer Connection Initiated"),
      "vpn_login"),
 ]
 _FIREWALL_ACTIONS = {"BLOCK": "fw_deny", "DENY": "fw_deny", "DROP": "fw_deny", "REJECT": "fw_deny",
@@ -327,6 +332,7 @@ def normalize_authlog_line(line, default_source, year=None, now=None):
     else:
         # BSD syslog has no year or zone: assume UTC and the given/current year,
         # rolling back a year if that would put the event in the future.
+        # The day is ASCII digits from the prefix. A fullwidth day never reaches int.
         parts = match.group("bsd").split()
         stamp = f"{parts[0]} {int(parts[1]):02d} {parts[2]}"
         dt = datetime.strptime(f"{year or now.year} {stamp}", "%Y %b %d %H:%M:%S").replace(tzinfo=timezone.utc)

@@ -210,6 +210,8 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 
 A combined access line becomes `web_scan` for a scanner path, an injection string, or a scanner user agent. The decoded path folds ASCII letters only. `UNION SELECT` and `/.ENV` are `web_scan`. `unıon select` and `/.gİt` are not. `/.gİt` is not `/.git`. The user agent folds ASCII letters only. `Nikto` and `sqlmap` are `web_scan`. `niKto` is not. `niKto` is not `nikto`. The status and the size are ASCII digits. `500` stays a 5xx `web_error`. A status of `５００` or a size of `１６２` is `line is not in combined access log format` and stores nothing. `５００` is not status 500. That refusal is not an HTTP 500.
 
+A BSD syslog day and clock are ASCII digits. `Sep 28 12:00:00` stays day 28. A day of `２８` is `line is not in syslog format` and is not rewritten to day 28. A clock of `１２:００:００` is that same refusal and is not an HTTP 500. `DPT=443` stores port 443. `DPT=４４３` does not store port 443. OpenVPN `203.0.113.10` stays `vpn_login`. A fullwidth quad is not stored as that address.
+
 ### Detection rules
 
 | Rule | Fires when | Severity |
@@ -741,7 +743,7 @@ time window; changing an alert grouping key does not change that incident logic.
 **Limitations:**
 - Single process with SQLite. Measured up to 250,000 events on one laptop (see [Performance](#performance)); larger volumes are untested, and this is not enterprise volume. No retention or rollup.
 - Live ingestion is basic: an optional syslog listener (unauthenticated, no TLS; loopback by default) and a single-file-per-flag shipper script. See [docs/LIVE_INGEST.md](LIVE_INGEST.md) for its limits.
-- Timestamps without a zone are treated as UTC. BSD syslog lines carry no year, so you pass one or the current year is assumed. An upload `year` is ASCII digits from 2000 to 2100. `year=2024` stays. `year=２０２４`, `year=²`, and `year=2_024` are 400 `year must be between 2000 and 2100`, and `year=²` is not a 500.
+- Timestamps without a zone are treated as UTC. BSD syslog lines carry no year, so you pass one or the current year is assumed. The BSD day and clock are ASCII digits. `Sep 28 12:00:00` stays day 28. A day of `２８` is `line is not in syslog format` and is not rewritten to day 28. A clock of `１２:００:００` is that same refusal and is not an HTTP 500. `DPT=443` stores port 443. `DPT=４４３` does not store port 443. OpenVPN `203.0.113.10` stays `vpn_login`. A fullwidth quad is not stored as that address. An upload `year` is ASCII digits from 2000 to 2100. `year=2024` stays. `year=２０２４`, `year=²`, and `year=2_024` are 400 `year must be between 2000 and 2100`, and `year=²` is not a 500.
 - Seeded accounts only (admin, analyst, and an optional viewer); there is no user-management UI or API. Accounts can be added with `watchpost.auth.create_user`. A second account whose name differs only by ASCII case is refused (`Admin` when `admin` is stored). `Érin` and `érin` stay two accounts. An exact duplicate is that same refusal.
 - No TLS in the app itself; `deploy/` puts Caddy or nginx in front for HTTPS. Rate limits live in memory and reset on restart.
 - Rules cover authentication, web, firewall/VPN, cloud audit, and host scenarios with fixed thresholds. Geo for impossible travel comes from a synthetic table covering only documentation and private ranges.

@@ -113,7 +113,7 @@ Syslog has no authentication or encryption. Pick one of these:
 
 ### Time zones
 
-RFC 3164 timestamps (`Sep 28 10:00:01`) have no year and no zone. Watchpost treats them as UTC in the current year, the same rule it applies to uploaded auth.log files. If the sending box runs on local time, use the `RSYSLOG_SyslogProtocol23Format` template shown above. It sends RFC 5424 timestamps with an offset.
+RFC 3164 timestamps (`Sep 28 10:00:01`) have no year and no zone. Watchpost treats them as UTC in the current year, the same rule it applies to uploaded auth.log files. The BSD day and clock are ASCII digits. `Sep 28 12:00:00` stays day 28. A day of `２８` is `line is not in syslog format` and is not rewritten to day 28. A clock of `１２:００:００` is that same refusal and is not an HTTP 500. `DPT=443` stores port 443. `DPT=４４３` does not store port 443. OpenVPN `203.0.113.10` stays `vpn_login`. A fullwidth quad is not stored as that address. If the sending box runs on local time, use the `RSYSLOG_SyslogProtocol23Format` template shown above. It sends RFC 5424 timestamps with an offset.
 
 ---
 
