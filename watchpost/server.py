@@ -521,9 +521,14 @@ def events(req):
     return queries.search_events(req.conn, req.query)
 
 
+def _resolved_ips(req):
+    masker = getattr(req, "masker", None)
+    return masker.resolved_ips if masker is not None else ()
+
+
 @route("GET", "/api/hunt")
 def hunt_run(req):
-    return hunt.run(req.conn, req.query, resolved_ips=req.masker.resolved_ips if req.masker else ())
+    return hunt.run(req.conn, req.query, resolved_ips=_resolved_ips(req))
 
 
 @route("GET", "/api/hunt/saved")
@@ -758,8 +763,7 @@ def _entity_route(kind):
     # One literal route per kind; the value is percent-encoded in the path (it may hold dots, colons, pipes).
     @route("GET", rf"/api/entities/{kind}/([^/]+)")
     def entity_detail(req, value):
-        return entities.get_entity(req.conn, kind, unquote(value),
-                                   resolved_ips=req.masker.resolved_ips if req.masker else ())
+        return entities.get_entity(req.conn, kind, unquote(value), resolved_ips=_resolved_ips(req))
 
 
 for _kind in entities.KINDS:
