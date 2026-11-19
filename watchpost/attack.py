@@ -88,20 +88,55 @@ def catalog():
     return sorted(items, key=lambda t: (tactic_rank(t["tactic"]), t["id"]))
 
 
+def _stored_technique_ids(raw):
+    """Yield catalog ids named by one rule's stored mappings, revoked ids included.
+
+    Accepts the list a rule stores (dicts, or a bare id string), one dict, or one id. An entry
+    with no id, or an id the catalog does not know, yields nothing.
+    """
+    if isinstance(raw, (str, dict)):
+        items = (raw,)
+    elif isinstance(raw, list):
+        items = raw
+    else:
+        return
+    for item in items:
+        if isinstance(item, str):
+            technique_id = item
+        elif isinstance(item, dict) and isinstance(item.get("id"), str):
+            technique_id = item["id"]
+        else:
+            continue
+        if not technique_id:
+            continue
+        try:
+            yield technique(technique_id)["id"]
+        except KeyError:
+            continue
+
+
 def coverage(rules, hits_by_rule):
     """Map each catalog technique to the rules that cover it and their alert counts.
 
     `rules`: [{"id", "name", "enabled", "techniques": [...]}]; `hits_by_rule`: {rule_id: alert count}.
+    Stored technique metadata is read through the catalog, so a revoked id counts as its current
+    one and the catalog supplies the name and tactic. Each rule adds its alerts once per canonical
+    id. A missing or unknown id is ignored.
     """
     by_technique = {t["id"]: {**t, "rules": [], "hits": 0} for t in catalog()}
+    seen = set()
     for rule in rules:
-        for t in rule.get("techniques") or []:
-            entry = by_technique.get(t["id"])
-            if entry is None:
+        rule_id = rule["id"]
+        hits = hits_by_rule.get(rule_id, 0)
+        for canonical_id in _stored_technique_ids(rule.get("techniques")):
+            key = (rule_id, canonical_id)
+            if key in seen:
                 continue
-            entry["rules"].append({"id": rule["id"], "name": rule["name"], "enabled": bool(rule["enabled"]),
-                                   "hits": hits_by_rule.get(rule["id"], 0)})
-            entry["hits"] += hits_by_rule.get(rule["id"], 0)
+            seen.add(key)
+            entry = by_technique[canonical_id]
+            entry["rules"].append({"id": rule_id, "name": rule["name"], "enabled": bool(rule["enabled"]),
+                                   "hits": hits})
+            entry["hits"] += hits
     items = list(by_technique.values())
     for item in items:
         item["covered"] = any(r["enabled"] for r in item["rules"])
