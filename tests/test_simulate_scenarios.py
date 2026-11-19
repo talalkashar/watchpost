@@ -1,115 +1,180 @@
-"""Labeled attacks added after the demo snapshot: stuffing, lateral movement, DNS exfil, precursors."""
+"""Withdrawn scored replays stay unknown, and the original demo still detects what it detected."""
 
-import copy
+import hashlib
+import json
 import unittest
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timezone
 
-from watchpost import rules, simulate
-from watchpost.db import iso
-from watchpost.normalize import EVENT_TYPES
+from watchpost import attack, engine, improve, incidents, simulate
+from watchpost.db import connect, init_schema
+from watchpost.normalize import parse_payload
 
-ALLOWED_PREFIXES = ("10.", "172.16.", "192.168.", "192.0.2.", "198.51.100.", "203.0.113.")
-DEFAULTS = {r["id"]: r["params"] for r in rules.DEFAULT_RULES}
-NEW = ("credential_stuffing", "lateral_movement", "dns_exfil", "ransomware_precursors")
+from .helpers import ServerTestCase
 
-
-def _numbered(events):
-    return [{"id": i, **e} for i, e in enumerate(events, start=1)]
-
-
-def _findings(rule_id, events):
-    params = dict(DEFAULTS[rule_id])
-    if rule_id == "log_source_silent":
-        # Same clock the noise lab uses: end of the scenario day, so a learned source would look silent.
-        params["now"] = iso(datetime.combine(
-            simulate.demo_day() + timedelta(days=1), time.min, tzinfo=timezone.utc))
-    return rules.RULE_FUNCTIONS[rule_id](copy.deepcopy(_numbered(events)), params)
+WITHDRAWN = ("credential_stuffing", "lateral_movement", "dns_exfil", "ransomware_precursors")
+FIXED_NOW = datetime(2026, 11, 18, 12, 0, tzinfo=timezone.utc)
+DEMO_HASH = "f41ec3b5073a60bd14e0968238cec8d8d25b27fafa70c3ab8e91f5bc82185d64"
+ATTACKS = (
+    "brute_force", "password_spray", "compromise", "off_hours_admin", "web_scan", "port_sweep",
+    "impossible_travel", "privilege_escalation", "cloud_new_principal", "exfiltration", "shadow_it",
+    "logging_disabled", "log_source_stops", "admin_new_source",
+)
+BENIGN_FIRES = (
+    "noisy_scanner", "noisy_scanner_repeat", "stale_password_device", "password_expiry_nat",
+    "oncall_admin", "authorized_port_scan", "typo_then_sudo", "nightly_backup",
+)
 
 
-class NewScenarioTests(unittest.TestCase):
-    def test_registered_outside_the_demo_dataset(self):
-        self.assertEqual(list(simulate.build(seed=7)), simulate.DEMO_SCENARIOS)
-        for name in NEW:
-            spec = simulate.SCENARIOS[name]
-            self.assertTrue(spec["malicious"], name)
+def _ids(start, end):
+    return list(range(start, end + 1))
+
+
+# Alert evidence after ingesting simulate.build(seed=7) for 2026-11-18 12:00 UTC, in alert id order.
+DEMO_EVIDENCE = (
+    ("account_repeated_failures", "admin", _ids(21, 60)),
+    ("brute_force_ip", "203.0.113.45", _ids(21, 60)),
+    ("password_spray", "198.51.100.23", _ids(61, 72)),
+    ("impossible_geo_login", "dave|10.0.1.23|192.0.2.77", [10, 80]),
+    ("success_after_failures", "dave|192.0.2.77", _ids(73, 80)),
+    ("off_hours_privileged_login", "root|10.0.9.9|2026-11-17", [81]),
+    ("account_repeated_failures", "svc_scan", _ids(82, 93)),
+    ("brute_force_ip", "10.0.50.5", _ids(82, 93)),
+    ("account_repeated_failures", "svc_scan", _ids(94, 105)),
+    ("brute_force_ip", "10.0.50.5", _ids(94, 105)),
+    ("web_scanner", "203.0.113.80", _ids(106, 117)),
+    ("firewall_port_sweep", "198.51.100.140", _ids(122, 141)),
+    ("impossible_geo_login", "erin|10.0.1.24|203.0.113.150", [143, 144]),
+    ("impossible_geo_login", "erin|203.0.113.150|10.0.1.24", [12, 144]),
+    ("impossible_geo_login", "frank|10.0.1.25|192.0.2.140", [15, 148]),
+    ("privilege_escalation_after_login", "frank|web01", _ids(145, 149)),
+    ("cloud_iam_change_by_new_principal", "svc-deploy-tmp", _ids(156, 158)),
+    ("data_exfil_volume", "svc-deploy-tmp", _ids(159, 198)),
+    ("unsanctioned_cloud_service", "judy|personal-drive.example", _ids(209, 214)),
+    ("cloud_logging_disabled", "svc-deploy-tmp", [219, 220]),
+    ("admin_action_from_new_source", "ops-admin|198.51.100.77", [392, 393]),
+)
+
+
+class WithdrawnScenarioTests(unittest.TestCase):
+    def test_a_withdrawn_name_is_an_unknown_scenario(self):
+        for name in WITHDRAWN:
+            self.assertNotIn(name, simulate.SCENARIOS)
             self.assertNotIn(name, simulate.DEMO_SCENARIOS)
-            self.assertNotIn("lookalike_of", spec)
-            self.assertTrue(spec["expected"])
-            self.assertTrue(spec["techniques"])
-            for rule_id in spec["expected"]:
-                self.assertIn(rule_id, rules.RULE_FUNCTIONS)
-            mapped = {t["id"] for rid in spec["expected"] for r in rules.DEFAULT_RULES if r["id"] == rid
-                      for t in r["techniques"]}
-            self.assertLessEqual(set(spec["techniques"]), mapped)
+            with self.assertRaises(ValueError) as caught:
+                simulate.build([name])
+            self.assertEqual(str(caught.exception), f"unknown scenario(s): {name}")
 
-    def test_builders_do_not_shift_the_demo_events(self):
-        full = simulate.build(list(simulate.SCENARIOS), seed=7)
-        demo = simulate.build(seed=7)
-        for name in simulate.DEMO_SCENARIOS:
-            self.assertEqual(full[name], demo[name])
+    def test_demo_sequence_and_evidence_ids_at_a_fixed_day(self):
+        built = simulate.build(seed=7, now=FIXED_NOW)
+        digest = hashlib.sha256(json.dumps(built, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        self.assertEqual(digest, DEMO_HASH)
+        self.assertEqual(list(built), list(simulate.DEMO_SCENARIOS))
+        self.assertEqual(sum(len(events) for events in built.values()), 393)
 
-    def test_each_scenario_is_deterministic_and_labeled(self):
-        for name in NEW:
-            first = simulate.build([name], seed=7)[name]
-            self.assertEqual(first, simulate.build([name], seed=7)[name])
-            self.assertEqual(simulate.build([name], seed=7)[name], simulate.build([name], seed=11)[name])
-            for event in first:
-                self.assertIn("SYNTHETIC", event["message"])
-                self.assertEqual(event["source"], f"demo:{name}")
-                self.assertIn(event["event_type"], EVENT_TYPES)
-                for ip in (event.get("src_ip"), event.get("dest_ip")):
-                    self.assertTrue(ip and ip.startswith(ALLOWED_PREFIXES), ip)
+        conn = connect(":memory:")
+        self.addCleanup(conn.close)
+        init_schema(conn)
+        engine.seed_rules(conn)
+        for name, events in built.items():
+            normalized, rejections = parse_payload(json.dumps(events), "json", f"demo:{name}")
+            self.assertEqual(rejections, [])
+            engine.ingest(conn, normalized, rejections, f"demo:{name}", "json", "test", True)
+        rows = []
+        for alert in conn.execute("SELECT id, rule_id, group_key FROM alerts ORDER BY id"):
+            ids = [row[0] for row in conn.execute(
+                "SELECT event_id FROM alert_events WHERE alert_id = ? ORDER BY event_id", (alert["id"],))]
+            rows.append((alert["rule_id"], alert["group_key"], ids))
+        self.assertEqual(tuple(rows), DEMO_EVIDENCE)
 
-    def test_only_the_expected_rules_fire(self):
-        for name in NEW:
-            spec = simulate.SCENARIOS[name]
-            events = simulate.build([name], seed=7)[name]
-            fired = {}
-            for rule_id in rules.RULE_FUNCTIONS:
-                found = _findings(rule_id, events)
-                if found:
-                    fired[rule_id] = [f["group_key"] for f in found]
-            self.assertEqual(set(fired), set(spec["expected"]), fired)
-            for rule_id, want in spec["expected"].items():
-                self.assertEqual(fired[rule_id], [want])
+    def test_the_lab_recovers_fourteen_attacks_and_eight_benign_fires(self):
+        self.assertEqual([name for name, spec in simulate.SCENARIOS.items() if spec["malicious"]], list(ATTACKS))
+        self.assertEqual(len(simulate.SCENARIOS), 31)
+        conn = connect(":memory:")
+        self.addCleanup(conn.close)
+        init_schema(conn)
+        engine.seed_rules(conn)
+        coverage = incidents.coverage(conn)
+        lab = improve.cached_noise_lab(conn)
+        scenarios = [{"name": name, "malicious": spec["malicious"], "expected_rules": list(spec["expected"])}
+                     for name, spec in simulate.SCENARIOS.items()]
+        strip = improve.lab_strip(lab["rules"], scenarios)
+        self.assertEqual(strip["scenarios"], 31)
+        self.assertEqual(strip["attacks"], 14)
+        self.assertEqual(strip["detected_attacks"], 14)
+        self.assertEqual(strip["missed"], [])
+        self.assertEqual(strip["false_positives"], 8)
+        self.assertEqual(tuple(strip["false_positive_scenarios"]), BENIGN_FIRES)
+        self.assertEqual(coverage["summary"]["levels"]["validated"], 17)
+        self.assertEqual(coverage["summary"]["levels"]["mapped"], 3)
 
-    def test_credential_stuffing_is_distributed(self):
-        events = simulate.build(["credential_stuffing"], seed=7)["credential_stuffing"]
-        failures = [e for e in events if e["event_type"] == "auth_failure"]
-        self.assertGreaterEqual(len({e["src_ip"] for e in failures}), 8)
-        self.assertTrue(all(e["src_ip"].startswith(("192.0.2.", "198.51.100.", "203.0.113.")) for e in failures))
-        self.assertEqual({e["user"] for e in failures}, {"hr_admin"})
-        self.assertGreaterEqual(len(failures), 8)
-        self.assertEqual(max(sum(e["src_ip"] == ip for e in failures) for ip in {e["src_ip"] for e in failures}), 1)
-        self.assertFalse(any(e["event_type"] in ("auth_success", "vpn_login") for e in events))
-
-    def test_lateral_movement_hops_hosts(self):
-        events = simulate.build(["lateral_movement"], seed=7)["lateral_movement"]
-        hosts = {e["host"] for e in events}
-        self.assertGreaterEqual(hosts, {"web01", "db01"})
-        escalations = [e for e in events if e["event_type"] == "privilege_escalation"]
-        self.assertEqual([e["host"] for e in escalations], ["db01"])
-        self.assertEqual(sum(e["event_type"] == "auth_failure" for e in events), 3)
-        self.assertTrue(any(e.get("dest_port") == 445 for e in events))
-
-    def test_dns_exfil_stays_under_the_volume_rule(self):
-        events = simulate.build(["dns_exfil"], seed=7)["dns_exfil"]
-        queries = [e for e in events if e.get("dest_port") == 53 or "DNS" in e["message"]]
-        self.assertGreaterEqual(len(queries), 8)
-        self.assertTrue(all("DNS" in e["message"] for e in queries))
-        self.assertLess(sum(e.get("bytes") or 0 for e in events), 1_000_000)
-        self.assertFalse(any(e["event_type"] == "cloud_data_access" for e in events))
-        self.assertFalse(any(e["event_type"] in ("auth_success", "vpn_login") for e in events))
-
-    def test_ransomware_precursors_name_shadow_copies(self):
-        events = simulate.build(["ransomware_precursors"], seed=7)["ransomware_precursors"]
-        text = " ".join(e["message"].lower() for e in events)
-        self.assertIn("vssadmin", text)
-        self.assertTrue("shadow" in text or ".locked" in text)
-        self.assertIn(".locked", text)
-        self.assertEqual(sum(e["event_type"] == "auth_failure" for e in events), 4)
-        self.assertEqual(sum(e["event_type"] == "privilege_escalation" for e in events), 1)
+        layer = attack.navigator_layer(coverage)
+        for name in WITHDRAWN:
+            self.assertNotIn(name, [row["name"] for row in lab["scenarios"]])
+            for row in lab["rules"]:
+                for key in ("detected", "missed", "lookalikes_fired", "other_benign_fired"):
+                    self.assertNotIn(name, row[key], row["rule_id"])
+            for technique in coverage["techniques"]:
+                self.assertNotIn(name, technique["scenarios"])
+                for rule in technique["rules"]:
+                    self.assertNotIn(name, rule["proves"])
+            for item in layer["techniques"]:
+                self.assertNotIn(name, item["comment"])
 
 
-if __name__ == "__main__":
-    unittest.main()
+class WithdrawnScenarioApiTests(ServerTestCase):
+    def test_a_withdrawn_replay_name_is_rejected(self):
+        analyst = self.client("analyst")
+        status, listed, _ = analyst.get("/api/demo/scenarios")
+        self.assertEqual(status, 200)
+        names = [row["name"] for row in listed]
+        self.assertIn("brute_force", names)
+        for name in WITHDRAWN:
+            self.assertNotIn(name, names)
+            status, data, _ = analyst.post("/api/demo/simulate", {"scenario": name})
+            self.assertEqual(status, 400, data)
+            self.assertEqual(data["error"], f"scenario must be one of {', '.join(simulate.SCENARIOS)}")
+
+    def test_persisted_replay_records_stay_readable(self):
+        conn = connect(self.db_path)
+        now = "2026-11-01T00:00:00.000Z"
+        event_ids = {}
+        for name in WITHDRAWN:
+            event_ids[name] = conn.execute(
+                "INSERT INTO events(ts, ingested_at, source, event_type, severity, message, synthetic)"
+                " VALUES (?,?,?,?,?,?,1)",
+                (now, now, f"demo:{name}", "auth_failure", "low", f"[SYNTHETIC] old replay {name}"),
+            ).lastrowid
+        alert_id = conn.execute(
+            "INSERT INTO alerts(rule_id, rule_version, group_key, severity, title, explanation, status,"
+            " first_seen, last_seen, event_count, synthetic, created_at, updated_at)"
+            " VALUES ('brute_force_ip', 1, '203.0.113.45', 'high', 'Old replay', ?, 'open', ?, ?, 1, 1, ?, ?)",
+            ("Stored from credential_stuffing", now, now, now, now),
+        ).lastrowid
+        conn.execute("INSERT INTO alert_events(alert_id, event_id) VALUES (?, ?)",
+                     (alert_id, event_ids["credential_stuffing"]))
+        conn.execute(
+            "INSERT INTO alert_notes(alert_id, author, body, created_at) VALUES (?, 'analyst', ?, ?)",
+            (alert_id, "note from lateral_movement replay", now))
+        conn.execute(
+            "INSERT INTO alert_activity(alert_id, actor, action, detail, created_at) VALUES (?, ?, ?, ?, ?)",
+            (alert_id, "analyst", "noted", "dns_exfil", now))
+        conn.execute(
+            "INSERT INTO rule_history(rule_id, version, enabled, params, changed_at, changed_by, note)"
+            " VALUES ('brute_force_ip', 99, 1, '{}', ?, 'analyst', ?)",
+            (now, "history from ransomware_precursors replay"))
+        conn.close()
+
+        analyst = self.client("analyst")
+        status, alert, _ = analyst.get(f"/api/alerts/{alert_id}")
+        self.assertEqual(status, 200, alert)
+        self.assertEqual(alert["evidence"][0]["source"], "demo:credential_stuffing")
+        self.assertEqual(alert["notes"][0]["body"], "note from lateral_movement replay")
+        self.assertEqual(alert["activity"][0]["detail"], "dns_exfil")
+        for name, event_id in event_ids.items():
+            status, event, _ = analyst.get(f"/api/events/{event_id}")
+            self.assertEqual(status, 200, event)
+            self.assertEqual(event["source"], f"demo:{name}")
+        status, history, _ = analyst.get("/api/rules/brute_force_ip/history")
+        self.assertEqual(status, 200, history)
+        self.assertEqual(history[0]["version"], 99)
+        self.assertIn("ransomware_precursors", history[0]["note"])

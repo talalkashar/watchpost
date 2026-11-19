@@ -6,12 +6,42 @@ from datetime import timedelta
 from urllib.parse import quote
 
 from watchpost import backtest, engine, improve
-from watchpost.db import connect, init_schema, iso, utcnow
+from watchpost.db import SCHEMA, connect, init_schema, iso, utcnow
 from watchpost.normalize import parse_payload
 
 from .helpers import ServerTestCase
 
 RULE = "brute_force_ip"  # threshold 10 failed logins from one IP within 300 s
+
+# Stored on a proposal while credential_stuffing, lateral_movement, dns_exfil and ransomware_precursors
+# were still scored. Threshold 41 on an empty event store. Review must refresh this, not trust it.
+EARLIER_EVALUATION = {
+    "after": {
+        "detected": [], "false_positives": [], "fn": 2, "fp": 0, "group_keys": [],
+        "lookalikes": ["noisy_scanner", "noisy_scanner_repeat"], "lookalikes_fired": [],
+        "missed": ["brute_force", "dns_exfil"], "precision": None, "recall": 0.0, "suppressed": 0, "tp": 0,
+    },
+    "backtest": {
+        "capped": False,
+        "counts": {"kept": 0, "lost": 0, "new": 0, "open_alerts_lost": 0},
+        "events_scanned": 0, "kept": [], "lost": [], "max_event_id": 0, "max_events": 100000,
+        "new": [], "open_alerts_lost": [], "rule": "brute_force_ip",
+        "running": {"proposed": True, "today": True},
+        "suppressed": {"proposed": 0, "today": 0},
+        "synthetic": "none", "synthetic_events": 0, "truncated": False, "window": None, "window_days": 7,
+    },
+    "before": {
+        "detected": ["brute_force", "dns_exfil"],
+        "false_positives": ["noisy_scanner", "noisy_scanner_repeat"],
+        "fn": 0, "fp": 2,
+        "group_keys": ["10.0.50.5", "198.51.100.216", "203.0.113.45"],
+        "lookalikes": ["noisy_scanner", "noisy_scanner_repeat"],
+        "lookalikes_fired": ["noisy_scanner", "noisy_scanner_repeat"],
+        "missed": [], "precision": 0.5, "recall": 1.0, "suppressed": 0, "tp": 2,
+    },
+    "ignore_additions": [],
+    "rule": "brute_force_ip",
+}
 
 
 def failures(ip, n, minutes_ago=10, user="alice"):
@@ -137,15 +167,17 @@ class BacktestTests(unittest.TestCase):
         alert = self.conn.execute("SELECT id FROM alerts WHERE rule_id = ?", (RULE,)).fetchone()["id"]
         change = improve.propose_change(self.conn, "rule_update", RULE, {"params": {"threshold": 13}},
                                         "too noisy for the helpdesk", "analyst")
-        # dns_exfil is ten failures from one address, so a threshold of 13 drops that labeled attack.
-        # The open alert below is a separate loss and still needs its own acknowledgement.
-        self.assertEqual(change["evaluation"]["after"]["missed"], ["dns_exfil"])
+        # Twelve stored failures are under 13. The shipped brute_force fixture is forty attempts, so no
+        # labeled attack is lost. The open alert is its own loss and still needs an acknowledgement.
+        self.assertEqual(change["evaluation"]["after"]["missed"], [])
         for ack in (False, "yes"):
             with self.assertRaises(improve.ChangeError) as caught:
                 improve.review_change(self.conn, change["id"], "approve", "admin", digest=change["evidence_digest"],
                                       acknowledge_detection_loss=ack)
             self.assertIn(f"#{alert}", str(caught.exception))
             self.assertIn("acknowledge_detection_loss", str(caught.exception))
+            self.assertNotIn("labeled attacks", str(caught.exception))
+            self.assertNotIn("dns_exfil", str(caught.exception))
         self.assertEqual(improve.get_change(self.conn, change["id"])["status"], "pending")
         done = improve.review_change(self.conn, change["id"], "approve", "admin", digest=change["evidence_digest"],
                                      acknowledge_detection_loss=True)
@@ -159,6 +191,76 @@ class BacktestTests(unittest.TestCase):
                                         "catch slower guessing", "analyst")
         done = improve.review_change(self.conn, change["id"], "approve", "admin", digest=change["evidence_digest"])
         self.assertEqual(done["status"], "approved")
+
+    def test_a_threshold_above_forty_attempts_loses_brute_force(self):
+        # The detector fires at len(window) >= threshold, so 40 still sees the fixture and 41 does not.
+        still = improve.propose_change(self.conn, "rule_update", RULE, {"params": {"threshold": 40}},
+                                       "still sees the forty-attempt fixture", "analyst")
+        self.assertEqual(still["evaluation"]["after"]["missed"], [])
+        change = improve.propose_change(self.conn, "rule_update", RULE, {"params": {"threshold": 41}},
+                                        "threshold above the forty-attempt fixture", "analyst")
+        self.assertEqual(change["evaluation"]["before"]["detected"], ["brute_force"])
+        self.assertEqual(change["evaluation"]["after"]["missed"], ["brute_force"])
+        self.assertNotIn("dns_exfil", json.dumps(change["evaluation"]))
+        for ack in (False, "yes"):
+            with self.assertRaises(improve.ChangeError) as caught:
+                improve.review_change(self.conn, change["id"], "approve", "admin",
+                                      digest=change["evidence_digest"], acknowledge_detection_loss=ack)
+            self.assertEqual(caught.exception.status, 400)
+            self.assertIn("brute_force", str(caught.exception))
+            self.assertIn("acknowledge_detection_loss", str(caught.exception))
+            self.assertNotIn("dns_exfil", str(caught.exception))
+        self.assertEqual(improve.get_change(self.conn, change["id"])["status"], "pending")
+        done = improve.review_change(self.conn, change["id"], "approve", "admin",
+                                     digest=change["evidence_digest"], acknowledge_detection_loss=True)
+        self.assertEqual(done["status"], "approved")
+        entry = self.conn.execute("SELECT detail FROM audit_log WHERE action = 'change_approved'").fetchone()
+        self.assertEqual(json.loads(entry["detail"])["acknowledged_detection_loss"], ["brute_force"])
+        self.assertEqual(improve.current_params(self.conn)[RULE]["threshold"], 41)
+
+    def test_an_upgraded_proposal_refreshes_the_earlier_evaluation(self):
+        conn = connect(":memory:")
+        self.addCleanup(conn.close)
+        conn.executescript(SCHEMA)
+        conn.execute(
+            "INSERT INTO change_requests(kind, target, payload, reason, proposed_by, evaluation, created_at)"
+            " VALUES (?,?,?,?,?,?,?)",
+            ("rule_update", RULE, json.dumps({"params": {"threshold": 41}}),
+             "threshold above the forty-attempt fixture", "analyst",
+             json.dumps(EARLIER_EVALUATION), "2026-11-01T00:00:00.000Z"))
+        init_schema(conn)
+        engine.seed_rules(conn)
+        stored = improve.get_change(conn, 1)
+        self.assertEqual(stored["evaluation"]["after"]["missed"], ["brute_force", "dns_exfil"])
+        old = improve.evidence_digest(EARLIER_EVALUATION)
+        self.assertEqual(stored["evidence_digest"], old)
+        with self.assertRaises(improve.ChangeError) as caught:
+            improve.review_change(conn, 1, "approve", "admin", digest=old)
+        self.assertEqual(caught.exception.status, 409)
+        self.assertIn("evidence changed", str(caught.exception))
+        change = improve.get_change(conn, 1)
+        self.assertEqual((change["status"], change["reviewed_by"]), ("pending", None))
+        self.assertEqual(change["evaluation"]["after"]["missed"], ["brute_force"])
+        self.assertNotIn("dns_exfil", json.dumps(change["evaluation"]))
+        self.assertNotEqual(change["evidence_digest"], old)
+        for ack in (False, "yes"):
+            with self.assertRaises(improve.ChangeError) as caught:
+                improve.review_change(conn, 1, "approve", "admin", digest=change["evidence_digest"],
+                                      acknowledge_detection_loss=ack)
+            self.assertEqual(caught.exception.status, 400)
+            self.assertIn("brute_force", str(caught.exception))
+            self.assertIn("acknowledge_detection_loss", str(caught.exception))
+            self.assertNotIn("dns_exfil", str(caught.exception))
+        with self.assertRaises(improve.ChangeError) as caught:
+            improve.review_change(conn, 1, "approve", "analyst", digest=change["evidence_digest"],
+                                  acknowledge_detection_loss=True)
+        self.assertEqual(caught.exception.status, 403)
+        self.assertIn("second person", str(caught.exception))
+        self.assertEqual(improve.get_change(conn, 1)["status"], "pending")
+        done = improve.review_change(conn, 1, "approve", "admin", digest=change["evidence_digest"],
+                                     acknowledge_detection_loss=True)
+        self.assertEqual((done["status"], done["reviewed_by"]), ("approved", "admin"))
+        self.assertEqual(improve.current_params(conn)[RULE]["threshold"], 41)
 
 
 class BacktestApiTests(ServerTestCase):
