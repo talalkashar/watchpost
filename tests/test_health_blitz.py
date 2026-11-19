@@ -464,6 +464,7 @@ class DependencyTests(_HealthCase):
 
 
 class ReportTests(_HealthCase):
+    @patch.dict("watchpost.health._COMPONENT_CHECKS", clear=True)
     def test_healthy_report_order(self):
         report = run_health_checks(self._open_memory(), ":memory:")
         self.assertEqual(report["status"], "ok")

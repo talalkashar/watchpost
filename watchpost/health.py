@@ -11,6 +11,7 @@ import threading
 import time
 from datetime import timedelta, timezone
 from pathlib import Path
+from types import MethodType
 
 from .db import iso, now_iso, parse_iso, utcnow
 from .diagnostics import describe_exception
@@ -65,7 +66,10 @@ def register_check(name, fn):
 def unregister_check(name, fn=None):
     with _CHECKS_LOCK:
         current = _COMPONENT_CHECKS.get(name)
-        if fn is None or current is fn:
+        # Accessing a bound method again creates a new method object.
+        same_method = (isinstance(current, MethodType) and isinstance(fn, MethodType)
+                       and current.__self__ is fn.__self__ and current.__func__ is fn.__func__)
+        if fn is None or current is fn or same_method:
             _COMPONENT_CHECKS.pop(name, None)
 
 
