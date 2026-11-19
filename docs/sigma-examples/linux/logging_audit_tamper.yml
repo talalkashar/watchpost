@@ -23,21 +23,27 @@ detection:
   elevation:
     event.action: privilege_escalation
   disable:
+    message|endswith:
+      - ' ; USER=root ; COMMAND=/sbin/auditctl -e 0'
+      - ' ; USER=root ; COMMAND=/sbin/auditctl -D'
+      - ' ; USER=root ; COMMAND=/usr/bin/systemctl stop auditd'
+      - ' ; USER=root ; COMMAND=/usr/bin/systemctl stop rsyslog'
+      - ' ; USER=root ; COMMAND=/usr/bin/systemctl stop syslog.socket'
+      - ' ; USER=root ; COMMAND=/usr/bin/systemctl disable auditd'
+      - ' ; USER=root ; COMMAND=/usr/bin/systemctl disable rsyslog'
+      - ' ; USER=root ; COMMAND=/usr/sbin/service auditd stop'
+      - ' ; USER=root ; COMMAND=/usr/sbin/service rsyslog stop'
+      - ' ; USER=root ; COMMAND=/usr/sbin/ufw logging off'
+      - ' ; USER=root ; COMMAND=/usr/bin/rm -f /var/log/auth.log'
+      - ' ; USER=root ; COMMAND=/usr/bin/rm -rf /var/log/audit'
+      - ' ; USER=root ; COMMAND=/usr/bin/truncate -s 0 /var/log/*'
+  denied:
     message|contains:
-      - 'auditctl -e 0'
-      - 'auditctl -D'
-      - 'systemctl stop auditd'
-      - 'systemctl stop rsyslog'
-      - 'systemctl stop syslog.socket'
-      - 'systemctl disable auditd'
-      - 'systemctl disable rsyslog'
-      - 'service auditd stop'
-      - 'service rsyslog stop'
-      - 'ufw logging off'
-      - 'rm -f /var/log/auth.log'
-      - 'rm -rf /var/log/audit'
-      - 'truncate -s 0 /var/log/'
-  condition: elevation and disable
+      - ' is not in the sudoers file'
+      - ' : user NOT in sudoers'
+  root_invoker:
+    user.name: root
+  condition: elevation and disable and not denied and not root_invoker
 falsepositives:
   - Maintenance that deliberately requests a stop of auditd or rsyslog
 level: high

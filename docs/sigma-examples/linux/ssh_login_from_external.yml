@@ -1,6 +1,6 @@
 # Accepted SSH for an account other than root, admin, or administrator, from outside
 # the private and local ranges (T1133). Privileged names belong to the other SSH example.
-title: Linux Nonprivileged SSH From External Address
+title: External SSH Login Outside Common Admin Names
 id: 7f3a1c90-2b64-4e17-9d08-a11c0e100001
 status: experimental
 description: |
@@ -39,6 +39,7 @@ detection:
       - 172.16.0.0/12
       - 192.168.0.0/16
       - 127.0.0.0/8
+      - 169.254.0.0/16
       - '::1/128'
       - fc00::/7
       - fe80::/10

