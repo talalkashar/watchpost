@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from watchpost import engine, improve, queries, rules, simulate, storyline
-from watchpost.db import connect, init_schema, iso, utcnow
+from watchpost.db import connect, init_schema, iso, utcnow, verify_chain
 from watchpost.normalize import classify_web_request, parse_payload
 
 from .helpers import ServerTestCase
@@ -537,8 +537,21 @@ class EngineSuppressionTests(unittest.TestCase):
             " VALUES ('brute_force_ip', '10.0.50.5', 'scanner', ?, 'analyst', 'admin', ?)",
             (iso(utcnow() + timedelta(days=1)), iso(utcnow())))
         init_schema(conn)
+        init_schema(conn)
         self.assertEqual(engine.active_suppressions(conn), {("brute_force_ip", "10.0.50.5")})
-        self.assertIsNone(improve.list_suppressions(conn)[0][0]["revoked_at"])
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM suppressions").fetchone()[0], 1)
+        row = improve.list_suppressions(conn)[0][0]
+        self.assertTrue(row["active"])
+        self.assertIsNone(row["revoked_at"])
+        self.assertIsNone(row["revoked_by"])
+        self.assertIn("revoked_at", {r["name"] for r in conn.execute("PRAGMA table_info(suppressions)")})
+        self.assertIn(
+            "idx_suppressions_active",
+            {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")},
+        )
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM audit_log WHERE action = 'audit_chain_started'").fetchone()[0], 1)
+        self.assertTrue(verify_chain(conn)["ok"])
 
 
 class NoiseLabApiTests(ServerTestCase):
