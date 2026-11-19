@@ -295,7 +295,7 @@ dialog::backdrop { background: rgb(8 8 8 / .72); }
 .worldmap .graticule line.equator { stroke: rgb(255 255 255 / .054); stroke-dasharray: 2 4; }
 .worldmap .coast path { fill: rgb(201 201 201 / .06); stroke: rgb(220 220 220 / .24); stroke-width: 1; }
 .worldmap .land circle { fill: rgb(219 219 219 / .36); }
-.worldmap .arc { fill: none; stroke: var(--ink); stroke-width: 1.4; stroke-dasharray: 2 2.2; opacity: .8; animation: flow 2.2s linear infinite; }
+.worldmap .arc { fill: none; stroke: var(--ink); stroke-dasharray: 2 2.2; opacity: .8; animation: flow 2.2s linear infinite; }
 .worldmap .mk .core { stroke: #000000; stroke-width: 1; }
 .worldmap .mk .halo { opacity: .22; transform-box: fill-box; transform-origin: center; animation: breathe 2.4s ease-in-out infinite; }
 .worldmap .mk.sev-critical .halo { animation-duration: 1.2s; opacity: .35; }

@@ -17,7 +17,6 @@ const TACTICS = [
   ["Lateral Movement", "Lateral"], ["Collection", "Collect"], ["Command and Control", "C2"],
   ["Exfiltration", "Exfil"], ["Impact", "Impact"],
 ];
-const HQ_DEFAULT = { city: "Watchpost HQ (internal)", lat: 39.1, lon: -94.6, internal: true, synthetic: true };
 const FEED_MAX = 140;
 const DASH_PANELS = ["p-map", "p-feed", "p-timeline", "p-attackers", "p-attack", "p-board", "p-rules", "p-health", "p-entities"];
 const DASH_LAYOUTS = {
@@ -296,7 +295,7 @@ function boardColumn(status) {
 // Side list for the attack map. Each arc is one fictional city aimed at HQ, busiest first.
 // `unknown` counts source IPs the synthetic geo table does not know.
 // A locate() of undefined is still in flight and is neither an arc nor unknown.
-function mapSide(sources, locate) {
+function mapSide(sources, locate, limit = 5) {
   const cities = new Map();
   let unknown = 0;
   for (const s of sources || []) {
@@ -304,7 +303,7 @@ function mapSide(sources, locate) {
     if (loc === undefined) continue;
     if (loc === null) { unknown += 1; continue; }
     if (loc.internal || !loc.city) continue;
-    const row = cities.get(loc.city) || { city: loc.city, events: 0, sev: "info", ips: 0 };
+    const row = cities.get(loc.city) || { city: loc.city, lon: loc.lon, lat: loc.lat, events: 0, sev: "info", ips: 0 };
     row.events += Number(s.events) || 0;
     row.ips += 1;
     row.sev = maxSev(row.sev, s.sev);
@@ -312,7 +311,7 @@ function mapSide(sources, locate) {
   }
   const ranked = [...cities.values()].sort((a, b) =>
     b.events - a.events || SEV_RANK[b.sev] - SEV_RANK[a.sev] || a.city.localeCompare(b.city));
-  return { arcs: ranked.slice(0, 5), locations: ranked.length, unknown };
+  return { arcs: ranked.slice(0, limit), locations: ranked.length, unknown };
 }
 
 const Geo = {
@@ -488,6 +487,7 @@ const Live = {
     const now = new Date();
     const c = $("#k-clock");
     if (c) c.replaceChildren(now.toISOString().slice(11, 19), el("small", {}, "UTC"));
+    Dash.mapView?.tick(now, this.rollingEpm(), Dash.lastMapEvent);
     const epm = $("#k-epm");
     if (epm) epm.textContent = fmtN(this.rollingEpm());
     if (now.getUTCSeconds() === 0) this.bumpEpm(0);
@@ -534,23 +534,22 @@ const Live = {
 // ---------- the dashboard view ----------
 const Dash = {
   mounted: false, data: null, coverage: { state: "loading" }, details: null,
-  queue: [], feedCount: 0, paused: false, live: new Map(), mapSize: null, timers: {}, observer: null,
+  queue: [], feedCount: 0, paused: false, mapView: null, lastMapEvent: null, mapSize: null, timers: {}, observer: null,
   views: [], viewsError: "", currentView: null, severities: DASH_FILTERS.all, layout: DASH_LAYOUTS.full,
 
   mount() {
     this.unmount();
     this.mounted = true;
     this.mapSize = null;
+    this.mapDims = null;
+    this.lastMapEvent = null;
+    this.mapView = new AttackMapView();
     this.feedCount = 0;
     const pause = el("button", { class: "mini ghost", id: "feed-pause", type: "button", "aria-pressed": "false", onclick: () => this.togglePause() }, "Pause");
     render(el("div", { class: "view-bar", id: "dashboard-view-bar", hidden: true }),
       el("div", { id: "dash-empty", hidden: true }),
       el("div", { class: "soc", id: "soc", hidden: true },
-      panel("p-map", "Attack map", [el("span", { class: "muted", id: "map-count" })],
-        el("div", { class: "mapwrap", id: "map" }),
-        el("div", { class: "map-side", id: "map-side" }),
-        el("div", { class: "map-legend" }, ...["critical", "high", "medium", "low"].map((s) => el("span", {}, el("i", { class: `dot sev-${s}` }), s)),
-          el("span", {}, el("i", { class: "dot hq" }), "HQ target"))),
+      this.mapView.card,
       panel("p-feed", "Live event stream", [el("span", { class: "muted", id: "feed-poll", hidden: true }), el("span", { class: "muted", id: "feed-rate" }), pause],
         el("div", { class: "feed-head" }, el("span", {}, "Time"), el("span", {}, "Sev"), el("span", {}, "Event")),
         el("div", { class: "feed", id: "feed", onmouseenter: () => this.hover(true), onmouseleave: () => this.hover(false),
@@ -579,6 +578,8 @@ const Dash = {
   unmount() {
     if (!this.mounted) return;
     this.mounted = false;
+    this.mapView.dispose();
+    this.mapView = null;
     for (const t of Object.values(this.timers)) clearInterval(t);
     this.timers = {};
     if (this.observer) { this.observer.disconnect(); this.observer = null; }
@@ -594,9 +595,10 @@ const Dash = {
   },
   async update(d) {
     this.data = d;
-    if (this.renderEmpty()) return;
+    if (this.renderEmpty()) { this.lastMapEvent = null; return; }
     if (!this.feedCount) this.fillFeed(d.recent_events);
     const recent = d.recent_events || [];
+    this.noteMapTime(recent);
     const ips = [...(d.attackers || []).map((a) => a.ip), ...recent.map((e) => e.src_ip), ...recent.map((e) => e.dest_ip), "10.0.0.10"].filter(Boolean);
     this.redraw();
     if (await Geo.resolve(ips)) this.renderMarks();
@@ -747,7 +749,6 @@ const Dash = {
       const panelNode = $(`#${id}`);
       if (!panelNode) continue;
       panelNode.hidden = !this.layout.includes(id);
-      if (!panelNode.hidden) soc.append(panelNode);
     }
   },
   applySeverity() {
@@ -780,8 +781,7 @@ const Dash = {
 
   // --- map ---
   hq() {
-    const loc = Geo.get("10.0.0.10");
-    return loc || HQ_DEFAULT;
+    return Geo.get("10.0.0.10");
   },
   renderMap() {
     const box = $("#map");
@@ -800,101 +800,66 @@ const Dash = {
     this.renderMarks();
   },
   sources() {
-    const out = new Map();
-    const add = (ip, events, sev, alerts, last) => {
-      const cur = out.get(ip) || { ip, events: 0, alerts: 0, sev: "info", last: null };
-      cur.events += events; cur.alerts = Math.max(cur.alerts, alerts || 0); cur.sev = maxSev(cur.sev, sev);
-      if (!cur.last || (last && last > cur.last)) cur.last = last;
-      out.set(ip, cur);
-    };
-    for (const a of (this.data && this.data.attackers) || []) add(a.ip, a.events, a.max_severity, a.alerts, a.last_seen);
-    for (const [ip, s] of this.live) add(ip, s.events, s.sev, 0, s.last);
-    return [...out.values()];
+    // Evidence counts come from the server snapshot. Stream events can animate
+    // immediately, including events that never become evidence for an alert.
+    return (this.data?.attackers || []).map(a => ({ ip: a.ip, events: a.events, sev: sevOf(a.max_severity) }));
   },
   renderMarks() {
     const svg = $("#map svg");
-    if (!svg || !this.mapDims) return;
+    if (!svg || !this.mapDims || !this.mapView) return;
     const [w, h] = this.mapDims;
     const hq = this.hq();
-    const cities = new Map();
-    for (const s of this.sources()) {
-      const loc = Geo.get(s.ip);
-      if (!loc || loc.internal) continue;
-      const c = cities.get(loc.city) || { ...loc, ips: [], events: 0, sev: "info" };
-      c.ips.push(s.ip); c.events += s.events; c.sev = maxSev(c.sev, s.sev);
-      cities.set(loc.city, c);
+    const summary = mapSide(this.sources(), ip => Geo.get(ip), Infinity);
+    if (!hq) {
+      this.mapView.update([], null, summary.unknown);
+      return;
     }
-    const ranked = [...cities.values()].sort((a, b) => SEV_RANK[b.sev] - SEV_RANK[a.sev] || b.events - a.events);
+    const ranked = summary.arcs.filter(c => this.severities.includes(c.sev === "info" ? "low" : c.sev));
     const esc = WPCharts.esc;
     const [hx, hy] = WPMap.project(hq.lon, hq.lat, w, h);
-    const sideEl = $("#map-side");
-    let coverRight = 0;
-    if (sideEl) {
-      const svgRect = svg.getBoundingClientRect();
-      const sideRect = sideEl.getBoundingClientRect();
-      if (svgRect.width > 0 && sideRect.width > 0) coverRight = (sideRect.right - svgRect.left) / (svgRect.width / w) + 8;
-    }
     const placed = [{ x: hx, y: hy }];
-    const crowded = (x, y) => placed.some((p) => Math.hypot(p.x - x, p.y - y) < 52);
     let arcs = "", marks = "";
-    ranked.forEach((c, i) => {
-      arcs += `<path class="arc s-${c.sev}" pathLength="100" d="${WPMap.arcPath([c.lon, c.lat], [hq.lon, hq.lat], w, h)}"/>`;
+    for (const c of ranked) {
       const [x, y] = WPMap.project(c.lon, c.lat, w, h);
-      const r = 2.6 + Math.min(5, Math.log2(1 + c.events) * 0.8);
-      let label = "";
-      if (i < 7 && x > coverRight && !crowded(x, y)) {
-        const end = x > w - 72;
-        const lx = end ? x - r - 4 : x + r + 4;
-        const ly = y > 18 ? y - r - 3 : y + r + 12;
-        label = `<text class="ml" x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="${end ? "end" : "start"}">${esc(c.city)}</text>`;
-        placed.push({ x, y });
-      }
-      marks += `<g class="mk sev-${c.sev}"><title>${esc(`${c.city}\n${c.ips.join(", ")}\n${c.events} events`)}</title>` +
-        `<circle class="halo" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${(r * 2.2).toFixed(1)}"/>` +
-        `<circle class="core" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${r.toFixed(1)}"/>` +
-        label + `</g>`;
-    });
-    const hqClear = hx + 28 < coverRight;
-    const hqEnd = !hqClear && hx > w - 72;
-    const hqx = hqClear ? coverRight : (hqEnd ? hx - 12 : hx + 12);
-    const hqy = hqClear ? Math.min(h - 8, Math.max(14, hy + 3)) : (hy > 18 ? hy - 8 : hy + 16);
-    marks += `<g class="hq"><title>${esc(hq.city)}</title><circle class="ring" cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="9"/>` +
-      `<circle class="core" cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="3.6"/>` +
-      `<text class="ml" x="${hqx.toFixed(1)}" y="${hqy.toFixed(1)}" text-anchor="${hqEnd ? "end" : "start"}">HQ</text></g>`;
+      const radius = 2.5 + Math.min(3, Math.log2(1 + c.events) * 0.4);
+      const label = placed.every(p => Math.hypot(p.x - x, p.y - y) > 42);
+      if (label) placed.push({ x, y });
+      arcs += `<path class="arc s-${c.sev}" stroke-width="${1 + Math.log2(1 + c.events) / 4}" pathLength="100" d="${WPMap.arcPath([c.lon, c.lat], [hq.lon, hq.lat], w, h)}"/>`;
+      marks += `<g class="mk sev-${c.sev}" data-city="${esc(c.city)}"><title>${esc(c.city)} · ${c.events} events</title>` +
+        `<circle class="halo" cx="${x}" cy="${y}" r="${radius * 2.4}"/><circle class="core" cx="${x}" cy="${y}" r="${radius}"/>` +
+        (label ? `<text class="ml" x="${x + (x > w - 76 ? -7 : 7)}" y="${Math.max(13, y - 6)}" text-anchor="${x > w - 76 ? "end" : "start"}">${esc(c.city)}</text>` : "") + "</g>";
+    }
+    marks += `<g class="hq"><title>${esc(hq.city)}</title><circle class="ring" cx="${hx}" cy="${hy}" r="8"/>` +
+      `<circle class="core" cx="${hx}" cy="${hy}" r="2.5"/><text class="ml" x="${hx + 10}" y="${hy - 6}">HQ</text></g>`;
     setSvgChildren(svg.querySelector("g.arcs"), arcs);
     setSvgChildren(svg.querySelector("g.marks"), marks);
-    this.applySeverity();
-    const summary = mapSide(this.sources(), (ip) => Geo.get(ip));
-    const count = $("#map-count");
-    if (count) count.textContent = `${summary.locations} ${summary.locations === 1 ? "arc" : "arcs"} · ${summary.unknown} no geo entry`;
-    const side = $("#map-side");
-    if (!side) return;
-    const arcRow = (a) => el("div", { class: "ms-row", title: `${a.city} → HQ · ${a.events} events from ${a.ips} source ${a.ips === 1 ? "IP" : "IPs"}` },
-      el("i", { class: `dot sev-${a.sev}` }),
-      el("span", { class: "ms-city" }, a.city),
-      el("b", { class: "ms-n" }, String(a.events)));
-    side.replaceChildren(
-      el("div", { class: "ms-h" }, "Busiest arcs"),
-      ...(summary.arcs.length ? summary.arcs.map(arcRow) : [el("div", { class: "muted" }, "No external arcs yet")]));
-    this.applySeverity();
+    this.mapView.update(ranked, hq, summary.unknown);
+    this.mapView.tick(new Date(), Live.rollingEpm(), this.lastMapEvent);
+  },
+  noteMapTime(events) {
+    for (const e of events) {
+      if (e.ts && (!this.lastMapEvent || e.ts > this.lastMapEvent)) this.lastMapEvent = e.ts;
+    }
   },
   pulse(e) {
-    const svg = $("#map svg");
-    if (!svg || !this.mapDims || !e.src_ip) return;
+    const view = this.mapView;
+    const s = sevOf(e.severity);
+    if (!view || view.motion.matches || !view.near || !this.severities.includes(s)) return;
     const loc = Geo.get(e.src_ip);
     if (!loc || loc.internal) return;
+    const dest = Geo.get(e.dest_ip);
+    const target = dest?.internal ? dest : this.hq();
+    if (!target) return;
+    if (view.active) { view.orbit.pulse(loc, target, s); return; }
+    const fx = $("#map g.fx");
+    if (!fx || !this.mapDims || fx.childNodes.length > 40) return;
     const [w, h] = this.mapDims;
-    const fx = svg.querySelector("g.fx");
-    if (!fx || fx.childNodes.length > 40) return;
-    const target = (e.dest_ip && Geo.get(e.dest_ip) && Geo.get(e.dest_ip).internal) ? Geo.get(e.dest_ip) : this.hq();
     const [x, y] = WPMap.project(loc.lon, loc.lat, w, h);
-    const s = sevOf(e.severity);
-    const wrap = svgNode(`<svg xmlns="http://www.w3.org/2000/svg"><circle class="ping sev-${s}" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3"/>` +
+    const wrap = svgNode(`<svg xmlns="http://www.w3.org/2000/svg"><circle class="ping sev-${s}" cx="${x}" cy="${y}" r="3"/>` +
       `<path class="shot s-${s}" pathLength="100" d="${WPMap.arcPath([loc.lon, loc.lat], [target.lon, target.lat], w, h)}"/></svg>`);
     const nodes = [...wrap.childNodes];
     fx.append(...nodes);
-    this.applySeverity();
-    setTimeout(() => nodes.forEach((n) => n.remove()), 1700);
+    setTimeout(() => nodes.forEach(n => n.remove()), 1700);
   },
 
   // --- live feed ---
@@ -912,12 +877,7 @@ const Dash = {
     for (const e of [...events].reverse()) this.queue.push(e);
     if (this.queue.length > 600) this.queue.splice(0, this.queue.length - 600);
     const ips = events.flatMap((e) => [e.src_ip, e.dest_ip]).filter(Boolean);
-    for (const e of events) {
-      if (!e.src_ip || (SEV_RANK[sevOf(e.severity)] < 2 && e.event_type !== "auth_failure")) continue;
-      const cur = this.live.get(e.src_ip) || { events: 0, sev: "info", last: null };
-      cur.events += 1; cur.sev = maxSev(cur.sev, e.severity); cur.last = e.ts;
-      this.live.set(e.src_ip, cur);
-    }
+    this.noteMapTime(events);
     Geo.resolve(ips).then((changed) => { if (changed) this.renderMarks(); });
     this.scheduleMarks();
   },
