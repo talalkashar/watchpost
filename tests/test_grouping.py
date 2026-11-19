@@ -1,9 +1,11 @@
+import hashlib
+import json
 import unittest
 from datetime import timedelta
 
 from tests.helpers import ServerTestCase
-from watchpost import grouping
-from watchpost.db import iso, utcnow
+from watchpost import engine, grouping
+from watchpost.db import connect, init_schema, iso, now_iso, utcnow
 
 
 class GroupingTests(unittest.TestCase):
@@ -148,6 +150,309 @@ class GroupingApiTests(ServerTestCase):
             with self.subTest(value=value):
                 self.assertEqual(analyst.post("/api/rules/brute_force_ip/proposals",
                                               {"grouping": value, "reason": "Validate grouping"})[0], 400)
+
+
+RULE = "brute_force_ip"
+TS = "2026-11-01T12:00:00.000Z"
+
+
+def _current_user_key(user):
+    return grouping.apply([{"group_key": "old", "event_ids": [1]}], [{"id": 1, "user": user}], ["user"])[0]["group_key"]
+
+
+def _legacy_user_key(user):
+    """Pre-#111 key: folded text, no escaping, hashed only after 256 characters."""
+    if len(user) > 256:
+        return "sha256:" + hashlib.sha256(user.encode()).hexdigest()
+    return user
+
+
+class GroupKeyReconciliationTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = connect(":memory:")
+        self.addCleanup(self.conn.close)
+        init_schema(self.conn)
+        engine.seed_rules(self.conn)
+        self.conn.execute("UPDATE rules SET enabled = 0 WHERE id != ?", (RULE,))
+        self.set_grouping(["user"])
+
+    def set_grouping(self, fields):
+        self.conn.execute("UPDATE rules SET grouping = ? WHERE id = ?", (json.dumps(fields), RULE))
+
+    def plant_events(self, ip, user="alice", n=10, users=None):
+        names = users if users is not None else [user] * n
+        now = now_iso()
+        ids = []
+        for name in names:
+            cur = self.conn.execute(
+                "INSERT INTO events(ts, ingested_at, source, event_type, severity, user, src_ip)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (TS, now, "auth01", "auth_failure", "low", name, ip),
+            )
+            ids.append(cur.lastrowid)
+        return ids
+
+    def plant_alert(self, group_key, event_ids, status="open"):
+        now = now_iso()
+        cur = self.conn.execute(
+            "INSERT INTO alerts(rule_id, rule_version, group_key, severity, title, explanation, status,"
+            " first_seen, last_seen, event_count, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (RULE, 1, group_key, "high", "title", "explanation", status, TS, TS, len(event_ids), now, now),
+        )
+        self.conn.executemany(
+            "INSERT INTO alert_events(alert_id, event_id) VALUES (?,?)",
+            [(cur.lastrowid, event_id) for event_id in event_ids],
+        )
+        return cur.lastrowid
+
+    def plant_suppression(self, group_key):
+        cur = self.conn.execute(
+            "INSERT INTO suppressions(rule_id, group_key, reason, expires_at, proposed_by, approved_by, created_at)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (RULE, group_key, "reviewed exception", iso(utcnow() + timedelta(days=7)),
+             "analyst", "admin", now_iso()),
+        )
+        return cur.lastrowid
+
+    def alerts(self):
+        return [dict(row) for row in self.conn.execute(
+            "SELECT id, group_key, status, event_count FROM alerts WHERE rule_id = ? ORDER BY id", (RULE,))]
+
+    def suppression_keys(self):
+        return [row["group_key"] for row in self.conn.execute(
+            "SELECT group_key FROM suppressions WHERE rule_id = ? ORDER BY id", (RULE,))]
+
+    def reviews(self):
+        return [json.loads(row["detail"]) for row in self.conn.execute(
+            "SELECT detail FROM audit_log WHERE action = 'suppression_needs_review' ORDER BY id")]
+
+    def rewrites(self):
+        return [row["detail"] for row in self.conn.execute(
+            "SELECT detail FROM alert_activity WHERE action = 'group_key_reconciled' ORDER BY id")]
+
+    def test_resolve_stored_and_ordinary_key(self):
+        literal = [{"id": 1, "user": "a,b"}]
+        split = [{"id": 1, "user": "a"}, {"id": 2, "user": "b"}]
+        self.assertEqual(grouping.resolve_stored("a,b", literal, ["user"]), ("legacy", "a\\,b"))
+        self.assertEqual(grouping.resolve_stored("a\\,b", literal, ["user"]), ("current", "a\\,b"))
+        self.assertEqual(grouping.resolve_stored("a,b", split, ["user"]), ("current", "a,b"))
+        self.assertEqual(grouping.resolve_stored("a\\,b", split, ["user"]), ("unresolved", None))
+        marked = [{"id": 1, "user": "(none)"}]
+        missing = [{"id": 1, "user": None}]
+        self.assertEqual(grouping.resolve_stored("(none)", marked, ["user"]), ("legacy", "\\(none)"))
+        self.assertEqual(grouping.resolve_stored("\\(none)", marked, ["user"]), ("current", "\\(none)"))
+        self.assertEqual(grouping.resolve_stored("(none)", missing, ["user"]), ("current", "(none)"))
+        both = [{"id": 7, "user": "bob"}, {"id": 7, "user": "Alice"}]
+        self.assertEqual(grouping.resolve_stored("alice", both, ["user"]), ("legacy", "alice,bob"))
+        self.assertEqual(grouping.resolve_stored("alice,bob", both, ["user"]), ("current", "alice,bob"))
+        self.assertEqual(grouping.resolve_stored("bob", both, ["user"]), ("unresolved", None))
+        slashed = [{"id": 1, "user": "a\\,b"}]
+        self.assertEqual(grouping.resolve_stored("a\\,b", slashed, ["user"])[0], "legacy")
+        long_user = "a," + ("b" * 300)
+        legacy = _legacy_user_key(long_user)
+        current = _current_user_key(long_user)
+        self.assertNotEqual(legacy, current)
+        self.assertEqual(grouping.resolve_stored(legacy, [{"id": 1, "user": long_user}], ["user"]),
+                         ("legacy", current))
+        plain = "u" * 300
+        plain_hash = _legacy_user_key(plain)
+        self.assertEqual(plain_hash, _current_user_key(plain))
+        self.assertEqual(grouping.resolve_stored(plain_hash, [{"id": 1, "user": plain}], ["user"]),
+                         ("current", plain_hash))
+        self.assertTrue(grouping.ordinary_key("alice", 1))
+        self.assertTrue(grouping.ordinary_key("alice|web01", 2))
+        for key, count in (("a,b", 1), ("a\\,b", 1), ("(none)", 1), ("\\(none)", 1),
+                           ("sha256:" + "ab" * 32, 1), ("alice", 0), ("a|b", 1), ("", 1)):
+            self.assertFalse(grouping.ordinary_key(key, count), key)
+        self.assertFalse(grouping.ordinary_key(None, 1))
+
+    def test_legacy_delimiter_suppression_follows_the_same_entity(self):
+        ids = self.plant_events("203.0.113.10", user="a,b")
+        self.plant_alert("a,b", ids)
+        self.plant_suppression("a,b")
+        first = engine.run_detection(self.conn)
+        second = engine.run_detection(self.conn)
+        self.assertEqual(first["alerts_suppressed"], 1)
+        self.assertEqual(first["alerts_created"], 0)
+        self.assertEqual([row["group_key"] for row in self.alerts()], ["a\\,b"])
+        self.assertEqual(self.suppression_keys(), ["a\\,b"])
+        self.assertEqual(self.rewrites(), ["a,b -> a\\,b"])
+        self.assertEqual(self.reviews(), [])
+        self.assertEqual(second["alerts_created"], 0)
+        self.assertEqual(second["alerts_suppressed"], 1)
+        self.assertEqual(len(self.alerts()), 1)
+        self.assertEqual(self.rewrites(), ["a,b -> a\\,b"])
+
+    def test_legacy_delimiter_does_not_cover_the_colliding_group(self):
+        literal = self.plant_events("203.0.113.10", user="a,b")
+        self.plant_alert("a,b", literal)
+        self.plant_suppression("a,b")
+        self.plant_events("203.0.113.11", users=["a"] * 5 + ["b"] * 5)
+        first = engine.run_detection(self.conn)
+        second = engine.run_detection(self.conn)
+        rows = self.alerts()
+        self.assertEqual(sorted(row["group_key"] for row in rows), ["a,b", "a\\,b"])
+        self.assertEqual(self.suppression_keys(), ["a\\,b"])
+        self.assertEqual(first["alerts_created"], 1)
+        self.assertEqual(first["alerts_suppressed"], 1)
+        open_keys = sorted(row["group_key"] for row in rows if row["status"] == "open")
+        self.assertEqual(open_keys, ["a,b", "a\\,b"])
+        self.assertEqual(second["alerts_created"], 0)
+        self.assertEqual(len(self.alerts()), 2)
+        self.assertEqual(self.suppression_keys(), ["a\\,b"])
+
+    def test_ordinary_key_stays_applied(self):
+        ids = self.plant_events("203.0.113.12", user="alice")
+        self.plant_alert("alice", ids)
+        self.plant_suppression("alice")
+        run = engine.run_detection(self.conn)
+        self.assertEqual(run["alerts_suppressed"], 1)
+        self.assertEqual(run["alerts_created"], 0)
+        self.assertEqual([row["group_key"] for row in self.alerts()], ["alice"])
+        self.assertEqual(self.suppression_keys(), ["alice"])
+        self.assertEqual(self.reviews(), [])
+        self.assertEqual(self.rewrites(), [])
+
+    def test_colliding_keys_stay_put_and_are_reviewed_once(self):
+        literal = self.plant_events("203.0.113.10", user="a,b")
+        split = self.plant_events("203.0.113.11", users=["a"] * 5 + ["b"] * 5)
+        self.plant_alert("a,b", literal)
+        self.plant_alert("a,b", split)
+        self.plant_suppression("a,b")
+        first = engine.run_detection(self.conn)
+        second = engine.run_detection(self.conn)
+        rows = self.alerts()
+        self.assertEqual([row["group_key"] for row in rows], ["a,b", "a,b"])
+        self.assertEqual([row["status"] for row in rows], ["open", "open"])
+        self.assertEqual(self.suppression_keys(), ["a,b"])
+        self.assertEqual(first["alerts_suppressed"], 0)
+        self.assertEqual(first["alerts_created"], 0)
+        self.assertEqual(len(self.reviews()), 1)
+        self.assertEqual(self.reviews()[0]["group_key"], "a,b")
+        self.assertEqual(second["alerts_created"], 0)
+        self.assertEqual(second["alerts_suppressed"], 0)
+        self.assertEqual(len(self.alerts()), 2)
+        self.assertEqual(len(self.reviews()), 1)
+        self.assertEqual(self.rewrites(), [])
+
+    def test_literal_missing_marker_is_not_a_gap(self):
+        literal = self.plant_events("203.0.113.13", user="(none)")
+        self.plant_alert("(none)", literal)
+        self.plant_suppression("(none)")
+        self.plant_events("203.0.113.14", user=None)
+        run = engine.run_detection(self.conn)
+        self.assertEqual(sorted(row["group_key"] for row in self.alerts()), ["(none)", "\\(none)"])
+        self.assertEqual(self.suppression_keys(), ["\\(none)"])
+        self.assertEqual(run["alerts_suppressed"], 1)
+        self.assertEqual(run["alerts_created"], 1)
+        gap = next(row for row in self.alerts() if row["group_key"] == "(none)")
+        self.assertEqual(gap["status"], "open")
+
+    def test_colliding_missing_marker_suppresses_neither(self):
+        literal = self.plant_events("203.0.113.13", user="(none)")
+        gap = self.plant_events("203.0.113.14", user=None)
+        self.plant_alert("(none)", literal)
+        self.plant_alert("(none)", gap)
+        self.plant_suppression("(none)")
+        first = engine.run_detection(self.conn)
+        second = engine.run_detection(self.conn)
+        rows = self.alerts()
+        self.assertEqual([row["group_key"] for row in rows], ["(none)", "(none)"])
+        self.assertEqual(len({row["id"] for row in rows}), 2)
+        self.assertEqual(self.suppression_keys(), ["(none)"])
+        self.assertEqual(first["alerts_suppressed"], 0)
+        self.assertEqual(first["alerts_created"], 0)
+        self.assertEqual(len(self.reviews()), 1)
+        self.assertEqual(second["alerts_created"], 0)
+        self.assertEqual(len(self.reviews()), 1)
+        self.assertEqual(len(self.alerts()), 2)
+
+    def test_hashed_legacy_key_follows_evidence(self):
+        user = "a," + ("b" * 300)
+        legacy, current = _legacy_user_key(user), _current_user_key(user)
+        self.assertNotEqual(legacy, current)
+        self.assertTrue(legacy.startswith("sha256:") and current.startswith("sha256:"))
+        ids = self.plant_events("203.0.113.15", user=user)
+        self.plant_alert(legacy, ids)
+        self.plant_suppression(legacy)
+        first = engine.run_detection(self.conn)
+        second = engine.run_detection(self.conn)
+        self.assertEqual([row["group_key"] for row in self.alerts()], [current])
+        self.assertEqual(self.suppression_keys(), [current])
+        self.assertEqual(first["alerts_created"], 0)
+        self.assertEqual(first["alerts_suppressed"], 1)
+        self.assertEqual(second["alerts_created"], 0)
+        self.assertEqual(len(self.alerts()), 1)
+        self.assertEqual(self.reviews(), [])
+
+    def test_hashed_ordinary_key_still_suppresses(self):
+        user = "u" * 300
+        stored = _legacy_user_key(user)
+        self.assertEqual(stored, _current_user_key(user))
+        ids = self.plant_events("203.0.113.16", user=user)
+        self.plant_alert(stored, ids)
+        self.plant_suppression(stored)
+        run = engine.run_detection(self.conn)
+        self.assertEqual(run["alerts_suppressed"], 1)
+        self.assertEqual(run["alerts_created"], 0)
+        self.assertEqual(self.suppression_keys(), [stored])
+        self.assertEqual([row["group_key"] for row in self.alerts()], [stored])
+        self.assertEqual(self.reviews(), [])
+
+    def test_resolved_alert_is_not_resurrected(self):
+        ids = self.plant_events("203.0.113.17", user="a,b")
+        self.plant_alert("a,b", ids, status="resolved")
+        first = engine.run_detection(self.conn)
+        second = engine.run_detection(self.conn)
+        rows = self.alerts()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "resolved")
+        self.assertEqual(rows[0]["group_key"], "a\\,b")
+        self.assertEqual(first["alerts_created"], 0)
+        self.assertEqual(second["alerts_created"], 0)
+        self.assertEqual(self.rewrites(), ["a,b -> a\\,b"])
+
+    def test_escaped_key_is_not_rewritten(self):
+        ids = self.plant_events("203.0.113.18", user="a,b")
+        self.plant_alert("a\\,b", ids)
+        self.plant_suppression("a\\,b")
+        first = engine.run_detection(self.conn)
+        second = engine.run_detection(self.conn)
+        self.assertEqual([row["group_key"] for row in self.alerts()], ["a\\,b"])
+        self.assertEqual(self.suppression_keys(), ["a\\,b"])
+        self.assertEqual(first["alerts_suppressed"], 1)
+        self.assertEqual(first["alerts_created"], 0)
+        self.assertEqual(second["alerts_created"], 0)
+        self.assertEqual(len(self.alerts()), 1)
+        self.assertEqual(self.rewrites(), [])
+        self.assertEqual(self.reviews(), [])
+
+    def test_ambiguous_suppression_without_evidence_stays_visible(self):
+        self.plant_suppression("a\\,b")
+        self.plant_events("203.0.113.19", user="a,b")
+        first = engine.run_detection(self.conn)
+        second = engine.run_detection(self.conn)
+        self.assertEqual(first["alerts_suppressed"], 0)
+        self.assertEqual(first["alerts_created"], 1)
+        self.assertEqual([row["group_key"] for row in self.alerts()], ["a\\,b"])
+        self.assertEqual([row["status"] for row in self.alerts()], ["open"])
+        self.assertEqual(self.suppression_keys(), ["a\\,b"])
+        self.assertEqual(len(self.reviews()), 1)
+        self.assertEqual(second["alerts_created"], 0)
+        self.assertEqual(second["alerts_suppressed"], 0)
+        self.assertEqual(len(self.alerts()), 1)
+        self.assertEqual(len(self.reviews()), 1)
+        self.assertEqual(self.suppression_keys(), ["a\\,b"])
+
+    def test_unresolved_native_key_is_not_rewritten(self):
+        ids = self.plant_events("203.0.113.9", user="Alice")
+        self.plant_alert("203.0.113.9", ids)
+        engine.run_detection(self.conn)
+        engine.run_detection(self.conn)
+        rows = self.alerts()
+        self.assertEqual(sorted(row["group_key"] for row in rows), ["203.0.113.9", "alice"])
+        self.assertEqual(self.reviews(), [])
+        self.assertEqual(self.rewrites(), [])
 
 
 if __name__ == "__main__":

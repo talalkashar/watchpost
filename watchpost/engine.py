@@ -107,7 +107,25 @@ def ingest(conn, events, rejections, source, fmt, submitted_by, synthetic=False)
 
 # --- Detection --------------------------------------------------------------------
 
-def _existing_alert(conn, rule_id, group_key, first_seen, last_seen, window):
+def _group_match(alert_id, stored_key, finding_key, identity):
+    """Whether this alert is the finding's group.
+
+    `identity` is None when the rule has no saved grouping, so the native key matches exactly.
+    A resolved alert matches the entity evidence produced, even when its stored text still differs.
+    An unresolved alert string-matches only when that stored key is not part of a collision.
+    """
+    if identity is None:
+        return stored_key == finding_key
+    resolved, blocked = identity
+    if alert_id not in resolved:
+        return stored_key == finding_key
+    target = resolved[alert_id]
+    if target is None:
+        return stored_key == finding_key and stored_key not in blocked
+    return target == finding_key
+
+
+def _existing_alert(conn, rule_id, group_key, first_seen, last_seen, window, identity=None):
     """Open alert for this group whose span is within `window` seconds of the finding.
 
     A gap of exactly `window` still matches. Rules split a cluster only when the gap is greater.
@@ -115,11 +133,21 @@ def _existing_alert(conn, rule_id, group_key, first_seen, last_seen, window):
     """
     earliest = iso(parse_iso(first_seen) - timedelta(seconds=window))
     latest = iso(parse_iso(last_seen) + timedelta(seconds=window))
-    return conn.execute(
-        "SELECT * FROM alerts WHERE rule_id = ? AND group_key = ? AND status != 'resolved'"
-        " AND last_seen >= ? AND first_seen <= ? ORDER BY id DESC LIMIT 1",
-        (rule_id, group_key, earliest, latest),
-    ).fetchone()
+    if identity is None:
+        return conn.execute(
+            "SELECT * FROM alerts WHERE rule_id = ? AND group_key = ? AND status != 'resolved'"
+            " AND last_seen >= ? AND first_seen <= ? ORDER BY id DESC LIMIT 1",
+            (rule_id, group_key, earliest, latest),
+        ).fetchone()
+    rows = conn.execute(
+        "SELECT * FROM alerts WHERE rule_id = ? AND status != 'resolved'"
+        " AND last_seen >= ? AND first_seen <= ? ORDER BY id DESC",
+        (rule_id, earliest, latest),
+    )
+    for row in rows:
+        if _group_match(row["id"], row["group_key"], group_key, identity):
+            return row
+    return None
 
 
 def _weigh(conn, rule, alert_id, assets_idx):
@@ -132,22 +160,32 @@ def _weigh(conn, rule, alert_id, assets_idx):
     return weighed
 
 
-def _apply_finding(conn, rule, finding, synthetic, assets_idx):
+def _apply_finding(conn, rule, finding, synthetic, assets_idx, identity=None):
     """Create or extend an alert. Returns 'created', 'updated', or 'unchanged'."""
     ids = finding["event_ids"]
     placeholders = ",".join("?" for _ in ids)
-    already = conn.execute(
-        f"SELECT COUNT(DISTINCT ae.event_id) FROM alert_events ae JOIN alerts a ON a.id = ae.alert_id"
-        f" WHERE a.rule_id = ? AND a.group_key = ? AND ae.event_id IN ({placeholders})",
-        (rule["id"], finding["group_key"], *ids),
-    ).fetchone()[0]
+    if identity is None:
+        already = conn.execute(
+            f"SELECT COUNT(DISTINCT ae.event_id) FROM alert_events ae JOIN alerts a ON a.id = ae.alert_id"
+            f" WHERE a.rule_id = ? AND a.group_key = ? AND ae.event_id IN ({placeholders})",
+            (rule["id"], finding["group_key"], *ids),
+        ).fetchone()[0]
+    else:
+        rows = conn.execute(
+            f"SELECT ae.event_id AS event_id, a.id AS alert_id, a.group_key AS group_key"
+            f" FROM alert_events ae JOIN alerts a ON a.id = ae.alert_id"
+            f" WHERE a.rule_id = ? AND ae.event_id IN ({placeholders})",
+            (rule["id"], *ids),
+        )
+        already = len({row["event_id"] for row in rows
+                       if _group_match(row["alert_id"], row["group_key"], finding["group_key"], identity)})
     if already == len(ids):
         return "unchanged"  # e.g. a rescan, or evidence already on a resolved alert
 
     now = now_iso()
     window = rule["params"].get("window_seconds", 3600)
     existing = _existing_alert(conn, rule["id"], finding["group_key"], finding["first_seen"],
-                               finding["last_seen"], window)
+                               finding["last_seen"], window, identity)
     if existing:
         conn.executemany("INSERT OR IGNORE INTO alert_events(alert_id, event_id) VALUES (?,?)",
                          [(existing["id"], i) for i in ids])
@@ -274,6 +312,134 @@ def rule_findings(rule, events, history_events, scan_start, suppressed, suppress
     return findings, skipped
 
 
+def _rule_alert_evidence(conn, rule_id):
+    rows = conn.execute(
+        "SELECT a.id AS alert_id, a.group_key AS group_key, e.id AS event_id, e.src_ip, e.dest_ip,"
+        " e.user, e.host, e.event_type, e.source"
+        " FROM alerts a LEFT JOIN alert_events ae ON ae.alert_id = a.id"
+        " LEFT JOIN events e ON e.id = ae.event_id"
+        " WHERE a.rule_id = ? ORDER BY a.id, e.id",
+        (rule_id,),
+    )
+    alerts = {}
+    for row in rows:
+        info = alerts.setdefault(row["alert_id"], {"group_key": row["group_key"], "evidence": []})
+        if row["event_id"] is None:
+            continue
+        info["evidence"].append({
+            "id": row["event_id"], "src_ip": row["src_ip"], "dest_ip": row["dest_ip"], "user": row["user"],
+            "host": row["host"], "event_type": row["event_type"], "source": row["source"],
+        })
+    return alerts
+
+
+def _open_review_ids(conn, rule_id):
+    found = set()
+    rows = conn.execute(
+        "SELECT detail FROM audit_log WHERE action = 'suppression_needs_review' AND target = ?",
+        (rule_id,),
+    )
+    for row in rows:
+        if not row["detail"]:
+            continue
+        try:
+            detail = json.loads(row["detail"])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(detail, dict) and isinstance(detail.get("suppression_id"), int):
+            found.add(detail["suppression_id"])
+    return found
+
+
+def _rewrite_group_key(conn, rule_id, old, new, alert_ids):
+    """Point one proven entity at its current key. Status and updated_at stay as stored."""
+    now = now_iso()
+    for alert_id in alert_ids:
+        conn.execute("UPDATE alerts SET group_key = ? WHERE id = ?", (new, alert_id))
+        conn.execute(
+            "INSERT INTO alert_activity(alert_id, actor, action, detail, created_at) VALUES (?,?,?,?,?)",
+            (alert_id, "detection", "group_key_reconciled", f"{old} -> {new}", now),
+        )
+    conn.execute(
+        "UPDATE suppressions SET group_key = ? WHERE rule_id = ? AND group_key = ?"
+        " AND expires_at > ? AND revoked_at IS NULL",
+        (new, rule_id, old, now),
+    )
+
+
+def _reconcile_rule(conn, rule):
+    """Rename a stored key only when this rule's evidence has exactly one current key for it.
+
+    A delimiter, a missing-value marker, or a hash is not identity by itself. When the rows
+    disagree, the stored alert and suppression stay, and the suppression is not applied.
+    """
+    fields = grouping.validate(rule["grouping"])
+    alerts = _rule_alert_evidence(conn, rule["id"])
+    suppressions = [dict(row) for row in conn.execute(
+        "SELECT id, group_key FROM suppressions WHERE rule_id = ? AND expires_at > ? AND revoked_at IS NULL",
+        (rule["id"], now_iso()),
+    )]
+    by_key = {}
+    for alert_id, info in alerts.items():
+        by_key.setdefault(info["group_key"], []).append((alert_id, info["evidence"]))
+    sup_by_key = {}
+    for row in suppressions:
+        sup_by_key.setdefault(row["group_key"], []).append(row)
+    flagged = _open_review_ids(conn, rule["id"])
+    resolved, blocked, ambiguous = {}, set(), set()
+    keys = list(by_key)
+    keys.extend(key for key in sup_by_key if key not in by_key)
+    for key in keys:
+        targets, unresolved, other = set(), False, False
+        members = by_key.get(key, [])
+        for alert_id, evidence in members:
+            if not evidence:
+                kind, target = "unresolved", None
+            else:
+                kind, target = grouping.resolve_stored(key, evidence, fields)
+            if kind == "unresolved":
+                unresolved = True
+                resolved[alert_id] = None
+            else:
+                targets.add(target)
+                resolved[alert_id] = target
+                if target != key:
+                    other = True
+        sups = sup_by_key.get(key, [])
+        reviewed = any(row["id"] in flagged for row in sups)
+        proven = bool(members) and not unresolved and len(targets) == 1
+        if proven and not reviewed:
+            target = next(iter(targets))
+            if target != key:
+                _rewrite_group_key(conn, rule["id"], key, target, [alert_id for alert_id, _ in members])
+            continue
+        if other or len(targets) > 1:
+            blocked.add(key)
+        if not sups:
+            continue
+        # An ordinary string has one encoding. A key evidence already confirms also stays.
+        # Anything else, including a previous review, is not applied and is not rewritten.
+        if not reviewed and (targets == {key} or (not targets and grouping.ordinary_key(key, len(fields)))):
+            continue
+        ambiguous.add(key)
+        for row in sups:
+            if row["id"] in flagged:
+                continue
+            audit(conn, "detection", "suppression_needs_review", rule["id"],
+                  {"suppression_id": row["id"], "group_key": key})
+            flagged.add(row["id"])
+    return (resolved, blocked), ambiguous
+
+
+def _reconcile_grouped_rules(conn, rules):
+    identities, ambiguous = {}, {}
+    for rule in rules:
+        if not (rule.get("grouping") or []):
+            continue
+        identities[rule["id"]], ambiguous[rule["id"]] = _reconcile_rule(conn, rule)
+    return identities, ambiguous
+
+
 def run_detection(conn, trigger="manual", start=None, end=None):
     """Run all enabled rules over a time range (default: all events).
 
@@ -300,9 +466,11 @@ def run_detection(conn, trigger="manual", start=None, end=None):
             synthetic_ids = {e["id"] for e in events + history_events if e["synthetic"]}
             summary["events_scanned"] = len(events) + len(history_events)
             assets_idx = assets_mod.load_index(conn)
-            suppressed = active_suppressions(conn)
             suppressed_rules = active_rule_suppressions(conn)
             with transaction(conn):
+                identities, ambiguous = _reconcile_grouped_rules(conn, active)
+                suppressed = {(rule_id, key) for rule_id, key in active_suppressions(conn)
+                              if key not in ambiguous.get(rule_id, ())}
                 for rule in active:
                     if rule["id"] == sources_mod.RULE_ID:
                         # Silence is an absence: the rule reads each source's recent arrivals and the wall
@@ -318,7 +486,8 @@ def run_detection(conn, trigger="manual", start=None, end=None):
                     summary["alerts_suppressed"] += skipped  # a reviewed exception or rule window covers them
                     for finding in findings:
                         synthetic = all(i in synthetic_ids for i in finding["event_ids"])
-                        outcome = _apply_finding(conn, rule, finding, synthetic, assets_idx)
+                        outcome = _apply_finding(conn, rule, finding, synthetic, assets_idx,
+                                                 identities.get(rule["id"]))
                         if outcome == "created":
                             summary["alerts_created"] += 1
                         elif outcome == "updated":

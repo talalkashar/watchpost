@@ -48,6 +48,37 @@ def _index_events(events):
     return by_id
 
 
+def _bound(key):
+    if len(key) > 256:
+        return "sha256:" + hashlib.sha256(key.encode()).hexdigest()
+    return key
+
+
+def _values(rows, field):
+    present = (row.get(field) for row in rows if row.get(field) not in (None, ""))
+    return sorted({_folded(field, value) for value in present})
+
+
+def _join(values, escape):
+    if not values:
+        return _MISSING
+    if escape:
+        return ",".join(_escape(value) for value in values)
+    return ",".join(values)
+
+
+def _legacy_rows(rows):
+    """Pre-#111 kept one row per id, and the last copy in the list won."""
+    by_id = {}
+    for row in rows:
+        by_id[row["id"]] = row
+    return list(by_id.values())
+
+
+def _key_from_rows(rows, fields, escape):
+    return _bound("|".join(_join(_values(rows, field), escape) for field in fields))
+
+
 def apply(findings, events, fields):
     """Replace keys deterministically without changing a finding's attached evidence ids.
 
@@ -62,16 +93,46 @@ def apply(findings, events, fields):
     for finding in findings:
         evidence = [event for event_id in finding["event_ids"] if event_id in by_id
                     for event in by_id[event_id]]
-        parts = []
-        for field in fields:
-            present = (event[field] for event in evidence if event.get(field) not in (None, ""))
-            values = sorted({_folded(field, value) for value in present})
-            parts.append(",".join(_escape(value) for value in values) if values else _MISSING)
-        key = "|".join(parts)
-        if len(key) > 256:
-            key = "sha256:" + hashlib.sha256(key.encode()).hexdigest()
-        out.append({**finding, "group_key": key})
+        out.append({**finding, "group_key": _key_from_rows(evidence, fields, True)})
     return out
+
+
+def keys_for(rows, fields):
+    """The pre-#111 key and the current key for the same rows and saved fields."""
+    fields = validate(fields)
+    return (_key_from_rows(_legacy_rows(rows), fields, False), _key_from_rows(rows, fields, True))
+
+
+def resolve_stored(stored, evidence_rows, fields):
+    """Whether `stored` is the current key or the pre-#111 key for this evidence.
+
+    Returns ("current" or "legacy", current_key), or ("unresolved", None) when the
+    evidence matches neither. Callers must not treat an unmatched string as either key.
+    """
+    fields = validate(fields)
+    current = _key_from_rows(evidence_rows, fields, True)
+    if stored == current:
+        return ("current", current)
+    legacy = _key_from_rows(_legacy_rows(evidence_rows), fields, False)
+    if stored == legacy:
+        return ("legacy", current)
+    return ("unresolved", None)
+
+
+def ordinary_key(key, field_count):
+    """True when this string has one encoding for a rule with `field_count` saved fields.
+
+    A comma, backslash, sha256 prefix, "(none)" part, or a different field count can name
+    two entities. Those keys are not identified from the string alone.
+    """
+    if not isinstance(key, str) or field_count < 1 or key.startswith("sha256:"):
+        return False
+    if "\\" in key or "," in key:
+        return False
+    parts = key.split("|")
+    if len(parts) != field_count:
+        return False
+    return all(part and part != _MISSING for part in parts)
 
 
 def _side(found):
