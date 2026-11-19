@@ -1,0 +1,28 @@
+# A new account in AWS Organizations. CreateUser is the shipped IAM example and is not here.
+# The new account id is not in the normalized message, so this is the request, not the account.
+title: Cloud Organization Account Creation Requested
+id: 9a1b6d30-2e44-4c7e-b152-8d0e6f1a3c94
+status: experimental
+description: |
+  CreateAccount or CreateGovCloudAccount on organizations.amazonaws.com. A denied call still
+  matches. An IAM CreateUser does not. The message names the call, not the new account.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1136/003/
+tags:
+  - attack.persistence
+  - attack.t1136.003
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    event.action: cloud_api_call
+    message|contains:
+      - CreateAccount on organizations.amazonaws.com
+      - CreateGovCloudAccount on organizations.amazonaws.com
+  condition: selection
+falsepositives:
+  - An administrator creating a member account
+level: high
