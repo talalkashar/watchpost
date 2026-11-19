@@ -89,7 +89,8 @@ class BacktestBudgetTests(unittest.TestCase):
         small_ids = list(counter.ids)
         self.assertEqual(set(small_ids), set(burst[-10:]))
         self.assertEqual(len(small_ids), 10)
-        self.assertTrue((small["capped"], small["incomplete"]))
+        self.assertTrue(small["capped"])
+        self.assertTrue(small["incomplete"])
         self.assertGreater(small["events_omitted"], 0)
         self.assertEqual(small["events_scanned"], len(small_ids))
         self.assertEqual(small["events_scanned"] + small["events_omitted"], budget)
@@ -133,6 +134,31 @@ class BacktestBudgetTests(unittest.TestCase):
         self.assertTrue(set(decoy).issubset(scanned))
         self.assertTrue(set(ancient_auth).isdisjoint(scanned))
         self.assertGreater(len(scanned), budget)
+
+    def test_incomplete_long_lookback_stays_inside_requested_day(self):
+        self.insert(12, iso(END_DT - timedelta(hours=36)), "auth_failure")
+        self.insert(1, END, "auth_failure")
+        params = {**self.params(BRUTE), "window_seconds": 2 * 86400}
+        replay = backtest.backtest(self.conn, BRUTE, params, window_days=1, max_events=8)
+        preview = backtest.preview_new_rule(self.conn, BRUTE, params, lambda e: True, window_days=1, max_events=8)
+        for result in (replay, preview):
+            self.assertTrue(result["incomplete"])
+            self.assertEqual(result["window"]["start"], iso(END_DT - timedelta(days=1)))
+        self.assertEqual(preview["matched_events"], 1)
+        self.assertEqual(replay["events_scanned"], 8)
+
+    def test_uncapped_evidence_keeps_its_pre_budget_digest(self):
+        self.insert(1, END, "auth_failure")
+        replay = backtest.backtest(self.conn, BRUTE, self.params(BRUTE))
+        earlier = {k: v for k, v in replay.items() if k not in ("incomplete", "events_omitted", "bound")}
+        self.assertEqual(improve.evidence_digest({"backtest": replay}), improve.evidence_digest({"backtest": earlier}))
+
+    def test_negative_budget_cannot_disable_sql_limit(self):
+        self.insert(1, END, "auth_failure")
+        with self.assertRaises(ValueError):
+            backtest.backtest(self.conn, BRUTE, self.params(BRUTE), max_events=-1)
+        with self.assertRaises(ValueError):
+            backtest.preview_new_rule(self.conn, BRUTE, self.params(BRUTE), lambda e: True, max_events=-1)
 
     def test_stored_grouping_is_replayed_on_both_sides(self):
         self.insert(1, END, "cloud_iam_change", src_ip="203.0.113.9")

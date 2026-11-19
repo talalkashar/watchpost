@@ -165,6 +165,8 @@ def _budget(conn, rules, max_id, end, requested_dt, max_events):
     toward the budget. When even the newest lookback does not fit, only its newest rows are read
     and the result is incomplete: it is not an exact evaluation.
     """
+    if max_events < 0:
+        raise ValueError("max_events must be nonnegative")
     pad = timedelta(seconds=rules_mod.lookback_seconds(rules))
     history, types = _history_spec(rules)
     end_dt = parse_iso(end)
@@ -182,7 +184,7 @@ def _budget(conn, rules, max_id, end, requested_dt, max_events):
         # exact span can keep some of those ids and drop the rest. Read the newest ids only.
         rows = _fetch_span(conn, max_id, min_start, event_end, history, types, limit=max_events)
         events, hist = _split(rows, min_start)
-        finding_start = min((e["ts"] for e in events), default=end)
+        finding_start = max(iso(requested_dt), min((e["ts"] for e in events), default=end))
         return _loaded(events, hist, min_start, finding_start, True, True, min_count - len(rows), _bound(rows))
     lo, hi = _ms(parse_iso(full_start)), _ms(parse_iso(min_start))
     scan_dt = min_dt if lo >= hi else _from_ms(

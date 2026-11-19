@@ -672,8 +672,12 @@ def evidence_digest(evaluation):
     if isinstance(evaluation.get("backtest"), dict):
         # The backtest's scan context moves with every ingested event (the window ends at the newest one);
         # the digest covers what the reviewer decides on: the kept / new / lost findings and open alerts lost.
-        evaluation = {**evaluation, "backtest": {k: v for k, v in evaluation["backtest"].items()
-                                                 if k not in BACKTEST_CONTEXT}}
+        replay = evaluation["backtest"]
+        context = BACKTEST_CONTEXT
+        if not replay.get("capped") and not replay.get("incomplete"):
+            # A complete, uncapped replay has the same evidence as before row budgets were introduced.
+            context += ("incomplete", "events_omitted", "bound")
+        evaluation = {**evaluation, "backtest": {k: v for k, v in replay.items() if k not in context}}
     canonical = json.dumps(evaluation, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
