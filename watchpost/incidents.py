@@ -1,6 +1,8 @@
 """Read-side incident queries, incident status changes, and ATT&CK coverage."""
 
 import json
+import re
+from itertools import chain
 
 from . import assets, attack, correlate, improve, search_rules, sigma, simulate
 from .db import audit, now_iso, row_to_dict, transaction
@@ -22,12 +24,12 @@ def _incident(row):
     return row_to_dict(row, ["entities", "stages"])
 
 
-def _technique_objects(raw):
+def _technique_objects(raw, include_unlisted=False):
     """Catalog techniques named by one rule, in stored order.
 
     Missing, corrupt, or non-list JSON contributes nothing. A legacy id becomes the catalog's
     current technique and is kept once. Integers, booleans, blank ids, and ids the catalog does
-    not know are omitted. The catalog supplies the name and tactic.
+    not know are omitted. Case exports may retain well-formed unlisted mappings.
     """
     if isinstance(raw, str):
         try:
@@ -50,7 +52,11 @@ def _technique_objects(raw):
         try:
             decoded = attack.technique(technique_id)
         except KeyError:
-            continue
+            if (not include_unlisted or not re.fullmatch(r"T[0-9]{4}(?:\.[0-9]{3})?", technique_id)
+                    or not isinstance(item, dict)
+                    or not all(isinstance(item.get(k), str) for k in ("name", "tactic"))):
+                continue
+            decoded = {k: item[k] for k in ("id", "name", "tactic")}
         if decoded["id"] in seen:
             continue
         seen.add(decoded["id"])
@@ -122,7 +128,7 @@ def list_incidents(conn, params):
     return items, total - len(items)
 
 
-def linked_alerts(conn, incident_id):
+def linked_alerts(conn, incident_id, *, include_unlisted=False):
     """Every alert on the incident, earliest first_seen then id, with its rule name and techniques.
 
     Case export and the incident report use this full list. Incident detail pages the same order.
@@ -130,7 +136,7 @@ def linked_alerts(conn, incident_id):
     """
     # Read technique JSON here. load_rules rejects every rule when one row's JSON is corrupt.
     rules = {
-        row["id"]: (row["name"], _technique_objects(row["techniques"]))
+        row["id"]: (row["name"], _technique_objects(row["techniques"], include_unlisted))
         for row in conn.execute("SELECT id, name, techniques FROM rules")
     }
     alerts = [alert_row(r) for r in conn.execute(
@@ -143,13 +149,13 @@ def linked_alerts(conn, incident_id):
     return alerts
 
 
-def get_incident(conn, incident_id):
+def get_incident(conn, incident_id, *, include_unlisted=False):
     row = conn.execute("SELECT * FROM incidents WHERE id = ?", (incident_id,)).fetchone()
     if row is None:
         raise QueryError("incident not found", 404)
     incident = _incident(row)
 
-    alerts = linked_alerts(conn, incident_id)
+    alerts = linked_alerts(conn, incident_id, include_unlisted=include_unlisted)
     techniques = {}
     for alert in alerts:
         for t in alert["techniques"]:
@@ -191,17 +197,13 @@ def get_incident(conn, incident_id):
     incident["escalated"] = len(incident["stages"]) >= 3
     incident["correlation_rule"] = correlate.rule_summary()
     # The event list above is capped. Addresses the incident reached still count past that page.
-    dest_ips = {
-        row["dest_ip"] for row in conn.execute(
-            "SELECT DISTINCT e.dest_ip AS dest_ip FROM events e"
-            " JOIN alert_events ae ON ae.event_id = e.id"
-            " JOIN incident_alerts ia ON ia.alert_id = ae.alert_id"
-            " WHERE ia.incident_id = ? AND e.dest_ip IS NOT NULL AND e.dest_ip != ''",
-            (incident_id,))
-    }
+    addresses = conn.execute(
+        "SELECT e.dest_ip FROM events e JOIN alert_events ae ON ae.event_id = e.id"
+        " JOIN incident_alerts ia ON ia.alert_id = ae.alert_id"
+        " WHERE ia.incident_id = ? AND e.dest_ip IS NOT NULL AND e.dest_ip != ''", (incident_id,))
     incident["assets"] = assets.for_entities(
         conn, incident["entities"].get("host"),
-        sorted(dest_ips | set(incident["entities"].get("src_ip") or [])))
+        chain(incident["entities"].get("src_ip") or (), (row[0] for row in addresses)))
     return incident
 
 

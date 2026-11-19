@@ -58,7 +58,7 @@ def _newest(conn, table_where, args):
 
 def build(conn, incident_id):
     """Combine an incident's evidence and analyst workflow into one ordered record."""
-    incident = incidents.get_incident(conn, incident_id)
+    incident = incidents.get_incident(conn, incident_id, include_unlisted=True)
     # Every linked alert, including ones past the incident-detail page of 200, and not only
     # the ones whose evidence made the event cap.
     full_alerts = incidents.linked_alerts(conn, incident_id)
