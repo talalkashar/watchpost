@@ -349,7 +349,9 @@ def covers(param, entries, event):
         return _ascii_fold(_action(event) or "") in entries
     if param in _USER_LISTS:
         return _ascii_fold(event.get("user") or "") in entries
-    return (event.get("user") or "").lower() in entries
+    # ASCII letters only, the same fold list_entry stored. ÉRIN matches Érin.
+    # érin does not. Not str.lower().
+    return _ascii_fold(event.get("user") or "") in entries
 
 
 def _filtered(events, params, event_type):
