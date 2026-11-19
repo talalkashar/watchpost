@@ -523,7 +523,7 @@ def events(req):
 
 @route("GET", "/api/hunt")
 def hunt_run(req):
-    return hunt.run(req.conn, req.query)
+    return hunt.run(req.conn, req.query, resolved_ips=req.masker.resolved_ips if req.masker else ())
 
 
 @route("GET", "/api/hunt/saved")
@@ -758,7 +758,8 @@ def _entity_route(kind):
     # One literal route per kind; the value is percent-encoded in the path (it may hold dots, colons, pipes).
     @route("GET", rf"/api/entities/{kind}/([^/]+)")
     def entity_detail(req, value):
-        return entities.get_entity(req.conn, kind, unquote(value))
+        return entities.get_entity(req.conn, kind, unquote(value),
+                                   resolved_ips=req.masker.resolved_ips if req.masker else ())
 
 
 for _kind in entities.KINDS:

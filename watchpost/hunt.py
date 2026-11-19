@@ -200,7 +200,7 @@ def bytes_matches(count, op, number):
     return count == number
 
 
-def _term_sql(term, now):
+def _term_sql(term, now, resolved_ips=()):
     """(sql, args, text) for one term. Column names come from FIELDS, values only from args."""
     field, value = term["field"], term["value"]
     kind, column = FIELDS[field]
@@ -246,12 +246,12 @@ def _term_sql(term, now):
             pattern = _escape_like(prefix) + "%"
             return ("(src_ip LIKE ? ESCAPE '\\' OR dest_ip LIKE ? ESCAPE '\\')", [pattern, pattern],
                     f"src_ip or dest_ip starts with {prefix}")
-        address = canonical_ip(value, field)
+        address = value if value in resolved_ips else canonical_ip(value, field)
         return "(src_ip = ? OR dest_ip = ?)", [address, address], f"src_ip or dest_ip = {address}"
     if prefix is not None:
         return f"{column} LIKE ? ESCAPE '\\'", [_escape_like(prefix) + "%"], f"{field} starts with {prefix}"
     if field in ("src_ip", "dest_ip"):
-        address = canonical_ip(value, field)
+        address = value if value in resolved_ips else canonical_ip(value, field)
         return f"{column} = ?", [address], f"{field} = {address}"
     if kind == "enum":
         # Fold ASCII case and bind the catalog spelling. Grouping by the field stays exact.
@@ -266,14 +266,14 @@ def _term_sql(term, now):
     return f"{column} = ?{collate}", [value], f"{field} = {value}"
 
 
-def _compile(text, now=None):
+def _compile(text, now=None, resolved_ips=()):
     """(compiled terms, parsed pipeline stage or None)."""
     now = now or utcnow()
     terms, stage = _parse(text)
     stage = parse_stage(stage) if stage is not None else None
     compiled = []
     for term in terms:
-        sql, args, label = _term_sql(term, now)
+        sql, args, label = _term_sql(term, now, resolved_ips)
         if term["negate"]:
             # NOT of a NULL comparison is NULL, which would also drop events missing the field: keep them.
             sql, label = f"NOT COALESCE(({sql}), 0)", "NOT " + label
@@ -294,10 +294,10 @@ def explain(text, now=None):
     return [echo for _, _, echo in _compile(text, now)[0]]
 
 
-def run(conn, params, now=None):
+def run(conn, params, now=None, *, resolved_ips=()):
     text = params.get("q") or ""
     now = now or utcnow()
-    compiled, stage = _compile(text, now)
+    compiled, stage = _compile(text, now, resolved_ips)
     # A pipeline stage does not page, but the same cap still applies so a huge offset is never a scan.
     event_offset(params)
     where, args = [sql for sql, _, _ in compiled], [a for _, args, _ in compiled for a in args]

@@ -6,10 +6,12 @@ internal address, 6to4 and Teredo, role-account pivots, and public addresses fil
 
 import ipaddress
 import json
+import sqlite3
 import unittest
 from unittest import mock
 from urllib.parse import quote, unquote
 
+from tests.helpers import ServerTestCase
 from watchpost import entities, hunt, masking
 from watchpost.db import connect, init_schema
 
@@ -339,6 +341,11 @@ class PivotTests(unittest.TestCase):
                 found = masker.unmask(conn, f'"{pseudo}"')
                 self.assertEqual(found, f'"{stored}"')
                 self.assertGreaterEqual(hunt.run(conn, {"q": found})["total"], 1)
+                field_query = masker.unmask(conn, f"{field}:{pseudo}")
+                self.assertEqual(hunt.run(conn, {"q": field_query}, resolved_ips=masker.resolved_ips)["total"], 1)
+                if field == "src_ip":
+                    entity = entities.get_entity(conn, field, stored, resolved_ips=masker.resolved_ips)
+                    self.assertEqual(entity["event_count"], 1)
                 if stored == str(parsed):
                     page = hunt.run(conn, {"q": f"{field}:{stored}"})
                     self.assertGreaterEqual(page["total"], 1)
@@ -355,7 +362,7 @@ class PivotTests(unittest.TestCase):
         masker = self.viewer()
         mapped = ipaddress.ip_address("::ffff:a00:1")
         six = ipaddress.ip_address("2002:0a00:0001::")
-        self.assertEqual(masker.unmask(self.conn, masker.ip(mapped)), "::ffff:10.0.0.1")
+        self.assertEqual(masker.unmask(self.conn, masker.ip(mapped)), str(mapped))
         self.assertEqual(masker.unmask(self.conn, masker.ip(six)), "2002:a00:1::")
         self.assertEqual(entities.get_entity(self.conn, "src_ip", "::ffff:10.0.0.1")["event_count"], 1)
         self.assertEqual(hunt.run(self.conn, {"q": "src_ip:::ffff:10.0.0.1"})["total"], 1)
@@ -386,6 +393,20 @@ class PivotTests(unittest.TestCase):
                         out = masker.unmask(conn, public_pseudo)
                         self.assertEqual(out, public_pseudo)
                         self.assertNotIn(internal, out)
+
+    def test_public_address_scan_is_bounded_and_username_pivot_does_not_scan_ips(self):
+        self.enable()
+        self.account("analyst")
+        for address in ("1.1.1.1", "1.1.1.2", "10.1.2.3"):
+            self.event(src_ip=address)
+        masker = self.viewer()
+        pseudo = masker.ip(ipaddress.ip_address("10.1.2.3"))
+        queries = []
+        self.conn.set_trace_callback(queries.append)
+        with mock.patch.object(masking, "IP_SCAN_LIMIT", 2):
+            self.assertEqual(masker.unmask(self.conn, masker.user("analyst")), "analyst")
+            self.assertFalse(any("src_ip" in query for query in queries))
+            self.assertEqual(masker.unmask(self.conn, pseudo), pseudo)
 
     def test_ip_ceiling_leaves_unresolved_pivots_without_a_raw_address(self):
         self.enable()
@@ -455,6 +476,27 @@ class PivotTests(unittest.TestCase):
         self.assertIsNone(masking.for_user(self.conn, {"role": "analyst", "username": "ann"}))
         self.assertIsNone(masking.for_user(self.conn, {"role": "admin", "username": "ada"}))
         self.assertIn("10.1.2.3", _text_download(None, text))
+
+
+class MaskedPivotHttpTests(ServerTestCase):
+    def test_stored_ip_spelling_survives_viewer_entity_and_field_hunt(self):
+        raw = "::FFFF:0A02:0304"
+        with sqlite3.connect(self.db_path) as db:
+            db.execute("INSERT OR REPLACE INTO settings(key,value,updated_at,updated_by)"
+                       " VALUES ('viewer_masking','1','2026-11-18','fixture')")
+            event = db.execute("INSERT INTO events(ts,ingested_at,source,event_type,severity,src_ip)"
+                               " VALUES ('2026-11-18','2026-11-18','fixture','other','low',?)", (raw,)).lastrowid
+        viewer = self.client("viewer")
+        status, detail, _ = viewer.get(f"/api/events/{event}")
+        self.assertEqual(status, 200)
+        pseudo = detail["src_ip"]
+        self.assertRegex(pseudo, PSEUDO_IP)
+        for route, key in ((f"/api/entities/src_ip/{pseudo}", "recent_events"),
+                           (f"/api/hunt?q=src_ip:{pseudo}", "events")):
+            status, page, _ = viewer.get(route)
+            self.assertEqual(status, 200, page)
+            self.assertEqual([row["id"] for row in page[key]], [event])
+            self.assertNotIn(raw.lower(), json.dumps(page).lower())
 
 
 if __name__ == "__main__":

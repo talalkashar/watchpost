@@ -22,7 +22,7 @@ through here.
 - Pivots: a pseudonym in a query parameter or path segment is resolved back to the real value server-side by
   hashing candidate values. No reverse map is stored. Address candidates are the stored src_ip and dest_ip
   spellings `is_internal` accepts, so dotted and hex IPv4-mapped IPv6, 6to4, and Teredo reverse the same way
-  they are recognized. Only those addresses count toward CANDIDATE_LIMIT. When several spellings are one
+  they are recognized. IP_SCAN_LIMIT bounds all distinct spellings inspected. When several spellings are one
   address, the spelling `str(ipaddress)` would store wins. Past that ceiling the extra pseudonyms stay
   unresolved, and a failed pivot does not reveal a raw internal address.
 
@@ -41,6 +41,7 @@ from .auth import ROLES
 
 SETTING = "viewer_masking"
 CANDIDATE_LIMIT = 10000  # distinct usernames / IPs considered per request
+IP_SCAN_LIMIT = CANDIDATE_LIMIT  # all distinct stored spellings examined, including public addresses
 DIGEST_CHARS = 8
 # A–Z only. str.lower() and re.IGNORECASE also fold É/é, which would make two accounts one pseudonym.
 _ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
@@ -52,7 +53,7 @@ USER_FIELDS = frozenset(("user", "username", "assignee", "author", "actor", "pro
                          "approved_by", "updated_by", "changed_by", "submitted_by", "created_by"))
 # A dotted octet may be four digits so a zero-padded octal loopback (0177) is one token, not skipped.
 IP_RE = re.compile(
-    r"(?<![\w:.])(?:[0-9A-Fa-f]{0,4}:){2,7}(?:\d{1,4}(?:\.\d{1,4}){3}|[0-9A-Fa-f]{1,4})?(?![\w:])"
+    r"(?:(?<![\w:.])|(?<=(?i:ip):))(?:[0-9A-Fa-f]{0,4}:){2,7}(?:\d{1,4}(?:\.\d{1,4}){3}|[0-9A-Fa-f]{1,4})?(?![\w:])"
     r"|(?<![\w.])\d{1,4}(?:\.\d{1,4}){3}(?!\w|\.\d)")
 PSEUDONYM_RE = re.compile(r"\b(?:user|internal)-[0-9a-f]{%d}\b" % DIGEST_CHARS)
 _QUAD_RE = re.compile(r"\d{1,4}(?:\.\d{1,4}){3}")
@@ -183,6 +184,7 @@ def _names_re(names):
 
 class Masker:
     def __init__(self, secret, names, self_name=None, *, reversible=()):
+        self.resolved_ips = set()  # exact stored spellings selected by this request
         self.secret = secret
         self.self_name = _ascii_fold(self_name or "")
         names = {_ascii_fold(n) for n in names if n} - {self.self_name}
@@ -258,12 +260,15 @@ class Masker:
             return s
         if not hasattr(self, "_reverse"):
             reverse = {self.user(n): n for n in self._reversible}
-            # is_internal is the candidate filter, not a spelling prefix. Public rows are not counted,
-            # so they cannot fill the ceiling and hide an internal address.
+            self._reverse = reverse
+        if "internal-" in s and not getattr(self, "_ips_loaded", False):
+            reverse = self._reverse
+            # ORDER BY lets SQLite merge the two address indexes and stop at the scan ceiling.
             seen = 0
             for (value,) in conn.execute(
                     "SELECT src_ip FROM events WHERE src_ip IS NOT NULL AND src_ip != '' UNION "
-                    "SELECT dest_ip FROM events WHERE dest_ip IS NOT NULL AND dest_ip != ''"):
+                    "SELECT dest_ip FROM events WHERE dest_ip IS NOT NULL AND dest_ip != '' "
+                    "ORDER BY 1 LIMIT ?", (IP_SCAN_LIMIT,)):
                 try:
                     ip = ipaddress.ip_address(value)
                 except ValueError:
@@ -279,6 +284,11 @@ class Masker:
                 seen += 1
                 if seen >= CANDIDATE_LIMIT:
                     break
-            self._reverse = reverse  # this request only; never kept beyond it
-        found = lambda m: self._reverse.get(m.group(0), m.group(0))  # noqa: E731
-        return PSEUDONYM_RE.sub((lambda m: quote(found(m), safe="")) if path else found, s)
+            self._ips_loaded = True
+        def found(match):
+            pseudo = match.group(0)
+            value = self._reverse.get(pseudo, pseudo)
+            if pseudo.startswith("internal-") and value != pseudo:
+                self.resolved_ips.add(value)
+            return quote(value, safe="") if path else value
+        return PSEUDONYM_RE.sub(found, s)
