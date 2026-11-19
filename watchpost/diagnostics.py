@@ -119,7 +119,8 @@ def _redact_containers(text):
             continue
         end = _container_end(text, start)
         if end is None:
-            continue
+            # An unclosed container may still hold the secret: fail closed to the end.
+            end = len(text)
         parts.append(text[pos:start])
         parts.append("[REDACTED]")
         pos = end

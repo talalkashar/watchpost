@@ -111,8 +111,8 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertIn('"user": "alice"', out)
         kept = json.dumps({"user": {"name": "alice"}})
         self.assertEqual(redact(kept), kept)
-        # An unclosed container is left in place rather than swallowing the line.
-        self.assertIn("hunter2", redact('{"password": {"k": "hunter2"'))
+        # An unclosed container fails closed: the rest of the line is redacted.
+        self.assertEqual(redact('{"password": {"k": "hunter2"'), '{"password": [REDACTED]')
 
     def test_json_numbers_bearer_quotes_percent_and_urls(self):
         self.assertEqual(
@@ -147,6 +147,17 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertIn("state=ok", query)
         self.assertEqual(redact("wp_" + "a" * 15), "wp_" + "a" * 15)
         self.assertEqual(redact("wp_" + "a" * 16), "wp_[REDACTED]")
+
+    def test_redact_hides_a_secret_in_an_unclosed_container(self):
+        for raw, secret in [
+            ("password=[hunter2", "hunter2"),
+            ("token={abc123def", "abc123def"),
+            ("secret: [s3cr3t", "s3cr3t"),
+        ]:
+            with self.subTest(raw=raw):
+                out = redact(raw)
+                self.assertNotIn(secret, out)
+                self.assertIn("[REDACTED]", out)
 
     def test_redact_is_idempotent_and_cuts_after_redacting(self):
         samples = [
