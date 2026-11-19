@@ -975,10 +975,16 @@ def rule_backtest(req, rule_id):
     except json.JSONDecodeError:
         raise ApiError(400, "params must be a JSON object")
     days = req.query.get("days", str(backtest_mod.DEFAULT_WINDOW_DAYS))
-    if not days.isdigit() or not 1 <= int(days) <= backtest_mod.MAX_WINDOW_DAYS:
-        raise ApiError(400, f"days must be an integer between 1 and {backtest_mod.MAX_WINDOW_DAYS}")
+    # ASCII digits only. Fullwidth digits are this 400, not a window.
+    # A superscript digit is this 400, not a 500.
+    message = f"days must be an integer between 1 and {backtest_mod.MAX_WINDOW_DAYS}"
+    if not days.isascii() or not days.isdigit():
+        raise ApiError(400, message)
+    window_days = int(days)
+    if not 1 <= window_days <= backtest_mod.MAX_WINDOW_DAYS:
+        raise ApiError(400, message)
     _backtest_quota(req, req.app.backtest_limiter)
-    return improve.preview_backtest(req.conn, rule_id, params, int(days))
+    return improve.preview_backtest(req.conn, rule_id, params, window_days)
 
 
 @route("POST", r"/api/rules/([^/]+)/suppressions", role="analyst")
