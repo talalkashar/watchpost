@@ -332,7 +332,8 @@ def list_entry(param, value):
     if param == "logging_actions":
         # ASCII letters only. Get matches get. GÉT does not match gét. Not str.lower().
         return _ascii_fold(value)
-    return value.lower()
+    # ASCII letters only. ÉRIN stays Érin and is not érin. Not str.lower().
+    return _ascii_fold(value)
 
 
 def covers(param, entries, event):
