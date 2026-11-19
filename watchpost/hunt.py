@@ -414,7 +414,10 @@ def parse_stage(text):
     if command == "top":
         words = [t for t in rest if t != ","]
         limit = TOP_DEFAULT
-        if len(words) == 2 and words[0].isdigit():
+        # ASCII digits only. 10 stays a limit of 10. Fullwidth １０ is the
+        # one-field error, not limit 10. ² and ① are that 400, not a 500.
+        # The conversion runs only after this check. 101 stays the range error.
+        if len(words) == 2 and words[0].isascii() and words[0].isdigit():
             limit = int(words[0])
             if not 1 <= limit <= TOP_MAX:
                 raise HuntError(f"top N must be between 1 and {TOP_MAX}")
