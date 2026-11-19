@@ -279,7 +279,7 @@ class MaskingServerTests(ServerTestCase):
         paths = [source]
         for group in re.findall(r"\([^()]*\)", source):
             prefix = source.split(group, 1)[0]
-            if group == r"(\d+)":
+            if group == r"([0-9]+)":
                 kind = prefix.rstrip("/").rsplit("/", 1)[-1]
                 values = ids[kind]
             elif group == "(md|pdf)":

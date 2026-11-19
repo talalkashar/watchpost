@@ -719,7 +719,7 @@ What these numbers do and do not say:
 - **The dashboard's events-per-minute chart** reads every event ingested in the last hour, which here is all of
   them because the whole load arrived in under a minute.
 - **Paging totals are exact.** `total` is a `COUNT(*)` with the same filters; with these indexes it stayed in the
-  low milliseconds except for text search, so it is not capped. `limit`, `offset`, `hours`, and `since_id` are ASCII digits only. `limit=10` stays 10. `limit=1_0`, `limit=４`, `limit=+10`, and `limit=²` are 400 naming that parameter, and `²` is not a 500. `offset` on event search and hunt stops at 10000.
+  low milliseconds except for text search, so it is not capped. A numeric path id is ASCII digits, `[0-9]+`. `GET /api/events/４` is 404 and does not return event 4. An ASCII id still returns that row. Session ids stay `[0-9a-f]{16}`. A fullwidth id is not a 500. `limit`, `offset`, `hours`, and `since_id` are ASCII digits only. `limit=10` stays 10. `limit=1_0`, `limit=４`, `limit=+10`, and `limit=²` are 400 naming that parameter, and `²` is not a 500. `offset` on event search and hunt stops at 10000.
   A larger skip would make SQLite visit every skipped row. Newer events are walked with `since_id`. `hours=24` stays 24. `hours=1_0`, `hours=４`, `hours=+10`, and `hours=²` are 400 `hours must be an integer`. `hours=0` and `hours=2161` stay `hours must be between 1 and 2160`.
 
 ## What is real vs. synthetic vs. future

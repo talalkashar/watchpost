@@ -23,7 +23,7 @@ VIEWER_POSTS = {"/api/auth/login", "/api/auth/mfa", "/api/auth/logout"}  # login
 
 
 def sample_path(pattern):
-    """Turn a route regex like ^/api/alerts/(\\d+)/report\\.(md|pdf)$ into a concrete path."""
+    """Turn a route regex like ^/api/alerts/([0-9]+)/report\\.(md|pdf)$ into a concrete path."""
     source = pattern.pattern.strip("^$")
     groups = re.findall(r"\([^()]*\)", source)
     path = source

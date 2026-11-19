@@ -152,6 +152,9 @@ def route(method, pattern, role="viewer", csrf=True):
 
     `viewer` accounts are read-only: whatever a route declares, a viewer may only send GETs
     (plus logout). See Handler._authorize.
+
+    A numeric path id is `[0-9]+`. `\\d` also matches `４`, and `int` of that character is 4.
+    Session ids stay `[0-9a-f]{16}`.
     """
     def decorator(fn):
         ROUTES.append((method, re.compile(f"^{pattern}$"), fn, role, csrf))
@@ -307,7 +310,7 @@ def maintenance_propose(req):
                                   data.get("reason"), req.user["username"])
 
 
-@route("POST", r"/api/sources/maintenance/(\d+)/end", role="admin")
+@route("POST", r"/api/sources/maintenance/([0-9]+)/end", role="admin")
 def maintenance_end(req, window_id):
     """End a window early: silence counts again from now. Stricter detection, so no review is needed."""
     return sources.end_window(req.conn, int(window_id), req.user["username"])
@@ -530,7 +533,7 @@ def hunt_save(req):
     return hunt.save_search(req.conn, body_json(req), req.user["username"])
 
 
-@route("POST", r"/api/hunt/saved/(\d+)/delete", role="analyst")
+@route("POST", r"/api/hunt/saved/([0-9]+)/delete", role="analyst")
 def hunt_delete(req, search_id):
     return hunt.delete_saved(req.conn, int(search_id), req.user["username"], auth.has_role(req.user, "admin"))
 
@@ -538,7 +541,7 @@ def hunt_delete(req, search_id):
 PROMOTE_MAX_BODY = 64 * 1024  # the definition plus its labeled sample
 
 
-@route("POST", r"/api/hunt/saved/(\d+)/promote", role="analyst")
+@route("POST", r"/api/hunt/saved/([0-9]+)/promote", role="analyst")
 def hunt_promote(req, search_id):
     """Promote a saved search to a threshold detection rule. Applies nothing by itself.
 
@@ -584,12 +587,12 @@ def hunt_promote(req, search_id):
                                   req.user["username"])
 
 
-@route("GET", r"/api/events/(\d+)")
+@route("GET", r"/api/events/([0-9]+)")
 def event_detail(req, event_id):
     return queries.get_event(req.conn, int(event_id))
 
 
-@route("GET", r"/api/events/(\d+)/ecs")
+@route("GET", r"/api/events/([0-9]+)/ecs")
 def event_ecs(req, event_id):
     """The event as an ECS-shaped document (ecs.py). A field mapping for export, not how events are stored."""
     event = queries.get_event(req.conn, int(event_id))
@@ -605,25 +608,25 @@ def alerts(req):
     return [{**a, "sla_breach": triage.pending_breaches(a, now)} for a in rows]
 
 
-@route("GET", r"/api/alerts/(\d+)")
+@route("GET", r"/api/alerts/([0-9]+)")
 def alert_detail(req, alert_id):
     return queries.get_alert(req.conn, int(alert_id))
 
 
-@route("POST", r"/api/alerts/(\d+)/notes", role="analyst")
+@route("POST", r"/api/alerts/([0-9]+)/notes", role="analyst")
 def alert_note(req, alert_id):
     req.status = 201
     return queries.add_note(req.conn, int(alert_id), req.user["username"], body_json(req).get("body"))
 
 
-@route("POST", r"/api/alerts/(\d+)/status", role="analyst")
+@route("POST", r"/api/alerts/([0-9]+)/status", role="analyst")
 def alert_status(req, alert_id):
     data = body_json(req)
     return queries.update_status(req.conn, int(alert_id), req.user["username"], data.get("status"),
                                  data.get("disposition"), data.get("note"))
 
 
-@route("POST", r"/api/alerts/(\d+)/assign", role="analyst")
+@route("POST", r"/api/alerts/([0-9]+)/assign", role="analyst")
 def alert_assign(req, alert_id):
     return queries.assign(req.conn, int(alert_id), req.user["username"], body_json(req).get("assignee"))
 
@@ -637,12 +640,12 @@ def incident_list(req):
     return rows
 
 
-@route("GET", r"/api/incidents/(\d+)")
+@route("GET", r"/api/incidents/([0-9]+)")
 def incident_detail(req, incident_id):
     return incidents.get_incident(req.conn, int(incident_id))
 
 
-@route("POST", r"/api/incidents/(\d+)/status", role="analyst")
+@route("POST", r"/api/incidents/([0-9]+)/status", role="analyst")
 def incident_status(req, incident_id):
     data = body_json(req)
     return incidents.update_status(req.conn, int(incident_id), req.user["username"], data.get("status"),
@@ -671,17 +674,17 @@ def _report(req, kind, ident, fmt):
     return Download(None, "text/markdown; charset=utf-8", name, model, lambda m: report.to_markdown(m).encode("utf-8"))
 
 
-@route("GET", r"/api/alerts/(\d+)/report\.(md|pdf)")
+@route("GET", r"/api/alerts/([0-9]+)/report\.(md|pdf)")
 def alert_report(req, alert_id, fmt):
     return _report(req, "alert", int(alert_id), fmt)
 
 
-@route("GET", r"/api/incidents/(\d+)/report\.(md|pdf)")
+@route("GET", r"/api/incidents/([0-9]+)/report\.(md|pdf)")
 def incident_report(req, incident_id, fmt):
     return _report(req, "incident", int(incident_id), fmt)
 
 
-@route("GET", r"/api/incidents/(\d+)/case\.(json|md)")
+@route("GET", r"/api/incidents/([0-9]+)/case\.(json|md)")
 def incident_case(req, incident_id, fmt):
     ident = int(incident_id)
     model = case_record.build(req.conn, ident)
@@ -720,12 +723,12 @@ def dashboard_view_create(req):
     return dashboard_views.save(req.conn, body_json(req), req.user["username"])
 
 
-@route("POST", r"/api/dashboard/views/(\d+)", role="analyst")
+@route("POST", r"/api/dashboard/views/([0-9]+)", role="analyst")
 def dashboard_view_update(req, view_id):
     return dashboard_views.save(req.conn, body_json(req), req.user["username"], int(view_id))
 
 
-@route("POST", r"/api/dashboard/views/(\d+)/delete", role="analyst")
+@route("POST", r"/api/dashboard/views/([0-9]+)/delete", role="analyst")
 def dashboard_view_delete(req, view_id):
     return dashboard_views.delete(req.conn, int(view_id), req.user["username"])
 
@@ -1024,12 +1027,12 @@ def rule_suppression_windows(req):
     return rows
 
 
-@route("POST", r"/api/rule-suppression-windows/(\d+)/end", role="admin")
+@route("POST", r"/api/rule-suppression-windows/([0-9]+)/end", role="admin")
 def rule_suppression_end(req, window_id):
     return improve.end_rule_suppression_window(req.conn, int(window_id), req.user["username"])
 
 
-@route("POST", r"/api/suppressions/(\d+)/revoke", role="admin")
+@route("POST", r"/api/suppressions/([0-9]+)/revoke", role="admin")
 def suppression_revoke(req, suppression_id):
     """End an approved exception before it expires; it stops applying from the next detection run."""
     return improve.revoke_suppression(req.conn, int(suppression_id), req.user["username"])
@@ -1068,7 +1071,7 @@ def changes(req):
     return rows
 
 
-@route("POST", r"/api/changes/(\d+)/review", role="admin")
+@route("POST", r"/api/changes/([0-9]+)/review", role="admin")
 def change_review(req, change_id):
     data = body_json(req)
     if data.get("decision") == "approve":
@@ -1131,7 +1134,7 @@ def asset_create(req):
     return _asset_saved(req, asset)
 
 
-@route("POST", r"/api/assets/(\d+)", role="admin")
+@route("POST", r"/api/assets/([0-9]+)", role="admin")
 def asset_update(req, asset_id):
     try:
         asset = assets.save_asset(req.conn, body_json(req), req.user["username"], int(asset_id), gated=True)
@@ -1140,7 +1143,7 @@ def asset_update(req, asset_id):
     return _asset_saved(req, asset)
 
 
-@route("POST", r"/api/assets/(\d+)/delete", role="admin")
+@route("POST", r"/api/assets/([0-9]+)/delete", role="admin")
 def asset_delete(req, asset_id):
     """A delete always needs a second admin. Kept as a route so older clients get a pointer, not a 404."""
     assets.get_asset(req.conn, int(asset_id))  # an unknown asset is still a 404
@@ -1157,7 +1160,7 @@ def asset_propose_add(req):
                                   req.user["username"])
 
 
-@route("POST", r"/api/assets/(\d+)/proposals", role="admin")
+@route("POST", r"/api/assets/([0-9]+)/proposals", role="admin")
 def asset_propose(req, asset_id):
     """Propose an edit (the full asset, as for a direct edit) or, with {"delete": true}, a delete."""
     data = body_json(req)
@@ -1190,7 +1193,7 @@ def token_create(req):
     return {"token": token, "note": "Shown once. Only a hash is stored."}
 
 
-@route("POST", r"/api/tokens/(\d+)/revoke", role="admin")
+@route("POST", r"/api/tokens/([0-9]+)/revoke", role="admin")
 def token_revoke(req, token_id):
     cur = req.conn.execute("UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
                            (now_iso(), int(token_id)))
