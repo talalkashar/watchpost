@@ -58,7 +58,8 @@ BYTES_OPS = (">=", ">", "<=", "<", "=")
 _BYTES_CMP = re.compile(r"(>=|<=|>|<|=)(0|[1-9][0-9]*)\Z")
 
 _FIELD = re.compile(r"([A-Za-z_]+):")
-_LAST = re.compile(r"(\d{1,6})([mhd])")
+# ASCII digits only. [0-9], not \d, so ４h does not match and is not 4 hours.
+_LAST = re.compile(r"([0-9]{1,6})([mhd])")
 
 # Pipeline stage caps. Group columns come from FIELDS like filter terms do.
 COMMANDS = ("stats", "top", "timechart")
@@ -210,11 +211,17 @@ def _term_sql(term, now):
         if term["negate"]:
             raise HuntError(f"{field} cannot be negated")
         if field == "last":
-            # ASCII letters only. 24H is 24 hours. 24İ, a bare number, and a window
-            # past 365 days stay the error below.
+            # ASCII digits and ASCII letters only. last:24h and last:24H stay
+            # 24 hours. last:４h and last:24４h are the error below, not 4 hours
+            # or 244 hours. last:24İ stays that error. Not a 500.
+            # The conversion runs only after the digit check.
             folded = value.translate(_ASCII_FOLD) if isinstance(value, str) else ""
             match = _LAST.fullmatch(folded)
-            minutes = int(match.group(1)) * LAST_UNITS[match.group(2)] if match else 0
+            number_text = match.group(1) if match else ""
+            if number_text.isascii() and number_text.isdigit():
+                minutes = int(number_text) * LAST_UNITS[match.group(2)]
+            else:
+                minutes = 0
             if not 1 <= minutes <= LAST_MAX_MINUTES:
                 raise HuntError("last must be a number with m, h or d, such as 15m, 24h or 7d (at most 365d)")
             start = iso(now - timedelta(minutes=minutes))
