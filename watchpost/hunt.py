@@ -119,7 +119,9 @@ def _parse(text):
             raise HuntError("OR is not supported; terms are always ANDed (run two hunts instead)")
         field, match = "message", _FIELD.match(text, pos)
         if match:
-            field = match.group(1).lower()
+            # ASCII letters only. The capture is [A-Za-z_]+, so USER is user.
+            # This assignment does not call lower or casefold.
+            field = match.group(1).translate(_ASCII_FOLD)
             if field not in FIELDS:
                 raise HuntError(f"unknown field {field!r}; fields are {', '.join(FIELDS)} "
                                 "(quote text that contains ':' to search the message)")
