@@ -7,6 +7,7 @@ import json
 import os
 import secrets
 import sqlite3
+from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 
@@ -175,50 +176,50 @@ def _count_failure(conn, user_id):
     return bool(locked_until)
 
 
-def _reject_wrong_password(conn, user, password):
-    """Check the password under the write lock. A wrong one is counted in that same transaction.
+_LOCKED = "account temporarily locked after repeated failures; try again later"
+_EXPIRED = "sign-in step expired; sign in again"
 
-    Parallel guesses therefore cannot all pass the lock check before any of them increments it:
-    at most login_lockout_threshold hashes are computed per lockout window. Returns True when
-    the password matches. Raises 429 when the account is already locked, without hashing.
+
+def _locked(user):
+    return user["locked_until"] and parse_iso(user["locked_until"]) > utcnow()
+
+
+@contextmanager
+def _verification_slot(conn, user_id, challenge=None):
+    """Reserve remaining guess capacity across connections without charging a failure.
+
+    A crashed verifier's lease expires. Its late result then has no authority to
+    change account state. Each reservation belongs to one request and challenge.
     """
+    attempt = secrets.token_hex(16)
     with transaction(conn):
-        row = conn.execute(
-            "SELECT locked_until FROM users WHERE id = ?", (user["id"],)).fetchone()
-        if row["locked_until"] and parse_iso(row["locked_until"]) > utcnow():
-            audit(conn, user["username"], "login_blocked", None, {"reason": "locked"})
-            raise_locked = True
-            ok = False
+        conn.execute("CREATE TABLE IF NOT EXISTS login_verifications ("
+                     "user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,"
+                     "attempt TEXT NOT NULL, challenge TEXT, expires_at TEXT NOT NULL,"
+                     "PRIMARY KEY(user_id, attempt))")
+        user = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        if user is None:
+            raise AuthError(_EXPIRED if challenge else "invalid username or password")
+        conn.execute("DELETE FROM login_verifications WHERE user_id=? AND expires_at <= ?", (user_id, now_iso()))
+        pending = conn.execute("SELECT COUNT(*) FROM login_verifications WHERE user_id=?", (user_id,)).fetchone()[0]
+        threshold, _ = _lockout_settings(conn)
+        blocked = _locked(user) or pending + user["failed_logins"] >= threshold
+        if blocked:
+            audit(conn, user["username"], "login_blocked", None, {"reason": "locked" if _locked(user) else "busy"})
         else:
-            raise_locked = False
-            ok = verify_password(password, user["pw_hash"])
-            if not ok:
-                locked = _count_failure(conn, user["id"])
-                audit(conn, user["username"], "login_failed", None, {"locked": locked})
-    if raise_locked:
-        raise AuthError("account temporarily locked after repeated failures; try again later", 429)
-    return ok
+            conn.execute("INSERT INTO login_verifications VALUES (?,?,?,?)",
+                         (user_id, attempt, challenge, iso(utcnow() + timedelta(seconds=MFA_TOKEN_TTL_SECONDS))))
+    if blocked:
+        raise AuthError(_LOCKED, 429)
+    try:
+        yield attempt
+    finally:
+        conn.execute("DELETE FROM login_verifications WHERE user_id=? AND attempt=?", (user_id, attempt))
 
 
-def _reserve_code_attempt(conn, user_id):
-    """Spend one attempt before a TOTP code is checked: refuse when locked, else count it as a failure now.
-
-    Checking the lock and counting happen in one transaction, so parallel guesses cannot all slip in before
-    the lock lands: at most `threshold` codes are ever checked per lockout window. A correct code then
-    clears the count and the lock (_start_session), and a TOTP step can only be used once, so counting first
-    loses nothing. Returns True when this attempt set the lock.
-    """
-    with transaction(conn):
-        row = conn.execute("SELECT username, locked_until FROM users WHERE id = ?", (user_id,)).fetchone()
-        if row["locked_until"] and parse_iso(row["locked_until"]) > utcnow():
-            audit(conn, row["username"], "login_blocked", None, {"reason": "locked"})
-            locked_out = True
-        else:
-            locked_out = False
-            locked = _count_failure(conn, user_id)
-    if locked_out:
-        raise AuthError("account temporarily locked after repeated failures; try again later", 429)
-    return locked
+def _consume_slot(conn, user_id, attempt, challenge=None):
+    return conn.execute("DELETE FROM login_verifications WHERE user_id=? AND attempt=?"
+                        " AND challenge IS ? AND expires_at > ?", (user_id, attempt, challenge, now_iso())).rowcount
 
 
 def _start_session(conn, user, ttl_seconds, detail=None):
@@ -287,70 +288,87 @@ def login(conn, username, password, ttl_seconds):
     A disabled account still checks the stored hash, then returns that same 401. It does not
     increment failed_logins and it does not lock. The error text does not say the account is disabled.
 
-    The lock is checked again under a write lock and the password is hashed there. A mismatch is
-    counted before that lock is released, so parallel guesses cannot check more passwords than
-    the threshold.
+    Password verification runs outside the write transaction. The final decision
+    uses the current account and commits atomically with the audit entry.
     """
-    if not _password_is_login_shaped(password):
-        _reject_unknown_login(conn, password)
-    if not isinstance(username, str) or not (3 <= len(username) <= 32):
+    if not _password_is_login_shaped(password) or not isinstance(username, str) or not 3 <= len(username) <= 32:
         _reject_unknown_login(conn, password)
     user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     if user is None:
         _reject_unknown_login(conn, password)
     if user["disabled"]:
         _reject_disabled_login(conn, user, password)
-    if not _reject_wrong_password(conn, user, password):
-        raise AuthError("invalid username or password")
-    if user["totp_secret"]:
-        mfa_token = secrets.token_urlsafe(32)
-        token_hash = sha256(mfa_token)
+    with _verification_slot(conn, user["id"]) as attempt:
+        ok = verify_password(password, user["pw_hash"])
         with transaction(conn):
-            conn.execute("DELETE FROM mfa_pending WHERE expires_at < ?", (now_iso(),))
-            conn.execute(
-                "INSERT INTO mfa_pending(token_hash, user_id, created_at, expires_at) VALUES (?,?,?,?)",
-                (token_hash, user["id"], now_iso(),
-                 iso(utcnow() + timedelta(seconds=MFA_TOKEN_TTL_SECONDS))))
-            # A newer password proof replaces older challenges. A stolen earlier token stops working.
-            conn.execute("DELETE FROM mfa_pending WHERE user_id = ? AND token_hash != ?",
-                         (user["id"], token_hash))
-            audit(conn, user["username"], "login_mfa_challenge", None)
-        return MfaChallenge(mfa_token)
-    return _start_session(conn, user, ttl_seconds)
+            row = conn.execute("SELECT * FROM users WHERE id=?", (user["id"],)).fetchone()
+            if not _consume_slot(conn, user["id"], attempt) or row is None:
+                raise AuthError("invalid username or password")
+            if row["disabled"] or row["pw_hash"] != user["pw_hash"]:
+                reason = "disabled" if row["disabled"] else "credential_changed"
+                audit(conn, username, "login_failed", None, {"reason": reason})
+            elif _locked(row):
+                audit(conn, username, "login_blocked", None, {"reason": "locked"})
+            elif not ok:
+                audit(conn, username, "login_failed", None, {"locked": _count_failure(conn, row["id"])})
+            elif row["totp_secret"]:
+                return _issue_challenge(conn, row)
+            else:
+                return _start_session(conn, row, ttl_seconds)
+    if _locked(row) and not row["disabled"]:
+        raise AuthError(_LOCKED, 429)
+    raise AuthError("invalid username or password")
+
+
+def _challenge_token(nonce, user):
+    # Bind the password proof to both factors at issuance, without storing either twice.
+    message = json.dumps([nonce, user["totp_secret"]]).encode()
+    return nonce + "." + hmac.new(user["pw_hash"].encode(), message, hashlib.sha256).hexdigest()
+
+
+def _issue_challenge(conn, user):
+    token = _challenge_token(secrets.token_urlsafe(32), user)
+    conn.execute("DELETE FROM mfa_pending WHERE expires_at < ? OR user_id = ?", (now_iso(), user["id"]))
+    conn.execute("INSERT INTO mfa_pending(token_hash, user_id, created_at, expires_at) VALUES (?,?,?,?)",
+                 (sha256(token), user["id"], now_iso(), iso(utcnow() + timedelta(seconds=MFA_TOKEN_TTL_SECONDS))))
+    audit(conn, user["username"], "login_mfa_challenge", None)
+    return MfaChallenge(token)
+
+
+def _pending_user(conn, token, digest):
+    user = conn.execute("SELECT u.* FROM mfa_pending p JOIN users u ON u.id=p.user_id"
+                        " WHERE p.token_hash=? AND p.expires_at > ?", (digest, now_iso())).fetchone()
+    if (user is None or user["disabled"] or not user["totp_secret"]
+            or not hmac.compare_digest(token, _challenge_token(token.partition(".")[0], user))):
+        raise AuthError(_EXPIRED)
+    return user
 
 
 def complete_mfa(conn, mfa_token, code, ttl_seconds):
-    """Second login step: a pending token from login() plus a current TOTP code. Returns (token, csrf, user).
-
-    A wrong code counts toward the same lockout as a wrong password. The pending token may be retried until
-    it expires or the account locks, and is consumed by the first success.
-    """
-    if not isinstance(mfa_token, str) or not mfa_token:
-        raise AuthError("sign-in step expired; sign in again")
-    pending = conn.execute(
-        "SELECT p.expires_at, u.* FROM mfa_pending p JOIN users u ON u.id = p.user_id WHERE p.token_hash = ?",
-        (sha256(mfa_token),),
-    ).fetchone()
-    if pending is None or parse_iso(pending["expires_at"]) < utcnow() or pending["disabled"] \
-            or not pending["totp_secret"]:
-        raise AuthError("sign-in step expired; sign in again")
-    locked = _reserve_code_attempt(conn, pending["id"])
-    step = totp.verify(pending["totp_secret"], code, pending["totp_last_step"])
-    if step is None:
-        if locked:
-            conn.execute("DELETE FROM mfa_pending WHERE user_id = ?", (pending["id"],))
-        audit(conn, pending["username"], "login_failed", None, {"reason": "mfa", "locked": locked})
-        raise AuthError("invalid authentication code")
-    # Both checks are single statements, so two requests racing with the same token or code cannot both win.
-    if not conn.execute("DELETE FROM mfa_pending WHERE token_hash = ?", (sha256(mfa_token),)).rowcount:
-        raise AuthError("sign-in step expired; sign in again")
-    if not _claim_step(conn, pending["id"], step):
-        if locked:
-            conn.execute("DELETE FROM mfa_pending WHERE user_id = ?", (pending["id"],))
-        audit(conn, pending["username"], "login_failed", None, {"reason": "mfa", "locked": locked})
-        raise AuthError("invalid authentication code")
-    conn.execute("DELETE FROM mfa_pending WHERE user_id = ?", (pending["id"],))
-    return _start_session(conn, pending, ttl_seconds, {"mfa": True})
+    """Only the current password proof may charge a wrong code or issue a session."""
+    if not isinstance(mfa_token, str) or not mfa_token or not mfa_token.isascii():
+        raise AuthError(_EXPIRED)
+    digest = sha256(mfa_token)
+    user = _pending_user(conn, mfa_token, digest)
+    with _verification_slot(conn, user["id"], digest) as attempt:
+        step = totp.verify(user["totp_secret"], code, user["totp_last_step"])
+        with transaction(conn):
+            current = _pending_user(conn, mfa_token, digest)
+            if not _consume_slot(conn, current["id"], attempt, digest):
+                raise AuthError(_EXPIRED)
+            if _locked(current):
+                audit(conn, current["username"], "login_blocked", None, {"reason": "locked"})
+            elif step is not None and _claim_step(conn, current["id"], step):
+                conn.execute("DELETE FROM mfa_pending WHERE user_id=?", (current["id"],))
+                return _start_session(conn, current, ttl_seconds, {"mfa": True})
+            else:
+                locked = _count_failure(conn, current["id"])
+                if locked:
+                    conn.execute("DELETE FROM mfa_pending WHERE user_id=?", (current["id"],))
+                audit(conn, current["username"], "login_failed", None, {"reason": "mfa", "locked": locked})
+    if _locked(current):
+        raise AuthError(_LOCKED, 429)
+    raise AuthError("invalid authentication code")
 
 
 def _claim_step(conn, user_id, step):
@@ -443,18 +461,27 @@ def mfa_disable(conn, username, code):
             return {"enabled": False}
         raise AuthError("two-factor authentication is not on", 409)
     # Same budget as signing in, so a stolen session cannot guess codes to turn the second factor off.
-    locked = _reserve_code_attempt(conn, user["id"])
-    step = totp.verify(user["totp_secret"], code, user["totp_last_step"])
-    if step is None or not _claim_step(conn, user["id"], step):
-        # Locking drops pending sign-in tokens, same as a failed code at the sign-in step.
-        if locked:
-            conn.execute("DELETE FROM mfa_pending WHERE user_id = ?", (user["id"],))
-        audit(conn, username, "mfa_disable_failed", username)
-        raise AuthError("invalid authentication code", 400)
-    conn.execute("UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = ?", (user["id"],))
-    _clear_mfa(conn, user["id"])
-    audit(conn, username, "mfa_disabled", username)
-    return {"enabled": False}
+    with _verification_slot(conn, user["id"]) as attempt:
+        step = totp.verify(user["totp_secret"], code, user["totp_last_step"])
+        with transaction(conn):
+            current = _user_row(conn, username)
+            if (not _consume_slot(conn, user["id"], attempt) or current["disabled"]
+                    or current["totp_secret"] != user["totp_secret"] or current["pw_hash"] != user["pw_hash"]):
+                raise AuthError("account changed; sign in again")
+            if _locked(current):
+                audit(conn, username, "login_blocked", None, {"reason": "locked"})
+            elif step is not None and _claim_step(conn, user["id"], step):
+                conn.execute("UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = ?", (user["id"],))
+                _clear_mfa(conn, user["id"])
+                audit(conn, username, "mfa_disabled", username)
+                return {"enabled": False}
+            else:
+                if _count_failure(conn, user["id"]):
+                    conn.execute("DELETE FROM mfa_pending WHERE user_id=?", (user["id"],))
+                audit(conn, username, "mfa_disable_failed", username)
+    if _locked(current):
+        raise AuthError(_LOCKED, 429)
+    raise AuthError("invalid authentication code", 400)
 
 
 def mfa_admin_reset(conn, username, actor):

@@ -12,6 +12,7 @@ import base64
 import hashlib
 import stat
 import tempfile
+import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -74,6 +75,34 @@ class PasswordLockoutTests(FileDb):
         self.assertTrue(all(status in (401, 429) for status in statuses))
         conn = self.connect()
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0], 0)
+
+    def test_account_is_revalidated_after_password_verification(self):
+        for change, session, challenge in [
+                ("role = 'viewer'", 1, 0), ("pw_hash = 'rotated'", 0, 0),
+                ("disabled = 1", 0, 0), ("totp_secret = 'enrolled'", 0, 1)]:
+            with self.subTest(change=change):
+                conn = self.connect()
+                conn.execute("UPDATE users SET pw_hash=?, role='analyst', disabled=0, totp_secret=NULL",
+                             (auth.hash_password(PASSWORD),))
+                writer = self.connect()
+                writer.execute("PRAGMA busy_timeout=500")
+                verify = auth.verify_password
+
+                def during_hash(*args):
+                    writer.execute("UPDATE users SET " + change)
+                    return verify(*args)
+
+                with mock.patch.object(auth, "verify_password", side_effect=during_hash):
+                    if session:
+                        self.assertEqual(auth.login(conn, "alice", PASSWORD, 3600)[2]["role"], "viewer")
+                    elif challenge:
+                        self.assertIsInstance(auth.login(conn, "alice", PASSWORD, 3600), auth.MfaChallenge)
+                    else:
+                        with self.assertRaises(AuthError):
+                            auth.login(conn, "alice", PASSWORD, 3600)
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0], session)
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM mfa_pending").fetchone()[0], challenge)
+                conn.execute("DELETE FROM sessions")
 
     def test_fifth_wrong_password_locks_the_sixth(self):
         conn = self.connect()
@@ -160,6 +189,52 @@ class MfaChallengeTests(FileDb):
         secret = totp.generate_secret()
         conn.execute("UPDATE users SET totp_secret = ? WHERE username = 'alice'", (secret,))
         return secret
+
+    def test_in_flight_challenge_cannot_clear_a_post_rotation_failure(self):
+        conn = self.connect()
+        writer = self.connect()
+        secret = self._enroll(conn)
+        challenge = auth.login(conn, "alice", PASSWORD, 3600)
+        rotated = auth.hash_password("rotated-password-2")
+        verify_code = totp.verify
+
+        def rotate_and_fail(*args):
+            writer.execute("UPDATE users SET pw_hash = ?, failed_logins = 0 WHERE username = 'alice'",
+                           (rotated,))
+            with self.assertRaises(AuthError):
+                auth.login(writer, "alice", WRONG, 3600)
+            return verify_code(*args, timestamp=WHEN)
+
+        with mock.patch.object(totp, "verify", side_effect=rotate_and_fail):
+            with self.assertRaisesRegex(AuthError, "sign-in step expired"):
+                auth.complete_mfa(conn, challenge.mfa_token, totp.code_at(secret, WHEN), 3600)
+        self.assertEqual(tuple(conn.execute("SELECT failed_logins, locked_until FROM users").fetchone()),
+                         (1, None))
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0], 0)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM audit_log WHERE action='login_failed'").fetchone()[0], 1)
+
+    def test_concurrent_redemption_commits_one_session(self):
+        conn = self.connect()
+        secret = self._enroll(conn)
+        challenge = auth.login(conn, "alice", PASSWORD, 3600)
+        start = threading.Barrier(2)
+
+        def redeem():
+            other = connect(self.path)
+            try:
+                start.wait(timeout=5)
+                auth.complete_mfa(other, challenge.mfa_token, totp.code_at(secret, WHEN), 3600)
+                return True
+            except AuthError:
+                return False
+            finally:
+                other.close()
+
+        with mock.patch.object(totp, "now", return_value=WHEN), ThreadPoolExecutor(2) as pool:
+            results = [pool.submit(redeem) for _ in range(2)]
+            self.assertCountEqual([f.result(timeout=10) for f in results], [True, False])
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0], 1)
+        self.assertEqual(conn.execute("SELECT failed_logins FROM users").fetchone()[0], 0)
 
     def test_new_password_step_replaces_the_previous_challenge(self):
         conn = self.connect()
