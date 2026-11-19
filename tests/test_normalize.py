@@ -423,7 +423,8 @@ class CoverageTests(unittest.TestCase):
         for status in ("²", "9" * 5000):
             with self.subTest(status=status[:10]):
                 rows, rejected = parse_payload(json.dumps([
-                    {"EventID": 4776, "Status": status}, {"EventID": 4624}
+                    {"ts": NOW.isoformat(), "EventID": 4776, "Status": status},
+                    {"ts": NOW.isoformat(), "EventID": 4624},
                 ]), "json", "win", now=NOW)
                 self.assertEqual(rejected, [])
                 self.assertEqual([row["event_type"] for row in rows], ["other", "auth_success"])
@@ -556,7 +557,7 @@ class CoverageTests(unittest.TestCase):
                  "203.0.113.50 port 22 [preauth]")
         firewall = (f"{stamp} fw01 kernel: IPTABLES DROPPED: IN=eth0 OUT= MAC= SRC=198.51.100.10 "
                     "DST=10.0.0.5 LEN=40 PROTO=TCP SPT=40000 DPT=22")
-        bad_line = (f"Xxx 15 10:00:01 web01 sshd[9]: Failed password for secretuser "
+        bad_line = ("Xxx 15 10:00:01 web01 sshd[9]: Failed password for secretuser "
                     "from 203.0.113.99 port 22 ssh2")
         auth_text = "\n".join([failed] * 10 + [closed] * 10 + [named, firewall, bad_line]) + "\n"
         auth_events, auth_rej = parse_payload(auth_text, "authlog", "authlog", now=NOW)
