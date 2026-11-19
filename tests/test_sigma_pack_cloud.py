@@ -126,6 +126,9 @@ def _specs():
     add(label="store-v6", rule=STORE, name="GetObject", source=S3, ip="2001:db8::50", user="dan",
         event_type="cloud_data_access")
 
+    add(label="routine-error-mentions-action", rule=None, name="ListDetectors", source=GUARD,
+        ip="203.0.113.60", error="DeleteDetector on guardduty.amazonaws.com")
+
     for label, name, source in THREAT_CALLS:
         add(label=label, rule=THREAT, name=name, source=source, ip="203.0.113.60", user="casey")
     add(label="threat-delete-denied", rule=THREAT, name="DeleteDetector", source=GUARD, ip="203.0.113.60",

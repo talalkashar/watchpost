@@ -1,6 +1,6 @@
 # DeleteLogGroup and DeleteDeliveryChannel only. StopLogging, DeleteTrail, DeleteFlowLogs,
 # and StopConfigurationRecorder are the shipped example and are not repeated here.
-# A denial appends " (errorCode)" and still matches. The file tags revoked T1562.008.
+# A denial appends " (errorCode)" and still matches.
 title: Cloud Logging Channel Deletion Requested
 id: e5f1a2b6-7c27-4d90-a6c3-2d9e7b2f0a11
 status: experimental
@@ -11,19 +11,21 @@ description: |
 author: Watchpost example
 date: 2026-11-18
 references:
-  - https://attack.mitre.org/techniques/T1562/008/
+  - https://attack.mitre.org/techniques/T1685/002/
 tags:
   - attack.defense_evasion
-  - attack.t1562.008
+  - attack.t1685.002
 logsource:
   product: aws
   service: cloudtrail
 detection:
   selection:
     event.action: cloud_api_call
-    message|contains:
+    message:
       - DeleteLogGroup on logs.amazonaws.com
+      - DeleteLogGroup on logs.amazonaws.com (*)
       - DeleteDeliveryChannel on config.amazonaws.com
+      - DeleteDeliveryChannel on config.amazonaws.com (*)
   condition: selection
 falsepositives:
   - An administrator retiring a log group or a delivery channel

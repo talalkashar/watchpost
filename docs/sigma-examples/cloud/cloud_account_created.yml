@@ -19,9 +19,11 @@ logsource:
 detection:
   selection:
     event.action: cloud_api_call
-    message|contains:
+    message:
       - CreateAccount on organizations.amazonaws.com
+      - CreateAccount on organizations.amazonaws.com (*)
       - CreateGovCloudAccount on organizations.amazonaws.com
+      - CreateGovCloudAccount on organizations.amazonaws.com (*)
   condition: selection
 falsepositives:
   - An administrator creating a member account
