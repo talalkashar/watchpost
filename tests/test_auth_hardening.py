@@ -15,6 +15,7 @@ import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from datetime import timedelta
 from unittest import mock
 
@@ -103,6 +104,28 @@ class PasswordLockoutTests(FileDb):
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0], session)
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM mfa_pending").fetchone()[0], challenge)
                 conn.execute("DELETE FROM sessions")
+
+    def test_disabled_accounts_share_a_bounded_hash_budget(self):
+        conn = self.connect()
+        conn.execute("UPDATE users SET disabled=1")
+        user_id = conn.execute("SELECT id FROM users WHERE username='alice'").fetchone()[0]
+        with ExitStack() as stack:
+            for _ in range(5):
+                stack.enter_context(auth._verification_slot(conn, user_id))
+            with mock.patch.object(auth, "verify_password") as verify:
+                with self.assertRaises(AuthError) as caught:
+                    auth.login(conn, "alice", PASSWORD, 3600)
+                self.assertEqual((caught.exception.status, str(caught.exception)), (401, "invalid username or password"))
+                verify.assert_not_called()
+        self.assertEqual(conn.execute("SELECT failed_logins FROM users").fetchone()[0], 0)
+
+    def test_lowering_the_threshold_does_not_permanently_lock_an_account(self):
+        conn = self.connect()
+        conn.execute("UPDATE users SET failed_logins = 4 WHERE username = 'alice'")
+        conn.execute("INSERT OR REPLACE INTO settings(key,value,updated_at,updated_by)"
+                     " VALUES ('login_lockout_threshold','3',?,'fixture')", (now_iso(),))
+        self.assertEqual(auth.login(conn, "alice", PASSWORD, 3600)[2]["username"], "alice")
+        self.assertEqual(conn.execute("SELECT failed_logins FROM users").fetchone()[0], 0)
 
     def test_fifth_wrong_password_locks_the_sixth(self):
         conn = self.connect()

@@ -203,13 +203,23 @@ def _verification_slot(conn, user_id, challenge=None):
         conn.execute("DELETE FROM login_verifications WHERE user_id=? AND expires_at <= ?", (user_id, now_iso()))
         pending = conn.execute("SELECT COUNT(*) FROM login_verifications WHERE user_id=?", (user_id,)).fetchone()[0]
         threshold, _ = _lockout_settings(conn)
-        blocked = _locked(user) or pending + user["failed_logins"] >= threshold
+        # A newly lowered policy may already be below the stored count. Allow one
+        # attempt to settle it through the normal success or timed-lock path.
+        if user["disabled"]:
+            blocked = pending >= threshold
+        else:
+            blocked = _locked(user) or pending >= max(1, threshold - user["failed_logins"])
         if blocked:
-            audit(conn, user["username"], "login_blocked", None, {"reason": "locked" if _locked(user) else "busy"})
+            if user["disabled"]:
+                audit(conn, user["username"], "login_failed", None, {"reason": "disabled"})
+            else:
+                audit(conn, user["username"], "login_blocked", None, {"reason": "locked" if _locked(user) else "busy"})
         else:
             conn.execute("INSERT INTO login_verifications VALUES (?,?,?,?)",
                          (user_id, attempt, challenge, iso(utcnow() + timedelta(seconds=MFA_TOKEN_TTL_SECONDS))))
     if blocked:
+        if user["disabled"]:
+            raise AuthError("invalid username or password")
         raise AuthError(_LOCKED, 429)
     try:
         yield attempt
@@ -296,9 +306,9 @@ def login(conn, username, password, ttl_seconds):
     user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     if user is None:
         _reject_unknown_login(conn, password)
-    if user["disabled"]:
-        _reject_disabled_login(conn, user, password)
     with _verification_slot(conn, user["id"]) as attempt:
+        if user["disabled"]:
+            _reject_disabled_login(conn, user, password)
         ok = verify_password(password, user["pw_hash"])
         with transaction(conn):
             row = conn.execute("SELECT * FROM users WHERE id=?", (user["id"],)).fetchone()
