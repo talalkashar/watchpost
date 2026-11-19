@@ -356,9 +356,10 @@ def normalize_authlog_line(line, default_source, year=None, now=None):
 
 # --- Web server access logs (nginx / Apache combined) --------------------------------
 
+# Status and size are ASCII digits. \d also matches ５, and int of that character is 5.
 _WEBLOG = re.compile(
     r'^(?P<ip>\S+) \S+ (?P<user>\S+) \[(?P<time>[^\]]+)\] "(?P<method>[A-Z]{3,10}) (?P<path>\S+)(?: [^"]*)?" '
-    r'(?P<status>\d{3}) (?P<size>\d+|-)(?: "(?P<referer>[^"]*)" "(?P<agent>[^"]*)")?'
+    r'(?P<status>[0-9]{3}) (?P<size>[0-9]+|-)(?: "(?P<referer>[^"]*)" "(?P<agent>[^"]*)")?'
 )
 SCAN_PATHS = ("/.env", "/.git", "/.svn", "/.aws", "/.ds_store", "/.htaccess", "/wp-login.php", "/wp-admin",
               "/xmlrpc.php", "/phpmyadmin", "/pma/", "/server-status", "/cgi-bin/", "/actuator",

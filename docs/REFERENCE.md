@@ -208,7 +208,7 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 
 `severity` is `info`, `low`, `medium`, `high`, or `critical`. A missing field stays the default for that event type. Ingest folds ASCII letters only. `HIGH` is `high`. `HİGH` stays the severity error and is not `high`. The batch `format` folds ASCII letters only. `JSON` is `json`, `Csv` is `csv`, and `WebLog` is `weblog`. `jsİn` stays the unsupported-format error and is not `json`.
 
-A combined access line becomes `web_scan` for a scanner path, an injection string, or a scanner user agent. The decoded path folds ASCII letters only. `UNION SELECT` and `/.ENV` are `web_scan`. `unıon select` and `/.gİt` are not. `/.gİt` is not `/.git`. The user agent folds ASCII letters only. `Nikto` and `sqlmap` are `web_scan`. `niKto` is not. `niKto` is not `nikto`.
+A combined access line becomes `web_scan` for a scanner path, an injection string, or a scanner user agent. The decoded path folds ASCII letters only. `UNION SELECT` and `/.ENV` are `web_scan`. `unıon select` and `/.gİt` are not. `/.gİt` is not `/.git`. The user agent folds ASCII letters only. `Nikto` and `sqlmap` are `web_scan`. `niKto` is not. `niKto` is not `nikto`. The status and the size are ASCII digits. `500` stays a 5xx `web_error`. A status of `５００` or a size of `１６２` is `line is not in combined access log format` and stores nothing. `５００` is not status 500. That refusal is not an HTTP 500.
 
 ### Detection rules
 
