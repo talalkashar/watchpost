@@ -1,0 +1,51 @@
+# Accepted SSH for an account other than root, admin, or administrator, from outside
+# the private and local ranges (T1133). Privileged names belong to the other SSH example.
+title: Linux Nonprivileged SSH From External Address
+id: 7f3a1c90-2b64-4e17-9d08-a11c0e100001
+status: experimental
+description: |
+  sshd accepted a login for an account other than root, admin, or administrator
+  from an address that is not private or local. Privileged names are excluded so
+  this does not repeat the root SSH examples. A missing source address is not
+  external. Each matching event is evidence; Watchpost groups findings by source
+  address.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1133/
+tags:
+  - attack.initial_access
+  - attack.t1133
+logsource:
+  product: linux
+  service: sshd
+detection:
+  selection:
+    event.action: auth_success
+    message|contains:
+      - 'Accepted password for '
+      - 'Accepted publickey for '
+      - 'Accepted keyboard-interactive/pam for '
+  ssh_line:
+    message|contains: ' ssh2'
+  privileged:
+    user.name:
+      - root
+      - admin
+      - administrator
+  internal:
+    SourceIp|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+      - '::1/128'
+      - fc00::/7
+      - fe80::/10
+  missing_source:
+    SourceIp: null
+  condition: selection and ssh_line and not privileged and not internal and not missing_source
+falsepositives:
+  - A person signing in from a home or hotel network
+  - An account literally named admin that is not privileged
+level: medium

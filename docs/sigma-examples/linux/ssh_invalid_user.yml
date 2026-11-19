@@ -1,0 +1,28 @@
+# SSH attempt against an account that does not exist (T1110.001). The sshd line says
+# "invalid user". A pre-authentication close that uses the same words is not a failure.
+title: Linux SSH Authentication For Invalid User
+id: 7f3a1c90-2b64-4e17-9d08-a11c0e100004
+status: experimental
+description: |
+  sshd recorded an authentication failure whose message says "invalid user".
+  That is a guess against a name that is not on the host. A failure for a real
+  account does not match, and neither does a connection closed before
+  authentication, even when the close names an invalid user.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1110/001/
+tags:
+  - attack.credential_access
+  - attack.t1110.001
+logsource:
+  product: linux
+  service: sshd
+detection:
+  selection:
+    event.action: auth_failure
+    message|contains: 'invalid user '
+  condition: selection
+falsepositives:
+  - A person mistyping an account name once
+level: medium
