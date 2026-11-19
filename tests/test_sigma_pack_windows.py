@@ -1,7 +1,6 @@
 """One Windows Sigma example, proved from scrubbed native Security exports.
 
-Donor 0014240 added eight examples. Only privileged password guessing can be
-decided from fields Watchpost stores: EventID 4625, TargetUserName, and IpAddress.
+Donor 0014240 added eight examples. A native 4625 supplies a failed-logon action, account name, and source address.
 These exports are omitted because their discriminators do not survive:
 
 - exchange_exploit_request.yml: IIS paths, not a Security export. T1190 stays mapped-only.
@@ -120,7 +119,7 @@ class WindowsSigmaPackTests(unittest.TestCase):
 
     def test_external_privileged_failure_is_the_only_accepted_event(self):
         rule = sigma.compile_rule((WINDOWS / EXAMPLE).read_text())
-        self.assertEqual(rule["rule_id"], "sigma_windows_privileged_password_guessing")
+        self.assertEqual(rule["rule_id"], "sigma_failed_privileged_logon_from_external_address")
         self.assertEqual(rule["sigma_id"], "769f3a96-3cdd-4e27-90db-fb0b13d13ff4")
         self.assertEqual(rule["severity"], "high")
         self.assertEqual(rule["logsource"]["product"], "windows")
@@ -185,7 +184,7 @@ class WindowsSigmaPackTests(unittest.TestCase):
         self.assertEqual(findings[0]["event_ids"], [external["id"]])
         self.assertEqual(
             findings[0]["title"],
-            "Windows Privileged Password Guessing: 1 matching event(s) for 203.0.113.44",
+            "Failed Privileged Logon From External Address: 1 matching event(s) for 203.0.113.44",
         )
         accepted = {label for label, row in by_label.items() if row["id"] in findings[0]["event_ids"]}
         self.assertEqual(accepted, {"fail-external"})
