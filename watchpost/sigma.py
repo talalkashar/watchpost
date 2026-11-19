@@ -1124,8 +1124,9 @@ def upgrade_stored_rules(conn):
         note = "Recompiled from the approved Sigma source"
         try:
             params = _approved_params(row)
-        except (ValueError, RecursionError) as exc:
-            # Source/JSON errors affect this rule alone. Database errors abort the whole transaction.
+        except (ValueError, RecursionError, TypeError, KeyError, AttributeError, IndexError) as exc:
+            # Source/JSON/compiler errors affect this rule alone, so one bad stored rule cannot stop startup.
+            # Database errors (sqlite3.Error) abort the whole transaction.
             reason = str(exc)[:500]
             params = {"format": COMPILED_FORMAT, "title": row["name"], "detection": {"op": "rejected", "reason": reason}}
             enabled = 0

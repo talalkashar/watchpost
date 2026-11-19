@@ -509,6 +509,14 @@ class LegacyUpgradeTests(unittest.TestCase):
                 self.assertFalse(sigma.matches(params, {"host": "maintenance"}))
         self.assertTrue(sigma.matches(self.state(valid)[2], {"host": "maintenance"}))
 
+    def test_unexpected_compiler_error_disables_only_that_rule(self):
+        broken = self.legacy("Broken")
+        with patch.object(sigma, "compile_rule", side_effect=TypeError("unexpected")):
+            init_schema(self.conn)
+        enabled, version, params = self.state(broken)
+        self.assertEqual((enabled, version), (0, 2))
+        self.assertFalse(sigma.matches(params, {"host": "maintenance"}))
+
     def test_upgrade_rolls_back_on_write_failure_then_retries(self):
         rule_id = self.legacy("Interrupted")
         before = self.state(rule_id)
