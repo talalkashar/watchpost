@@ -98,6 +98,12 @@ class PortabilityBlitzTests(unittest.TestCase):
                     portability.plan_import(self.conn, document)
         self.assertEqual(portability.plan_import(self.conn, {**doc, "rules": []}), [])
 
+    def test_equal_float_does_not_bypass_integer_param_validation(self):
+        row = self.rule()
+        row["params"]["threshold"] = float(row["params"]["threshold"])
+        row["enabled"] = False
+        self.assertEqual(self.plan([row])[0]["outcome"], "refused")
+
     def test_non_dict_params_refuse_one_rule(self):
         good_id = "account_repeated_failures"
         good = self.rule(good_id)
@@ -343,6 +349,25 @@ class PortabilityBlitzTests(unittest.TestCase):
         self.assertEqual(self.live()["enabled"], 1)
         self.assertEqual(self.live(OTHER)["enabled"], 1)
         self.assertFalse(self.conn.in_transaction)
+
+    def test_enclosing_rollback_keeps_the_input_plan_reusable(self):
+        plan = self._two_accepted()
+        before = copy.deepcopy(plan)
+        self.conn.execute("BEGIN IMMEDIATE")
+        result = portability.propose_import(self.conn, plan, "tuning.json", "analyst")
+        self.assertEqual(result[1]["outcome"], "proposed")
+        self.assertEqual(plan, before)
+        self.conn.rollback()
+        self._assert_rolled_back(plan, before)
+        portability.propose_import(self.conn, plan, "tuning.json", "analyst")
+        self._assert_one_sequence(plan, before[0]["reason"])
+
+    def test_refused_ids_do_not_overwrite_another_rows_audit_reason(self):
+        plan = self.plan([{"id": "unknown"}, {"id": "unknown"}, {"id": "unknown#2"}])
+        portability.propose_import(self.conn, plan, "fixture", "analyst")
+        reasons = json.loads(self.conn.execute(
+            "SELECT detail FROM audit_log WHERE action='rules_imported'").fetchone()[0])["refused"]
+        self.assertCountEqual(reasons.values(), [row["reason"] for row in plan])
 
     def test_unexpected_error_rolls_back_the_import(self):
         plan = self._two_accepted()

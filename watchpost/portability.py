@@ -8,6 +8,8 @@ change request through improve.propose_change, with the same validation, backtes
 gate and two-person review as a proposal made by hand.
 """
 
+import json
+
 from . import __version__
 from . import improve
 from . import rules as rules_mod
@@ -71,7 +73,7 @@ def _tuning_payload(entry, rule):
                 raise improve.ChangeError("params must be an object")
         elif not isinstance(stored, dict):
             raise improve.ChangeError("stored params are not an object and cannot be merged")
-        elif {**stored, **incoming} != stored:
+        elif json.dumps({**stored, **incoming}, sort_keys=True) != json.dumps(stored, sort_keys=True):
             payload["params"] = incoming
     if "enabled" in entry:
         enabled = entry["enabled"]
@@ -99,12 +101,16 @@ def _changed_params(rule_id, rule, merged):
 def _refused_reasons(plan):
     """One reason per refused row. Colliding ids (and every id-less row) keep the earlier reasons."""
     refused, seen = {}, {}
+    reserved = {str(item["id"]) for item in plan if item["outcome"] == "refused"}
     for item in plan:
         if item["outcome"] != "refused":
             continue
         base = str(item["id"])
         seen[base] = seen.get(base, 0) + 1
         key = base if seen[base] == 1 else f"{base}#{seen[base]}"
+        while key in refused or (key != base and key in reserved):
+            seen[base] += 1
+            key = f"{base}#{seen[base]}"
         refused[key] = item["reason"]
     return refused
 
@@ -206,7 +212,8 @@ def propose_import(conn, plan, label, actor):
     """Turn each would_propose outcome into a pending rule_update change request, and audit the import.
 
     Proposals, the per-rule change audits, and the import audit are one transaction. The plan object
-    records those results only after that transaction commits, so a failure leaves the same object reusable.
+    records those results after commit. Under a caller-owned transaction the returned plan is a
+    separate provisional result and the input stays reusable.
     A ChangeError (the true-positive gate) refuses that rule and still commits the others with this audit.
     """
     staged = {}
@@ -227,6 +234,10 @@ def propose_import(conn, plan, label, actor):
             "unchanged": sum(1 for item in view if item["outcome"] == "unchanged"),
             "refused": _refused_reasons(view),
         })
+    if conn.in_transaction:
+        # A caller owns the enclosing transaction. Return provisional results separately
+        # so its rollback can retry the original plan.
+        return view
     for index, fields in staged.items():
         plan[index].update(fields)
     return plan
