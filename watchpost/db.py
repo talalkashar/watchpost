@@ -609,6 +609,8 @@ def transaction(conn):
 
 
 def init_schema(conn):
+    from . import sigma
+
     # executescript commits an open transaction before it runs. Refuse that so the caller's
     # uncommitted rows do not become durable.
     if _tx_depth(conn) is not None or conn.in_transaction:
@@ -631,6 +633,7 @@ def init_schema(conn):
             _ensure_column(conn, "audit_log", column, "TEXT")
         _start_audit_chain(conn)
         _check_chain_key(conn)
+        sigma.upgrade_stored_rules(conn)
     conn.execute(
         "INSERT INTO meta(key, value) VALUES ('schema_version', ?)"
         " ON CONFLICT(key) DO UPDATE SET value = excluded.value", (str(SCHEMA_VERSION),)
