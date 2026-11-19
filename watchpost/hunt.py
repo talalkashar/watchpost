@@ -53,8 +53,9 @@ LAST_MAX_MINUTES = 365 * 1440
 _ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 
 # bytes:>=N (and >, <=, <, =). The operator is chosen from this tuple; the integer is a bound parameter.
+# ASCII digits only. [0-9], not \d, so 1４ does not match and is not 14.
 BYTES_OPS = (">=", ">", "<=", "<", "=")
-_BYTES_CMP = re.compile(r"(>=|<=|>|<|=)(0|[1-9]\d*)\Z")
+_BYTES_CMP = re.compile(r"(>=|<=|>|<|=)(0|[1-9][0-9]*)\Z")
 
 _FIELD = re.compile(r"([A-Za-z_]+):")
 _LAST = re.compile(r"(\d{1,6})([mhd])")
@@ -168,7 +169,14 @@ def _value(text, pos, field):
 def bytes_bound(value):
     """(operator, integer) for a bytes term. The operator is one of >=, >, <=, <, =."""
     match = _BYTES_CMP.fullmatch(value) if isinstance(value, str) else None
-    number = int(match.group(2)) if match else None
+    number_text = match.group(2) if match else ""
+    # ASCII digits only. bytes:>=1000 stays 1000. bytes:>=1４ is the error
+    # below, not 14. bytes:>=４ stays that error. Not a 500. The conversion
+    # runs only after this check.
+    if number_text.isascii() and number_text.isdigit():
+        number = int(number_text)
+    else:
+        number = None
     if number is None or number > MAX_BYTES:
         raise HuntError(
             "bytes must be one of >=, >, <=, < or = followed by an integer from 0 to "
