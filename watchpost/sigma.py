@@ -18,11 +18,11 @@ import ipaddress
 import itertools
 import json
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from . import attack
 from . import ecs
-from .db import parse_iso
+from .db import now_iso, parse_iso
 
 MAX_SOURCE_BYTES = 64 * 1024
 MAX_LINES = 2000
@@ -40,6 +40,7 @@ GROUP_GAP_SECONDS = 3600  # matching events of one group key further apart than 
 # SQLite COLLATE NOCASE folds these letters only. Host and user group keys use the same fold.
 _ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 RULE_PREFIX = "sigma_"
+COMPILED_FORMAT = "sigma-v2"
 SAMPLE_PREFIX = "sigma_sample:"
 
 
@@ -398,13 +399,33 @@ def _unescape_literals(value, where):
     return "".join(out)
 
 
-def _windash_values(text, where):
-    """Each leading `-` or `/` becomes `-`, `/`, or a Unicode dash. At most three per value."""
-    positions = [m.start() for m in _WINDASH_RE.finditer(text)]
-    if len(positions) > 3:
-        raise SigmaError(f"{where}: windash expands at most three dashes in one value")
-    if not positions:
-        return [text]
+def _raise_too_large():
+    raise SigmaError(f"the compiled detection is too large (at most {MAX_COMPILED_VALUES} values and "
+                     f"{MAX_COMPILED_CHARS // 1024} KB once the condition is expanded); a condition that "
+                     "names the same selections many times multiplies them")
+
+
+class _ExpandBudget:
+    """Charge each selection's output once per occurrence in the compiled condition."""
+
+    def __init__(self):
+        self.values = 0
+        self.chars = 0
+        self.references = 1
+
+    def reserve(self, n_values, n_chars):
+        if (self.values + n_values * self.references > MAX_COMPILED_VALUES
+                or self.chars + n_chars * self.references > MAX_COMPILED_CHARS):
+            _raise_too_large()
+
+    def add(self, n_values, n_chars):
+        self.reserve(n_values, n_chars)
+        self.values += n_values * self.references
+        self.chars += n_chars * self.references
+
+
+def _windash_expand(text, positions):
+    """Each listed `-` or `/` becomes `-`, `/`, or a Unicode dash. `positions` is 1 to 3."""
     chars = list(text)
     expanded = []
     for combo in itertools.product(_WINDASH_CHARS, repeat=len(positions)):
@@ -416,7 +437,10 @@ def _windash_values(text, where):
 
 
 def _base64_offsets(text):
-    """Three shifted encodings of `text`, including an empty slice when the input is very short."""
+    """Three shifted encodings of `text`, the same slices pySigma emits.
+
+    A short input can leave an empty or one-character slice. `_transform_values` rejects those.
+    """
     data = text.encode()
     out = []
     for i in range(3):
@@ -426,25 +450,48 @@ def _base64_offsets(text):
     return out
 
 
-def _transform_values(text, mods, where):
-    """Apply windash / base64 / base64offset left to right. Each step ORs its results."""
+def _transform_values(text, mods, where, budget):
+    """Apply windash / base64 / base64offset left to right. Each step ORs its results.
+
+    Reserve the size of each stage before building its product.
+    """
     current = [text]
     for mod in mods:
         if mod == "windash":
-            current = [item for s in current for item in _windash_values(s, where)]
-        elif mod in _ENCODE_MODS:
-            nxt = []
+            staged, add_n, add_c = [], 0, 0
             for s in current:
-                plain = _unescape_literals(s, where)
-                if mod == "base64":
-                    nxt.append(base64.b64encode(plain.encode()).decode())
-                else:
-                    nxt.extend(_base64_offsets(plain))
+                positions = [m.start() for m in _WINDASH_RE.finditer(s)]
+                if len(positions) > 3:
+                    raise SigmaError(f"{where}: windash expands at most three dashes in one value")
+                produced = len(_WINDASH_CHARS) ** len(positions)
+                add_n += produced
+                add_c += produced * len(s)
+                staged.append((s, positions))
+            budget.reserve(add_n, add_c)
+            nxt = []
+            for s, positions in staged:
+                nxt.extend(_windash_expand(s, positions) if positions else [s])
             current = nxt
+        elif mod in _ENCODE_MODS:
+            plain = [_unescape_literals(s, where) for s in current]
+            sizes = [len(s.encode()) for s in plain]
+            if mod == "base64":
+                if 0 in sizes:
+                    raise SigmaError(f"{where}: {mod} produced an empty encoding")
+                budget.reserve(len(sizes), sum(4 * ((n + 2) // 3) for n in sizes))
+                current = [base64.b64encode(s.encode()).decode() for s in plain]
+            else:
+                # Four input bytes give at least one full quantum in every shifted slice.
+                if min(sizes) < 4:
+                    raise SigmaError(f"{where}: {mod} produced an ambiguous short encoding")
+                # Across the three alignments the slices retain exactly 4*n - 2 characters.
+                budget.reserve(3 * len(sizes), sum(4 * n - 2 for n in sizes))
+                current = [fragment for s in plain for fragment in _base64_offsets(s)]
+    budget.add(len(current), sum(len(s) for s in current))
     return current
 
 
-def _field_match(key, value, where):
+def _field_match(key, value, where, budget):
     """One `field|mod|...: value(s)` entry -> a match node."""
     if not isinstance(key, str) or not key:
         raise SigmaError(f"{where}: field names must be strings")
@@ -479,7 +526,10 @@ def _field_match(key, value, where):
             if not isinstance(v, str):
                 raise SigmaError(f"{where}: {transforms[0]} applies to strings")
             _value(v, where)
-            groups.append(_transform_values(v, transforms, where))
+            groups.append(_transform_values(v, transforms, where, budget))
+        # windash of "" is one empty alternative. Under contains/startswith/endswith that is a wildcard.
+        if kind in _WILDCARD_MODS and any(item == "" for group in groups for item in group):
+            raise SigmaError(f"{where}: {transforms[0]} produced an ambiguous short encoding")
         mapped = _field(field)
         if "all" in mods and len(groups) > 1:
             # `|all` ANDs the author's values. Each value's expansion stays OR-linked.
@@ -499,18 +549,19 @@ def _field_match(key, value, where):
                 raise SigmaError(f"{where}: {v!r} is not a CIDR network")
     elif kind != "eq" and None in values:
         raise SigmaError(f"{where}: null cannot be combined with {kind}")
+    budget.add(len(values), sum(len(str(v)) for v in values))
     return {"op": "match", "field": _field(field), "mod": kind, "all": "all" in mods, "values": values}
 
 
-def _selection(name, body):
+def _selection(name, body, budget):
     where = f"selection {name!r}"
     if isinstance(body, dict):
         if not body:
             raise SigmaError(f"{where} is empty")
-        args = [_field_match(k, v, where) for k, v in body.items()]
+        args = [_field_match(k, v, where, budget) for k, v in body.items()]
         return args[0] if len(args) == 1 else {"op": "and", "args": args}
     if isinstance(body, list) and body and all(isinstance(b, dict) for b in body):
-        args = [_selection(name, b) for b in body]  # a list of maps: any of them
+        args = [_selection(name, b, budget) for b in body]  # a list of maps: any of them
         return args[0] if len(args) == 1 else {"op": "or", "args": args}
     if isinstance(body, (list, str, int)) and not isinstance(body, bool):
         # Keywords: a bare value or list of values, matched as a substring of the event message.
@@ -518,8 +569,9 @@ def _selection(name, body):
         if not values or len(values) > MAX_VALUES or not all(isinstance(v, (str, int)) and not isinstance(v, bool)
                                                               for v in values):
             raise SigmaError(f"{where}: keyword lists hold 1-{MAX_VALUES} strings")
-        return {"op": "match", "field": "message", "mod": "contains", "all": False,
-                "values": [_value(v, where) for v in values]}
+        values = [_value(v, where) for v in values]
+        budget.add(len(values), sum(len(str(v)) for v in values))
+        return {"op": "match", "field": "message", "mod": "contains", "all": False, "values": values}
     raise SigmaError(f"{where} must be a map of fields, a list of maps, or a keyword list")
 
 
@@ -566,6 +618,11 @@ class _Condition:
         if "near" in text.lower().split():
             raise SigmaError("condition: 'near' is not supported")
         self.toks, self.i, self.sel = _tokens(text), 0, selections
+        self.references = Counter()
+
+    def _reference(self, name):
+        self.references[name] += 1
+        return self.sel[name]
 
     def parse(self):
         node = self._or(0)
@@ -624,11 +681,11 @@ class _Condition:
                 names = [n for n in names if not n.startswith("_")]
             if not names:
                 raise SigmaError(f"condition: {target!r} matches no selection")
-            args = [self.sel[n] for n in names]
+            args = [self._reference(n) for n in names]
             return args[0] if len(args) == 1 else {"op": "or" if low == "1" else "and", "args": args}
         if tok not in self.sel:
             raise SigmaError(f"condition: unknown selection {tok!r}")
-        return self.sel[tok]
+        return self._reference(tok)
 
 
 def slug(title):
@@ -671,9 +728,18 @@ def compile_rule(source):
         if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.\-]+", name) or \
                 name.lower() in ("and", "or", "not", "of", "them", "near", "all", "1"):
             raise SigmaError(f"selection name {name!r} is not usable in a condition")
-    selections = {name: _selection(name, body) for name, body in named.items()}
-    tree = _Condition(detection["condition"], selections).parse()
-    _check_budget(tree)
+    # The condition holds references to these nodes. Count them before expanding any
+    # transform, then fill each shared node once, charging its full serialized size.
+    selections = {name: {} for name in named}
+    condition = _Condition(detection["condition"], selections)
+    tree = condition.parse()
+    budget = _ExpandBudget()
+    for name, body in named.items():
+        if not condition.references[name]:
+            _selection(name, body, _ExpandBudget())  # validate unused source and discard its expansion
+            continue
+        budget.references = condition.references[name]
+        selections[name].update(_selection(name, body, budget))
 
     techniques, ignored_tags = [], []
     for tag in tags:
@@ -702,7 +768,7 @@ def compile_rule(source):
         "severity": LEVELS[level],
         "techniques": techniques,
         "logsource": logsource or {},
-        "params": {"title": title.strip()[:200], "detection": tree},
+        "params": {"format": COMPILED_FORMAT, "title": title.strip()[:200], "detection": tree},
         "conditions": describe(tree),
         "warnings": ([f"tags not mapped to the ATT&CK catalog (kept out of coverage): {', '.join(ignored_tags)}"]
                      if ignored_tags else []) +
@@ -715,6 +781,8 @@ def compile_rule(source):
 def describe(node):
     """The compiled tree as one readable line, e.g. (event_type = 'auth_failure' AND src_ip in 10.0.0.0/8)."""
     op = node["op"]
+    if op == "rejected":
+        return f"Rule disabled during Sigma upgrade: {node['reason']}"
     if op == "not":
         return f"NOT {describe(node['arg'])}"
     if op in ("and", "or"):
@@ -728,8 +796,10 @@ def describe(node):
 
 def validate_params(params):
     """Check a stored compiled tree before it runs (it came from compile_rule; this guards edits)."""
-    if not isinstance(params, dict) or set(params) != {"title", "detection"} or not isinstance(params["title"], str):
-        raise SigmaError("Sigma rule params must be the compiled {title, detection}; they are not tunable")
+    # Historical params can still be read/exported. _Compiled enforces the executable format.
+    if not isinstance(params, dict) or set(params) not in ({"title", "detection"}, {"format", "title", "detection"}) \
+            or not isinstance(params["title"], str) or ("format" in params and params["format"] != COMPILED_FORMAT):
+        raise SigmaError("Sigma rule params must be the compiled Sigma detection; they are not tunable")
 
     def check(node, depth):
         if depth > 4 * MAX_DEPTH or not isinstance(node, dict):
@@ -752,7 +822,11 @@ def validate_params(params):
         else:
             raise SigmaError("compiled detection is malformed")
 
-    check(params["detection"], 0)
+    root = params["detection"]
+    if isinstance(root, dict) and root.get("op") == "rejected" and set(root) == {"op", "reason"} \
+            and isinstance(root["reason"], str):
+        return params
+    check(root, 0)
     _check_budget(params["detection"])
     return params
 
@@ -771,9 +845,7 @@ def _check_budget(tree):
             values += len(node["values"])
             chars += sum(len(str(v)) for v in node["values"])
         if values > MAX_COMPILED_VALUES or chars > MAX_COMPILED_CHARS:
-            raise SigmaError(f"the compiled detection is too large (at most {MAX_COMPILED_VALUES} values and "
-                             f"{MAX_COMPILED_CHARS // 1024} KB once the condition is expanded); a condition that "
-                             "names the same selections many times multiplies them")
+            _raise_too_large()
 
 
 # --- Evaluation ---------------------------------------------------------------------------------
@@ -842,8 +914,9 @@ def _glob(pattern, text):
 class _Compiled:
     """Patterns prepared once per run; `matches(event)` then walks the tree."""
 
-    def __init__(self, tree):
-        self.tree = tree
+    def __init__(self, params):
+        # The old tree erased transform provenance. Only the database upgrade can recover it.
+        self.tree = params["detection"] if params.get("format") == COMPILED_FORMAT else None
         self.cache = {}
 
     def _patterns(self, node):
@@ -883,7 +956,10 @@ class _Compiled:
         return _glob(pat, str(value).casefold())
 
     def matches(self, event, node=None):
-        node = self.tree if node is None else node
+        if node is None:
+            node = self.tree
+            if node is None or node["op"] == "rejected":
+                return False
         op = node["op"]
         if op == "and":
             return all(self.matches(event, a) for a in node["args"])
@@ -897,7 +973,7 @@ class _Compiled:
 
 
 def matches(params, event):
-    return _Compiled(params["detection"]).matches(event)
+    return _Compiled(params).matches(event)
 
 
 def group_key(event):
@@ -925,7 +1001,7 @@ def run(events, params):
     Every matching event counts (there is no threshold). Matching events are grouped by `group_key`, and
     within a group events more than GROUP_GAP_SECONDS apart start a new finding.
     """
-    compiled = _Compiled(params["detection"])
+    compiled = _Compiled(params)
     title = params["title"]
     groups = defaultdict(list)
     for e in events:
@@ -993,7 +1069,7 @@ def sample_result(params, sample):
     look-alike does. None when there is no sample."""
     if not sample:
         return None
-    compiled = _Compiled(params["detection"])
+    compiled = _Compiled(params)
     missed = [i for i, e in enumerate(sample["malicious"]) if not compiled.matches(e)]
     fired = [i for i, e in enumerate(sample["benign"]) if compiled.matches(e)]
     passes = not missed and not fired
@@ -1010,6 +1086,56 @@ def sample_result(params, sample):
 
 def is_sigma(rule_id):
     return isinstance(rule_id, str) and rule_id.startswith(RULE_PREFIX)
+
+
+def _approved_params(row):
+    """Bind the retained source to the reviewed import before compiling any selections."""
+    source = row["source"]
+    if not isinstance(source, str) or len(source) > MAX_SOURCE_BYTES:
+        raise SigmaError("missing or oversized Sigma source")
+    digest = hashlib.sha256(source.encode()).hexdigest()
+    if not isinstance(row["evaluation"], str) or digest != row["sha256"]:
+        raise SigmaError("missing approved import or source digest mismatch")
+    evidence = json.loads(row["evaluation"])
+    if not isinstance(evidence, dict) or evidence.get("sha256") != digest or evidence.get("rule") != row["id"]:
+        raise SigmaError("source digest or rule identity differs from the approved import")
+    compiled = compile_rule(source)
+    if (compiled["rule_id"], compiled["title"], compiled["sigma_id"]) != (row["id"], row["name"], row["sigma_id"]):
+        raise SigmaError("compiled rule identity differs from the stored rule")
+    return compiled["params"]
+
+
+def upgrade_stored_rules(conn):
+    """Replace legacy params under init_schema's write lock, preserving each previous history entry."""
+    # Materialize only IDs before updating the same table. A malformed old tree also needs recovery.
+    ids = conn.execute(
+        "SELECT id FROM rules WHERE id GLOB 'sigma_*' AND"
+        " (CASE WHEN json_valid(params) THEN json_extract(params, '$.format') END) IS NOT ?",
+        (COMPILED_FORMAT,)).fetchall()
+    for (rule_id,) in ids:
+        row = conn.execute(
+            "SELECT r.id, r.name, r.version, r.enabled, r.grouping, s.source, s.sha256, s.sigma_id, c.evaluation"
+            " FROM rules r LEFT JOIN sigma_rules s ON s.rule_id = r.id"
+            " LEFT JOIN change_requests c ON c.id = s.change_request_id AND c.kind = 'sigma_add'"
+            " AND c.status = 'approved' AND c.target = r.id AND c.reviewed_by = s.approved_by"
+            " AND c.proposed_by = s.imported_by AND c.proposed_by != c.reviewed_by WHERE r.id = ?", (rule_id,)
+        ).fetchone()
+        enabled = row["enabled"]
+        note = "Recompiled from the approved Sigma source"
+        try:
+            params = _approved_params(row)
+        except (ValueError, RecursionError) as exc:
+            # Source/JSON errors affect this rule alone. Database errors abort the whole transaction.
+            reason = str(exc)[:500]
+            params = {"format": COMPILED_FORMAT, "title": row["name"], "detection": {"op": "rejected", "reason": reason}}
+            enabled = 0
+            note = f"Sigma upgrade disabled this rule: {reason}"
+        version, now, encoded = row["version"] + 1, now_iso(), json.dumps(params)
+        conn.execute("UPDATE rules SET params = ?, enabled = ?, version = ?, updated_at = ?,"
+                     " updated_by = 'sigma-upgrade' WHERE id = ?", (encoded, enabled, version, now, rule_id))
+        conn.execute("INSERT INTO rule_history(rule_id, version, enabled, params, grouping, changed_at,"
+                     " changed_by, note) VALUES (?,?,?,?,?,?,'sigma-upgrade',?)",
+                     (rule_id, version, enabled, encoded, row["grouping"], now, note))
 
 
 def stored(conn, rule_id):
@@ -1084,5 +1210,5 @@ def preview(conn, params, window_days=7, max_events=100_000):
     (backtest.preview_new_rule, shared with promoted saved searches)."""
     from . import backtest
 
-    compiled = _Compiled(params["detection"])
+    compiled = _Compiled(params)
     return backtest.preview_new_rule(conn, "sigma_preview", params, compiled.matches, window_days, max_events)
