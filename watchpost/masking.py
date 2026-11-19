@@ -9,14 +9,22 @@ through here.
   on ASCII case only (A–Z), in structured fields and inside free text alike, so Alice and alice are one name
   and ÉRIN and érin stay two. Not by guessing what a name looks like.
   An account named after a role ("analyst") is masked in identity fields (USER_FIELDS) but not as a word in
-  text, where it is the product's own vocabulary ("Analyst notes"). An event username is masked everywhere.
+  text, where it is the product's own vocabulary ("Analyst notes"). That account's pseudonym still resolves
+  on pivot. An event username is masked everywhere.
 - IPs are found with an IPv4/IPv6 regex and confirmed with `ipaddress`. Only internal addresses are masked
-  (RFC 1918, loopback, link-local, IPv6 ULA); public addresses are the attacker side and stay visible.
+  (RFC 1918, loopback, link-local, IPv6 ULA). A v4 embedded in a mapped, 6to4, or Teredo address counts when
+  that v4 is internal. A leading-zero quad is read as decimal, or as octal when only the octal reading is
+  internal. Public addresses, including the documentation ranges, stay visible. A token `ipaddress` rejects
+  is still masked when it embeds one of those quads or begins with an internal address.
 - A pseudonym is HMAC-SHA256(key, value), truncated: `user-3f9a2c1b`, `internal-8b21e0d4`. The key is derived
   from SIEM_AUDIT_KEY when that is set, else it is a random per-database secret kept in the `meta` table, so
   the same value gets the same pseudonym on every endpoint and across restarts, and nothing here is a constant.
 - Pivots: a pseudonym in a query parameter or path segment is resolved back to the real value server-side by
-  hashing candidate values (bounded DISTINCT queries). No reverse map is stored.
+  hashing candidate values. No reverse map is stored. Address candidates are the stored src_ip and dest_ip
+  spellings `is_internal` accepts, so dotted and hex IPv4-mapped IPv6, 6to4, and Teredo reverse the same way
+  they are recognized. IP_SCAN_LIMIT bounds all distinct spellings inspected. When several spellings are one
+  address, the spelling `str(ipaddress)` would store wins. Past that ceiling the extra pseudonyms stay
+  unresolved, and a failed pivot does not reveal a raw internal address.
 
 This is presentation-layer masking for a low-trust role, not anonymization. See README.
 """
@@ -33,6 +41,7 @@ from .auth import ROLES
 
 SETTING = "viewer_masking"
 CANDIDATE_LIMIT = 10000  # distinct usernames / IPs considered per request
+IP_SCAN_LIMIT = CANDIDATE_LIMIT  # all distinct stored spellings examined, including public addresses
 DIGEST_CHARS = 8
 # A–Z only. str.lower() and re.IGNORECASE also fold É/é, which would make two accounts one pseudonym.
 _ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
@@ -42,10 +51,12 @@ INTERNAL_NETS = [ipaddress.ip_network(n) for n in (
 # Fields that always hold an account or event username, masked whatever their value.
 USER_FIELDS = frozenset(("user", "username", "assignee", "author", "actor", "proposed_by", "reviewed_by",
                          "approved_by", "updated_by", "changed_by", "submitted_by", "created_by"))
+# A dotted octet may be four digits so a zero-padded octal loopback (0177) is one token, not skipped.
 IP_RE = re.compile(
-    r"(?<![\w:.])(?:[0-9A-Fa-f]{0,4}:){2,7}(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9A-Fa-f]{1,4})?(?![\w:])"
-    r"|(?<![\w.])\d{1,3}(?:\.\d{1,3}){3}(?!\w|\.\d)")
+    r"(?:(?<![\w:.])|(?<=(?i:ip):))(?:[0-9A-Fa-f]{0,4}:){2,7}(?:\d{1,4}(?:\.\d{1,4}){3}|[0-9A-Fa-f]{1,4})?(?![\w:])"
+    r"|(?<![\w.])\d{1,4}(?:\.\d{1,4}){3}(?!\w|\.\d)")
 PSEUDONYM_RE = re.compile(r"\b(?:user|internal)-[0-9a-f]{%d}\b" % DIGEST_CHARS)
+_QUAD_RE = re.compile(r"\d{1,4}(?:\.\d{1,4}){3}")
 
 
 class Unavailable(Exception):
@@ -58,9 +69,80 @@ def _ascii_fold(value):
     return value.translate(_ASCII_FOLD)
 
 
+def _embedded_v4(ip):
+    """The IPv4 carried in a mapped, 6to4, or Teredo address, or None."""
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        return mapped
+    sixtofour = getattr(ip, "sixtofour", None)
+    if sixtofour is not None:
+        return sixtofour
+    teredo = getattr(ip, "teredo", None)
+    if teredo:
+        return teredo[1]  # (server, client); the client is the concealed host
+    return None
+
+
 def is_internal(ip):
-    ip = getattr(ip, "ipv4_mapped", None) or ip
+    embedded = _embedded_v4(ip)
+    if embedded is not None and is_internal(embedded):
+        return True
     return any(ip.version == n.version and ip in n for n in INTERNAL_NETS)
+
+
+def _v4_reading(text):
+    """Internal address for a dotted quad: decimal if that is internal, else a zero-padded octal reading.
+
+    10.0.0.01 and 010.0.0.1 are 10.0.0.1. 0177.0.0.1 is four digits, so it is not the public 177.0.0.1;
+    the padded octet is octal 127, which is loopback, so that reading is used. 008.008.008.008 stays
+    8.8.8.8 (visible): an octet with a digit 8-9 has no octal reading. 0.0.0.0 and the documentation
+    ranges are not internal.
+    """
+    parts = text.split(".")
+    if len(parts) != 4:
+        return None
+    decimal = []
+    octal = []
+    for part in parts:
+        if not part.isdigit() or not 1 <= len(part) <= 4:
+            return None
+        dec = int(part, 10)
+        if dec > 255:
+            decimal = None
+        elif decimal is not None:
+            decimal.append(dec)
+        padded = len(part) > 1 and part[0] == "0"
+        if padded and any(ch > "7" for ch in part):
+            octal = None
+        elif octal is not None:
+            value = int(part, 8) if padded else dec
+            if value > 255:
+                octal = None
+            else:
+                octal.append(value)
+    for nums in (decimal, octal):
+        if not nums or len(nums) != 4:
+            continue
+        addr = ipaddress.IPv4Address(".".join(str(n) for n in nums))
+        if is_internal(addr):
+            return addr
+    return None
+
+
+def _internal_prefix(text):
+    """Longest leading slice of an unparsed colon-token that is itself an internal address."""
+    ends = {len(text)}
+    ends.update(i for i, ch in enumerate(text) if ch == ":")
+    for end in sorted(ends, reverse=True):
+        if end < 2:
+            continue
+        try:
+            addr = ipaddress.ip_address(text[:end])
+        except ValueError:
+            continue
+        if is_internal(addr):
+            return addr, end
+    return None
 
 
 def key(conn):
@@ -87,8 +169,9 @@ def for_user(conn, user):
                                         " AND user != '' LIMIT ?", (CANDIDATE_LIMIT + 1,))}
     if len(names) > CANDIDATE_LIMIT:  # fail closed: names past the bound would go out unmasked in free text
         raise Unavailable(f"the masked view is unavailable: more than {CANDIDATE_LIMIT:,} distinct usernames")
-    names |= {_ascii_fold(r[0]) for r in conn.execute("SELECT username FROM users")} - set(ROLES)
-    return Masker(key(conn), names, self_name=user["username"])
+    accounts = {_ascii_fold(r[0]) for r in conn.execute("SELECT username FROM users")}
+    names |= accounts - set(ROLES)  # a role word in prose stays visible; an event username is still masked
+    return Masker(key(conn), names, self_name=user["username"], reversible=accounts)
 
 
 @functools.lru_cache(maxsize=8)
@@ -100,11 +183,14 @@ def _names_re(names):
 
 
 class Masker:
-    def __init__(self, secret, names, self_name=None):
+    def __init__(self, secret, names, self_name=None, *, reversible=()):
+        self.resolved_ips = set()  # exact stored spellings selected by this request
         self.secret = secret
         self.self_name = _ascii_fold(self_name or "")
         names = {_ascii_fold(n) for n in names if n} - {self.self_name}
+        extra = {_ascii_fold(n) for n in reversible if n} - {self.self_name}
         self.names = tuple(sorted(names, key=lambda n: (-len(n), n)))  # longest first: ops-admin before admin
+        self._reversible = names | extra  # role accounts are not in self.names, but their pseudonyms pivot
         self.names_re = _names_re(self.names)
 
     def _digest(self, kind, value):
@@ -116,12 +202,30 @@ class Masker:
     def ip(self, ip):
         return "internal-" + self._digest("ip", str(ip))
 
+    def _mask_quads(self, text):
+        def sub(match):
+            addr = _v4_reading(match.group(0))
+            return self.ip(addr) if addr is not None else match.group(0)
+        return _QUAD_RE.sub(sub, text)
+
     def _ip_sub(self, match):
+        text = match.group(0)
         try:
-            ip = ipaddress.ip_address(match.group(0))
+            ip = ipaddress.ip_address(text)
         except ValueError:
-            return match.group(0)
-        return self.ip(ip) if is_internal(ip) else match.group(0)
+            ip = None
+        # Digest the address itself. A mapped/6to4/Teredo hit must not collapse onto the embedded v4.
+        if ip is not None and is_internal(ip):
+            return self.ip(ip)
+        masked = self._mask_quads(text)
+        if masked != text:
+            return masked
+        if ip is None and ":" in text:
+            found = _internal_prefix(text)
+            if found:
+                addr, end = found
+                return self.ip(addr) + text[end:]
+        return text
 
     def text(self, s):
         s = IP_RE.sub(self._ip_sub, s)  # IPs first, so a numeric username cannot split an address
@@ -155,16 +259,36 @@ class Masker:
         if not PSEUDONYM_RE.search(s):
             return s
         if not hasattr(self, "_reverse"):
-            reverse = {self.user(n): n for n in self.names}
-            for (value,) in conn.execute("SELECT DISTINCT src_ip FROM events WHERE src_ip IS NOT NULL UNION"
-                                         " SELECT DISTINCT dest_ip FROM events WHERE dest_ip IS NOT NULL LIMIT ?",
-                                         (CANDIDATE_LIMIT,)):
+            reverse = {self.user(n): n for n in self._reversible}
+            self._reverse = reverse
+        if "internal-" in s and not getattr(self, "_ips_loaded", False):
+            reverse = self._reverse
+            # ORDER BY lets SQLite merge the two address indexes and stop at the scan ceiling.
+            seen = 0
+            for (value,) in conn.execute(
+                    "SELECT src_ip FROM events WHERE src_ip IS NOT NULL AND src_ip != '' UNION "
+                    "SELECT dest_ip FROM events WHERE dest_ip IS NOT NULL AND dest_ip != '' "
+                    "ORDER BY 1 LIMIT ?", (IP_SCAN_LIMIT,)):
                 try:
                     ip = ipaddress.ip_address(value)
                 except ValueError:
                     continue
-                if is_internal(ip):
-                    reverse[self.ip(ip)] = value
-            self._reverse = reverse  # this request only; never kept beyond it
-        found = lambda m: self._reverse.get(m.group(0), m.group(0))  # noqa: E731
-        return PSEUDONYM_RE.sub((lambda m: quote(found(m), safe="")) if path else found, s)
+                if not is_internal(ip):
+                    continue
+                pseudo = self.ip(ip)
+                canon = str(ip)
+                current = reverse.get(pseudo)
+                # One pseudonym per address. Prefer the spelling ingest would store.
+                if current is None or (value == canon and current != canon):
+                    reverse[pseudo] = value
+                seen += 1
+                if seen >= CANDIDATE_LIMIT:
+                    break
+            self._ips_loaded = True
+        def found(match):
+            pseudo = match.group(0)
+            value = self._reverse.get(pseudo, pseudo)
+            if pseudo.startswith("internal-") and value != pseudo:
+                self.resolved_ips.add(value)
+            return quote(value, safe="") if path else value
+        return PSEUDONYM_RE.sub(found, s)

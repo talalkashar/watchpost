@@ -194,7 +194,7 @@ def list_entities(conn, params):
             "entities_omitted": len(rows) - len(shown)}
 
 
-def get_entity(conn, kind, value):
+def get_entity(conn, kind, value, *, resolved_ips=()):
     """Score breakdown, alerts, incidents, recent events, and alerts by day for one entity.
 
     An entity nothing has been seen for is not an error: it has a score of 0 and empty lists.
@@ -208,7 +208,7 @@ def get_entity(conn, kind, value):
     """
     if kind not in KINDS:
         raise QueryError("entity kind not found", 404)
-    if kind == "src_ip":
+    if kind == "src_ip" and value not in resolved_ips:
         value = canonical_ip(value, "src_ip")
     match = _entity_match(kind)
     value = _entity_value(kind, value)

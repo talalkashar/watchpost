@@ -133,17 +133,37 @@ function panel(id, title, meta, ...body) {
     el("div", { class: "pb", id: `${id}-body` }, ...body));
 }
 
-// A store with zero events is one explanation, not a note in every panel.
-// Only an admin gets the control that loads the labeled synthetic dataset.
-function emptyDashboard(eventsTotal, isAdmin) {
+// A store with zero events is one next action, not a map and not a saved-view form.
+// Keep the admin demo shortcut. Analysts can upload, and viewers get a read-only explanation.
+function emptyDashboard(eventsTotal, role) {
   if (typeof eventsTotal !== "number" || eventsTotal !== 0) return null;
-  const load = isAdmin === true;
+  const title = "No events yet";
+  if (role === "admin") {
+    return { title, body: "No events are stored.", load: true, label: "Load demo data" };
+  }
+  if (role === "analyst") {
+    return {
+      title,
+      body: "No events are stored.",
+      href: "#ingest",
+      label: "Upload a log",
+      hint: "",
+    };
+  }
   return {
-    title: "No events yet",
-    body: "Ingest a log file or load demo data to populate the dashboard.",
-    load,
-    hint: load ? "" : "Ask an admin to load demo data.",
+    title,
+    body: "No events are stored. This account is read-only.",
+    href: "",
+    label: "",
+    hint: "",
   };
+}
+function dashboardRole() {
+  const role = state.user && state.user.role;
+  return role === "admin" || role === "analyst" || role === "viewer" ? role : "viewer";
+}
+function ownerName(value) {
+  return typeof value === "string" ? value.trim() : "";
 }
 // The public <title> stays the search title. Once signed in, the tab names the open critical count.
 const PUBLIC_TITLE = "Watchpost: an open-source SIEM and SOC console in Python";
@@ -173,6 +193,7 @@ function normIncidents(payload) {
       id: i.id, title: i.title || `Incident #${i.id}`, severity: sevOf(i.severity || "medium"),
       status: String(i.status || "open"), first_seen: i.first_seen, last_seen: i.last_seen || i.updated_at,
       alert_count: i.alert_count ?? i.alerts_count ?? (alerts.length || asList(i.alert_ids).length),
+      assignee: ownerName(i.assignee),
       tactics: asList(i.kill_chain ?? i.stages ?? i.kill_chain_stages ?? i.tactics).map((t) => (typeof t === "string" ? t : t.name || t.tactic)).filter(Boolean),
       top_technique: techniqueRef(i.top_technique),
       entities: parseMaybeJson(i.entities ?? i.entity_summary) || {},
@@ -514,7 +535,7 @@ const Live = {
 const Dash = {
   mounted: false, data: null, coverage: { state: "loading" }, details: null,
   queue: [], feedCount: 0, paused: false, live: new Map(), mapSize: null, timers: {}, observer: null,
-  views: [], currentView: null, severities: DASH_FILTERS.all, layout: DASH_LAYOUTS.full,
+  views: [], viewsError: "", currentView: null, severities: DASH_FILTERS.all, layout: DASH_LAYOUTS.full,
 
   mount() {
     this.unmount();
@@ -522,9 +543,9 @@ const Dash = {
     this.mapSize = null;
     this.feedCount = 0;
     const pause = el("button", { class: "mini ghost", id: "feed-pause", type: "button", "aria-pressed": "false", onclick: () => this.togglePause() }, "Pause");
-    render(el("div", { class: "view-bar", id: "dashboard-view-bar" }, el("p", { class: "muted" }, "Loading saved dashboard views…")),
+    render(el("div", { class: "view-bar", id: "dashboard-view-bar", hidden: true }),
       el("div", { id: "dash-empty", hidden: true }),
-      el("div", { class: "soc", id: "soc" },
+      el("div", { class: "soc", id: "soc", hidden: true },
       panel("p-map", "Attack map", [el("span", { class: "muted", id: "map-count" })],
         el("div", { class: "mapwrap", id: "map" }),
         el("div", { class: "map-side", id: "map-side" }),
@@ -585,19 +606,26 @@ const Dash = {
   renderEmpty() {
     const box = $("#dash-empty");
     const soc = $("#soc");
+    const bar = $("#dashboard-view-bar");
     if (!box || !soc || !this.data) return false;
-    const copy = emptyDashboard(this.data.events_total, can("admin"));
+    const copy = emptyDashboard(this.data.events_total, dashboardRole());
     if (!copy) {
-      if (soc.hidden || !box.hidden) {
+      const wasHidden = soc.hidden || !box.hidden;
+      if (wasHidden) {
         box.hidden = true;
         box.replaceChildren();
         delete box.dataset.mode;
         soc.hidden = false;
+        this.renderViewBar();
       }
       return false;
     }
     soc.hidden = true;
-    const mode = copy.load ? "load" : "wait";
+    if (bar) {
+      bar.hidden = true;
+      bar.replaceChildren();
+    }
+    const mode = copy.load ? "demo" : copy.href ? "ingest" : "read";
     if (box.hidden || box.dataset.mode !== mode) {
       box.dataset.mode = mode;
       box.hidden = false;
@@ -605,8 +633,10 @@ const Dash = {
         el("h2", {}, copy.title),
         el("p", {}, copy.body),
         copy.load
-          ? el("button", { type: "button", id: "dash-load-demo", onclick: () => guarded(() => this.loadDemo()) }, "Load demo data")
-          : el("p", { class: "muted" }, copy.hint)));
+          ? el("button", { type: "button", id: "dash-load-demo", onclick: () => guarded(() => this.loadDemo()) }, copy.label)
+          : copy.href
+          ? el("a", { class: "button", id: "dash-next", href: copy.href }, copy.label)
+          : null));
     }
     return true;
   },
@@ -636,9 +666,13 @@ const Dash = {
   },
   async loadViews() {
     if (!this.mounted) return;
-    try { this.views = await api("/api/dashboard/views"); }
-    catch (e) { return $("#dashboard-view-bar")?.replaceChildren(el("p", { class: "error", role: "alert" }, e.message)); }
-    this.renderViewBar();
+    try {
+      this.views = await api("/api/dashboard/views");
+      this.viewsError = "";
+    } catch (e) {
+      this.viewsError = e.message;
+    }
+    if (this.mounted) this.renderViewBar();
   },
   viewPayload(form) {
     const f = new FormData(form);
@@ -648,6 +682,18 @@ const Dash = {
   renderViewBar() {
     const bar = $("#dashboard-view-bar");
     if (!bar) return;
+    // An empty store has one next action. Do not leave the saved-view form up.
+    if (!this.data || emptyDashboard(this.data.events_total, "viewer")) {
+      bar.hidden = true;
+      bar.replaceChildren();
+      return;
+    }
+    bar.hidden = false;
+    const queue = el("a", { id: "dash-queue", href: "#alerts" }, "Open alert queue");
+    if (this.viewsError) {
+      bar.replaceChildren(queue, el("p", { class: "error", role: "alert" }, this.viewsError));
+      return;
+    }
     const picker = el("select", { name: "saved_view", "aria-label": "Saved dashboard view" },
       el("option", { value: "" }, "Default view"),
       ...this.views.map((v) => el("option", { value: v.id }, `${v.name} · ${v.visibility}${v.owner === state.user.username ? " · mine" : ""}`)));
@@ -684,7 +730,8 @@ const Dash = {
       }); });
       save = el("details", { class: "view-save" }, el("summary", {}, "Save a view"), form);
     }
-    const lead = [el("h1", { class: "view-name" }, this.currentView ? this.currentView.name : "Dashboard")];
+    // A link, not a redirect, so an explicit dashboard URL and a saved layout stay put.
+    const lead = [el("h1", { class: "view-name" }, this.currentView ? this.currentView.name : "Dashboard"), queue];
     if (layoutHidesMatrix(this.layout)) {
       lead.push(el("a", {
         class: "chip coverage-chip", id: "coverage-chip", href: "#coverage",
@@ -1095,12 +1142,13 @@ function incidentBoard(inc, alerts, perColumn) {
   if (inc.state === "ok") {
     for (const i of inc.list) cols[boardColumn(i.status)].push({
       href: `#incidents/${i.id}`, sev: i.severity, title: i.title, time: i.last_seen,
-      meta: `${i.alert_count || 0} ${i.alert_count === 1 ? "alert" : "alerts"}`, tags: boardTags(i.tactics, i.top_technique),
+      meta: `${i.alert_count || 0} ${i.alert_count === 1 ? "alert" : "alerts"}`,
+      owner: ownerName(i.assignee), tags: boardTags(i.tactics, i.top_technique),
     });
   } else {
     for (const a of alerts || []) cols[boardColumn(a.status)].push({
       href: `#alerts/${a.id}`, sev: a.severity, title: a.title, time: a.last_seen,
-      meta: `${a.event_count} events · ${a.rule_id}`, tags: [],
+      meta: `${a.event_count} events · ${a.rule_id}`, owner: ownerName(a.assignee), tags: [],
     });
   }
   const order = (x, y) => SEV_RANK[sevOf(y.sev)] - SEV_RANK[sevOf(x.sev)] || String(y.time).localeCompare(String(x.time));
@@ -1110,7 +1158,9 @@ function incidentBoard(inc, alerts, perColumn) {
       el("div", { class: "bh" }, el("span", {}, name[0].toUpperCase() + name.slice(1)), el("b", {}, items.length)),
       ...items.slice(0, perColumn).map((c) => el("a", { class: `bcard sev-${sevOf(c.sev)}`, href: c.href },
         el("div", { class: "bt" }, c.title),
-        el("div", { class: "bm" }, sevTag(c.sev), el("span", {}, c.meta), el("span", { class: "muted" }, ago(c.time))),
+        el("div", { class: "bm" }, sevTag(c.sev), el("span", {}, c.meta),
+          c.owner ? el("span", {}, c.owner) : null,
+          el("span", { class: "muted" }, ago(c.time))),
         c.tags.length ? el("div", { class: "btags" }, ...c.tags.map((t) => (t.kind === "tech"
           ? el("span", { class: "tag tech", title: techniqueTagTitle(t) }, t.id)
           : el("span", { class: "tag" }, t.text)))) : null)),

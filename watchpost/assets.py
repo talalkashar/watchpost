@@ -19,6 +19,7 @@ admin approves; `plan_change` checks it against the inventory at proposal and ag
 import ipaddress
 import json
 import re
+from itertools import chain
 
 from .db import audit, now_iso, row_to_dict, transaction
 from .normalize import SEVERITIES
@@ -496,5 +497,5 @@ def _reweigh_open(conn, idx):
 def for_entities(conn, hosts, ips):
     """Assets behind an incident's hosts and addresses, for detail views and reports."""
     idx = load_index(conn)
-    events = [{"host": h} for h in hosts or []] + [{"dest_ip": ip} for ip in ips or []]
+    events = chain(({"host": h} for h in hosts or ()), ({"dest_ip": ip} for ip in ips or ()))
     return [_public(a) for a in match(idx, events)]
