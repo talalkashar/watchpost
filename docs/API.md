@@ -66,8 +66,8 @@ Accepted fields (aliases in parentheses):
 | `user` | `username`, `TargetUserName`, `account`, `user.name` | |
 | `src_ip` | `source_ip`, `client_ip`, `ip`, `IpAddress`, `source.ip` | Must be a valid IPv4/IPv6 address |
 | `dest_ip` | `destination_ip`, `server_ip`, `dst_ip` | |
-| `dest_port` | `destination_port`, `dst_port`, `dport` | Integer 0–65535 (firewall events) |
-| `bytes` | `bytes_out`, `bytes_sent`, `sent_bytes`, `out_bytes` | Non-negative integer (outbound volume) |
+| `dest_port` | `destination_port`, `dst_port`, `dport` | Integer 0–65535. ASCII digits or a JSON number. `"443"` and `"0"` store 443 and 0. A JSON number 443 stores 443. `"４４３"`, `"4_43"`, `"+443"`, and `"²"` are `dest_port must be an integer` and store nothing. A bool stays rejected |
+| `bytes` | `bytes_out`, `bytes_sent`, `sent_bytes`, `out_bytes` | Non-negative integer. ASCII digits or a JSON number. `"1000"` and `"0"` stay those counts. `"1_000"`, `"１"`, `"+1"`, and `"²"` are `bytes must be an integer` |
 | `host` | `hostname`, `Computer`, `device`, `host.name` | |
 | `severity` | `level` | `info`, `low`, `medium`, `high`, or `critical`; defaults by type. ASCII letters fold, so `HIGH` is `high`. `HİGH` stays the severity error and is not `high` |
 | `outcome`, `message`, `source` | | Secrets like `password=` are redacted before storage |

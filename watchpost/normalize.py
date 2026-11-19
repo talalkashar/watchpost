@@ -157,13 +157,20 @@ def parse_ip(value, field):
 
 
 def parse_int(value, field, high):
+    # ASCII digits or a real int. Fullwidth digits, underscores, and a leading plus are refused.
     if value is None or (isinstance(value, str) and value.strip() in ("", "-")):
         return None
     if isinstance(value, bool):
         raise EventError(f"{field} must be an integer")
-    try:
-        number = int(str(value).strip())
-    except ValueError:
+    if isinstance(value, str):
+        text = value.strip()
+        # Fullwidth digits, Arabic-Indic digits, and ² are not ASCII digits.
+        if not text.isascii() or not text.isdigit():
+            raise EventError(f"{field} must be an integer")
+        number = int(text)
+    elif isinstance(value, int):
+        number = value
+    else:
         raise EventError(f"{field} must be an integer")
     if not 0 <= number <= high:
         raise EventError(f"{field} must be between 0 and {high}")
