@@ -852,6 +852,24 @@ def unsanctioned_cloud_service(events, params):
     return findings
 
 
+def _request_denied(event):
+    """Whether the projected record shows a denied call.
+
+    Detection does not receive the raw event. A CloudTrail error code survives as a
+    single-token parenthetical at the end of the message. A note with a space, such as
+    "(change ticket)", is not an error code. `outcome` is not a detection field; it
+    counts only when a caller still attached it.
+    """
+    outcome = event.get("outcome")
+    if isinstance(outcome, str) and _ascii_fold(outcome.strip()) == "failure":
+        return True
+    _, found, rest = (event.get("message") or "").partition(" on ")
+    if not found or not rest.endswith(")"):
+        return False
+    token = rest[rest.rfind("(") + 1:-1]
+    return bool(token) and " " not in token and token == token.strip()
+
+
 def cloud_logging_disabled(events, params):
     actions = {list_entry("logging_actions", a) for a in params["logging_actions"]}
     window = params["window_seconds"]
@@ -864,16 +882,48 @@ def cloud_logging_disabled(events, params):
     for principal, group in groups.items():
         for cluster in _clusters(group, window, lambda w: True):
             done = Counter(_action(e) for e in cluster)
+            denied = sum(1 for e in cluster if _request_denied(e))
+            shown = ", ".join(done)
+            if denied == len(cluster):
+                title = f"Cloud audit logging action requested by {principal} and denied: {shown}"
+                proved = "Each call was denied, so this record did not change logging."
+            elif denied:
+                title = (f"Cloud audit logging action requested by {principal}: {shown} "
+                         "(a denied call is included)")
+                proved = "A denied call is included. The record names the action that was requested."
+            else:
+                title = f"Cloud audit logging action requested by {principal}: {shown}"
+                proved = ("The record names the action that was requested, not that logging is off. "
+                          "Check the trail status.")
             ips = sorted({e.get("src_ip") or "unknown" for e in cluster})
             findings.append(_finding(
-                principal, cluster,
-                f"Cloud audit logging disabled by {principal}: {', '.join(done)}",
+                principal, cluster, title,
                 f"{principal} called {', '.join(f'{a} ({n})' for a, n in done.items())} between {cluster[0]['ts']} "
-                f"and {cluster[-1]['ts']} from {', '.join(ips[:5])}. These actions stop or delete cloud audit "
-                f"logging, which hides what happens next. A denied attempt is recorded the same way, so check "
-                f"whether logging is actually off.",
+                f"and {cluster[-1]['ts']} from {', '.join(ips[:5])}. {proved}",
             ))
     return findings
+
+
+# Titles that claim the trail is already off. A requested-action title does not match these.
+_SHUTDOWN_CLAIMS = ("disabled", "shutdown", "logging is off", "logging was off", "logging off")
+
+
+def stale_logging_display(conn):
+    """Alert titles for cloud_logging_disabled that still claim a completed shutdown.
+
+    Read only. Stored rows are left as they are, including rule id, name, and params.
+    """
+    rows = conn.execute(
+        "SELECT id, title FROM alerts WHERE rule_id = ? ORDER BY id",
+        ("cloud_logging_disabled",),
+    )
+    stale = []
+    for row in rows:
+        title = row["title"] or ""
+        folded = title.lower()
+        if any(claim in folded for claim in _SHUTDOWN_CLAIMS):
+            stale.append({"id": row["id"], "title": title})
+    return stale
 
 
 PRIVILEGED_TYPES = ("privilege_use", "privilege_escalation", "cloud_iam_change")

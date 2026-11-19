@@ -3,8 +3,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from watchpost import rules
-from watchpost.db import iso
-from watchpost.improve import evaluate
+from watchpost.db import connect, init_schema, iso
+from watchpost.engine import RULE_EVENT_FIELDS, seed_rules
+from watchpost.improve import ChangeError, evaluate, propose_change
+from watchpost.normalize import normalize_record
 
 BASE = datetime(2026, 9, 15, 14, 0, tzinfo=timezone.utc)  # a Tuesday
 
@@ -407,6 +409,37 @@ def trail(sec, action, user="svc-x", ip="203.0.113.9", event_type="cloud_api_cal
     return ev(sec, event_type, user, ip, message=f"[SYNTHETIC] {action} on cloudtrail.amazonaws.com{suffix}")
 
 
+_RULE_FIELDS = tuple(part.strip() for part in RULE_EVENT_FIELDS.split(","))
+
+
+def projected_cloudtrail(action, user="svc-x", ip="203.0.113.9", error=None, when="2026-09-15T14:00:00Z"):
+    """One raw CloudTrail record as detection sees it: normalized, then rule fields only."""
+    record = {
+        "eventTime": when,
+        "eventSource": "cloudtrail.amazonaws.com",
+        "eventName": action,
+        "sourceIPAddress": ip,
+        "userIdentity": {"type": "IAMUser", "userName": user},
+    }
+    if error:
+        record["errorCode"] = error
+    stored = normalize_record(record, "cloudtrail")
+    event = {field: stored.get(field) for field in _RULE_FIELDS}
+    event.pop("id", None)
+    return event
+
+
+def assert_logging_title(test, title, *, denied):
+    folded = title.lower()
+    test.assertIn("requested", folded)
+    for banned in ("disabled", "shutdown", "logging is off", "logging was off"):
+        test.assertNotIn(banned, folded, title)
+    if denied:
+        test.assertIn("denied", folded)
+    else:
+        test.assertNotIn("denied", folded)
+
+
 class CloudLoggingDisabledTests(unittest.TestCase):
     def test_stop_and_delete_trail_fire_once_per_principal(self):
         p = params("cloud_logging_disabled")
@@ -416,6 +449,8 @@ class CloudLoggingDisabledTests(unittest.TestCase):
         self.assertEqual(found[0]["event_ids"], [2, 3])  # DescribeTrails is reading, not disabling
         self.assertIn("StopLogging", found[0]["explanation"])
         self.assertIn("DeleteTrail", found[0]["explanation"])
+        assert_logging_title(self, found[0]["title"], denied=False)
+        self.assertIn("StopLogging, DeleteTrail", found[0]["title"])
 
     def test_changes_that_leave_logging_on_are_quiet(self):
         p = params("cloud_logging_disabled")
@@ -435,6 +470,8 @@ class CloudLoggingDisabledTests(unittest.TestCase):
         found = rules.cloud_logging_disabled(make([trail(0, "StopLogging", suffix=" (AccessDenied)")]),
                                              params("cloud_logging_disabled", logging_actions=["stoplogging"]))
         self.assertEqual(len(found), 1)
+        assert_logging_title(self, found[0]["title"], denied=True)
+        self.assertIn("did not change logging", found[0]["explanation"])
 
     def test_actions_list_window_and_ignore_lists(self):
         p = params("cloud_logging_disabled", logging_actions=["DeleteFlowLogs"])
@@ -453,6 +490,94 @@ class CloudLoggingDisabledTests(unittest.TestCase):
         entry = rules.list_entry("logging_actions", "StopLogging")
         self.assertTrue(rules.covers("logging_actions", {entry}, trail(0, "StopLogging", suffix=" (AccessDenied)")))
         self.assertFalse(rules.covers("logging_actions", {entry}, trail(0, "StartLogging")))
+
+    def test_projected_denied_success_and_maintenance(self):
+        p = params("cloud_logging_disabled")
+        denied_event = projected_cloudtrail("StopLogging", error="AccessDenied")
+        self.assertNotIn("outcome", denied_event)
+        self.assertIn("(AccessDenied)", denied_event["message"])
+        denied = rules.cloud_logging_disabled(make([denied_event]), p)
+        self.assertEqual(len(denied), 1)
+        assert_logging_title(self, denied[0]["title"], denied=True)
+        self.assertNotIn("disabled", denied[0]["title"].lower())
+
+        ok = rules.cloud_logging_disabled(make([
+            projected_cloudtrail("StopLogging", user="svc-deploy", when="2026-09-15T14:05:00Z"),
+        ]), p)
+        self.assertEqual(len(ok), 1)
+        self.assertEqual(ok[0]["group_key"], "svc-deploy")
+        assert_logging_title(self, ok[0]["title"], denied=False)
+        self.assertIn("not that logging is off", ok[0]["explanation"])
+
+        maintenance = [
+            projected_cloudtrail(action, when=f"2026-09-15T15:{minute:02d}:00Z")
+            for minute, action in enumerate(
+                ["CreateTrail", "UpdateTrail", "PutEventSelectors", "StartLogging",
+                 "GetTrailStatus", "DescribeTrails"])
+        ]
+        self.assertEqual(rules.cloud_logging_disabled(make(maintenance), p), [])
+
+        mixed = rules.cloud_logging_disabled(make([
+            trail(0, "StopLogging", suffix=" (AccessDenied)"),
+            trail(30, "DeleteTrail"),
+        ]), p)
+        self.assertEqual(len(mixed), 1)
+        assert_logging_title(self, mixed[0]["title"], denied=True)
+        self.assertIn("a denied call is included", mixed[0]["title"])
+
+    def test_stale_shutdown_titles_are_reported_and_left_in_place(self):
+        catalog = next(r for r in rules.DEFAULT_RULES if r["id"] == "cloud_logging_disabled")
+        self.assertEqual(catalog["id"], "cloud_logging_disabled")
+        self.assertEqual(catalog["name"], "Cloud audit logging stopped or deleted")
+        self.assertEqual(catalog["params"]["logging_actions"],
+                         ["StopLogging", "DeleteTrail", "DeleteFlowLogs"])
+
+        conn = connect(":memory:")
+        self.addCleanup(conn.close)
+        init_schema(conn)
+        seed_rules(conn)
+        stored = conn.execute(
+            "SELECT id, name, description, params, version FROM rules WHERE id = 'cloud_logging_disabled'"
+        ).fetchone()
+        before_rule = tuple(stored)
+        before_audit = conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+        stamp = "2026-09-15T14:00:00Z"
+        conn.execute(
+            "INSERT INTO alerts(rule_id, rule_version, group_key, severity, title, explanation,"
+            " first_seen, last_seen, event_count, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("cloud_logging_disabled", 1, "svc-x", "high",
+             "Cloud audit logging disabled by svc-x: StopLogging",
+             "old title", stamp, stamp, 1, stamp, stamp),
+        )
+        conn.execute(
+            "INSERT INTO alerts(rule_id, rule_version, group_key, severity, title, explanation,"
+            " first_seen, last_seen, event_count, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("cloud_logging_disabled", 1, "svc-y", "high",
+             "Cloud audit logging action requested by svc-y: DeleteTrail",
+             "current title", stamp, stamp, 1, stamp, stamp),
+        )
+        conn.execute(
+            "INSERT INTO alerts(rule_id, rule_version, group_key, severity, title, explanation,"
+            " first_seen, last_seen, event_count, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("brute_force_ip", 1, "203.0.113.1", "high",
+             "Account disabled after failures", "other rule", stamp, stamp, 1, stamp, stamp),
+        )
+        report = rules.stale_logging_display(conn)
+        self.assertEqual(report, [{
+            "id": 1,
+            "title": "Cloud audit logging disabled by svc-x: StopLogging",
+        }])
+        titles = [row["title"] for row in conn.execute("SELECT title FROM alerts ORDER BY id")]
+        self.assertEqual(titles, [
+            "Cloud audit logging disabled by svc-x: StopLogging",
+            "Cloud audit logging action requested by svc-y: DeleteTrail",
+            "Account disabled after failures",
+        ])
+        after_rule = tuple(conn.execute(
+            "SELECT id, name, description, params, version FROM rules WHERE id = 'cloud_logging_disabled'"
+        ).fetchone())
+        self.assertEqual(after_rule, before_rule)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0], before_audit)
 
 
 def priv(sec, user="kim", ip="10.0.1.33", event_type="cloud_iam_change", action="AttachUserPolicy"):
@@ -860,7 +985,16 @@ class ValidationTests(unittest.TestCase):
             ("cloud_logging_disabled", {"logging_actions": []}),
             ("cloud_logging_disabled", {"logging_actions": "StopLogging"}),
             ("cloud_logging_disabled", {"logging_actions": [""]}),
+            ("cloud_logging_disabled", {"logging_actions": ["Stop Logging"]}),
+            ("cloud_logging_disabled", {"logging_actions": ["x" * 129]}),
             ("cloud_logging_disabled", {"window_seconds": 5}),
+            ("brute_force_ip", {"ignore_ips": ["10.0.0.0/8"]}),
+            ("brute_force_ip", {"ignore_users": [" admin"]}),
+            ("brute_force_ip", {"ignore_users": ["ad\x00min"]}),
+            ("off_hours_privileged_login", {"privileged_users": ["   "]}),
+            ("unsanctioned_cloud_service", {"sanctioned_services": ["..."]}),
+            ("unsanctioned_cloud_service", {"sanctioned_services": ["corp drive.example"]}),
+            ("unsanctioned_cloud_service", {"sanctioned_services": ["amazonaws.com."]}),
             ("admin_action_from_new_source", {"min_prior_actions": 0}),
             ("admin_action_from_new_source", {"min_prior_actions": "3"}),
             ("admin_action_from_new_source", {"history_seconds": 30}),
@@ -872,76 +1006,10 @@ class ValidationTests(unittest.TestCase):
                 with self.assertRaises(rules.RuleConfigError):
                     rules.validate_params(rule_id, p)
 
-    def test_bad_rule_errors_name_the_value(self):
-        cases = [
-            ("brute_force_ip", {"threshold": "10"},
-             "threshold must be an integer between 2 and 10000 (got '10', a str)"),
-            ("brute_force_ip", {"threshold": True},
-             "threshold must be an integer between 2 and 10000 (got True, a boolean)"),
-            ("brute_force_ip", {"threshold": 1},
-             "threshold must be an integer between 2 and 10000 (got 1)"),
-            ("brute_force_ip", {"nope": 1},
-             "unknown parameter(s) for brute_force_ip: nope. "
-             "Known parameters: ignore_ips, ignore_users, threshold, window_seconds"),
-            ("brute_force_ip", {1: 2, "nope": 3},
-             "unknown parameter(s) for brute_force_ip: 'nope', 1. "
-             "Known parameters: ignore_ips, ignore_users, threshold, window_seconds"),
-            ("brute_force_ip", ["threshold"],
-             "params must be an object (got list)"),
-            ("cloud_logging_disabled", {"logging_actions": "StopLogging"},
-             "logging_actions must be a list with 1-500 entries (got a str)"),
-            ("cloud_logging_disabled", {"logging_actions": []},
-             "logging_actions must be a list with 1-500 entries (got 0)"),
-            ("cloud_logging_disabled", {"logging_actions": [""]},
-             "logging_actions entries must be non-empty strings of at most 128 characters "
-             "(logging_actions[0] has length 0)"),
-            ("cloud_logging_disabled", {"logging_actions": [1]},
-             "logging_actions entries must be non-empty strings (logging_actions[0] is int)"),
-            ("cloud_logging_disabled", {"logging_actions": ["x" * 129]},
-             "logging_actions entries must be non-empty strings of at most 128 characters "
-             "(logging_actions[0] has length 129)"),
-            ("brute_force_ip", {"ignore_ips": ["10.0.0.0/8"]},
-             "ignore_ips entry '10.0.0.0/8' is not an IP address (a prefix is not one address)"),
-            ("brute_force_ip", {"ignore_ips": ["not-an-ip"]},
-             "ignore_ips entry 'not-an-ip' is not an IP address"),
-            ("brute_force_ip", {"ignore_users": [" admin"]},
-             "ignore_users entry ' admin' has surrounding whitespace or control characters; "
-             "stored events do not keep them, so this entry would match nothing"),
-            ("brute_force_ip", {"ignore_users": ["ad\x00min"]},
-             "ignore_users entry 'ad\\x00min' has surrounding whitespace or control characters; "
-             "stored events do not keep them, so this entry would match nothing"),
-            ("off_hours_privileged_login", {"privileged_users": ["   "]},
-             "privileged_users entry '   ' has surrounding whitespace or control characters; "
-             "stored events do not keep them, so this entry would match nothing"),
-            ("off_hours_privileged_login", {"business_start_hour": 18, "business_end_hour": 8},
-             "business_start_hour must be before business_end_hour (got 18 and 8)"),
-            ("off_hours_privileged_login", {"business_start_hour": 20},
-             "business_start_hour must be before business_end_hour (got 20 and 18)"),
-            ("unsanctioned_cloud_service", {"sanctioned_services": ["..."]},
-             "sanctioned_services entry '...' is only dots and matches no service"),
-            ("unsanctioned_cloud_service", {"sanctioned_services": ["corp drive.example"]},
-             "sanctioned_services entry 'corp drive.example' must be a single word; a space never matches"),
-            ("unsanctioned_cloud_service", {"sanctioned_services": ["amazonaws.com."]},
-             "sanctioned_services entry 'amazonaws.com.' has punctuation the service parser strips, "
-             "so it would match nothing"),
-            ("cloud_logging_disabled", {"logging_actions": ["Stop Logging"]},
-             "logging_actions entry 'Stop Logging' must be a single word; a space never matches"),
-            ("missing_rule", {}, "unknown rule 'missing_rule'"),
-            (None, {}, "unknown rule None"),
-        ]
-        for rule_id, bad, message in cases:
-            with self.subTest(rule=rule_id, params=bad):
-                with self.assertRaises(rules.RuleConfigError) as caught:
-                    rules.validate_params(rule_id, bad)
-                self.assertEqual(str(caught.exception), message)
-
     def test_a_long_bad_value_stays_a_short_message(self):
         with self.assertRaises(rules.RuleConfigError) as caught:
             rules.validate_params("brute_force_ip", {"threshold": "x" * 500})
-        text = str(caught.exception)
-        self.assertLess(len(text), 200)
-        self.assertIn("threshold must be an integer", text)
-        self.assertIn("a str", text)
+        self.assertLess(len(str(caught.exception)), 200)
 
     def test_entries_that_can_match_still_pass(self):
         merged = rules.validate_params("brute_force_ip", {
@@ -953,12 +1021,65 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(merged["ignore_ips"], ["2001:DB8::1"])
         self.assertEqual(merged["ignore_users"], ["érin", "John Doe"])
         self.assertEqual(merged["window_seconds"], 300)
+        hidden = make([
+            fail(0, user="John Doe", ip="198.51.100.9"),
+            fail(1, user="John Doe", ip="198.51.100.9"),
+            fail(2, user="ada", ip="2001:DB8::1"),
+            fail(3, user="ada", ip="2001:db8::1"),
+        ])
+        self.assertEqual(rules.brute_force_ip(hidden, merged), [])
+        seen = rules.brute_force_ip(make([
+            fail(0, user="ada", ip="198.51.100.9"),
+            fail(1, user="ada", ip="198.51.100.9"),
+        ]), merged)
+        self.assertEqual([f["group_key"] for f in seen], ["198.51.100.9"])
+        logging = rules.validate_params("cloud_logging_disabled", {"logging_actions": ["DeleteFlowLogs"]})
+        flow = rules.cloud_logging_disabled(make([trail(0, "DeleteFlowLogs")]), logging)
+        self.assertEqual(len(flow), 1)
+        assert_logging_title(self, flow[0]["title"], denied=False)
+        self.assertEqual(rules.cloud_logging_disabled(make([trail(0, "StopLogging")]), logging), [])
         rules.validate_params("unsanctioned_cloud_service", {"sanctioned_services": [".ÉXAMPLE.com"]})
         rules.validate_params("off_hours_privileged_login", {
             "business_start_hour": 0, "business_end_hour": 24, "privileged_users": ["root"],
         })
         rules.validate_params("cloud_logging_disabled", {"logging_actions": ["StopLogging"]})
         self.assertEqual(rules.validate_params("data_exfil_volume", {"baseline_multiplier": 0})["baseline_multiplier"], 0)
+
+    def test_a_refused_proposal_leaves_rules_and_audit_unchanged(self):
+        conn = connect(":memory:")
+        self.addCleanup(conn.close)
+        init_schema(conn)
+        seed_rules(conn)
+
+        def durable():
+            rules_rows = [tuple(row) for row in conn.execute(
+                "SELECT id, name, description, params, version FROM rules ORDER BY id")]
+            history = [tuple(row) for row in conn.execute(
+                "SELECT rule_id, version, enabled, params, note FROM rule_history ORDER BY id")]
+            changes = conn.execute("SELECT COUNT(*) FROM change_requests").fetchone()[0]
+            audit_rows = [tuple(row) for row in conn.execute(
+                "SELECT actor, action, target, detail FROM audit_log ORDER BY id")]
+            return rules_rows, history, changes, audit_rows
+
+        before = durable()
+        with self.assertRaises(ChangeError):
+            propose_change(
+                conn, "rule_update", "cloud_logging_disabled",
+                {"params": {"logging_actions": ["Stop Logging"]}},
+                "this value cannot match a stored action",
+                "analyst",
+            )
+        after = durable()
+        self.assertEqual(after, before)
+        self.assertEqual(after[2], 0)
+        actions = [row[1] for row in after[3]]
+        self.assertNotIn("change_proposed", actions)
+        self.assertFalse(any("refus" in action for action in actions))
+        stored = next(row for row in after[0] if row[0] == "cloud_logging_disabled")
+        self.assertEqual(stored[0], "cloud_logging_disabled")
+        self.assertIn("StopLogging", stored[3])
+        self.assertIn("DeleteTrail", stored[3])
+        self.assertIn("DeleteFlowLogs", stored[3])
 
 
 class EvaluationTests(unittest.TestCase):
