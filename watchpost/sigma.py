@@ -355,6 +355,8 @@ REFUSED_MODIFIERS = {
 _MATCH_MODS = ("contains", "startswith", "endswith", "cidr")
 _WILDCARD_MODS = ("contains", "startswith", "endswith")
 _ENCODE_MODS = ("base64", "base64offset")
+# A full base64 quantum. Shorter slices (including the empty one) match unrelated text under contains.
+_MIN_ENCODED = 4
 # Fixed scanner. It is not a regular expression taken from the rule (`re` stays refused).
 _WINDASH_RE = re.compile(r"\B[-/]\b")
 _WINDASH_CHARS = ("-", "/", "\u2013", "\u2014", "\u2015")
@@ -398,13 +400,35 @@ def _unescape_literals(value, where):
     return "".join(out)
 
 
-def _windash_values(text, where):
-    """Each leading `-` or `/` becomes `-`, `/`, or a Unicode dash. At most three per value."""
-    positions = [m.start() for m in _WINDASH_RE.finditer(text)]
-    if len(positions) > 3:
-        raise SigmaError(f"{where}: windash expands at most three dashes in one value")
-    if not positions:
-        return [text]
+def _raise_too_large():
+    raise SigmaError(f"the compiled detection is too large (at most {MAX_COMPILED_VALUES} values and "
+                     f"{MAX_COMPILED_CHARS // 1024} KB once the condition is expanded); a condition that "
+                     "names the same selections many times multiplies them")
+
+
+class _ExpandBudget:
+    """Size of the detection as selections are compiled, before a condition repeats one.
+
+    Expansion checks `reserve` before it builds a product. `_check_budget` still walks the finished
+    tree, where repeating a condition multiplies the shared selections.
+    """
+
+    def __init__(self):
+        self.values = 0
+        self.chars = 0
+
+    def reserve(self, n_values, n_chars):
+        if self.values + n_values > MAX_COMPILED_VALUES or self.chars + n_chars > MAX_COMPILED_CHARS:
+            _raise_too_large()
+
+    def add(self, n_values, n_chars):
+        self.reserve(n_values, n_chars)
+        self.values += n_values
+        self.chars += n_chars
+
+
+def _windash_expand(text, positions):
+    """Each listed `-` or `/` becomes `-`, `/`, or a Unicode dash. `positions` is 1 to 3."""
     chars = list(text)
     expanded = []
     for combo in itertools.product(_WINDASH_CHARS, repeat=len(positions)):
@@ -416,7 +440,10 @@ def _windash_values(text, where):
 
 
 def _base64_offsets(text):
-    """Three shifted encodings of `text`, including an empty slice when the input is very short."""
+    """Three shifted encodings of `text`, the same slices pySigma emits.
+
+    A short input can leave an empty or one-character slice. `_transform_values` rejects those.
+    """
     data = text.encode()
     out = []
     for i in range(3):
@@ -426,25 +453,53 @@ def _base64_offsets(text):
     return out
 
 
-def _transform_values(text, mods, where):
-    """Apply windash / base64 / base64offset left to right. Each step ORs its results."""
+def _transform_values(text, mods, where, budget):
+    """Apply windash / base64 / base64offset left to right. Each step ORs its results.
+
+    The product is built only after `budget.reserve` accepts its size. An encoded fragment shorter
+    than `_MIN_ENCODED` is ambiguous: it is not stored, and the value is refused.
+    """
     current = [text]
     for mod in mods:
         if mod == "windash":
-            current = [item for s in current for item in _windash_values(s, where)]
+            staged, add_n, add_c = [], 0, 0
+            for s in current:
+                positions = [m.start() for m in _WINDASH_RE.finditer(s)]
+                if len(positions) > 3:
+                    raise SigmaError(f"{where}: windash expands at most three dashes in one value")
+                produced = 5 ** len(positions)
+                add_n += produced
+                add_c += produced * len(s)
+                staged.append((s, positions))
+            budget.reserve(add_n, add_c)
+            nxt = []
+            for s, positions in staged:
+                nxt.extend(_windash_expand(s, positions) if positions else [s])
+            current = nxt
         elif mod in _ENCODE_MODS:
+            mult = 3 if mod == "base64offset" else 1
+            add_c = 0
+            for s in current:
+                # Offset slices are at most the base64 of the text plus two prefix spaces.
+                nbytes = len(s.encode()) + (2 if mod == "base64offset" else 0)
+                add_c += mult * (4 * ((nbytes + 2) // 3))
+            budget.reserve(len(current) * mult, add_c)
             nxt = []
             for s in current:
                 plain = _unescape_literals(s, where)
                 if mod == "base64":
-                    nxt.append(base64.b64encode(plain.encode()).decode())
+                    encoded = [base64.b64encode(plain.encode()).decode()]
                 else:
-                    nxt.extend(_base64_offsets(plain))
+                    encoded = _base64_offsets(plain)
+                if any(len(fragment) < _MIN_ENCODED for fragment in encoded):
+                    raise SigmaError(f"{where}: {mod} produced an ambiguous short encoding")
+                nxt.extend(encoded)
             current = nxt
+    budget.add(len(current), sum(len(s) for s in current))
     return current
 
 
-def _field_match(key, value, where):
+def _field_match(key, value, where, budget):
     """One `field|mod|...: value(s)` entry -> a match node."""
     if not isinstance(key, str) or not key:
         raise SigmaError(f"{where}: field names must be strings")
@@ -479,7 +534,10 @@ def _field_match(key, value, where):
             if not isinstance(v, str):
                 raise SigmaError(f"{where}: {transforms[0]} applies to strings")
             _value(v, where)
-            groups.append(_transform_values(v, transforms, where))
+            groups.append(_transform_values(v, transforms, where, budget))
+        # windash of "" is one empty alternative. Under contains/startswith/endswith that is a wildcard.
+        if kind in _WILDCARD_MODS and any(item == "" for group in groups for item in group):
+            raise SigmaError(f"{where}: {transforms[0]} produced an ambiguous short encoding")
         mapped = _field(field)
         if "all" in mods and len(groups) > 1:
             # `|all` ANDs the author's values. Each value's expansion stays OR-linked.
@@ -499,18 +557,19 @@ def _field_match(key, value, where):
                 raise SigmaError(f"{where}: {v!r} is not a CIDR network")
     elif kind != "eq" and None in values:
         raise SigmaError(f"{where}: null cannot be combined with {kind}")
+    budget.add(len(values), sum(len(str(v)) for v in values))
     return {"op": "match", "field": _field(field), "mod": kind, "all": "all" in mods, "values": values}
 
 
-def _selection(name, body):
+def _selection(name, body, budget):
     where = f"selection {name!r}"
     if isinstance(body, dict):
         if not body:
             raise SigmaError(f"{where} is empty")
-        args = [_field_match(k, v, where) for k, v in body.items()]
+        args = [_field_match(k, v, where, budget) for k, v in body.items()]
         return args[0] if len(args) == 1 else {"op": "and", "args": args}
     if isinstance(body, list) and body and all(isinstance(b, dict) for b in body):
-        args = [_selection(name, b) for b in body]  # a list of maps: any of them
+        args = [_selection(name, b, budget) for b in body]  # a list of maps: any of them
         return args[0] if len(args) == 1 else {"op": "or", "args": args}
     if isinstance(body, (list, str, int)) and not isinstance(body, bool):
         # Keywords: a bare value or list of values, matched as a substring of the event message.
@@ -518,8 +577,9 @@ def _selection(name, body):
         if not values or len(values) > MAX_VALUES or not all(isinstance(v, (str, int)) and not isinstance(v, bool)
                                                               for v in values):
             raise SigmaError(f"{where}: keyword lists hold 1-{MAX_VALUES} strings")
-        return {"op": "match", "field": "message", "mod": "contains", "all": False,
-                "values": [_value(v, where) for v in values]}
+        values = [_value(v, where) for v in values]
+        budget.add(len(values), sum(len(str(v)) for v in values))
+        return {"op": "match", "field": "message", "mod": "contains", "all": False, "values": values}
     raise SigmaError(f"{where} must be a map of fields, a list of maps, or a keyword list")
 
 
@@ -671,7 +731,8 @@ def compile_rule(source):
         if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.\-]+", name) or \
                 name.lower() in ("and", "or", "not", "of", "them", "near", "all", "1"):
             raise SigmaError(f"selection name {name!r} is not usable in a condition")
-    selections = {name: _selection(name, body) for name, body in named.items()}
+    budget = _ExpandBudget()
+    selections = {name: _selection(name, body, budget) for name, body in named.items()}
     tree = _Condition(detection["condition"], selections).parse()
     _check_budget(tree)
 
@@ -771,9 +832,7 @@ def _check_budget(tree):
             values += len(node["values"])
             chars += sum(len(str(v)) for v in node["values"])
         if values > MAX_COMPILED_VALUES or chars > MAX_COMPILED_CHARS:
-            raise SigmaError(f"the compiled detection is too large (at most {MAX_COMPILED_VALUES} values and "
-                             f"{MAX_COMPILED_CHARS // 1024} KB once the condition is expanded); a condition that "
-                             "names the same selections many times multiplies them")
+            _raise_too_large()
 
 
 # --- Evaluation ---------------------------------------------------------------------------------
@@ -839,6 +898,21 @@ def _glob(pattern, text):
     return p == len(pattern)
 
 
+def _legacy_short_offset(mod, values):
+    """Stored base64offset of a 0- or 1-byte input includes an empty alternative.
+
+    Under contains/startswith/endswith that empty alternative is a wildcard. A sole empty value
+    is an intentional empty-field match and is left alone. When every other alternative is a
+    single character, nothing identifies the evidence, so the node matches nothing.
+    """
+    if mod not in _WILDCARD_MODS or len(values) < 2 or not any(v == "" for v in values):
+        return values
+    for v in values:
+        if v != "" and (not isinstance(v, str) or len(v) > 1):
+            return values
+    return []
+
+
 class _Compiled:
     """Patterns prepared once per run; `matches(event)` then walks the tree."""
 
@@ -849,8 +923,12 @@ class _Compiled:
     def _patterns(self, node):
         key = id(node)
         if key not in self.cache:
+            values = _legacy_short_offset(node["mod"], node["values"])
+            if not values:
+                self.cache[key] = []
+                return []
             pats = []
-            for v in node["values"]:
+            for v in values:
                 if v is None:
                     pats.append(None)
                 elif node["mod"] == "cidr":
@@ -892,7 +970,10 @@ class _Compiled:
         if op == "not":
             return not self.matches(event, node["arg"])
         value = event.get(node["field"])
-        hits = (self._one(p, node["mod"], value) for p in self._patterns(node))
+        pats = self._patterns(node)
+        if not pats:
+            return False
+        hits = (self._one(p, node["mod"], value) for p in pats)
         return all(hits) if node["all"] else any(hits)
 
 

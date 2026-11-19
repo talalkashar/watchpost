@@ -241,6 +241,90 @@ class CompileTests(unittest.TestCase):
                     compiled(det)
                 self.assertIn(reason, str(ctx.exception))
 
+    def test_short_transforms_do_not_match_unrelated_text(self):
+        benign = {"message": "the host finished a health check"}
+        refused = (
+            "  sel:\n    message|base64offset|contains: a\n  condition: sel\n",
+            "  sel:\n    message|base64offset|contains: ''\n  condition: sel\n",
+            "  sel:\n    message|base64: ''\n  condition: sel\n",
+            "  sel:\n    message|base64offset: ab\n  condition: sel\n",
+            "  sel:\n    message|base64offset|contains: AAA\n  condition: sel\n",
+            "  sel:\n    message|windash|contains: ''\n  condition: sel\n",
+        )
+        for det in refused:
+            with self.subTest(detection=det):
+                with self.assertRaises(sigma.SigmaError) as ctx:
+                    compiled(det)
+                self.assertIn("ambiguous", str(ctx.exception))
+        one = compiled("  sel:\n    message|base64: a\n  condition: sel\n")
+        self.assertEqual(one["detection"]["values"], ["YQ=="])
+        self.assertTrue(sigma.matches(one, {"message": "YQ=="}))
+        self.assertFalse(sigma.matches(one, benign))
+        offset = compiled("  sel:\n    message|base64offset|contains: AAAA\n  condition: sel\n")
+        self.assertEqual(offset["detection"]["values"], ["QUFBQ", "FBQU", "BQUFB"])
+        for frag in offset["detection"]["values"]:
+            self.assertTrue(sigma.matches(offset, {"message": f"xx{frag}yy"}), frag)
+        self.assertFalse(sigma.matches(offset, benign))
+        cmd = compiled("  sel:\n    message|base64offset|contains: 'cmd\\?.exe'\n  condition: sel\n")
+        self.assertTrue(sigma.matches(cmd, {"message": "prefix Y21kPy5leG suffix"}))
+        self.assertFalse(sigma.matches(cmd, benign))
+
+    def test_stored_short_offset_matches_nothing(self):
+        def legacy(values, mod="contains", all_flag=False):
+            return {"title": "legacy", "detection": {
+                "op": "match", "field": "message", "mod": mod, "all": all_flag, "values": values}}
+
+        benign = {"message": "the host finished a health check"}
+        stored = legacy(["Y", "", "h"])
+        self.assertEqual(sigma.validate_params(stored), stored)
+        self.assertEqual(rules_mod.validate_params("sigma_legacy_offset", stored), stored)
+        for mod in ("contains", "startswith", "endswith"):
+            p = legacy(["Y", "", "h"], mod)
+            self.assertFalse(sigma.matches(p, benign), mod)
+            self.assertFalse(sigma.matches(p, {"message": "hello"}), mod)
+            self.assertFalse(sigma.matches(p, {"message": ""}), mod)
+        blank = legacy(["", "", ""], all_flag=True)
+        self.assertFalse(sigma.matches(blank, benign))
+        self.assertFalse(sigma.matches(blank, {"message": ""}))
+        events = [
+            {"id": 1, "ts": "2026-09-15T12:00:00+00:00", "src_ip": "198.51.100.8", "message": benign["message"]},
+            {"id": 2, "ts": "2026-09-15T12:00:01+00:00", "src_ip": "198.51.100.9", "message": "hello"},
+        ]
+        self.assertEqual(sigma.run(events, stored), [])
+        valid = legacy(["Y21kPy5leG", "NtZD8uZXhl", "jbWQ/LmV4Z"])
+        self.assertTrue(sigma.matches(valid, {"message": "prefix Y21kPy5leG suffix"}))
+        self.assertFalse(sigma.matches(valid, benign))
+        exact = legacy(["Y", "", "h"], "eq")
+        self.assertFalse(sigma.matches(exact, benign))
+        self.assertTrue(sigma.matches(exact, {"message": "h"}))
+        self.assertTrue(sigma.matches(exact, {"message": ""}))
+
+    def test_intentional_empty_equality_stays(self):
+        benign = {"message": "the host finished a health check"}
+        empty = compiled("  sel:\n    message: ''\n  condition: sel\n")
+        self.assertTrue(sigma.matches(empty, {"message": ""}))
+        self.assertFalse(sigma.matches(empty, benign))
+        for mod in ("contains", "startswith", "endswith"):
+            p = compiled(f"  sel:\n    message|{mod}: ''\n  condition: sel\n")
+            self.assertTrue(sigma.matches(p, {"message": ""}), mod)
+            self.assertTrue(sigma.matches(p, benign), mod)
+        letter = compiled("  sel:\n    message|contains: h\n  condition: sel\n")
+        self.assertTrue(sigma.matches(letter, {"message": "hello"}))
+        self.assertFalse(sigma.matches(letter, {"message": "benign"}))
+        author = compiled("  sel:\n    message|contains:\n      - ''\n      - ab\n  condition: sel\n")
+        self.assertTrue(sigma.matches(author, benign))
+
+    def test_transform_expansion_is_capped_before_allocation(self):
+        one = compiled("  sel:\n    message|windash|contains: '-a -b -c'\n  condition: sel\n")
+        self.assertEqual(len(one["detection"]["values"]), 125)
+        self.assertTrue(sigma.matches(one, {"message": "run -a -b -c"}))
+        lines = "".join(f"      - '-a -b -c {i:02d}'\n" for i in range(17))
+        started = time.monotonic()
+        with self.assertRaises(sigma.SigmaError) as ctx:
+            compiled(f"  sel:\n    message|windash|contains:\n{lines}  condition: sel\n")
+        self.assertIn("too large", str(ctx.exception))
+        self.assertLess(time.monotonic() - started, 1.0)
+
     def test_conditions(self):
         det = ("  sel_a:\n    user: alice\n  sel_b:\n    src_ip: 203.0.113.9\n  other:\n    host: web01\n"
                "  condition: {}\n")
@@ -520,6 +604,31 @@ class ImportWorkflowTests(ServerTestCase):
         rule = self.rule(admin, "sigma_failed_admin_login_from_external_source")
         self.assertEqual((rule["severity"], rule["enabled"]), ("high", False))
         self.assertEqual([t["id"] for t in rule["techniques"]], ["T1110.001"])
+
+    def test_encoded_command_alerts_only_on_the_fragment(self):
+        source = rule_yaml("  sel:\n    message|base64offset|contains: 'cmd\\?.exe'\n  condition: sel\n",
+                           title="Encoded Command")
+        rule_id = sigma.compile_rule(source)["rule_id"]
+        malicious = {"message": "prefix Y21kPy5leG suffix"}
+        benign = {"message": "the host finished a health check"}
+        sample = {"malicious": [malicious], "benign": [benign]}
+        analyst, admin = self.client("analyst"), self.client("admin")
+        status, change, _ = self.import_rule(analyst, source, sample)
+        self.assertEqual(status, 201, change)
+        self.assertTrue(change["evaluation"]["sample"]["passes"])
+        self.approve(admin, change)
+        status, change, _ = analyst.post(f"/api/rules/{rule_id}/proposals",
+                                         {"enabled": True, "reason": "turn it on"})
+        self.assertEqual(status, 201, change)
+        self.approve(admin, change)
+        base = utcnow() - timedelta(minutes=30)
+        analyst.post("/api/ingest", {"source": "host", "events": [
+            {"ts": iso(base), "type": "process", "src_ip": "198.51.100.8", "message": malicious["message"]},
+            {"ts": iso(base + timedelta(minutes=1)), "type": "process", "src_ip": "198.51.100.9",
+             "message": benign["message"]}]})
+        alerts = [a for a in analyst.get(f"/api/alerts?rule_id={rule_id}")[1] if a["rule_id"] == rule_id]
+        self.assertEqual(len(alerts), 1, alerts)
+        self.assertEqual(alerts[0]["group_key"], "198.51.100.8")
 
     def test_imports_spend_the_backtest_buckets(self):
         analyst = self.client("analyst")
