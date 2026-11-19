@@ -397,9 +397,12 @@ def parse_stage(text):
     command, rest = tokens[0].translate(_ASCII_FOLD), tokens[1:]
     if command not in COMMANDS:
         raise HuntError(f"unknown command {tokens[0]!r}; supported commands are stats, top and timechart")
-    lowered = [t.lower() for t in rest]
+    # ASCII letters only. BY is by, COUNT is count, SPAN=1H is span=1h.
+    # bİ stays bİ, not by, and the error quotes the original token with no combining dot.
+    # Not str.lower().
+    folded = [t.translate(_ASCII_FOLD) for t in rest]
     if command == "stats":
-        split = lowered.index("by") if "by" in lowered else len(rest)
+        split = folded.index("by") if "by" in folded else len(rest)
         aggregates = []
         for token in rest[:split]:
             if token == ",":
@@ -435,7 +438,7 @@ def parse_stage(text):
         return {"command": "top", "limit": limit, "by": [_group_field(words[0])]}
     span, by, pos = None, [], 0
     while pos < len(rest):
-        token = lowered[pos]
+        token = folded[pos]
         if token.startswith("span="):
             if span is not None or token[5:] not in SPANS:
                 raise HuntError(f"timechart span must be one of {', '.join(SPANS)} (given once)")
