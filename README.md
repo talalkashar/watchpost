@@ -20,11 +20,11 @@ Watchpost is a SIEM in the Python standard library. It ingests logs, runs explai
 
 - **Ingests** JSON, CSV, Linux `auth.log`, Windows Security events, nginx and Apache access logs, firewall and VPN logs, and cloud audit logs. Input is a file upload, an authenticated API, a syslog listener, or `scripts/shipper.py`. Normalization writes one schema.
 - **Detects** with fifteen built-in rules. Each rule is a pure function. Each alert stores a plain-English explanation and the event ids behind it. The rules are listed under [Detections](#detections).
-- **Maps to MITRE ATT&CK.** A technique is validated only when an enabled rule catches a labeled attack scenario. The other grades are mapped, disabled, and gap.
+- **Maps to MITRE ATT&CK.** Today's catalog is the 20 techniques in `watchpost/attack.py`, not the full matrix. A technique is validated only when an enabled rule detects a labeled synthetic scenario tagged with that technique. That grade is not a claim about real traffic. The other grades are mapped, disabled, and gap.
 - **Correlates** alerts that share an IP, account, or host into incidents with kill-chain stages. An incident exports a case record as JSON or Markdown, and a report as Markdown or PDF.
 - **Hunts** with one line: `field:value`, `NOT`, `last:7d`, and one of `| stats`, `| top`, or `| timechart`. The compiler uses a field whitelist and bound values. A saved search can be promoted to a detection.
 - **Tunes** from analyst feedback. The proposal is backtested on stored events. A second person approves it. Rules export and import as versioned JSON. A subset of Sigma imports.
-- **Secures itself** with PBKDF2 password hashes, lockout, server-side sessions, TOTP, and CSRF protection. The audit log is a hash chain. Viewer responses are masked.
+- **Secures itself** with PBKDF2 password hashes, lockout, server-side sessions, TOTP, and CSRF protection. The audit log is a hash chain. `viewer_masking` defaults to off (`0` in `watchpost/improve.py`). When a reviewed change sets it to `1`, only the `viewer` role sees pseudonyms (`user-` and `internal-`, eight hex digits) for known usernames and internal IPs. Analyst and admin responses are not masked. Public IPs, host names, and the signed-in viewer's own name stay visible.
 
 ## Detections
 
@@ -44,11 +44,13 @@ Fifteen threshold rules. No machine learning. Default parameters are in `watchpo
 | `cloud_iam_change_by_new_principal` | An IAM change by a principal with no recent cloud activity | high | T1098.001, T1136.003, T1078.004 |
 | `data_exfil_volume` | A large outbound transfer, or many cloud data reads, by one principal | high | T1530, T1048 |
 | `unsanctioned_cloud_service` | Use of a cloud service that is not on the sanctioned list | medium | T1567 |
-| `cloud_logging_disabled` | A cloud audit event that stops or deletes logging | high | T1562.008 |
+| `cloud_logging_disabled` | A cloud audit request whose action is `StopLogging`, `DeleteTrail`, or `DeleteFlowLogs`, including a denied call | high | T1685.002 |
 | `admin_action_from_new_source` | A privileged action from a source IP new to that principal | medium | T1078, T1078.004 |
-| `log_source_silent` | A log source with a learned cadence stops sending | medium | T1562.006 |
+| `log_source_silent` | A source with a learned cadence goes quiet (an arrival gap, not a fixed event count) | medium | T1685 |
 
-Impossible-travel positions come from a synthetic geo table for demo address ranges. An unmapped address does not alert. `data_exfil_volume` stays on flat thresholds unless an approved exception turns on a per-principal baseline. `log_source_silent` uses arrival gaps, not a fixed event count.
+Impossible-travel positions come from a synthetic geo table for demo address ranges only (RFC 5737 and RFC 1918). That is not a GeoIP lookup. An unmapped address does not alert. `data_exfil_volume` stays on flat thresholds unless an approved exception turns on a per-principal baseline. `log_source_silent` compares arrival gaps with a learned cadence. A gap is not proof the source was tampered with. `cloud_logging_disabled` matches the action name on the request, including a denied call, and does not prove that logging stopped.
+
+Open **Alerts** (`#alerts`), then a row (`#alerts/<id>`). The **Evidence** card lists the stored events for that alert. The same rows are the `evidence` array on `GET /api/alerts/<id>`.
 
 ## How it works
 
@@ -80,7 +82,7 @@ cd watchpost
 On first start, generated passwords are written to `data/initial_credentials.txt` (mode 0600). Set `SIEM_ADMIN_PASSWORD`, `SIEM_ANALYST_PASSWORD`, and `SIEM_VIEWER_PASSWORD` to choose them. Sign in as `admin`. Open **Admin → Load synthetic demo data**.
 
 ```bash
-./run_tests.sh    # 1326 unit and integration tests + a 26-step end-to-end smoke check
+./run_tests.sh    # unit and integration tests, then a 26-step end-to-end smoke check
 ```
 
 CI runs the suite on Python 3.11 through 3.14.
