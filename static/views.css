@@ -324,6 +324,10 @@ body[data-view="alerts"] #view > .card .table-wrap td:nth-child(6) {
 }
 body[data-view="alerts"] #view > .card tbody tr:nth-child(even) { background: rgb(255 255 255 / .02); }
 
+.table-empty { margin: 8px 0; padding-block: 12px; border-block-start: 1px solid var(--line); }
+.event-details { display: none; }
+.event-message { overflow-wrap: anywhere; }
+
 /* Event log: fixed tracks for the short columns, message fills whatever is left and wraps. */
 .event-log table {
   table-layout: fixed;
@@ -339,12 +343,16 @@ body[data-view="alerts"] #view > .card tbody tr:nth-child(even) { background: rg
 .event-log th:nth-child(5), .event-log td:nth-child(5) { width: 124px; }
 .event-log th:nth-child(6), .event-log td:nth-child(6) { width: 76px; }
 .event-log th:nth-child(7), .event-log td:nth-child(7) { width: 188px; }
+.event-results th:nth-child(6), .event-results td:nth-child(6) { width: 138px; }
+.event-results th:nth-child(7), .event-results td:nth-child(7) { width: 126px; }
+.event-host { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .event-log td:nth-child(-n+6) { white-space: nowrap; }
 /* Long type names and source names wrap onto the stamp's second line. The pill stays whole. */
+.event-results td:nth-child(n+4):nth-child(-n+6),
 .event-log td:nth-child(3),
 .event-log td:nth-child(7) { white-space: normal; overflow-wrap: anywhere; }
 .event-log td:nth-child(7) .pill { white-space: nowrap; overflow-wrap: normal; }
-.event-log td:nth-child(8) { overflow-wrap: break-word; color: var(--ink); line-height: 1.45; }
+.event-log td:nth-child(8) { overflow-wrap: anywhere; color: var(--ink); line-height: 1.45; }
 .event-log td:nth-child(1),
 body[data-view="alerts"] #view > .card .table-wrap td:nth-child(6) {
   font-family: var(--mono);
@@ -1013,6 +1021,34 @@ body[data-view="admin"] .sessions button.danger:focus-visible {
     white-space: nowrap;
     overflow-wrap: normal;
   }
+  /* Keep one event row and its keyboard action at both sizes. The dialog holds the full record. */
+  .event-results table, .event-results tbody { display: block; min-width: 0; }
+  .event-results thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+  .event-results tr.clickable {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 6px 12px;
+    padding: 12px;
+    border-top: 1px solid var(--line);
+  }
+  .event-results tr.clickable td:nth-child(n) {
+    width: auto;
+    padding: 0;
+    border: 0;
+    box-shadow: none;
+    white-space: normal;
+  }
+  .event-results td:nth-child(2) { justify-self: end; }
+  .event-results td:nth-child(3), .event-results td:nth-child(8) { grid-column: 1 / -1; }
+  .event-results td:nth-child(3) { color: var(--ink); font-weight: 600; }
+  .event-results td:nth-child(n+4):nth-child(-n+7) { display: none; }
+  .event-details { display: block; margin-top: 6px; }
   /* The wide alert table scrolls on a phone and cuts titles in half. Fit the screen instead. */
   body[data-view="alerts"] #view > .card .table-wrap table {
     min-width: 0;

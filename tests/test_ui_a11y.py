@@ -1,10 +1,12 @@
 """Static checks for the keyboard and accessibility pass (milestone 8).
 
-There is no JS runtime in the Python suite, so these assert what is cheap to read from the files.
-The behavior itself (shortcuts, overflow at 390px, labels after render) is driven in a real browser
+The read-order regression uses Node when available. Markup and style checks read the source.
+Keyboard and layout behavior (shortcuts, overflow at 390px, labels after render) is driven in a real browser
 by scripts/ui_check.js.
 """
 import re
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -65,6 +67,31 @@ class IndexLandmarkTests(unittest.TestCase):
 
     def test_menu_toggle_is_wired_for_assistive_tech(self):
         self.assertRegex(self.html, r'id="nav-toggle"[^>]*aria-expanded="false"[^>]*aria-controls="nav"')
+
+
+class PanelReadTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "node is not installed")
+    def test_late_success_and_failure_cannot_commit(self):
+        helper = function_body(read("app.js"), "readView")
+        script = r"""
+const assert = require("node:assert/strict");
+const state = { user: {}, view: "events" };
+let viewRevision = 0;
+async function check() {
+  for (const next of ["alerts", "events"]) {
+    state.view = "events";
+    let release, fail;
+    const pending = readView("events", () => new Promise((resolve, reject) => { release = resolve; fail = reject; }));
+    state.view = next;
+    assert.equal(await readView(next, () => "current rows"), "current rows");
+    if (next === "alerts") release("old rows"); else fail(new Error("old error"));
+    assert.equal(await pending, undefined);
+  }
+  await assert.rejects(readView("events", () => Promise.reject(new Error("current error"))), /current error/);
+}
+check().catch(error => { console.error(error); process.exitCode = 1; });
+"""
+        subprocess.run(["node", "-e", helper + script], check=True)
 
 
 class ShortcutHandlerTests(unittest.TestCase):
