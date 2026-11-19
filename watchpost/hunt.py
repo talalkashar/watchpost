@@ -326,8 +326,12 @@ def _parse_filter_text(text):
 
 
 def _group_field(name):
-    """(field, column) for a field a stage may group or count by; refuses the rest with a reason."""
-    field = name.lower()
+    """(field, column) for a field a stage may group or count by; refuses the rest with a reason.
+
+    ASCII letters only. USER is user. useK stays useK (not usek, and not user).
+    USİR stays that spelling in the error, with no combining dot.
+    """
+    field = name.translate(_ASCII_FOLD)
     if field not in FIELDS:
         raise HuntError(f"unknown field {name!r}; group by one of {', '.join(GROUPABLE)}")
     kind, column = FIELDS[field]
