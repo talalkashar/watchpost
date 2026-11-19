@@ -1,0 +1,52 @@
+# Directory traversal that also names a sensitive file. A bare "../" in a static
+# asset path is not enough: both a traversal marker and a sensitive file must hit.
+# Markers cover raw "../", encoded dots, and Windows backslashes.
+title: Web Path Traversal to a Sensitive File
+id: d8dc8aec-592e-4167-a76f-dafc5d55af46
+status: experimental
+description: |
+  A web request that walks out of the web root and names a credential or system file
+  (passwd, shadow, win.ini, SAM, SSH keys, proc). Encoded dot-segments and the
+  percent-encoded slash in "etc%2fpasswd" are included because the access log keeps
+  the raw path.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1190/
+  - https://cwe.mitre.org/data/definitions/22.html
+tags:
+  - attack.initial_access
+  - attack.t1190
+logsource:
+  category: webserver
+detection:
+  web:
+    event.action:
+      - web_request
+      - web_scan
+      - web_error
+  traversal:
+    message|contains:
+      - '../'
+      - "..\\"
+      - '..%2f'
+      - '..%5c'
+      - '%2e%2e'
+      - '%252e%252e'
+  sensitive:
+    message|contains:
+      - 'etc/passwd'
+      - 'etc/shadow'
+      - 'etc%2fpasswd'
+      - 'etc%2fshadow'
+      - 'etc%5cpasswd'
+      - 'win.ini'
+      - 'boot.ini'
+      - 'proc/self/environ'
+      - 'proc/self/cmdline'
+      - '.ssh/id_rsa'
+      - 'system32/config/sam'
+  condition: web and traversal and sensitive
+falsepositives:
+  - A published walkthrough whose URL contains both a traversal marker and a sample filename
+level: high
