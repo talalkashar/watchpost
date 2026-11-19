@@ -703,6 +703,12 @@ def _open_alerts_lost(evaluation):
     return [a["id"] for a in bt["open_alerts_lost"]] if bt else []
 
 
+def _backtest_incomplete(evaluation):
+    """True when the stored-event replay left rows unread. That result cannot show a change is safe."""
+    bt = (evaluation or {}).get("backtest")
+    return isinstance(bt, dict) and bool(bt.get("incomplete"))
+
+
 def validate_rule_update(conn, rule_id, payload):
     """Validate a rule_update payload exactly as a proposal is. Returns the merged params, or None."""
     return _validate_change(conn, "rule_update", rule_id, payload)
@@ -822,6 +828,10 @@ def review_change(conn, change_id, decision, reviewer, note="", digest=None, ack
             elif fresh is not None and digest != evidence_digest(fresh):
                 problem = ChangeError("the evidence changed since this request was last shown; nothing was "
                                       "applied. Review the updated evidence and approve again", 409)
+            elif _backtest_incomplete(fresh) and not (lost or lost_alerts):
+                # No losses here can mean only that the unread rows were the ones that would have fired.
+                problem = ChangeError("the stored-event backtest is incomplete; this change cannot be "
+                                      "approved as safe")
             elif (lost or lost_alerts) and acknowledge_detection_loss is not True:
                 what = [f"labeled attacks it detects today ({', '.join(lost)})"] if lost else []
                 if lost_alerts:
