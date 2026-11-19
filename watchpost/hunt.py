@@ -392,7 +392,9 @@ def parse_stage(text):
     tokens = _STAGE_TOKEN.findall(text)
     if not tokens:
         raise HuntError("| must be followed by a command: stats, top or timechart")
-    command, rest = tokens[0].lower(), tokens[1:]
+    # ASCII letters only. STATS is stats. stİts stays that spelling, not stats,
+    # and the error quotes the original token with no combining dot. Not str.lower().
+    command, rest = tokens[0].translate(_ASCII_FOLD), tokens[1:]
     if command not in COMMANDS:
         raise HuntError(f"unknown command {tokens[0]!r}; supported commands are stats, top and timechart")
     lowered = [t.lower() for t in rest]
