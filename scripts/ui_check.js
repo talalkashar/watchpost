@@ -176,7 +176,7 @@ async function main() {
       await admin.page.reload();
       await admin.page.waitForSelector("#attack-chart .cellg");
       const size = await admin.page.locator("#attack-chart").evaluate(matrixGeometry);
-      check(size.columns === 14 && size.fit && size.impactRight <= size.containerRight + 0.02
+      check(size.columns === 15 && size.fit && size.impactRight <= size.containerRight + 0.02
         && size.contentWidth === size.containerWidth && size.pageWidth === width && !size.clipped.length && size.font >= 11,
         `${width}px ATT&CK matrix: ${size.font.toFixed(2)}px labels, IMPACT right ${size.impactRight?.toFixed(2)} / ${size.containerRight.toFixed(2)}, clipped [${size.clipped}]`);
     }

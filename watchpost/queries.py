@@ -59,6 +59,12 @@ EVENTS_BY_TYPE_LIMIT = 100
 # Event detail returns this many linked alerts, newest by alert id, then id order.
 # alerts_omitted is how many linked alerts were past that cap.
 EVENT_ALERT_LIMIT = 50
+# Alert detail lists incident ids for this alert, lowest incident_id first.
+# incident_alerts.alert_id is the primary key, so the list is one id or none.
+# cases_omitted is how many memberships were past that cap (0 when it fits,
+# including an alert in no incident). A membership whose incident row is gone
+# is still that id.
+CASE_MEMBERSHIP_LIMIT = 1
 _ATTACKER_FROM = (
     " FROM alerts a JOIN alert_events ae ON ae.alert_id = a.id"
     " JOIN events e ON e.id = ae.event_id WHERE e.src_ip IS NOT NULL")
@@ -267,7 +273,8 @@ def list_alerts(conn, params):
     Rows stay not-resolved first, then severity, then last_seen, then id
     descending (the newer id stays). The second value is 0 when every match
     fits. Callers that return the bare array send that count as
-    X-Watchpost-Omitted.
+    X-Watchpost-Omitted. assignee and unassigned, when set, are part of that
+    match: the count is the rows past the limit after those filters too.
     """
     where, args = [], []
     if params.get("status"):
@@ -289,6 +296,21 @@ def list_alerts(conn, params):
         # Érin_rule stays apart from érin_rule. An unknown name matches nothing.
         where.append("rule_id = ? COLLATE NOCASE")
         args.append(params["rule_id"])
+    if params.get("assignee"):
+        # Exact stored spelling. Admin does not match admin. A blank is not a filter.
+        owner = params["assignee"]
+        if not isinstance(owner, str):
+            raise QueryError("assignee must be a username")
+        where.append("assignee = ?")
+        args.append(owner)
+    if params.get("unassigned"):
+        # 1 and true (ASCII case) are alerts with no assignee. Anything else is a
+        # 400, so a typo does not return the whole queue. A blank assignee is not NULL.
+        flag = params["unassigned"]
+        folded = flag.translate(_ASCII_FOLD) if isinstance(flag, str) else None
+        if folded not in ("1", "true"):
+            raise QueryError("unassigned must be 1 or true")
+        where.append("assignee IS NULL")
     limit = _int(params.get("limit"), "limit", 100, 1, 500)
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     total = conn.execute(f"SELECT COUNT(*) FROM alerts{clause}", args).fetchone()[0]
@@ -330,7 +352,26 @@ def get_alert(conn, alert_id):
     alert["activity"], alert["activity_omitted"] = _newest_by_id(
         conn, "alert_activity", alert_id, ACTIVITY_LIMIT)
     alert["timeline"] = related_timeline(conn, alert)
+    alert["cases"], alert["cases_omitted"] = case_membership(conn, alert_id)
     return alert
+
+
+def case_membership(conn, alert_id):
+    """Incident ids for this alert, lowest id first, and how many were left out.
+
+    The list is at most CASE_MEMBERSHIP_LIMIT. The second value is 0 when every
+    membership fits, including an alert in no incident. The id comes from
+    incident_alerts. A missing incidents row does not drop it.
+    """
+    total = conn.execute(
+        "SELECT COUNT(*) AS n FROM incident_alerts WHERE alert_id = ?",
+        (alert_id,)).fetchone()["n"]
+    rows = conn.execute(
+        "SELECT incident_id FROM incident_alerts WHERE alert_id = ?"
+        " ORDER BY incident_id LIMIT ?",
+        (alert_id, CASE_MEMBERSHIP_LIMIT))
+    ids = [row["incident_id"] for row in rows]
+    return ids, total - len(ids)
 
 
 def _newest_by_id(conn, table, alert_id, limit):

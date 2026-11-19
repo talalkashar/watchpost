@@ -1,10 +1,12 @@
 """SQL identifier checks, hot-path indexes, and transaction boundaries in watchpost.db."""
 
+import sqlite3
 import unittest
 
 from watchpost.db import (
     ADDED_COLUMNS,
     SCHEMA_VERSION,
+    TransactionBoundaryError,
     _column_type_sql,
     _ensure_column,
     _sql_ident,
@@ -170,6 +172,15 @@ class TransactionTests(SafetyCase):
         self.assertEqual(self._meta("safety_later"), "1")
         self.assertFalse(self.conn.in_transaction)
 
+    def test_nested_savepoint_commits_with_the_outer_transaction(self):
+        with transaction(self.conn):
+            self.conn.execute("INSERT INTO meta(key, value) VALUES ('safety_outer_ok', '1')")
+            with transaction(self.conn):
+                self.conn.execute("INSERT INTO meta(key, value) VALUES ('safety_inner_ok', '1')")
+        self.assertEqual(self._meta("safety_outer_ok"), "1")
+        self.assertEqual(self._meta("safety_inner_ok"), "1")
+        self.assertFalse(self.conn.in_transaction)
+
     def test_nested_savepoint_rolls_back_only_itself(self):
         with transaction(self.conn):
             self.conn.execute("INSERT INTO meta(key, value) VALUES ('safety_outer', '1')")
@@ -196,20 +207,94 @@ class TransactionTests(SafetyCase):
         self.assertIsNone(self._meta("safety_inner2"))
         self.assertFalse(self.conn.in_transaction)
 
-    def test_early_commit_and_executescript_do_not_raise(self):
-        with transaction(self.conn):
-            self.conn.execute("INSERT INTO meta(key, value) VALUES ('safety_early', '1')")
-            self.conn.execute("COMMIT")
+    def test_early_commit_stays_durable_and_a_later_audit_is_refused(self):
+        before = self.conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+        with self.assertRaises(TransactionBoundaryError) as caught:
+            with transaction(self.conn):
+                self.conn.execute("INSERT INTO meta(key, value) VALUES ('safety_early', '1')")
+                self.conn.execute("COMMIT")
+                raise RuntimeError("too late")
+        self.assertIsInstance(caught.exception.__cause__, RuntimeError)
+        # The COMMIT already happened. Reporting the error does not remove the row.
         self.assertEqual(self._meta("safety_early"), "1")
-        with transaction(self.conn):
-            self.conn.execute("INSERT INTO meta(key, value) VALUES ('safety_script_a', '1')")
-            self.conn.executescript("INSERT INTO meta(key, value) VALUES ('safety_script_b', '2');")
-        self.assertEqual(self._meta("safety_script_a"), "1")
-        self.assertEqual(self._meta("safety_script_b"), "2")
+        with self.assertRaises(TransactionBoundaryError):
+            with transaction(self.conn):
+                self.conn.execute("INSERT INTO meta(key, value) VALUES ('safety_early_audit', '1')")
+                self.conn.execute("COMMIT")
+                audit(self.conn, "alice", "should_not_land", "t")
+        self.assertEqual(self._meta("safety_early_audit"), "1")
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0], before)
+        self.assertNotIn(
+            "should_not_land",
+            [r[0] for r in self.conn.execute("SELECT action FROM audit_log")],
+        )
         with transaction(self.conn):
             self.conn.execute("INSERT INTO meta(key, value) VALUES ('safety_follow', '1')")
         self.assertEqual(self._meta("safety_follow"), "1")
         self.assertFalse(self.conn.in_transaction)
+
+    def test_executescript_implicit_commit_stays_durable(self):
+        with self.assertRaises(TransactionBoundaryError):
+            with transaction(self.conn):
+                self.conn.execute("INSERT INTO meta(key, value) VALUES ('safety_script_a', '1')")
+                self.conn.executescript("INSERT INTO meta(key, value) VALUES ('safety_script_b', '2');")
+        self.assertEqual(self._meta("safety_script_a"), "1")
+        self.assertEqual(self._meta("safety_script_b"), "2")
+        self.assertFalse(self.conn.in_transaction)
+
+    def test_missing_savepoint_surfaces_and_the_outer_transaction_rolls_back(self):
+        with self.assertRaises(sqlite3.OperationalError):
+            with transaction(self.conn):
+                self.conn.execute("INSERT INTO meta(key, value) VALUES ('safety_sp', '1')")
+                with transaction(self.conn):
+                    self.conn.execute("INSERT INTO meta(key, value) VALUES ('safety_sp_inner', '1')")
+                    self.conn.execute("RELEASE wp_0")
+        self.assertIsNone(self._meta("safety_sp"))
+        self.assertIsNone(self._meta("safety_sp_inner"))
+        self.assertFalse(self.conn.in_transaction)
+
+    def test_commit_failure_surfaces_and_rolls_back(self):
+        self.conn.execute("CREATE TABLE safety_parent(id INTEGER PRIMARY KEY)")
+        self.conn.execute(
+            "CREATE TABLE safety_child(id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL"
+            " REFERENCES safety_parent(id) DEFERRABLE INITIALLY DEFERRED)"
+        )
+        inserted = False
+        with self.assertRaises(sqlite3.IntegrityError):
+            with transaction(self.conn):
+                self.conn.execute("INSERT INTO safety_child(parent_id) VALUES (99)")
+                inserted = True
+        self.assertTrue(inserted)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM safety_child").fetchone()[0], 0)
+        self.assertFalse(self.conn.in_transaction)
+        with transaction(self.conn):
+            self.conn.execute("INSERT INTO safety_parent(id) VALUES (1)")
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM safety_parent").fetchone()[0], 1)
+
+    def test_domain_write_and_audit_commit_or_roll_back_together(self):
+        with transaction(self.conn):
+            self.conn.execute("INSERT INTO meta(key, value) VALUES ('safety_domain', '1')")
+            audit(self.conn, "alice", "domain_kept", "meta")
+        self.assertEqual(self._meta("safety_domain"), "1")
+        with self.assertRaises(RuntimeError):
+            with transaction(self.conn):
+                self.conn.execute("INSERT INTO meta(key, value) VALUES ('safety_domain_no', '1')")
+                audit(self.conn, "alice", "domain_lost", "meta")
+                raise RuntimeError("nope")
+        self.assertIsNone(self._meta("safety_domain_no"))
+        actions = [r[0] for r in self.conn.execute("SELECT action FROM audit_log ORDER BY id")]
+        self.assertEqual(actions, ["audit_chain_started", "domain_kept"])
+        self.assertTrue(verify_chain(self.conn)["ok"])
+        self.assertFalse(self.conn.in_transaction)
+
+    def test_init_schema_refuses_to_commit_an_open_transaction(self):
+        with self.assertRaises(TransactionBoundaryError):
+            with transaction(self.conn):
+                self.conn.execute("INSERT INTO meta(key, value) VALUES ('safety_schema', '1')")
+                init_schema(self.conn)
+        self.assertIsNone(self._meta("safety_schema"))
+        self.assertFalse(self.conn.in_transaction)
+        self.assertTrue(verify_chain(self.conn)["ok"])
 
     def test_audit_follows_the_transaction_that_contains_it(self):
         before = self.conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]

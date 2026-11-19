@@ -1,14 +1,15 @@
-# Actions that stop or delete cloud audit logging. UpdateTrail is omitted on purpose:
-# the event names the call, not whether logging stayed on.
+# Requests to stop or delete cloud audit logging without a recorded API error. The message is the whole
+# "<action> on <service>" line. A denial appends " (errorCode)" and does not match.
+# UpdateTrail is omitted on purpose: the event names the call, not whether logging stayed on.
 # Written for Watchpost's Sigma subset (docs/REFERENCE.md, "Sigma rule import").
-title: Cloud Audit Logging Stopped
+title: Cloud Audit Logging Stop or Deletion Requested
 id: 84cc5745-a86f-4a51-8cdf-90fcd87cb05c
 status: experimental
 description: |
-  A cloud API call that stops or deletes a CloudTrail trail, deletes VPC flow logs, or
-  stops the AWS Config recorder. The action is the start of Watchpost's "<action> on
-  <service>" message, so a describe or an update does not match. A denied call still
-  matches. Each matching event is evidence; Watchpost groups them per source IP.
+  A request to stop or delete a CloudTrail trail, delete VPC flow logs, or stop the AWS
+  Config recorder, with no error in the projected message. The message must be exactly one of those four
+  "<action> on <service>" lines. A denied call, a describe, and an update do not match.
+  Each matching event is evidence; Watchpost groups them per source IP.
 author: Watchpost example
 date: 2026-11-18
 references:
@@ -23,13 +24,12 @@ detection:
   call:
     event.action: cloud_api_call
   stopped:
-    message|startswith:
-      - 'StopLogging on '
-      - 'DeleteTrail on '
-      - 'DeleteFlowLogs on '
-      - 'StopConfigurationRecorder on '
+    message:
+      - 'StopLogging on cloudtrail.amazonaws.com'
+      - 'DeleteTrail on cloudtrail.amazonaws.com'
+      - 'DeleteFlowLogs on ec2.amazonaws.com'
+      - 'StopConfigurationRecorder on config.amazonaws.com'
   condition: call and stopped
 falsepositives:
   - An operator retiring a trail during a reviewed migration
-  - A denied attempt that left logging on
 level: critical

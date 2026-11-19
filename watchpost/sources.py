@@ -186,7 +186,8 @@ def log_source_silent(events, params):
 
     Events are judged by arrival (`ingested_at`, or `ts` where events carry none, as in the noise lab).
     Each completed gap is judged against the cadence as of its start; with `params["now"]` (injected by the
-    engine and the noise lab, never stored) the current silence is judged too. The evidence is the last event
+    engine and the noise lab, never stored) the current silence is judged too. Arrivals later than that clock
+    are ignored, so a gap that has not finished is only the silence so far. The evidence is the last event
     before the silence, so one silence episode is one finding however often it is rescanned.
     `params["maintenance"]` lists windows ({source, host or None, start, end} as epochs) that excuse quiet time.
     A window matches ASCII case, so a window for web01 covers WEB01.
@@ -195,7 +196,10 @@ def log_source_silent(events, params):
     windows = params.get("maintenance") or []
     findings = []
     for (source, host), g in _arrivals(events).items():
-        times = sorted(g["by_time"])
+        # An arrival after the clock has not happened. Judging that whole gap would alert on time still ahead.
+        times = sorted(t for t in g["by_time"] if now is None or t <= now)
+        if not times:
+            continue
         mine = _windows_for(windows, source, host)
         ends = [(i, times[i]) for i in range(1, len(times))]
         if now is not None and now > times[-1]:
@@ -301,8 +305,8 @@ def arrival_events(conn, max_id):
     return out
 
 
-def list_windows(conn):
-    now = now_iso()
+def list_windows(conn, now=None):
+    now = now or now_iso()
     rows = [dict(r) for r in conn.execute("SELECT * FROM maintenance_windows ORDER BY starts_at DESC, id DESC")]
     for w in rows:
         end = min(w["ends_at"], w["ended_at"]) if w["ended_at"] else w["ends_at"]
@@ -332,12 +336,13 @@ def inventory(conn, now=None):
     `sources` is the first SOURCE_LIST_LIMIT rows after silent, then source, then host. `sources_omitted`
     is how many pairs were past that cap (0 when the inventory fits, including none). `summary` counts
     every pair, including the ones left off the page. `maintenance_windows` is windows whose effective end
-    is still ahead, at most MAINTENANCE_LIST_LIMIT, in starts_at descending then id descending order.
-    `maintenance_windows_omitted` is how many of those were past that cap.
+    is still ahead of `now` and later than their start, at most MAINTENANCE_LIST_LIMIT, in starts_at
+    descending then id descending order. A window ended before it started covers no time, so it is left
+    out. `maintenance_windows_omitted` is how many of those were past that cap.
     """
     now = now or now_iso()
     now_s = _epoch(now)
-    listed = list_windows(conn)
+    listed = list_windows(conn, now)
     windows = [{"source": w["source"], "host": w["host"], "start": _epoch(w["starts_at"]),
                 "end": _epoch(w["effective_end"])} for w in listed]
     rows = []
@@ -354,7 +359,8 @@ def inventory(conn, now=None):
                      "maintenance_omitted": max(0, len(active) - MAINTENANCE_ON_SOURCE), **verdict})
     order = {"silent": 0, "late": 1, "healthy": 2, "learning": 3}
     rows.sort(key=lambda r: (order[r["status"]], r["source"], r["host"] or ""))
-    future = [w for w in listed if w["effective_end"] > now]
+    # effective_end == starts_at means the window was ended before it began and excuses nothing.
+    future = [w for w in listed if w["effective_end"] > now and w["effective_end"] > w["starts_at"]]
     return {"checked_at": now, "thresholds": THRESHOLDS,
             "sources": rows[:SOURCE_LIST_LIMIT],
             "sources_omitted": max(0, len(rows) - SOURCE_LIST_LIMIT),
@@ -395,12 +401,25 @@ def validate_window(source, payload, now=None):
 
 def add_window(conn, source, payload, reason, proposed_by, approved_by, change_request_id):
     host, start, end = validate_window(source, payload)
-    window_id = conn.execute(
-        "INSERT INTO maintenance_windows(source, host, starts_at, ends_at, reason, proposed_by, approved_by,"
-        " change_request_id, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-        (source, host, start, end, reason, proposed_by, approved_by, change_request_id, now_iso())).lastrowid
-    audit(conn, approved_by, "maintenance_window_added", source,
-          {"id": window_id, "host": host, "start": start, "end": end, "change_request": change_request_id})
+    # Begin only when the caller has not: an approval already holds BEGIN IMMEDIATE, and a nested one fails.
+    # On this connection an insert autocommits, so a failed audit would otherwise leave an unaudited window.
+    own = not conn.in_transaction
+    if own:
+        conn.execute("BEGIN IMMEDIATE")
+    try:
+        window_id = conn.execute(
+            "INSERT INTO maintenance_windows(source, host, starts_at, ends_at, reason, proposed_by, approved_by,"
+            " change_request_id, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (source, host, start, end, reason, proposed_by, approved_by, change_request_id, now_iso())).lastrowid
+        audit(conn, approved_by, "maintenance_window_added", source,
+              {"id": window_id, "host": host, "start": start, "end": end, "change_request": change_request_id})
+    except BaseException:
+        if own:
+            conn.execute("ROLLBACK")
+        raise
+    else:
+        if own:
+            conn.execute("COMMIT")
     return window_id
 
 
