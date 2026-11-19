@@ -48,6 +48,44 @@ def _index_events(events):
     return by_id
 
 
+def _key(values, escape):
+    parts = []
+    for group in values:
+        ordered = sorted(group)
+        parts.append(",".join(_escape(v) for v in ordered) if escape else ",".join(ordered))
+    text = "|".join(part or _MISSING for part in parts)
+    return "sha256:" + hashlib.sha256(text.encode()).hexdigest() if len(text) > 256 else text
+
+
+def _field_values(rows, fields):
+    values = [set() for _ in fields]
+    count = 0
+    for row in rows:
+        count += 1
+        for field, group in zip(fields, values):
+            value = row[field] if field in row.keys() else None
+            if value not in (None, ""):
+                group.add(_folded(field, value))
+    return count, values
+
+
+def retained_key(stored, fields, rows, expected_count):
+    """Prove the key using the entire original membership, including retention gaps."""
+    count, values = _field_values(rows, fields)
+    if not count or count != expected_count:
+        return None
+    current = _key(values, True)
+    if stored == current or stored == _key(values, False):
+        return current
+    return None
+
+
+def ordinary_key(key, fields):
+    parts = key.split("|")
+    return (len(parts) == len(fields) and not key.startswith("sha256:")
+            and "," not in key and "\\" not in key and all(p and p != _MISSING for p in parts))
+
+
 def apply(findings, events, fields):
     """Replace keys deterministically without changing a finding's attached evidence ids.
 
@@ -62,15 +100,8 @@ def apply(findings, events, fields):
     for finding in findings:
         evidence = [event for event_id in finding["event_ids"] if event_id in by_id
                     for event in by_id[event_id]]
-        parts = []
-        for field in fields:
-            present = (event[field] for event in evidence if event.get(field) not in (None, ""))
-            values = sorted({_folded(field, value) for value in present})
-            parts.append(",".join(_escape(value) for value in values) if values else _MISSING)
-        key = "|".join(parts)
-        if len(key) > 256:
-            key = "sha256:" + hashlib.sha256(key.encode()).hexdigest()
-        out.append({**finding, "group_key": key})
+        _, values = _field_values(evidence, fields)
+        out.append({**finding, "group_key": _key(values, True)})
     return out
 
 

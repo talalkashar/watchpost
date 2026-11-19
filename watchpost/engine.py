@@ -107,7 +107,7 @@ def ingest(conn, events, rejections, source, fmt, submitted_by, synthetic=False)
 
 # --- Detection --------------------------------------------------------------------
 
-def _existing_alert(conn, rule_id, group_key, first_seen, last_seen, window):
+def _existing_alert(conn, match_sql, match_args, first_seen, last_seen, window):
     """Open alert for this group whose span is within `window` seconds of the finding.
 
     A gap of exactly `window` still matches. Rules split a cluster only when the gap is greater.
@@ -116,9 +116,9 @@ def _existing_alert(conn, rule_id, group_key, first_seen, last_seen, window):
     earliest = iso(parse_iso(first_seen) - timedelta(seconds=window))
     latest = iso(parse_iso(last_seen) + timedelta(seconds=window))
     return conn.execute(
-        "SELECT * FROM alerts WHERE rule_id = ? AND group_key = ? AND status != 'resolved'"
+        f"SELECT a.* FROM alerts a WHERE {match_sql} AND status != 'resolved'"
         " AND last_seen >= ? AND first_seen <= ? ORDER BY id DESC LIMIT 1",
-        (rule_id, group_key, earliest, latest),
+        (*match_args, earliest, latest),
     ).fetchone()
 
 
@@ -136,17 +136,23 @@ def _apply_finding(conn, rule, finding, synthetic, assets_idx):
     """Create or extend an alert. Returns 'created', 'updated', or 'unchanged'."""
     ids = finding["event_ids"]
     placeholders = ",".join("?" for _ in ids)
+    match_sql = "a.rule_id = ? AND a.group_key = ?"
+    match_args = (rule["id"], finding["group_key"])
+    if rule.get("grouping"):
+        match_sql = ("a.id IN (SELECT alert_id FROM alert_group_keys"
+                     " WHERE rule_id=? AND fields=? AND canonical=?)")
+        match_args = (rule["id"], json.dumps(rule["grouping"]), finding["group_key"])
     already = conn.execute(
         f"SELECT COUNT(DISTINCT ae.event_id) FROM alert_events ae JOIN alerts a ON a.id = ae.alert_id"
-        f" WHERE a.rule_id = ? AND a.group_key = ? AND ae.event_id IN ({placeholders})",
-        (rule["id"], finding["group_key"], *ids),
+        f" WHERE {match_sql} AND ae.event_id IN ({placeholders})",
+        (*match_args, *ids),
     ).fetchone()[0]
     if already == len(ids):
         return "unchanged"  # e.g. a rescan, or evidence already on a resolved alert
 
     now = now_iso()
     window = rule["params"].get("window_seconds", 3600)
-    existing = _existing_alert(conn, rule["id"], finding["group_key"], finding["first_seen"],
+    existing = _existing_alert(conn, match_sql, match_args, finding["first_seen"],
                                finding["last_seen"], window)
     if existing:
         conn.executemany("INSERT OR IGNORE INTO alert_events(alert_id, event_id) VALUES (?,?)",
@@ -185,6 +191,9 @@ def _apply_finding(conn, rule, finding, synthetic, assets_idx):
          int(synthetic), now, now),
     )
     alert_id = cur.lastrowid
+    if rule.get("grouping"):
+        conn.execute("INSERT INTO alert_group_keys(alert_id,rule_id,fields,canonical,native) VALUES (?,?,?,?,1)",
+                     (alert_id, rule["id"], json.dumps(rule["grouping"]), finding["group_key"]))
     conn.executemany("INSERT OR IGNORE INTO alert_events(alert_id, event_id) VALUES (?,?)",
                      [(alert_id, i) for i in ids])
     conn.execute(
@@ -204,10 +213,106 @@ def _apply_finding(conn, rule, finding, synthetic, assets_idx):
     return "created"
 
 
+def _group_tables(conn):
+    conn.execute("CREATE TABLE IF NOT EXISTS alert_group_keys (alert_id INTEGER PRIMARY KEY REFERENCES alerts(id) ON DELETE CASCADE,"
+                 "rule_id TEXT NOT NULL, fields TEXT, canonical TEXT, native INTEGER NOT NULL)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_alert_group_canonical ON alert_group_keys(rule_id,fields,canonical)")
+    conn.execute("CREATE TABLE IF NOT EXISTS suppression_group_state (suppression_id INTEGER PRIMARY KEY REFERENCES suppressions(id) ON DELETE CASCADE,"
+                 "fields TEXT NOT NULL, cutoff INTEGER NOT NULL, review TEXT)")
+
+
+def _alert_proof(conn, alert, rule):
+    fields = rule["grouping"]
+    if alert["rule_version"] != rule["version"]:
+        history = conn.execute("SELECT grouping FROM rule_history WHERE rule_id=? AND version=? ORDER BY id DESC",
+                               (rule["id"], alert["rule_version"])).fetchone()
+        fields = json.loads(history[0]) if history else []
+    canonical = None
+    if fields:
+        rows = conn.execute("SELECT e.src_ip,e.dest_ip,e.user,e.host,e.event_type,e.source"
+                            " FROM alert_events ae JOIN events e ON e.id=ae.event_id WHERE ae.alert_id=?",
+                            (alert["id"],))
+        canonical = grouping.retained_key(alert["group_key"], fields, rows, alert["event_count"])
+    return (alert["id"], rule["id"], json.dumps(fields), canonical)
+
+
+def _missing_group_proofs(conn, rules):
+    proofs = []
+    for rule in rules:
+        alerts = conn.execute("SELECT a.id,a.group_key,a.rule_version,a.event_count FROM alerts a"
+                              " WHERE a.rule_id=? AND NOT EXISTS"
+                              " (SELECT 1 FROM alert_group_keys g WHERE g.alert_id=a.id)", (rule["id"],))
+        proofs.extend(_alert_proof(conn, a, rule) for a in alerts)
+    return proofs
+
+
+def _suppression_keys(conn, rules, cached, record=False):
+    """Resolve a reviewed key only when all its original members agree on its identity."""
+    active, reviews = set(), []
+    for sup in conn.execute("SELECT id,rule_id,group_key FROM suppressions"
+                            " WHERE expires_at > ? AND revoked_at IS NULL", (now_iso(),)):
+        key = sup["group_key"]
+        rid = sup["rule_id"]
+        rule = rules.get(rid)
+        if rule is None:
+            if not record:
+                active.add((rid, key))  # A pre-seeding database can already hold native exceptions.
+            continue
+        state = conn.execute("SELECT * FROM suppression_group_state WHERE suppression_id=?",
+                             (sup["id"],)).fetchone() if cached else None
+        if not rule["grouping"] and state is None:
+            active.add((rid, key))
+            continue
+        fields = json.dumps(rule["grouping"])
+        cutoff = state["cutoff"] if state else conn.execute("SELECT COALESCE(MAX(id),0) FROM alerts").fetchone()[0]
+        # Current-format alerts created after this decision cannot supply provenance for an older exception.
+        targets, missing = set(), []
+        if cached:
+            members = conn.execute(
+                "SELECT a.*,g.alert_id AS known,g.fields,g.canonical FROM alerts a LEFT JOIN alert_group_keys g ON g.alert_id=a.id"
+                " WHERE a.rule_id=? AND a.group_key=? AND (a.id<=? OR g.native=0 OR g.alert_id IS NULL)"
+                " ORDER BY a.id", (rid, key, cutoff))
+        else:
+            members = conn.execute("SELECT a.*,NULL AS known FROM alerts a WHERE rule_id=? AND group_key=? ORDER BY id",
+                                   (rid, key))
+        for member in members:
+            alert_id = member["id"]
+            if member["known"] is None:
+                _, _, saved, canonical = _alert_proof(conn, member, rule)
+            else:
+                saved, canonical = member["fields"], member["canonical"]
+            if saved != fields or canonical is None:
+                missing.append(alert_id)
+            else:
+                targets.add(canonical)
+        previous = json.loads(state["review"]) if state and state["review"] else None
+        effective = None
+        if not previous and not missing and (not state or state["fields"] == fields):
+            if len(targets) == 1:
+                effective = next(iter(targets))
+            elif not targets and grouping.ordinary_key(key, rule["grouping"]):
+                effective = key
+        if effective is not None:
+            active.add((rid, effective))
+            detail = None
+        else:
+            unresolved = sorted(set(missing).union(previous["unresolved_alert_ids"] if previous else []))
+            detail = {"rule_id": rid, "group_key": key, "suppression_id": sup["id"], "unresolved_alert_ids": unresolved}
+            reviews.append(detail)
+            if record and detail != previous:
+                audit(conn, "detection", "suppression_needs_review", rid, detail)
+        if record and (not state or detail != previous):
+            conn.execute("INSERT INTO suppression_group_state VALUES (?,?,?,?)"
+                         " ON CONFLICT(suppression_id) DO UPDATE SET review=excluded.review",
+                         (sup["id"], fields, cutoff, json.dumps(detail) if detail else None))
+    return active, reviews
+
+
 def active_suppressions(conn):
-    """Approved tuning exceptions that are neither expired nor revoked, as a set of (rule_id, group_key)."""
-    return {(r["rule_id"], r["group_key"]) for r in conn.execute(
-        "SELECT rule_id, group_key FROM suppressions WHERE expires_at > ? AND revoked_at IS NULL", (now_iso(),))}
+    rules = {row["id"]: row_to_dict(row, ["grouping"])
+             for row in conn.execute("SELECT id,version,grouping FROM rules")}
+    cached = conn.execute("SELECT 1 FROM sqlite_master WHERE name='suppression_group_state'").fetchone()
+    return _suppression_keys(conn, rules, bool(cached))[0]
 
 
 def active_rule_suppressions(conn):
@@ -300,9 +405,22 @@ def run_detection(conn, trigger="manual", start=None, end=None):
             synthetic_ids = {e["id"] for e in events + history_events if e["synthetic"]}
             summary["events_scanned"] = len(events) + len(history_events)
             assets_idx = assets_mod.load_index(conn)
-            suppressed = active_suppressions(conn)
+            grouped = [r for r in active if r.get("grouping")]
+            cached = conn.execute("SELECT 1 FROM sqlite_master WHERE name='suppression_group_state'").fetchone()
+            if grouped:
+                _group_tables(conn)
+                revision = conn.execute("PRAGMA data_version").fetchone()[0]
+                proofs = _missing_group_proofs(conn, grouped)
             suppressed_rules = active_rule_suppressions(conn)
             with transaction(conn):
+                if grouped:
+                    if revision != conn.execute("PRAGMA data_version").fetchone()[0]:
+                        # A writer changed the snapshot. Prove only still-unclassified members again.
+                        proofs = _missing_group_proofs(conn, grouped)
+                    conn.executemany("INSERT INTO alert_group_keys VALUES (?,?,?,?,0)", proofs)
+                suppressed, reviews = _suppression_keys(conn, {r["id"]: r for r in active},
+                                                        bool(grouped or cached), record=bool(grouped or cached))
+                summary["suppression_reviews"] = reviews
                 for rule in active:
                     if rule["id"] == sources_mod.RULE_ID:
                         # Silence is an absence: the rule reads each source's recent arrivals and the wall
