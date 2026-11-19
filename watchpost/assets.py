@@ -385,7 +385,13 @@ def plan_change(conn, kind, target, payload):
             raise AssetError("an asset_add targets the name of the asset it adds")
         _check_name_free(conn, after["name"], None)
         return None, after
-    before = _current(conn, int(target)) if str(target).isdigit() else None
+    # isdigit() is true for ４ and for ². Converting that text would load asset 4, or raise on ².
+    # Only ASCII digits name an asset id.
+    text = str(target)
+    if text.isascii() and text.isdigit():
+        before = _current(conn, int(text))
+    else:
+        before = None
     if before is None:
         raise AssetError(f"asset #{target} no longer exists; nothing was applied", 409)
     if kind == "asset_delete":
