@@ -219,7 +219,7 @@ class ChangeEvidenceTests(ServerTestCase):
         first = analyst.post("/api/rules/brute_force_ip/proposals",
                              {"params": {"ignore_ips": ["10.0.50.5"]}, "reason": "authorized scanner"})[1]
         second = analyst.post("/api/rules/brute_force_ip/proposals",
-                              {"params": {"threshold": 12}, "reason": "slightly less noise"})[1]
+                              {"params": {"threshold": 41}, "reason": "above the forty-attempt fixture"})[1]
         self.assertEqual(second["evaluation"]["before"]["fp"], 2)
         self.assertEqual(self.approve(admin, first)[0], 200)
 
@@ -237,16 +237,19 @@ class ChangeEvidenceTests(ServerTestCase):
         # Resending the digest the reviewer first saw is refused again: only the evidence now stored applies.
         self.assertEqual(self.approve(admin, second)[0], 409)
         self.assertNotEqual(change["evidence_digest"], second["evidence_digest"])
-        # Threshold 12 drops dns_exfil (ten failures). The fresh digest is not enough on its own.
+        # Threshold 41 drops the forty-attempt brute_force fixture. The fresh digest is not enough on its own.
         status, refused, _ = self.approve(admin, change)
         self.assertEqual(status, 400)
-        self.assertIn("dns_exfil", refused["error"])
+        self.assertIn("brute_force", refused["error"])
         self.assertIn("acknowledge_detection_loss", refused["error"])
+        self.assertNotIn("dns_exfil", refused["error"])
+        self.assertEqual(change["evaluation"]["after"]["missed"], ["brute_force"])
         self.assertEqual((rule()["version"], rule()["params"]["threshold"]), (2, 10))
-        status, reviewed, _ = self.approve(admin, change, acknowledge_detection_loss=True)
-        self.assertEqual((status, reviewed["status"]), (200, "approved"))
+        admin2 = self.second_admin()
+        status, reviewed, _ = self.approve(admin2, change, acknowledge_detection_loss=True)
+        self.assertEqual((status, reviewed["status"], reviewed["reviewed_by"]), (200, "approved", "admin2"))
         self.assertEqual(reviewed["evaluation"], change["evaluation"])
-        self.assertEqual((rule()["version"], rule()["params"]["threshold"]), (3, 12))
+        self.assertEqual((rule()["version"], rule()["params"]["threshold"]), (3, 41))
 
     def test_stale_exception_evidence_is_refreshed_then_applies_on_the_second_approve(self):
         analyst, admin = self.client("analyst"), self.client("admin")
