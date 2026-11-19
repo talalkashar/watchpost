@@ -33,7 +33,7 @@ export SIEM_SYSLOG_PORT=5514      # UDP and TCP; ports below 1024 need root, so 
 What the listener does with each message:
 
 1. It reads the frame. UDP takes one message per datagram. TCP accepts newline-terminated messages and RFC 6587 octet-counted messages (`LEN SP MSG`). Frames longer than 16 KB are truncated.
-2. It parses PRI and the RFC 5424 or RFC 3164 header. A missing hostname falls back to the sender's IP, and a missing timestamp falls back to the receive time.
+2. It parses PRI and the RFC 5424 or RFC 3164 header. PRI is one to three ASCII digits and is kept only when it is at most 191. `<13>` stays priority 13. `<４>` is not priority 4 and does not change an unlabeled line's severity. A missing hostname falls back to the sender's IP, and a missing timestamp falls back to the receive time.
 3. It tries the auth.log parser first (sshd, sudo/su, useradd, auditd, UFW/iptables firewall, OpenVPN). A message that parser does not recognize is tried as an nginx/Apache combined access line, so `access_log syslog:server=127.0.0.1:5514 combined;` in nginx gives `web_request`/`web_scan`/`web_error` events with the host from the syslog header and the time from the access line. Lines neither parser recognizes become `event_type=syslog`. Their severity comes from PRI: emerg, alert, and crit map to `critical`, err to `high`, warning to `medium`, notice to `low`, and info and debug to `info`.
 4. Every 2 seconds, everything queued is handed to the engine as one batch. The batch source is `syslog` and the submitter is `syslog-listener`, so it shows up under **Ingest > Recent batches**.
 

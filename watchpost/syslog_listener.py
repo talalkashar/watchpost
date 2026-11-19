@@ -38,7 +38,8 @@ RECENT_SECONDS = 600          # drops or flush failures this recent make the com
 PRI_SEVERITY = {0: "critical", 1: "critical", 2: "critical", 3: "high",
                 4: "medium", 5: "low", 6: "info", 7: "info"}
 
-_PRI = re.compile(r"^<(\d{1,3})>")
+# ASCII digits only. \d also matches fullwidth ４, and int("４") is 4.
+_PRI = re.compile(r"^<([0-9]{1,3})>")
 _RFC5424 = re.compile(
     r"^1 (?P<ts>\S+) (?P<host>\S+) (?P<app>\S+) (?P<procid>\S+) (?P<msgid>\S+) "
     r"(?P<sd>-|(?:\[(?:[^\]\\]|\\.)*\])+)(?: (?P<msg>.*))?$", re.S)

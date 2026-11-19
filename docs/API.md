@@ -109,7 +109,7 @@ curl -X POST "http://127.0.0.1:8080/api/ingest/upload?format=authlog&source=bast
 ### Live ingestion (no new routes)
 
 - **File shipper.** `scripts/shipper.py` tails files and posts complete new lines to `POST /api/ingest/upload` with `Authorization: Bearer wp_...`, using `format` and `source` query parameters. It keeps a position file and retries network errors, 5xx, and 401/403 with backoff. It skips batches refused with 400, 413, 415, or 422.
-- **Syslog listener.** With `SIEM_SYSLOG=1`, Watchpost also accepts RFC 3164 and RFC 5424 syslog over UDP and TCP on `SIEM_SYSLOG_BIND:SIEM_SYSLOG_PORT` (default `127.0.0.1:5514`). Frames are stored as batches with `source=syslog`, `format=syslog`, and `submitted_by=syslog-listener`. Lines that no parser recognizes get `event_type=syslog`, with severity taken from PRI.
+- **Syslog listener.** With `SIEM_SYSLOG=1`, Watchpost also accepts RFC 3164 and RFC 5424 syslog over UDP and TCP on `SIEM_SYSLOG_BIND:SIEM_SYSLOG_PORT` (default `127.0.0.1:5514`). Frames are stored as batches with `source=syslog`, `format=syslog`, and `submitted_by=syslog-listener`. Lines that no parser recognizes get `event_type=syslog`, with severity taken from PRI. The PRI value is one to three ASCII digits and is kept only when it is at most 191. `<13>` stays priority 13, so an unlabeled line stays severity `low`. `<４>` is not priority 4, so that unlabeled line stays the default severity and is not `medium`. A normal RFC 5424 frame and a normal RFC 3164 frame still parse.
 
 Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 
