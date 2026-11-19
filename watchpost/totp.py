@@ -53,7 +53,8 @@ def verify(secret, code, last_step=None, timestamp=None):
     if not isinstance(code, str):
         return None
     code = code.strip().replace(" ", "")
-    if len(code) != DIGITS or not code.isdigit():
+    # isdigit() is true for １２３４５６. That string is not six ASCII digits and must return before HMAC.
+    if len(code) != DIGITS or not code.isascii() or not code.isdigit():
         return None
     key = decode_secret(secret)
     current = step_at(now() if timestamp is None else timestamp)

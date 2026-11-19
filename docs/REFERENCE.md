@@ -481,7 +481,7 @@ For the first two, record the head and the chain start (`id`, `hash`, `created_a
 
 ### Two-factor sign-in and sessions
 
-Analysts and admins can add a TOTP second factor (RFC 6238: HMAC-SHA1, 6 digits, 30-second steps, codes from one step before or after accepted for clock drift). It is opt-in per account. The read-only `viewer` role cannot enroll (403), so the public demo login stays a single password step.
+Analysts and admins can add a TOTP second factor (RFC 6238: HMAC-SHA1, 6 digits, 30-second steps, codes from one step before or after accepted for clock drift). The code is six ASCII digits. An ASCII code still verifies. `１２３４５６` is not six ASCII digits and is not compared with HMAC. It is opt-in per account. The read-only `viewer` role cannot enroll (403), so the public demo login stays a single password step.
 
 **Enrolling** (**Account → Two-factor sign-in**, or the API): `POST /api/auth/mfa/enroll` returns `{secret, otpauth_uri}` with `otpauth://totp/Watchpost:<user>?secret=...&issuer=Watchpost`. There is no QR code: enter the secret in your authenticator app. The secret stays pending, and sign-in stays one step, until `POST /api/auth/mfa/confirm` with `{"code"}` succeeds. `POST /api/auth/mfa/disable` with a current code turns it off (or cancels an unconfirmed setup). `GET /api/auth/mfa/status` (any role) returns `{enabled, pending, available}`.
 

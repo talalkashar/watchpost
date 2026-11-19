@@ -50,6 +50,7 @@ curl -c jar -H 'Content-Type: application/json' -d '{"username":"analyst","passw
 | `POST /api/auth/logout` | any | |
 | `GET /api/auth/me` | any | current user and CSRF token |
 | `GET /api/auth/sessions` | any | The signed-in user's active sessions, newest by `created_at` then `sid`, at most 100. The username is that account only; ASCII case does not add another account. An expired session is not a row. The body stays a bare array and never includes the token or its hash. `X-Watchpost-Omitted` is how many active sessions were past that cap (0 when the list fits or is empty) |
+| `POST /api/auth/mfa` | public | `{mfa_token, code}`. The code is six ASCII digits. An ASCII code still verifies. `１２３４５６` is not six ASCII digits and is not compared with HMAC. That code is 401 `invalid authentication code` and does not create a session |
 
 ## Ingestion
 
