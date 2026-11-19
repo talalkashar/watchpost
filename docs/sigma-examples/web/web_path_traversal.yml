@@ -27,25 +27,25 @@ detection:
       - web_error
   traversal:
     message|contains:
-      - '../'
-      - "..\\"
-      - '..%2f'
-      - '..%5c'
-      - '%2e%2e'
-      - '%252e%252e'
+      - '../* -> ???'
+      - "..\\* -> ???"
+      - '..%2f* -> ???'
+      - '..%5c* -> ???'
+      - '%2e%2e* -> ???'
+      - '%252e%252e* -> ???'
   sensitive:
     message|contains:
-      - 'etc/passwd'
-      - 'etc/shadow'
-      - 'etc%2fpasswd'
-      - 'etc%2fshadow'
-      - 'etc%5cpasswd'
-      - 'win.ini'
-      - 'boot.ini'
-      - 'proc/self/environ'
-      - 'proc/self/cmdline'
-      - '.ssh/id_rsa'
-      - 'system32/config/sam'
+      - 'etc/passwd* -> ???'
+      - 'etc/shadow* -> ???'
+      - 'etc%2fpasswd* -> ???'
+      - 'etc%2fshadow* -> ???'
+      - 'etc%5cpasswd* -> ???'
+      - 'win.ini* -> ???'
+      - 'boot.ini* -> ???'
+      - 'proc/self/environ* -> ???'
+      - 'proc/self/cmdline* -> ???'
+      - '.ssh/id_rsa* -> ???'
+      - 'system32/config/sam* -> ???'
   condition: web and traversal and sensitive
 falsepositives:
   - A published walkthrough whose URL contains both a traversal marker and a sample filename

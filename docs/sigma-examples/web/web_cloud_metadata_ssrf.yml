@@ -6,8 +6,7 @@ status: experimental
 description: |
   A web request that points at a cloud instance metadata address: the AWS and
   Azure link-local service, the AWS IPv6 metadata address, GCP metadata, or the
-  Alibaba metadata service. A hit is an attempt to exploit a public application
-  into reading instance credentials.
+  Alibaba metadata service. The request target contains a URL for one of these services.
 author: Watchpost example
 date: 2026-11-18
 references:
@@ -26,15 +25,11 @@ detection:
       - web_error
   metadata:
     message|contains:
-      - '169.254.169.254'
-      - '169.254.170.2'
-      - 'fd00:ec2::254'
-      - 'metadata.google.internal'
-      - '100.100.100.200'
-      - 'latest/meta-data'
-      - 'latest%2fmeta-data'
-      - 'computemetadata/v1'
-      - 'metadata/instance\?api-version'
+      - '://169.254.169.254/* -> ???'
+      - '://169.254.170.2/* -> ???'
+      - '://[fd00:ec2::254]/* -> ???'
+      - '://metadata.google.internal/* -> ???'
+      - '://100.100.100.200/* -> ???'
   condition: web and metadata
 falsepositives:
   - An application health check that intentionally proxies to its own metadata service

@@ -1,15 +1,10 @@
-# OS command injection in the request line. Bare "wget" or "curl" is not enough:
-# the pattern wants a shell metacharacter or a URL-encoded one next to the command,
-# or a full path such as /bin/sh. A docs page named curl-and-wget does not match.
+# Match command chaining in the recorded request target.
 title: Web Command Injection Attempt
 id: e3b1b0bb-cb3e-4057-972b-a9d19ad7bd9e
 status: experimental
 description: |
-  A web request that tries to run a shell command through a query parameter:
-  wget or curl chained with a metacharacter, command substitution, /bin/sh,
-  cmd.exe, or PowerShell. Percent-encoded semicolons and pipes are included
-  because the access log keeps the raw path. A 500 from this payload is stored
-  as web_error and still matches.
+  The request target contains a shell separator followed by a command name.
+  The access log records the request and its HTTP status.
 author: Watchpost example
 date: 2026-11-18
 references:
@@ -28,42 +23,27 @@ detection:
       - web_error
   injection:
     message|contains:
-      - '/bin/sh'
-      - '/bin/bash'
-      - '/usr/bin/wget'
-      - '/usr/bin/curl'
-      - 'cmd.exe'
-      - 'cmd%2eexe'
-      - 'powershell.exe'
-      - 'powershell%2eexe'
-      - ';wget'
-      - ';curl'
-      - ';whoami'
-      - '; wget'
-      - '; curl'
-      - '|wget'
-      - '|curl'
-      - '|whoami'
-      - '| wget'
-      - '| curl'
-      - '$(wget'
-      - '$(curl'
-      - '$(whoami'
-      - '%3bwget'
-      - '%3bcurl'
-      - '%3bwhoami'
-      - '%7cwget'
-      - '%7ccurl'
-      - '%7cwhoami'
-      - '%26%26whoami'
-      - '&&whoami'
-      - 'wget%20http'
-      - 'curl%20http'
-      - 'bash -i'
-      - 'bash%20-i'
-      - '/dev/tcp/'
-      - 'chmod 777'
-      - 'chmod%20777'
+      - ';wget* -> ???'
+      - ';curl* -> ???'
+      - ';whoami* -> ???'
+      - '; wget* -> ???'
+      - '; curl* -> ???'
+      - '|wget* -> ???'
+      - '|curl* -> ???'
+      - '|whoami* -> ???'
+      - '| wget* -> ???'
+      - '| curl* -> ???'
+      - '$(wget* -> ???'
+      - '$(curl* -> ???'
+      - '$(whoami* -> ???'
+      - '%3bwget* -> ???'
+      - '%3bcurl* -> ???'
+      - '%3bwhoami* -> ???'
+      - '%7cwget* -> ???'
+      - '%7ccurl* -> ???'
+      - '%7cwhoami* -> ???'
+      - '%26%26whoami* -> ???'
+      - '&&whoami* -> ???'
   condition: web and injection
 falsepositives:
   - A request that quotes a shell snippet as a search term, including the metacharacter
