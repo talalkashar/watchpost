@@ -152,9 +152,6 @@ class GroupingApiTests(ServerTestCase):
                                               {"grouping": value, "reason": "Validate grouping"})[0], 400)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 class StoredGroupTests(unittest.TestCase):
     rule_id = "brute_force_ip"
 
@@ -247,6 +244,25 @@ class StoredGroupTests(unittest.TestCase):
         self.assertEqual(reads, [False])
         self.assertEqual(self.conn.execute("SELECT event_count FROM alerts WHERE id=?", (old,)).fetchone()[0], 20)
 
+    def test_later_alert_cannot_supply_missing_approval_provenance(self):
+        exception = self.suppress("a,b")
+        self.conn.execute("UPDATE suppressions SET created_at=? WHERE id=?",
+                          (iso(utcnow() - timedelta(days=1)), exception))
+        self.alert("a,b", self.events(["a,b"] * 10))
+        for _ in range(2):
+            result = engine.run_detection(self.conn)
+            self.assertEqual(result["alerts_suppressed"], 0)
+            self.assertEqual([r["suppression_id"] for r in result["suppression_reviews"]], [exception])
+
+    def test_removing_grouping_does_not_retarget_an_old_exception(self):
+        self.events(["192.0.2.1"] * 10)
+        self.suppress("192.0.2.1")
+        self.conn.execute("UPDATE rule_history SET grouping=? WHERE rule_id=?", (json.dumps(["user"]), self.rule_id))
+        self.conn.execute("UPDATE rules SET grouping='[]',version=2 WHERE id=?", (self.rule_id,))
+        result = engine.run_detection(self.conn)
+        self.assertEqual((result["alerts_created"], result["alerts_suppressed"]), (1, 0))
+        self.assertEqual(len(result["suppression_reviews"]), 1)
+
     def test_old_grouping_cannot_authorize_an_exception_after_fields_change(self):
         ids = self.events(["a,b"] * 10)
         self.alert("a,b", ids)
@@ -257,3 +273,7 @@ class StoredGroupTests(unittest.TestCase):
         result = engine.run_detection(self.conn)
         self.assertEqual((result["status"], result["alerts_suppressed"]), ("ok", 0))
         self.assertEqual(len(result["suppression_reviews"]), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

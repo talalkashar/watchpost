@@ -249,7 +249,7 @@ def _missing_group_proofs(conn, rules):
 def _suppression_keys(conn, rules, cached, record=False):
     """Resolve a reviewed key only when all its original members agree on its identity."""
     active, reviews = set(), []
-    for sup in conn.execute("SELECT id,rule_id,group_key FROM suppressions"
+    for sup in conn.execute("SELECT id,rule_id,group_key,created_at FROM suppressions"
                             " WHERE expires_at > ? AND revoked_at IS NULL", (now_iso(),)):
         key = sup["group_key"]
         rid = sup["rule_id"]
@@ -260,21 +260,26 @@ def _suppression_keys(conn, rules, cached, record=False):
             continue
         state = conn.execute("SELECT * FROM suppression_group_state WHERE suppression_id=?",
                              (sup["id"],)).fetchone() if cached else None
-        if not rule["grouping"] and state is None:
+        fields = json.dumps(rule["grouping"])
+        approved_fields = state["fields"] if state else fields
+        if state is None and rule["version"] > 1:
+            history = conn.execute("SELECT grouping FROM rule_history WHERE rule_id=? AND changed_at<=?"
+                                   " ORDER BY version DESC,id DESC LIMIT 1", (rid, sup["created_at"])).fetchone()
+            approved_fields = json.dumps(json.loads(history[0])) if history else None
+        if not rule["grouping"] and approved_fields == fields and state is None:
             active.add((rid, key))
             continue
-        fields = json.dumps(rule["grouping"])
         cutoff = state["cutoff"] if state else conn.execute("SELECT COALESCE(MAX(id),0) FROM alerts").fetchone()[0]
         # Current-format alerts created after this decision cannot supply provenance for an older exception.
         targets, missing = set(), []
         if cached:
             members = conn.execute(
                 "SELECT a.*,g.alert_id AS known,g.fields,g.canonical FROM alerts a LEFT JOIN alert_group_keys g ON g.alert_id=a.id"
-                " WHERE a.rule_id=? AND a.group_key=? AND (a.id<=? OR g.native=0 OR g.alert_id IS NULL)"
-                " ORDER BY a.id", (rid, key, cutoff))
+                " WHERE a.rule_id=? AND a.group_key=? AND a.id<=? AND a.created_at<=?"
+                " ORDER BY a.id", (rid, key, cutoff, sup["created_at"]))
         else:
-            members = conn.execute("SELECT a.*,NULL AS known FROM alerts a WHERE rule_id=? AND group_key=? ORDER BY id",
-                                   (rid, key))
+            members = conn.execute("SELECT a.*,NULL AS known FROM alerts a WHERE rule_id=? AND group_key=?"
+                                   " AND created_at<=? ORDER BY id", (rid, key, sup["created_at"]))
         for member in members:
             alert_id = member["id"]
             if member["known"] is None:
@@ -287,7 +292,7 @@ def _suppression_keys(conn, rules, cached, record=False):
                 targets.add(canonical)
         previous = json.loads(state["review"]) if state and state["review"] else None
         effective = None
-        if not previous and not missing and (not state or state["fields"] == fields):
+        if not previous and not missing and approved_fields == fields:
             if len(targets) == 1:
                 effective = next(iter(targets))
             elif not targets and grouping.ordinary_key(key, rule["grouping"]):
@@ -407,8 +412,10 @@ def run_detection(conn, trigger="manual", start=None, end=None):
             assets_idx = assets_mod.load_index(conn)
             grouped = [r for r in active if r.get("grouping")]
             cached = conn.execute("SELECT 1 FROM sqlite_master WHERE name='suppression_group_state'").fetchone()
-            if grouped:
+            if not cached and (grouped or conn.execute("SELECT 1 FROM suppressions LIMIT 1").fetchone()):
                 _group_tables(conn)
+                cached = True
+            if grouped:
                 revision = conn.execute("PRAGMA data_version").fetchone()[0]
                 proofs = _missing_group_proofs(conn, grouped)
             suppressed_rules = active_rule_suppressions(conn)
