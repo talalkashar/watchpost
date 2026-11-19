@@ -435,12 +435,13 @@ def batches(req):
 @route("POST", "/api/demo/load", role="admin")
 def demo_load(req):
     data = body_json(req)
+    seed = data.get("seed", 7)
+    # bool is a subclass of int; JSON true must not become seed 1.
+    if not isinstance(seed, int) or isinstance(seed, bool):
+        raise ApiError(400, "seed must be an integer")
     existing = req.conn.execute("SELECT COUNT(*) FROM events WHERE synthetic = 1").fetchone()[0]
     if existing and not data.get("force"):
         raise ApiError(409, f"{existing} synthetic events already loaded; send force=true to add another copy")
-    seed = data.get("seed", 7)
-    if not isinstance(seed, int):
-        raise ApiError(400, "seed must be an integer")
     results = {}
     demo_assets = assets.seed_demo_assets(req.conn, req.user["username"])
     for name, events in simulate.build(seed=seed).items():
@@ -462,10 +463,11 @@ def demo_simulate(req):
     """Replay one labeled attack scenario into the local store (synthetic, loopback only by design)."""
     data = body_json(req)
     name, seed = data.get("scenario"), data.get("seed", 7)
+    # bool is a subclass of int; JSON true must not become seed 1.
+    if not isinstance(seed, int) or isinstance(seed, bool):
+        raise ApiError(400, "seed must be an integer")
     if name not in simulate.SCENARIOS:
         raise ApiError(400, f"scenario must be one of {', '.join(simulate.SCENARIOS)}")
-    if not isinstance(seed, int):
-        raise ApiError(400, "seed must be an integer")
     events = simulate.build([name], seed=seed)[name]
     normalized, rejections = parse_payload(json.dumps(events), "json", f"demo:{name}")
     req.status = 201

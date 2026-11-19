@@ -117,8 +117,8 @@ Setup and rsyslog configuration: [LIVE_INGEST.md](LIVE_INGEST.md).
 | `GET /api/ingest/batches` | viewer | Last 50 batches by `created_at` descending, then `id` descending. The same timestamp keeps the higher id. Each row has up to 100 rejection reasons. The body stays a bare array. `X-Watchpost-Omitted` is how many batches were past that cap (0 when the table fits) |
 | `POST /api/detection/run` | analyst | Full rescan; processes any backlog |
 | `GET /api/demo/scenarios` | viewer | Labeled synthetic scenarios |
-| `POST /api/demo/load` | admin | `{seed?, force?}`: loads every scenario (409 if already loaded) |
-| `POST /api/demo/simulate` | analyst | `{scenario, seed?}`: replays one scenario into this instance |
+| `POST /api/demo/load` | admin | `{seed?, force?}`: loads every scenario (409 if already loaded). `seed` is an integer, default 7. Seed `7` stays that seed. JSON `true`, JSON `false`, and a string seed are 400 `seed must be an integer` and store nothing |
+| `POST /api/demo/simulate` | analyst | `{scenario, seed?}`: replays one scenario into this instance. `seed` is an integer, default 7. Seed `7` stays that seed. JSON `true`, JSON `false`, and a string seed are 400 `seed must be an integer` and store nothing |
 
 ## Search and investigation
 
@@ -398,7 +398,7 @@ A scripted six-stage intrusion (recon → credential attack → foothold → esc
 
 | Endpoint | Role | Notes |
 |---|---|---|
-| `POST /api/storyline/start` | admin | `{speed?: 0.1–10000 (default 1 = about 2 minutes), seed?: int}` → 202 with the status below. 409 while a run is active. Audited as `storyline_started` |
+| `POST /api/storyline/start` | admin | `{speed?: 0.1–10000 (default 1 = about 2 minutes), seed?: int}` → 202 with the status below. 409 while a run is active. A JSON boolean seed is 400 `seed must be an integer`. Audited as `storyline_started` |
 | `POST /api/storyline/stop` | admin | Stops the current run after the batch in flight; audited as `storyline_stopped` |
 | `GET /api/storyline/status` | viewer | `{running, stage, progress (0–1), events_sent, alerts_created, started_at, finished_at, error, speed, seed, started_by, stages: [{name, starts_at, description}], synthetic: true}` |
 
