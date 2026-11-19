@@ -3,6 +3,7 @@ import re
 import shutil
 import socket
 import subprocess
+import tempfile
 import time
 import unittest
 from datetime import timedelta
@@ -496,15 +497,52 @@ process.stdout.write(JSON.stringify(out));
         start = self.source.index("renderMarks()")
         chunk = self.source[start:self.source.index("pulse(e)")]
         self.assertIn("mapSide(this.sources()", chunk)
-        self.assertIn("Busiest arcs", chunk)
-        self.assertNotIn('class: "ms-h" }, "No geo entry"', chunk)
-        self.assertIn("ms-city", chunk)
-        self.assertIn("no geo entry", chunk)
-        self.assertNotIn("Top sources", chunk)
+        self.assertIn("this.mapView.update(ranked, hq, summary.unknown)", chunk)
+        view = (STATIC / "map-view.js").read_text()
+        self.assertIn("Busiest arcs", view)
+        self.assertIn('"data-city": r.city', view)
+        self.assertIn('el("button", { class: "ms-row"', view)
+        self.assertIn("ms-city", view)
+        self.assertIn("no geo entry", view)
+        self.assertNotIn("Top sources", view)
         self.assertNotIn("unknown.slice", chunk)
         css = (STATIC / "style.css").read_text()
         self.assertIn("grid-template-columns: 12px minmax(0, 1fr) auto", css)
         self.assertIn(".ms-row .ms-city", css)
+
+
+@unittest.skipUnless(shutil.which("node"), "node is not installed")
+class OrbitGeometryTests(unittest.TestCase):
+    def test_geographic_axes_and_shortest_beams(self):
+        # Load the shipped ES modules with Node, including releases where .js
+        # defaults to CommonJS outside a package. No browser or package install.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text('{"type":"module"}')
+            shutil.copy(STATIC / "orbit.js", root)
+            shutil.copytree(STATIC / "vendor" / "three", root / "vendor" / "three")
+            script = """
+import assert from "node:assert/strict";
+import { position, track } from "./orbit.js";
+const near = (a, b) => assert.ok(Math.abs(a-b) < 1e-6, a + " differs from " + b);
+const loc = (lon, lat = 0) => ({ lon, lat });
+near(position(loc(0)).x, 1);
+near(position(loc(90)).z, -1);
+near(position(loc(10, 90)).y, 1);
+
+for (const [from, to] of [[loc(-179), loc(179)], [loc(0), loc(180)],
+                         [loc(20, 90), loc(20, -90)], [loc(55, 30), loc(55, 30)]]) {
+    const beam = track(from, to);
+    near(beam[0].clone().normalize().distanceTo(position(from)), 0);
+    near(beam.at(-1).clone().normalize().distanceTo(position(to)), 0);
+    for (const point of beam) assert.ok(point.length() >= 1 && point.length() < 1.13);
+}
+const dateline = track(loc(-179), loc(179));
+near(dateline[32].clone().normalize().distanceTo(position(loc(180))), 0);
+assert.ok(dateline[32].length() > dateline[0].length());
+"""
+            subprocess.run([shutil.which("node"), "--input-type=module", "-e", script],
+                           cwd=root, check=True, capture_output=True, text=True)
 
 
 class MapRedrawTests(unittest.TestCase):
