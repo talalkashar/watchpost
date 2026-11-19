@@ -3,7 +3,7 @@
 // (via el()), never innerHTML. The SOC dashboard and live stream live in dashboard.js; its
 // charts are SVG strings from charts.js/map.js with every text value escaped.
 
-const state = { user: null, csrf: null, view: "dashboard", alertId: null, keys: null, restore: null, focusSearch: false };
+const state = { user: null, csrf: null, view: "dashboard", viewId: null, keys: null, restore: null, focusSearch: false };
 const ROLE_RANK = { viewer: 1, analyst: 2, admin: 3 };
 const can = (role) => state.user && ROLE_RANK[state.user.role] >= ROLE_RANK[role];
 
@@ -142,20 +142,34 @@ async function api(path, { method = "GET", body, raw, contentType, allow = [] } 
 }
 
 // Clickable rows are focusable and open with Enter or Space, so the mouse is never required.
-function table(headers, rows, onClick, wrapClass) {
+function table(headers, rows, onClick, wrapClass, emptyMessage) {
+  if (!rows.length && emptyMessage) return el("p", { class: "table-empty muted" }, emptyMessage);
   const onKey = (r) => (ev) => {
     if (ev.target !== ev.currentTarget || (ev.key !== "Enter" && ev.key !== " ")) return;
     ev.preventDefault();
-    onClick(r);
+    onClick(r, ev.currentTarget);
   };
   return el("div", { class: wrapClass ? `table-wrap ${wrapClass}` : "table-wrap" },
     el("table", {},
       el("thead", {}, el("tr", {}, headers.map((h) => el("th", { scope: "col" }, h)))),
       el("tbody", {}, rows.length ? rows.map((r) =>
-        el("tr", { class: [onClick ? "clickable" : "", r.cls || ""].join(" "), onclick: onClick ? () => onClick(r) : null,
+        el("tr", { class: [onClick ? "clickable" : "", r.cls || ""].join(" "), onclick: onClick ? (ev) => onClick(r, ev.currentTarget) : null,
           tabindex: onClick ? "0" : null, onkeydown: onClick ? onKey(r) : null, "data-id": onClick && r.id !== undefined ? r.id : null },
           r.cells.map((c) => (c && c.num !== undefined ? el("td", { class: "num" }, c.num) : el("td", {}, c)))))
         : el("tr", {}, el("td", { colspan: headers.length, class: "muted" }, "Nothing to show.")))));
+}
+
+// Only the newest panel read can commit. Live strip/stream reads have a separate lifetime.
+let viewRevision = 0;
+async function readView(view, read) {
+  if (!state.user || state.view !== view) return;
+  const revision = ++viewRevision;
+  try {
+    const data = await read();
+    if (revision === viewRevision) return data;
+  } catch (error) {
+    if (revision === viewRevision) throw error;
+  }
 }
 
 function render(...nodes) {
@@ -174,16 +188,17 @@ async function guarded(fn) {
 // One <dialog> serves every modal: showModal() makes the page behind it inert (the browser traps focus)
 // and Esc closes it. This names it after its heading and hands focus back to the trigger on close.
 let modalReturn = null;
-function openModal() {
+function openModal(trigger = document.activeElement) {
   const m = $("#modal");
   const h = $("#modal-body").querySelector("h2");
   if (h) { h.id = "modal-title"; m.setAttribute("aria-labelledby", "modal-title"); } else m.removeAttribute("aria-labelledby");
-  if (!m.open) modalReturn = document.activeElement;
+  if (!m.open) modalReturn = trigger;
   m.showModal();
 }
 
 // ---------- auth ----------
 function showLogin() {
+  viewRevision++;
   state.user = null; state.csrf = null;
   document.title = consoleTitle(false);
   Live.stop();
@@ -294,7 +309,9 @@ function setMenu(open) {
 function route() {
   if (!state.user) return;
   const [view, id, ...rest] = ((location.hash === "#main" ? "" : location.hash.slice(1)) || "dashboard").split("/");
+  viewRevision++;
   state.view = view;
+  state.viewId = id;
   document.body.dataset.view = view;
   state.keys = null;  // per-view shortcut keys; the view that owns them sets them again
   setMenu(false);
@@ -303,11 +320,20 @@ function route() {
     if (b.dataset.view === view) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
   });
   if (view !== "dashboard") Dash.unmount();
-  const views = { dashboard: socDashboard, incidents: () => (id ? incidentDetail(Number(id)) : incidentsView()),
+  const loading = el("p", { class: "muted", role: "status" }, "Loading…");
+  render(loading);
+  const views = { dashboard: socDashboard, incidents: () => id ? incidentDetail(Number(id)) : incidentList(),
     alerts: () => (id ? alertDetail(Number(id)) : alerts()), events, overview, ingest, rules: () => rules(id),
     noise: noiseLab, coverage: coverageView, health, admin, account, hunt: () => huntView(huntQueryFromHash([id, ...rest].join("/"))),
     entity: () => entityDetail(id, decodeURIComponent(rest.join("/"))) };
-  guarded(views[view] || socDashboard);
+  const load = views[view] || socDashboard;
+  guarded(async () => {
+    try { await load(); }
+    catch (error) {
+      if (loading.isConnected) render(el("p", { class: "error", role: "alert" }, error.message));
+      throw error;
+    }
+  });
 }
 
 async function refreshBanner() {
@@ -331,7 +357,9 @@ async function refreshBanner() {
 
 // ---------- metrics overview (the 1.0 dashboard) ----------
 async function overview() {
-  const [m, tri] = await Promise.all([api("/api/metrics"), api("/api/metrics/triage")]);
+  const result = await readView("overview", () => Promise.all([api("/api/metrics"), api("/api/metrics/triage")]));
+  if (!result) return;
+  const [m, tri] = result;
   const kpi = (v, l) => el("div", { class: "kpi" }, el("div", { class: "v" }, v ?? "—"), el("div", { class: "l" }, l));
   const hist = m.activity_last_24h_of_data;
   const max = Math.max(1, ...hist.map((h) => h.events));
@@ -478,7 +506,10 @@ async function alerts() {
     storeAlertFilter(ALERT_QUEUE_ALL);
     guarded(alerts);
   });
-  const [list, incidents] = await Promise.all([api(`/api/alerts?${params}`), api("/api/incidents?status=open,investigating")]);
+  const result = await readView("alerts", () => Promise.all([api(`/api/alerts?${params}`), api("/api/incidents?status=open,investigating")]).catch((e) => e));
+  if (!result) return;
+  if (result instanceof Error) return render(el("h1", {}, "Alerts"), form, el("p", { class: "error", role: "alert" }, result.message));
+  const [list, incidents] = result;
   render(el("h1", {}, "Alerts"),
     el("details", { class: "card active-incidents" }, el("summary", {}, `Active incidents (${incidents.length})`),
       el("p", { class: "muted" }, "Alerts sharing an IP, account or host within 30 minutes form an incident. Three or more tactics raise its severity."),
@@ -486,19 +517,22 @@ async function alerts() {
         incidents.map((i) => ({ id: i.id, cells: [sev(i.severity), i.title,
           i.stages.length ? el("span", { class: "stages" }, i.stages.map((t) => pill(t, "stage"))) : "—",
           { num: i.alert_count }, status(i.status), stamp(i.last_seen)] })),
-        (r) => go("incidents", r.id))),
+        (r) => go("incidents", r.id), null, "No active incidents.")),
     form, el("div", { class: "card", "data-kbd-list": "alerts" }, table(
     ["Severity", "Alert", "Rule", "Status", "Events", "Last seen"],
     list.map((a) => ({ id: a.id, cells: [sev(a.severity), a.title, el("code", {}, a.rule_id),
       el("span", { class: "cell-stack" }, status(a.status),
         a.disposition ? el("span", { class: "disp" }, a.disposition.replace("_", " ")) : null, slaBadge(a.sla_breach)),
       { num: a.event_count }, stamp(a.last_seen)] })),
-    (r) => go("alerts", r.id))));
+    (r) => go("alerts", r.id), null,
+    alertQueueCanReset(params) ? "No alerts match these filters." : "No alerts have been recorded.")));
   restoreSelection(`[data-kbd-list] tr[data-id="${state.restore}"]`);
 }
 
 async function alertDetail(id) {
-  const a = await api(`/api/alerts/${id}`);
+  if (Number(state.viewId) !== id) return;
+  const a = await readView("alerts", () => api(`/api/alerts/${id}`));
+  if (!a) return;
   // Triage keys (see keyboard section): Esc for everyone; a and r only for roles that may act.
   state.keys = state.view === "alerts" ? { Escape: () => { state.restore = id; go("alerts"); } } : null;
   if (state.keys && can("analyst") && a.status !== "resolved") {
@@ -608,8 +642,28 @@ function correlationRule(incident) {
 }
 
 // ---------- incidents ----------
+// The standalone board owns its panel read. The live dashboard shares the board components.
+async function incidentList() {
+  const result = await readView("incidents", async () => {
+    await Live.refreshIncidents();
+    const inc = Live.incidents;
+    const alerts = inc.state === "ok" ? [] : await api("/api/alerts?limit=200");
+    return { inc, alerts };
+  });
+  if (!result) return;
+  const { inc, alerts } = result;
+  render(
+    el("div", { class: "page-head" }, el("h1", {}, "Incidents"), inc.state === "ok" ? null : incidentFallbackChip(inc.state)),
+    inc.state !== "ok" ? el("p", { class: "muted" }, inc.state === "error" ? inc.error
+      : "Alerts become incidents once the correlation engine ships (GET /api/incidents). Until then this board groups alerts by status.") : null,
+    el("div", { class: "board big", "data-kbd-list": "incidents" }, ...incidentBoard(inc, alerts, 50)));
+  restoreSelection(`[data-kbd-list] a.bcard[href="#incidents/${state.restore}"]`);
+}
+
 async function incidentDetail(id) {
-  const i = await api(`/api/incidents/${id}`);
+  if (Number(state.viewId) !== id) return;
+  const i = await readView("incidents", () => api(`/api/incidents/${id}`));
+  if (!i) return;
   const setIncident = (body) => guarded(async () => { await api(`/api/incidents/${id}/status`, { method: "POST", body }); incidentDetail(id); });
   state.keys = state.view === "incidents" ? { Escape: () => { state.restore = id; go("incidents"); } } : null;
   if (state.keys && can("analyst") && i.status === "open") state.keys.a = () => setIncident({ status: "investigating" });
@@ -718,7 +772,8 @@ function entityDayChart(series) {
 // ---------- entity page ----------
 async function entityDetail(kind, value) {
   if (!Object.hasOwn(ENTITY_KINDS, kind)) throw new Error("Unknown entity kind");
-  const e = await api(`/api/entities/${kind}/${encodeURIComponent(value)}`);
+  const e = await readView("entity", () => api(`/api/entities/${kind}/${encodeURIComponent(value)}`));
+  if (!e) return;
   const kpi = (v, l) => el("div", { class: "kpi" }, el("div", { class: "v" }, v ?? "—"), el("div", { class: "l" }, l));
   const counted = e.contributions.filter((c) => c.counted);
   const weights = Object.entries(e.severity_weights).map(([s, w]) => `${s} ${w}`).join(", ");
@@ -799,39 +854,58 @@ async function events(offset = 0) {
   form.addEventListener("submit", (ev) => {
     ev.preventDefault();
     const p = new URLSearchParams();
-    for (const [k, v] of new FormData(form)) if (v) p.set(k, v.trim());
+    for (const [k, v] of new FormData(form)) if (v.trim()) p.set(k, v.trim());
     try { sessionStorage.setItem("eventFilter", p.toString()); } catch { /* ignore */ }
     guarded(() => events(0));
   });
   const query = new URLSearchParams(saved);
   if (query.get("severity")) query.set("severity_mode", "min");
   query.set("limit", "100"); query.set("offset", String(offset));
-  let data;
-  try { data = await api(`/api/events?${query}`); }
-  catch (e) { render(el("h1", {}, "Event search"), form, el("p", { class: "error", role: "alert" }, e.message)); return; }
+  const data = await readView("events", () => api(`/api/events?${query}`).catch((e) => e));
+  if (!data) return;
+  if (data instanceof Error) return render(el("h1", {}, "Event search"), form, el("p", { class: "error", role: "alert" }, data.message));
   const pager = el("div", { class: "row" },
     el("span", { class: "muted" }, `${data.total ? `${offset + 1}–${offset + data.events.length} of ` : ""}${data.total.toLocaleString()} events`),
     el("button", { class: "ghost", disabled: offset === 0, onclick: () => guarded(() => events(Math.max(0, offset - 100))) }, "Newer"),
     el("button", { class: "ghost", disabled: offset + 100 >= data.total, onclick: () => guarded(() => events(offset + 100)) }, "Older"));
   render(el("h1", {}, "Event search"), form, el("div", { class: "card" }, pager,
-    table(["Time", "Severity", "Type", "User", "Source IP", "Host", "Source", "Message"],
-      data.events.map((e) => ({ id: e.id, cells: [stamp(e.ts), sev(e.severity), e.event_type, e.user ?? "—", el("code", {}, e.src_ip ?? "—"), e.host ?? "—", e.source, eventMessage(e)] })),
-      (r) => guarded(() => eventDialog(r.id)), "event-log")));
+    eventResults(data, saved.size > 0)));
 }
 
-async function eventDialog(id) {
-  const e = await api(`/api/events/${id}`);
+function eventResults(data, filtered) {
+  const empty = data.total ? "No events on this page." : filtered ? "No events match this search." : "No events have been collected.";
+  return table(["Time", "Severity", "Type", "User", "Source IP", "Host", "Source", "Message"],
+    data.events.map((e) => ({ id: e.id, cells: [stamp(e.ts), sev(e.severity), e.event_type, e.user ?? "—",
+      el("code", {}, e.src_ip ?? "—"), el("span", { class: "event-host", title: e.host }, e.host ?? "—"), e.source,
+      el("div", {}, el("span", {}, eventMessage(e)), el("button", { type: "button", class: "event-details ghost",
+        "aria-haspopup": "dialog", "aria-label": `View details for event #${e.id}` }, "View details"))] })),
+    (r, row) => guarded(() => eventDialog(r.id, row)), "event-log event-results", empty);
+}
+
+let detailRevision = 0;
+async function eventDialog(id, row) {
+  const revision = ++detailRevision;
+  const view = viewRevision;
+  const current = () => revision === detailRevision && view === viewRevision && row.isConnected && !$("#modal").open;
+  let e;
+  try { e = await api(`/api/events/${id}`); }
+  catch (error) {
+    if (current()) throw error;
+    return;
+  }
+  if (!current()) return;
   $("#modal-body").replaceChildren(
     el("h2", {}, `Event #${e.id}`),
+    el("p", { class: "event-message" }, eventMessage(e)),
     el("dl", { class: "kv" }, ...["ts", "ingested_at", "source", "host", "event_type", "outcome", "severity", "user", "src_ip", "dest_ip", "batch_id"]
       .flatMap((k) => [el("dt", {}, k), el("dd", {}, e[k] ?? "—",
         HUNT_PIVOTS.includes(k) && e[k] !== null ? [" ", huntLink(k, e[k], "Hunt", () => $("#modal").close())] : null)]), el("dt", {}, "synthetic"), el("dd", {}, e.synthetic ? "yes" : "no")),
     el("h3", {}, "Linked alerts"),
-    e.alerts.length ? e.alerts.map((a) => el("div", {}, el("a", { href: `#alerts/${a.id}`, onclick: () => $("#modal").close() }, `#${a.id} ${a.title}`), " ", status(a.status)))
+    e.alerts.length ? el("div", {}, e.alerts.map((a) => el("div", {}, el("a", { href: `#alerts/${a.id}`, onclick: () => $("#modal").close() }, `#${a.id} ${a.title}`), " ", status(a.status))))
       : el("p", { class: "muted" }, "None."),
     el("h3", {}, "Original record (secrets redacted)"), el("pre", {}, e.raw ?? ""),
     el("p", {}, el("button", { onclick: () => $("#modal").close() }, "Close")));
-  openModal();
+  openModal(row);
 }
 
 // ---------- hunt ----------
@@ -896,7 +970,9 @@ async function huntView(query = "", offset = 0) {
     openHunt(input.value.trim());
   });
   const params = new URLSearchParams({ q: query, limit: "100", offset: String(offset) });
-  const [saved, data] = await Promise.all([api("/api/hunt/saved"), api(`/api/hunt?${params}`).catch((e) => e)]);
+  const result = await readView("hunt", () => Promise.all([api("/api/hunt/saved"), api(`/api/hunt?${params}`).catch((e) => e)]));
+  if (!result) return;
+  const [saved, data] = result;
   const remove = (s) => confirm(`Delete saved search "${s.name}"?`) && guarded(async () => {
     await api(`/api/hunt/saved/${s.id}/delete`, { method: "POST" });
     toast("Saved search deleted");
@@ -909,7 +985,7 @@ async function huntView(query = "", offset = 0) {
       el("code", {}, s.query), `${s.owner} · ${fmtTime(s.created_at)}`,
       el("span", { class: "row" },
         can("analyst") ? el("button", { class: "ghost", onclick: () => promoteDialog(s) }, "Promote to detection…") : null,
-        mayDelete(s) ? el("button", { class: "danger", onclick: () => remove(s) }, "Delete") : null)] }))));
+        mayDelete(s) ? el("button", { class: "danger", onclick: () => remove(s) }, "Delete") : null)] })), null, null, "No saved searches."));
   if (data instanceof Error) {
     render(el("h1", {}, "Hunt"), form, el("div", { class: "card" }, el("p", { class: "error", role: "alert" }, data.message)), savedCard);
     return;
@@ -927,9 +1003,7 @@ async function huntView(query = "", offset = 0) {
     el("button", { class: "ghost", disabled: offset + 100 >= data.total, onclick: () => guarded(() => huntView(query, offset + 100)) }, "Older"));
   if (state.focusSearch) { state.focusSearch = false; queueMicrotask(() => input.focus()); }
   render(el("h1", {}, "Hunt"), form, el("div", { class: "card" }, parsed, pager,
-    table(["Time", "Severity", "Type", "User", "Source IP", "Host", "Source", "Message"],
-      data.events.map((e) => ({ id: e.id, cells: [stamp(e.ts), sev(e.severity), e.event_type, e.user ?? "—", el("code", {}, e.src_ip ?? "—"), e.host ?? "—", e.source, eventMessage(e)] })),
-      (r) => guarded(() => eventDialog(r.id)), "event-log")), savedCard);
+    eventResults(data, Boolean(query.trim()))), savedCard);
 }
 
 // Pipeline results (| stats, | top, | timechart). Value cells pivot: they add field:value to the filter
@@ -1023,8 +1097,9 @@ function saveHuntDialog(query) {
 
 // ---------- ingest ----------
 async function ingest() {
-  const batches = await api("/api/ingest/batches");
-  const scenarios = await api("/api/demo/scenarios");
+  const resultData = await readView("ingest", () => Promise.all([api("/api/ingest/batches"), api("/api/demo/scenarios")]));
+  if (!resultData) return;
+  const [batches, scenarios] = resultData;
   const result = el("div");
   const upload = el("form", { class: "card" },
     el("h2", {}, "Upload a log file"),
@@ -1084,7 +1159,7 @@ async function ingest() {
       table(["Received", "Source", "Format", "Accepted", "Rejected", "Detection", "By", "Rejection reasons"],
         batches.map((b) => ({ cells: [fmtTime(b.created_at), b.source, b.format, { num: b.accepted }, { num: b.rejected },
           pill(b.detection_status, { ok: "st-ok", recovered: "st-ok", failed: "st-failing" }[b.detection_status] || "st-degraded"),
-          b.submitted_by, b.errors.slice(0, 3).map((e) => `#${e.index}: ${e.reason}`).join("; ") + (b.errors.length > 3 ? ` (+${b.errors.length - 3} more)` : "")] })))),
+          b.submitted_by, b.errors.slice(0, 3).map((e) => `#${e.index}: ${e.reason}`).join("; ") + (b.errors.length > 3 ? ` (+${b.errors.length - 3} more)` : "")] })), null, null, "No ingestion batches have been recorded.")),
   );
 }
 
@@ -1107,7 +1182,9 @@ function ruleLabMark(rule, labRules) {
 
 // ---------- rules ----------
 async function rules(focus) {
-  const [list, changes, settings, evals, exceptions, suppressionWindows, lab] = await Promise.all([api("/api/rules"), api("/api/changes"), api("/api/settings"), api("/api/evaluations"), api("/api/suppressions"), api("/api/rule-suppression-windows"), api("/api/noise-lab")]);
+  const result = await readView("rules", () => Promise.all([api("/api/rules"), api("/api/changes"), api("/api/settings"), api("/api/evaluations"), api("/api/suppressions"), api("/api/rule-suppression-windows"), api("/api/noise-lab")]));
+  if (!result) return;
+  const [list, changes, settings, evals, exceptions, suppressionWindows, lab] = result;
   const pending = changes.filter((c) => c.status === "pending");
   const ruleCards = list.map((r) => {
     const p = r.performance || {};
@@ -1767,7 +1844,8 @@ function noiseStrip(strip) {
 }
 
 async function noiseLab() {
-  const lab = await api("/api/noise-lab");
+  const lab = await readView("noise", () => api("/api/noise-lab"));
+  if (!lab) return;
   const rules = lab.rules.map((r) => el("article", { class: "nr" },
     el("h3", {}, r.name),
     ruleId(r.rule_id),
@@ -1819,7 +1897,8 @@ function coverageDetail(t, meaning) {
 }
 
 async function coverageView() {
-  const cov = await api("/api/attack/coverage");
+  const cov = await readView("coverage", () => api("/api/attack/coverage"));
+  if (!cov) return;
   const lv = cov.summary.levels;
   const detail = el("div", { class: "card", "aria-live": "polite" },
     el("p", { class: "muted" }, "Select a technique to see its rules, their noise-lab verdicts, the scenarios that prove it, and its alerts."));
@@ -1886,7 +1965,8 @@ const durationText = (sec) => (sec === null || sec === undefined ? "—" : sec <
 const sourceHunt = (r) => `source:${huntValue(r.source)}${r.host ? ` host:${huntValue(r.host)}` : ""} last:7d`;
 
 function sourceHealthCard(s) {
-  if (!s) return el("div", { class: "card", id: "source-health" }, el("h2", {}, "Log source health"), el("p", { class: "muted" }, "Could not load source health."));
+  if (!s || s instanceof Error) return el("div", { class: "card", id: "source-health" }, el("h2", {}, "Log source health"),
+    el("p", { class: "error", role: "alert" }, s?.status === 403 ? s.message : "Could not load source health."));
   const t = s.thresholds;
   const where = (r) => `${r.source}${r.host ? ` on ${r.host}` : ""}`;
   const rows = s.sources.map((r) => {
@@ -1907,7 +1987,7 @@ function sourceHealthCard(s) {
       + `Late: quiet over ${t.late_multiplier}x cadence, ${durationText(t.late_floor_seconds)}, and its longest recent gap. Silent: over ${t.silent_multiplier}x cadence, ${durationText(t.silent_floor_seconds)}, and twice that gap (rule log_source_silent alerts). `
       + `Learning: under ${t.min_gaps} gaps or ${durationText(t.min_history_seconds)} of history.`),
     el("p", {}, ["silent", "late", "healthy", "learning"].flatMap((k) => [el("span", { class: `pill ${SOURCE_STATUS[k]}` }, `${k} ${s.summary[k]}`), " "])),
-    table(["Source", "Host", "Status", "Last arrival", "Cadence", "Events 24h", "Why"], rows),
+    table(["Source", "Host", "Status", "Last arrival", "Cadence", "Events 24h", "Why"], rows, null, null, "No log sources have reported events."),
     s.maintenance_windows.length ? el("div", {}, el("h3", {}, "Maintenance windows"),
       table(["#", "Source", "Host", "Window", "Reason", "Approved by", ""], s.maintenance_windows.map((w) => ({ cells: [
         `#${w.id}`, el("code", {}, w.source), w.host ?? "every host", `${fmtTime(w.starts_at)} – ${fmtTime(w.effective_end)}${w.active ? " (active)" : ""}`, w.reason, w.approved_by,
@@ -1936,7 +2016,9 @@ function sourceHealthCard(s) {
 }
 
 async function health() {
-  const [h, srcs] = await Promise.all([api("/api/health/details"), api("/api/sources/health").catch(() => null)]);
+  const result = await readView("health", () => Promise.all([api("/api/health/details"), api("/api/sources/health").catch((e) => e)]));
+  if (!result) return;
+  const [h, srcs] = result;
   render(
     el("h1", {}, "System health"),
     el("div", { class: "card" },
@@ -1957,18 +2039,20 @@ async function health() {
       })),
     sourceHealthCard(srcs),
     el("div", { class: "card" }, el("h2", {}, "Recent errors (redacted)"),
-      table(["When", "Component", "Error", "Guidance"], h.recent_errors.map((e) => ({ cells: [fmtTime(e.created_at), e.component, el("code", {}, e.message), e.guidance ?? ""] })))),
+      table(["When", "Component", "Error", "Guidance"], h.recent_errors.map((e) => ({ cells: [fmtTime(e.created_at), e.component, el("code", {}, e.message), e.guidance ?? ""] })), null, null, "No recent errors were recorded.")),
     el("div", { class: "card" }, el("h2", {}, "Recent detection runs"),
       table(["#", "Started", "Trigger", "Status", "Scanned", "Created", "Updated", "Suppressed", "Error"], h.recent_detection_runs.map((r) => ({ cells: [
         r.id, fmtTime(r.started_at), r.trigger, pill(r.status, r.status === "ok" ? "st-ok" : r.status === "failed" ? "st-failing" : "st-degraded"),
-        { num: r.events_scanned }, { num: r.alerts_created }, { num: r.alerts_updated }, { num: r.alerts_suppressed ?? 0 }, r.error ?? ""] })))),
+        { num: r.events_scanned }, { num: r.alerts_created }, { num: r.alerts_updated }, { num: r.alerts_suppressed ?? 0 }, r.error ?? ""] })), null, null, "No recent detection runs were recorded.")),
   );
 }
 
 // ---------- admin ----------
 async function admin() {
   if (!can("admin")) return render(el("p", {}, "Admins only."));
-  const [tokens, audit, inventory, chain, sessions] = await Promise.all([api("/api/tokens"), api("/api/audit"), api("/api/assets"), api("/api/audit/verify"), api("/api/sessions")]);
+  const result = await readView("admin", () => Promise.all([api("/api/tokens"), api("/api/audit"), api("/api/assets"), api("/api/audit/verify"), api("/api/sessions")]));
+  if (!result) return;
+  const [tokens, audit, inventory, chain, sessions] = result;
   const tokenOut = el("div");
   const tokenForm = el("form", { class: "row" },
     el("label", {}, "Token name", el("input", { name: "name", required: true, maxlength: 64, placeholder: "e.g. web01-forwarder" })),
@@ -2059,7 +2143,9 @@ function sessionsTable(rows, base, redraw, showUser = false) {
 }
 
 async function account() {
-  const [mfa, sessions] = await Promise.all([api("/api/auth/mfa/status"), api("/api/auth/sessions")]);
+  const result = await readView("account", () => Promise.all([api("/api/auth/mfa/status"), api("/api/auth/sessions")]));
+  if (!result) return;
+  const [mfa, sessions] = result;
   const out = el("div");
   const codeForm = (label, action, onDone) => {
     const code = el("input", { name: "code", inputmode: "numeric", autocomplete: "one-time-code", pattern: "[0-9]{6}", maxlength: 6, required: true });
