@@ -199,6 +199,7 @@ function openModal(trigger = document.activeElement) {
 // ---------- auth ----------
 function showLogin() {
   viewRevision++;
+  state.focusSearch = false;
   state.user = null; state.csrf = null;
   document.title = consoleTitle(false);
   Live.stop();
@@ -310,6 +311,7 @@ function route() {
   if (!state.user) return;
   const [view, id, ...rest] = ((location.hash === "#main" ? "" : location.hash.slice(1)) || "dashboard").split("/");
   viewRevision++;
+  if (view !== "hunt" || id) state.focusSearch = false;  // / requests focus on the plain Hunt route
   state.view = view;
   state.viewId = id;
   document.body.dataset.view = view;
@@ -986,24 +988,25 @@ async function huntView(query = "", offset = 0) {
       el("span", { class: "row" },
         can("analyst") ? el("button", { class: "ghost", onclick: () => promoteDialog(s) }, "Promote to detection…") : null,
         mayDelete(s) ? el("button", { class: "danger", onclick: () => remove(s) }, "Delete") : null)] })), null, null, "No saved searches."));
+  function renderHunt(resultCard) {
+    render(el("h1", {}, "Hunt"), form, resultCard, savedCard);
+    if (state.focusSearch) { state.focusSearch = false; input.focus(); }
+  }
   if (data instanceof Error) {
-    render(el("h1", {}, "Hunt"), form, el("div", { class: "card" }, el("p", { class: "error", role: "alert" }, data.message)), savedCard);
+    renderHunt(el("div", { class: "card" }, el("p", { class: "error", role: "alert" }, data.message)));
     return;
   }
   const parsed = data.terms.length ? el("div", { class: "row", style: { alignItems: "center" } }, el("span", { class: "muted" }, "Parsed as:"),
     data.terms.map((t) => pill(t.text, "technique"))) : null;
   if (data.kind) {
-    if (state.focusSearch) { state.focusSearch = false; queueMicrotask(() => input.focus()); }
-    render(el("h1", {}, "Hunt"), form, el("div", { class: "card", id: "hunt-agg" }, parsed, huntAggregate(data)), savedCard);
+    renderHunt(el("div", { class: "card", id: "hunt-agg" }, parsed, huntAggregate(data)));
     return;
   }
   const pager = el("div", { class: "row" },
     el("span", { class: "muted" }, `${data.total ? `${offset + 1}–${offset + data.events.length} of ` : ""}${data.total.toLocaleString()} events`),
     el("button", { class: "ghost", disabled: offset === 0, onclick: () => guarded(() => huntView(query, Math.max(0, offset - 100))) }, "Newer"),
     el("button", { class: "ghost", disabled: offset + 100 >= data.total, onclick: () => guarded(() => huntView(query, offset + 100)) }, "Older"));
-  if (state.focusSearch) { state.focusSearch = false; queueMicrotask(() => input.focus()); }
-  render(el("h1", {}, "Hunt"), form, el("div", { class: "card" }, parsed, pager,
-    eventResults(data, Boolean(query.trim()))), savedCard);
+  renderHunt(el("div", { class: "card" }, parsed, pager, eventResults(data, Boolean(query.trim()))));
 }
 
 // Pipeline results (| stats, | top, | timechart). Value cells pivot: they add field:value to the filter
