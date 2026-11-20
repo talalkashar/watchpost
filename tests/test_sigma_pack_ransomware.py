@@ -84,7 +84,7 @@ CASES = [
         "file": "cloud_audit_logging_disabled.yml",
         "rule_id": "sigma_ransomware_cloud_logging_disabled",
         "sigma_id": "6a1c9f33-8d27-4e15-9b40-c5e7a2d81460",
-        "technique": "T1562.008",
+        "technique": "T1685.002",  # tagged T1562.008, which ATT&CK revoked
         "hits": [
             {"event_type": "cloud_api_call", "user": "arn:aws:iam::123:user/backup", "src_ip": "203.0.113.50",
              "message": "StopLogging on arn:aws:cloudtrail:us-east-1:123:trail/org"},

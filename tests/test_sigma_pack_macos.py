@@ -143,7 +143,7 @@ CASES = [
     {
         "file": "unified_logging_disabled.yml",
         "rule_id": "sigma_macos_unified_logging_disabled",
-        "technique": "T1562.006",
+        "technique": "T1685",  # tagged T1562.006, which ATT&CK revoked
         "severity": "high",
         "category": "process_creation",
         "malicious": [

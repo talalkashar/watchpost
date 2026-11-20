@@ -137,7 +137,7 @@ CASES = [
     (
         "audit_policy_modified.yml",
         "sigma_kubernetes_audit_policy_modified_or_deleted",
-        "T1562.008",
+        "T1685.002",  # tagged T1562.008, which ATT&CK revoked
         "high",
         [
             ev(audit("patch", 200, "/api/v1/namespaces/kube-system/configmaps/audit-policy", "alice",

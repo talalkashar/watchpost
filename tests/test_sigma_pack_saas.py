@@ -81,7 +81,7 @@ CASES = (
     ),
     (
         "audit_logging_disabled.yml",
-        "T1562.008",
+        "T1685.002",  # tagged T1562.008, which ATT&CK revoked
         (
             {"event_type": "cloud_api_call", "user": "svc-deploy-tmp", "src_ip": "203.0.113.150",
              "message": "StopLogging on cloudtrail.amazonaws.com"},

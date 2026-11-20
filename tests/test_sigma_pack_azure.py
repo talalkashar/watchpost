@@ -20,7 +20,7 @@ CASES = (
         "file": "diagnostic_setting_deleted.yml",
         "rule_id": "sigma_azure_diagnostic_setting_deleted",
         "sigma_id": "c4a1e7b2-6d58-4f90-9c13-2b8e5a7d04f6",
-        "technique": "T1562.008",
+        "technique": "T1685.002",  # tagged T1562.008, which ATT&CK revoked
         "severity": "high",
         "hits": (
             _event("cloud_api_call", "Microsoft.Insights/diagnosticSettings/delete on insights.azure.com"),
