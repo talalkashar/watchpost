@@ -32,6 +32,7 @@
   <link rel="stylesheet" href="/views.css">
   <link rel="stylesheet" href="/glass.css">
   <link rel="stylesheet" href="/orbit.css">
+  <link rel="stylesheet" href="/declutter.css">
   <script src="/charts.js" defer></script>
   <script src="/map.js" defer></script>
   <script src="/map-view.js" defer></script>
@@ -47,19 +48,28 @@
       <button type="button" id="nav-toggle" class="ghost nav-toggle" aria-expanded="false" aria-controls="nav">Menu</button>
     </div>
     <nav id="nav" aria-label="Views">
+      <div class="nav-set" role="group" aria-labelledby="nav-g-investigate">
+      <p class="nav-group" id="nav-g-investigate">Investigate</p>
       <button data-view="dashboard"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 2h5v6H2zM9 2h5v3H9zM9 7h5v7H9zM2 10h5v4H2z"/></svg>Dashboard</button>
       <button data-view="incidents"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5 15 14H1z"/><path d="M8 6v4M8 11.5v.5"/></svg>Incidents</button>
       <button data-view="alerts"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2a4 4 0 0 1 4 4v3l1.5 2.5h-11L4 9V6a4 4 0 0 1 4-4zM6.5 13.5h3"/></svg>Alerts</button>
       <button data-view="events"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 3h12M2 6.3h12M2 9.6h8M2 13h10"/></svg>Events</button>
       <button data-view="hunt"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="6.5" cy="6.5" r="4.5"/><path d="M10 10l4.5 4.5"/></svg>Hunt</button>
+      </div>
+      <div class="nav-set" role="group" aria-labelledby="nav-g-detection">
+      <p class="nav-group" id="nav-g-detection">Detection</p>
       <button data-view="overview"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 14V9M6 14V4M10 14V7M14 14V2"/></svg>Metrics</button>
       <button data-view="ingest"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2v8M4.5 6.5 8 10l3.5-3.5M2 13h12"/></svg>Ingest</button>
       <button data-view="rules"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2h10v12H3zM5.5 5h5M5.5 8h5M5.5 11h3"/></svg>Rules &amp; review</button>
       <button data-view="noise"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1 8h2l1.5-5 2.5 10 2-7 1.5 4 1-2h3.5"/></svg>Noise lab</button>
       <button data-view="coverage"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 2h3v3H2zM6.5 2h3v3h-3zM11 2h3v3h-3zM2 6.5h3v3H2zM6.5 6.5h3v3h-3zM2 11h3v3H2z"/></svg>Coverage</button>
+      </div>
+      <div class="nav-set" role="group" aria-labelledby="nav-g-operate">
+      <p class="nav-group" id="nav-g-operate">Operate</p>
       <button data-view="health"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1 8h3l2-4 3 8 2-4h4"/></svg>Health</button>
       <button data-view="account" data-role="analyst"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="7" width="10" height="7" rx="1"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>Account</button>
       <button data-view="admin" data-role="admin"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.5"/><path d="M8 1v2.5M8 12.5V15M1 8h2.5M12.5 8H15M3 3l1.8 1.8M11.2 11.2 13 13M3 13l1.8-1.8M11.2 4.8 13 3"/></svg>Admin</button>
+      </div>
     </nav>
     <div class="rail-foot">
       <div class="who" id="who" hidden>

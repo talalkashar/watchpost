@@ -133,3 +133,36 @@
   background: linear-gradient(#83a8b4, #83a8b4) top left / 9px 1px, linear-gradient(#83a8b4, #83a8b4) top left / 1px 9px,
     linear-gradient(#83a8b4, #83a8b4) bottom right / 9px 1px, linear-gradient(#83a8b4, #83a8b4) bottom right / 1px 9px;
   background-repeat: no-repeat; }
+
+/* God's-eye pass: scanlines, vignette, engagement and wheel hint. */
+.orbit-scan { display: none; position: absolute; inset: 0; pointer-events: none; z-index: 1;
+  background:
+    radial-gradient(ellipse 75% 70% at 50% 50%, transparent 55%, rgb(2 6 10 / .55) 100%),
+    repeating-linear-gradient(0deg, rgb(160 220 230 / .035) 0 1px, transparent 1px 3px); }
+#p-map[data-mode="3d"] .orbit-scan { display: block; }
+/* The page keeps vertical swipes until the globe is tapped; then drags steer it. */
+.orbit-beams { touch-action: pan-y; }
+.orbit-stage[data-engaged="true"] .orbit-beams { touch-action: none; }
+.orbit-stage[data-engaged="true"]::before { content: ""; position: absolute; inset: 0; z-index: 2; pointer-events: none;
+  box-shadow: inset 0 0 0 1px rgb(155 230 229 / .35); }
+.orbit-wheel-hint { position: absolute; left: 50%; top: 14px; z-index: 3; transform: translate(-50%, -4px);
+  padding: 5px 10px; border-radius: 999px; background: rgb(6 14 20 / .88); border: 1px solid rgb(155 230 229 / .22);
+  color: #d5e7ea; font: 500 11px var(--sans); white-space: nowrap; pointer-events: none; opacity: 0;
+  transition: opacity .2s, transform .2s; }
+.orbit-wheel-hint.is-shown { opacity: 1; transform: translate(-50%, 0); }
+.orbit-stage[data-loading="true"]::after { content: "Loading globe imagery…"; position: absolute; inset: auto 0 14px; text-align: center;
+  background: none; opacity: 1; color: #9fb6c0; font: 11px var(--mono); letter-spacing: .04em; }
+.orbit-bearing { z-index: 3; color: #b6cbd2; letter-spacing: .04em; }
+.orbit-zoom, .orbit-motion { z-index: 3; }
+.orbit-zoom .orbit-overhead { font: 600 10.5px var(--mono); letter-spacing: .04em; padding: 1px 9px; }
+.orbit-zoom .orbit-overhead[aria-pressed="true"] { background: #c0dbdc; color: #102024; }
+.orbit-zoom button[aria-label="Fit globe"] { font-size: 11px; }
+@media (max-width: 760px) {
+  .orbit-wheel-hint { display: none; }
+  .orbit-zoom .orbit-overhead { padding: 1px 8px; }
+  #p-map[data-mode="3d"] .orbit-tools { gap: 8px; }
+  .orbit-hint { flex: 1 1 0; min-width: 0; }
+  /* Icon-only on phones; the text stays as the accessible name. */
+  .orbit-motion { min-width: 44px; padding: 0; font-size: 0; }
+  .orbit-motion::before { margin: 0; font-size: 12px; }
+}
