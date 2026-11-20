@@ -1,0 +1,34 @@
+# Double extortion over SSH file transfer (WinSCP, pscp, scp -r, sftp://). ATT&CK T1048,
+# exfiltration over an alternative protocol. The command line is matched in message.
+title: Ransomware SCP Exfiltration
+id: 1d5b7e08-4a92-4c66-b7e3-82f19c0d5a36
+status: experimental
+description: |
+  A process start that copies data off the host with WinSCP, pscp, psftp, scp -r, scp -P, or an
+  sftp:// URL. A backup script that only mentions scope, or a note that scp is not installed, does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1048/
+  - https://www.cisa.gov/stopransomware
+tags:
+  - attack.exfiltration
+  - attack.t1048
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  process:
+    event.action: process_start
+  tool:
+    message|contains:
+      - winscp
+      - pscp
+      - psftp
+      - 'scp -r'
+      - 'scp -P'
+      - 'sftp://'
+  condition: process and tool
+falsepositives:
+  - An administrator copying files to a jump host with WinSCP or scp
+level: high

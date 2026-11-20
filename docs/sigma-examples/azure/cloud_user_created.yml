@@ -1,0 +1,30 @@
+# Entra ID audit activity "Add user" (directory user create). Membership changes such as
+# "Add user to group" are the same words with a different operation, so they are excluded.
+title: Azure AD Cloud User Created
+id: 3f7c1a90-5e24-4b68-8d17-a6c4e9b0d253
+status: experimental
+description: |
+  An Entra ID audit event created a cloud user account (activity "Add user").
+  Adding that user to a group or role uses a longer activity name and does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1136/003/
+tags:
+  - attack.persistence
+  - attack.t1136.003
+logsource:
+  product: azure
+  service: auditlogs
+detection:
+  selection:
+    event.action:
+      - user_created
+      - cloud_iam_change
+    message|contains: 'Add user'
+  membership:
+    message|contains: 'Add user to'
+  condition: selection and not membership
+falsepositives:
+  - A joiner workflow or HR sync that creates a cloud account
+level: medium

@@ -1,0 +1,34 @@
+# SSH authorized_keys persistence (T1098.004). A write into authorized_keys, not a publickey login
+# and not a read of the file.
+title: Linux SSH Authorized Keys Modification
+id: b8e14d27-5c3a-4f90-9b62-7a1d3e8c5f04
+status: experimental
+description: |
+  A command appended or installed an SSH authorized_keys file. Reading the file and sshd
+  Accepted publickey lines do not contain a write tool and do not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1098/004/
+tags:
+  - attack.persistence
+  - attack.t1098.004
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  selection_file:
+    message|contains:
+      - 'authorized_keys'
+      - 'authorized_keys2'
+  selection_write:
+    message|contains:
+      - 'tee '
+      - 'echo '
+      - 'sed -i'
+      - 'install '
+      - '>>'
+  condition: selection_file and selection_write
+falsepositives:
+  - An administrator adding their own key with tee or a shell redirect
+level: high

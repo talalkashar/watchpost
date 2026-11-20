@@ -1,0 +1,36 @@
+# Azure Blob storage log: an anonymous GetBlob or ListBlobs. Authenticated reads of the same
+# objects do not match. AuthenticationType is matched as its own phrase so a display name
+# that merely contains the word Anonymous is not enough.
+title: Azure Storage Anonymous Blob Read
+id: 6a0c8e35-4d17-4b92-a6f1-3e9b2c7d50a4
+status: experimental
+description: |
+  An Azure Storage data-plane read (GetBlob or ListBlobs) completed with anonymous authentication.
+  That is object data leaving the account without a signed-in identity.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1530/
+tags:
+  - attack.collection
+  - attack.t1530
+logsource:
+  product: azure
+  service: storage
+detection:
+  read:
+    event.action:
+      - cloud_data_access
+      - cloud_api_call
+    message|contains:
+      - GetBlob
+      - ListBlobs
+  anonymous:
+    message|contains:
+      - AuthenticationType=Anonymous
+      - 'AuthenticationType: Anonymous'
+      - 'AuthenticationType":"Anonymous"'
+  condition: read and anonymous
+falsepositives:
+  - A public static website or CDN origin that is meant to serve blobs anonymously
+level: medium

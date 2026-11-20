@@ -1,0 +1,33 @@
+# Entra ID sign-in error AADSTS50053: the account was locked because of too many bad passwords.
+# A single invalid password (AADSTS50126) does not match. The numeric code is matched with the
+# AADSTS prefix or an errorCode field so an unrelated 50053 substring is less likely.
+title: Azure AD Account Locked By Sign-In Failures
+id: d52e9b18-7f40-4a63-8c25-1b6d4e0a93f7
+status: experimental
+description: |
+  An Entra ID sign-in failed because the account is locked after repeated bad passwords
+  (AADSTS50053). One mistyped password does not use this code.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1110/
+tags:
+  - attack.credential_access
+  - attack.t1110
+logsource:
+  product: azure
+  service: signinlogs
+detection:
+  selection:
+    event.action:
+      - auth_failure
+      - account_lockout
+    message|contains:
+      - AADSTS50053
+      - 'errorCode":50053'
+      - 'errorCode": 50053'
+      - 'errorCode: 50053'
+  condition: selection
+falsepositives:
+  - A person who forgot a password and tripped smart lockout on their own account
+level: medium

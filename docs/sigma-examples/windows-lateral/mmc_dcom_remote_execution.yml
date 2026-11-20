@@ -1,0 +1,28 @@
+# MMC launched with -Embedding is the local COM server for a remote MMC20.Application call (DCOM).
+# Opening a snap-in from the console does not pass -Embedding.
+title: Windows MMC DCOM Remote Execution
+id: 23397177-989d-4b3b-8b57-fc369eb489a9
+status: experimental
+description: |
+  mmc.exe started with the COM embedding flag. That process is what a remote caller gets from the
+  MMC20.Application DCOM object. A console launch of a management snap-in does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1021/003/
+tags:
+  - attack.lateral_movement
+  - attack.t1021.003
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection:
+    event.action: process_start
+    message|contains|all:
+      - mmc.exe
+      - '-Embedding'
+  condition: selection
+falsepositives:
+  - Management software that automates MMC snap-ins over DCOM on purpose
+level: high
