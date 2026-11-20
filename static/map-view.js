@@ -1,7 +1,7 @@
 "use strict";
 
-// The flat view is available immediately. Only an intersecting, motion-enabled
-// card imports the renderer and imagery. Each dashboard mount owns one controller.
+// The flat view is available immediately. Only an intersecting card in globe
+// mode imports the renderer and imagery. Each dashboard mount owns one controller.
 class AttackMapView {
   constructor() {
     this.motion = matchMedia("(prefers-reduced-motion: reduce)");
@@ -9,18 +9,27 @@ class AttackMapView {
     this.active = false;
     this.rows = [];
     this.selected = null;
-    this.running = true;
+    this.running = !this.motion.matches;
     this.life = new AbortController();
     const on = (node, type, fn) => node.addEventListener(type, fn, { signal: this.life.signal });
     const modeButton = (id, text) => el("button", { id, type: "button", "aria-pressed": "false" }, text);
     this.flatButton = modeButton("map-flat", "2D");
     this.globeButton = modeButton("map-globe", "3D");
     this.motionButton = el("button", { class: "orbit-motion", type: "button", hidden: true });
+    const cameraButton = (label, text, action) => {
+      const button = el("button", { type: "button", title: label, "aria-label": label }, text);
+      on(button, "click", action);
+      return button;
+    };
+    this.zoomControls = el("div", { class: "orbit-zoom", role: "group", "aria-label": "Globe zoom", hidden: true },
+      cameraButton("Zoom out", "−", () => this.orbit?.zoomBy(1 / 1.3)),
+      cameraButton("Zoom in", "+", () => this.orbit?.zoomBy(1.3)),
+      cameraButton("Fit globe", "Fit", () => this.orbit?.fit()));
     this.stage = el("div", { class: "orbit-stage" },
       el("div", { class: "mapwrap", id: "map" }),
-      el("div", { class: "orbit-instrument", "aria-hidden": "true" }, el("i"), "Synthetic geo"),
-      el("span", { class: "orbit-bearing", "aria-hidden": "true" }),
-      el("span", { class: "orbit-hint", hidden: true }, "Drag to rotate"), this.motionButton);
+      el("span", { class: "orbit-bearing", "aria-hidden": "true" }));
+    const cameraTools = el("div", { class: "orbit-tools" }, this.zoomControls,
+      el("span", { class: "orbit-hint" }, "Drag to rotate", el("br"), "Pinch to zoom"), this.motionButton);
     this.list = el("div", { class: "orbit-list" });
     this.detail = el("div", { class: "orbit-detail", "aria-live": "polite" });
     this.side = el("aside", { id: "map-side", "aria-label": "Attack routes" },
@@ -35,7 +44,7 @@ class AttackMapView {
     const metric = (label, id) => el("div", {}, el("dt", {}, label), el("dd", { id }, "—"));
     this.card = panel("p-map", "Attack map", [
       el("div", { class: "orbit-modes", role: "group", "aria-label": "Map projection" }, this.globeButton, this.flatButton)],
-      el("div", { class: "orbit-main" }, this.stage, this.side),
+      el("div", { class: "orbit-main" }, el("div", { class: "orbit-view" }, this.stage, cameraTools), this.side),
       el("dl", { class: "orbit-metrics" }, metric("Mapped arcs", "map-count"), metric("Events/min", "map-rate"),
         metric("Last event", "map-last"), metric("UTC clock", "map-clock")),
       el("div", { class: "orbit-foot" }, this.legend, el("span", { id: "map-unknown" })));
@@ -46,7 +55,10 @@ class AttackMapView {
       if (this.running) this.select(null);
       this.refreshMode();
     });
-    on(this.motion, "change", () => this.mode(!this.motion.matches));
+    on(this.motion, "change", () => {
+      this.running = !this.motion.matches;
+      this.mode(!this.motion.matches);
+    });
     on(this.stage, "click", e => {
       const city = e.target.closest(".mk")?.dataset.city;
       if (city) this.select(city);
@@ -82,7 +94,7 @@ class AttackMapView {
       gl = surface.getContext("webgl2", { alpha: true, antialias: true, powerPreference: "low-power" });
       if (!gl) throw Error("WebGL 2 unavailable");
       const { createOrbit } = await import("./orbit.js");
-      if (signal.aborted || !this.wantGlobe || !this.near || this.motion.matches) return;
+      if (signal.aborted || !this.wantGlobe || !this.near) return;
       handedOff = true;
       this.orbit = await createOrbit(this.stage, gl, {
         select: city => this.select(city),
@@ -110,20 +122,19 @@ class AttackMapView {
   }
 
   refreshMode() {
-    const allowed = !this.failed && !this.motion.matches;
+    const allowed = !this.failed;
     this.active = !!(this.orbit && this.wantGlobe && allowed);
     this.card.dataset.mode = this.active ? "3d" : "2d";
     this.flatButton.setAttribute("aria-pressed", String(!this.active));
     this.globeButton.setAttribute("aria-pressed", String(this.active));
     this.globeButton.disabled = !allowed;
-    this.globeButton.title = this.motion.matches ? "Flat map enabled for reduced motion" :
-      this.failed ? "3D view unavailable on this device" : "Orbital globe";
-    this.motionButton.hidden = !this.active;
-    this.stage.querySelector(".orbit-hint").hidden = !this.active;
+    this.globeButton.title = this.failed ? "3D view unavailable on this device" : "Orbital globe";
+    this.motionButton.hidden = !this.active || this.motion.matches;
+    this.zoomControls.hidden = !this.active;
     this.motionButton.textContent = this.running ? "Pause orbit" : "Resume orbit";
     this.motionButton.dataset.running = String(this.running);
     this.stage.querySelector(".orbit-bearing").hidden = !this.active;
-    this.orbit?.state(this.active && this.near && !document.hidden, this.running);
+    this.orbit?.state(this.active && this.near && !document.hidden, this.running, this.motion.matches);
     if (allowed && this.wantGlobe && this.near && !document.hidden && !this.orbit && !this.loading) this.load();
   }
 
