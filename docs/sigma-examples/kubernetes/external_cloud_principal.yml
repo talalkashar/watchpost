@@ -44,10 +44,16 @@ detection:
       - 192.168.0.0/16
       - 127.0.0.0/8
   filter_trusted_principal:
-    # Placeholder: replace with the role ARNs and service accounts allowed to call the API from outside.
+    # Placeholder: replace with the principals allowed to call the API from outside. Keep each entry
+    # anchored to the username key and its quotes (compact and spaced JSON), so the same text in a
+    # request URI or object does not suppress the alert. Assumed roles end at the role name plus '/'.
+    # Limit: a request object that carries its own "username" key with a trusted value still matches
+    # this filter. Keep the list short, or leave it empty and rely on filter_known_egress.
     message|contains:
-      - 'arn:aws:iam::000000000000:role/replace-with-trusted-role'
-      - 'replace-with-trusted-sa@example.iam.gserviceaccount.com'
+      - '"username":"arn:aws:sts::000000000000:assumed-role/replace-with-trusted-role/'
+      - '"username": "arn:aws:sts::000000000000:assumed-role/replace-with-trusted-role/'
+      - '"username":"replace-with-trusted-sa@example.iam.gserviceaccount.com"'
+      - '"username": "replace-with-trusted-sa@example.iam.gserviceaccount.com"'
   filter_known_egress:
     # Placeholder: replace 192.0.2.0/24 (TEST-NET-1, never routed) with your office, VPN, and CI egress ranges.
     SourceIp|cidr:
