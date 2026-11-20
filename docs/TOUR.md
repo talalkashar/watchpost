@@ -4,7 +4,7 @@ For a security engineer who opened the live console from LinkedIn. Five minutes,
 
 Open [https://watchpost-nxxu.onrender.com](https://watchpost-nxxu.onrender.com). Sign in as `viewer` / `watchpost-viewer-demo`. The free-tier host can take about a minute on a cold start. The sign-in page says **All data is synthetic.** That is the whole dataset: labeled office traffic and attack scenarios, not a customer tenant.
 
-After sign-in the rail reads **Viewer · read-only**. **Account** and **Admin** are not in the nav. Below 760px wide, open **Menu** to see the views.
+After sign-in the rail reads **viewer · read-only**. **Account** and **Admin** are not in the nav. Below 760px wide, open **Menu** to see the views.
 
 If the rail also shows **Masked view**, the setting `viewer_masking` is on. Usernames and internal addresses are then stable pseudonyms (`user-…`, `internal-…`) on every response, including reports. Public addresses stay visible, including the RFC 5737 ranges the scenarios use (`203.0.113.0/24` and the other documentation nets). A pseudonym in a filter or a hunt still resolves on the server. This is presentation masking for a low-trust role, not anonymization. The shipped default is off, so a demo that has not approved that setting shows the raw synthetic names (`alice`, `admin`, `erin`) and the internal addresses as stored. Either way, the rest of this tour is the same clicks.
 
@@ -18,7 +18,7 @@ You land on `#dashboard`. The bar says **Dashboard**. The dropdown is saved dash
 
 Read three panels. That is the product.
 
-**Attack map.** Arcs run from fictional cities to HQ. Cities exist only for RFC 5737 and RFC 1918 ranges (for example `203.0.113.0/25` is Ironvale, `10.0.0.0/8` is Riverton HQ). Anything else is counted as **no geo entry** and is never placed. Internal sources are not drawn as attacker arcs. Hover a mark for the city, the source addresses, and the event count. The side list is **Busiest arcs**. This proves the map is a fixed demo table, not a geo feed and not threat intelligence.
+**Attack map.** The card opens as a 3D globe; **2D** switches to the flat map, which is also the view when the browser asks for reduced motion or has no WebGL 2. **Overhead** looks straight down on HQ, and **Pause orbit** stops the rotation. Arcs run from fictional cities to HQ. Cities exist only for RFC 5737 and RFC 1918 ranges (for example `203.0.113.0/25` is Ironvale, `10.0.0.0/8` is Riverton HQ). Anything else is counted as **no geo entry** and is never placed. Internal sources are not drawn as attacker arcs. The side list is **Busiest arcs**. Select a city there for its event count, source IP count, and highest severity. This proves the map is a fixed demo table, not a geo feed and not threat intelligence.
 
 **Live event stream.** Rows are recent events, dripped as they arrive. **Pause** stops the drip. Severity, type, and the message are the normalized event, not the raw line. This proves ingest reaches the screen without a reload.
 

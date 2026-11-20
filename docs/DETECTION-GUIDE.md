@@ -8,7 +8,7 @@ This page is how to write and test the first two. The field reference is [REFERE
 
 ## What the function sees
 
-Each event is a dict. The engine loads `id`, `ts`, `event_type`, `user`, `src_ip`, `host`, `dest_ip`, `dest_port`, `bytes`, `message`, and `synthetic` (`engine.RULE_EVENT_FIELDS`). Rule code reads the first of those. Timestamps are ISO-8601.
+Each event is a dict. The engine loads `id`, `ts`, `event_type`, `user`, `src_ip`, `host`, `dest_ip`, `dest_port`, `bytes`, `message`, `synthetic`, `source`, and `ingested_at` (`engine.RULE_EVENT_FIELDS`). Rule code matches on the eight fields from `event_type` to `message`. `id` and `ts` are evidence and ordering. Timestamps are ISO-8601.
 
 `event_type` is one of the names in `normalize.EVENT_TYPES`:
 
@@ -203,14 +203,14 @@ A selection is a map of `field` or `field|modifier` to a value or a list. A list
 
 Values match case-insensitively. `*` and `?` are wildcards. `\*`, `\?`, and `\\` are literals. `null` matches an empty field. A number is compared as text, so `dest_port: 22` matches the text `22`.
 
-Modifiers: `contains`, `startswith`, `endswith`, `cidr`, and `all`. Use at most one of the first four, plus `all`. `all` means every value must match.
+Modifiers: `contains`, `startswith`, `endswith`, `cidr`, `all`, `windash`, `base64`, and `base64offset`. Use at most one of the first four, plus `all`. `all` means every value must match. `windash` also tries each leading `-` as `/` and the dash look-alikes, at most three dashes per value. `base64` and `base64offset` encode the value before matching and must come before `contains`, `startswith`, or `endswith` (`CommandLine|base64offset|contains` order). `cidr` does not combine with them.
 
 Conditions: a selection name, `and`, `or`, `not`, parentheses, `1 of them`, `all of them`, `1 of sel*`, `all of sel*`. Names that start with `_` are left out of `them`.
 
 Refused, with the reason in the error:
 
 - Unknown fields. `EventID`, `Image`, and `CommandLine` have no Watchpost column.
-- `re`, base64 and other encoding modifiers, `windash`, `expand`, `lt` / `lte` / `gt` / `gte`, `exists`.
+- `re`, `wide` / `utf16` / `utf16le` / `utf16be`, `expand`, `lt` / `lte` / `gt` / `gte`, `exists`.
 - `| count()` and any other `|` aggregation, `near`, and `timeframe`.
 - `N of` other than `1` and `all`.
 - Anchors, aliases, tags (`!`), tabs, duplicate keys, and the rest of the YAML list in the module docstring.
@@ -290,6 +290,12 @@ sigma.compile_rule(
 
 An aggregation fails closed the same way: `condition: aggregations ('| count() by ...') are not supported`.
 
+### Example packs
+
+`docs/sigma-examples/` holds the worked example and the other top-level rules. Each subfolder is a pack of rules for one surface: `azure`, `cloud`, `email`, `kubernetes`, `linux`, `linux-persistence`, `macos`, `network`, `ransomware`, `saas`, `web`, `windows`, `windows-lateral`. `tests/test_sigma_pack_<pack>.py` compiles that pack and checks matching and non-matching events.
+
+Because `logsource` does not filter, a pack rule that only names a path or a keyword runs against web requests, firewall lines, and everything else. Scope a rule with an `event.action` selection (for example `process_start`, `file_access`, `privilege_use`) so a scanner probing `/etc/crontab` does not trip a host persistence rule. Rules that would fire on routine traffic carry a `filter_*` selection with placeholder values, such as known mail relays or trusted principals. Replace those placeholders with your own values before you enable the rule. The `falsepositives` field on each rule names the knob.
+
 ### Findings
 
 There is no threshold. Every matching event is evidence. `sigma.run(events, params)` groups by source IP. An event with no source IP groups by host, then by user, then by `"unknown"`. A host or user key folds ASCII letters only when that field is the key. `WEB01` and `web01` are one host `web01`. An address is not folded. `2001:DB8::1` and `2001:db8::1` are two keys.
@@ -312,7 +318,7 @@ findings = sigma.run(events, compiled["params"])
 
 That returns three findings: ids `[1, 2]` and `[3]` under `203.0.113.5`, and id `[4]` under `web01`. Event 3 is more than an hour after event 2, so it does not join the first finding.
 
-`params` is `{"title", "detection"}`. It is not tunable. To change the logic, import the YAML again under a new title.
+`params` is `{"format", "title", "detection"}`. It is not tunable. Sigma rules stored before `format` existed are recompiled from their approved YAML when the schema initializes. One whose source no longer compiles is disabled with the reason in its history. To change the logic, import the YAML again under a new title.
 
 ### The labeled sample
 
