@@ -111,6 +111,8 @@ a.chip.coverage-chip:hover { border-color: var(--ink-2); }
 main { padding: 16px 20px; min-width: 0; }
 body.authed[data-view="dashboard"] main { padding: 16px 0 0; }
 #main :is(a, button, input, select, summary, textarea, [tabindex]) { scroll-margin-top: var(--chrome-clearance); }
+/* Keep the skip destination reachable while the dashboard waits for its first summary. */
+body.authed[data-view="dashboard"] #main:target { min-height: 100dvh; }
 #main:target #view::before { content: ""; display: block; height: var(--chrome-clearance); }
 .rail, .strip, dialog { border: 1px solid var(--line); }
 body:not(.authed) main { max-width: 1280px; margin: 0 auto; min-height: 100dvh; display: flex; flex-direction: column;

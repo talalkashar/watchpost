@@ -1,5 +1,5 @@
 /* Orbital map. The rail and instruments sit outside the two projection layers. */
-#soc { --orbit-height: 436px; }
+#soc { --orbit-height: clamp(540px, 43vw, 740px); }
 #p-map { height: var(--orbit-height); border-color: #334248; background: #0c1419; }
 #p-map .ph { height: 46px; flex: none; padding: 0 14px; background: #10191e; border-color: #29343a; }
 #p-map .ph h2 { display: flex; align-items: center; gap: 9px; }
@@ -17,6 +17,9 @@
 .orbit-modes button[aria-pressed=true] { background: #c0dbdc; color: #102024; }
 .orbit-modes button:disabled { opacity: .45; }
 .orbit-main { display: flex; min-height: 0; flex: 1; }
+.orbit-view { position: relative; display: flex; flex: 1; min-width: 0; flex-direction: column; }
+.orbit-tools, .orbit-hint { display: none; }
+#p-map[data-mode="3d"] .orbit-tools { display: contents; }
 .orbit-stage {
   position: relative; flex: 1; min-width: 0; overflow: hidden; isolation: isolate;
   background: radial-gradient(ellipse at 50% 49%, #122736 0, #0a151e 46%, #070e14 79%);
@@ -25,14 +28,24 @@
 #p-map[data-mode="3d"] :is(.orbit-surface, .orbit-beams) { display: block; }
 #p-map[data-mode="3d"] #map { pointer-events: none; }
 #p-map[data-mode="3d"] #map svg { display: none; }
+.orbit-sky, .orbit-limb { display: none; position: absolute; pointer-events: none; }
+#p-map[data-mode="3d"] :is(.orbit-sky, .orbit-limb) { display: block; }
+.orbit-sky { inset: -20px; background: #050910 url("/textures/orbit-sky.webp") center / cover; filter: brightness(1.7) contrast(1.12); }
+.orbit-limb { left: 50%; top: 50%; transform: translate(-50%, -50%); border-radius: 50%;
+  box-shadow: 0 0 3px 1px #91c9ff99, 2px 0 11px 2px #498cf26b, 3px 0 30px 4px #3671b638; }
 .orbit-beams { touch-action: none; cursor: grab; }
 .orbit-beams:active { cursor: grabbing; }
-.orbit-instrument, .orbit-hint, .orbit-motion, .orbit-caption, #map-side h3, .orbit-metrics dt,
+.orbit-zoom, .orbit-motion, .orbit-caption, #map-side h3, .orbit-metrics dt,
 .orbit-swatches, .orbit-key summary, #map-unknown { font-family: var(--mono); }
-.orbit-instrument { position: absolute; top: 12px; left: 13px; display: flex; align-items: center; gap: 6px;
-  font-size: 10px; text-transform: uppercase; letter-spacing: .09em; color: #9bb7c2; pointer-events: none; }
-.orbit-instrument i, .orbit-hq { display: inline-block; height: 7px; width: 7px; border: 1px solid #9edddc; transform: rotate(45deg); }
-.orbit-hint { position: absolute; bottom: 10px; left: 13px; font-size: 9px; color: #93a7b0; pointer-events: none; }
+.orbit-hq { display: inline-block; height: 7px; width: 7px; border: 1px solid #9edddc; transform: rotate(45deg); }
+.orbit-zoom { position: absolute; left: 10px; bottom: 8px; display: flex; overflow: hidden;
+  border: 1px solid #344651; border-radius: 5px; background: #0b151ee8; }
+.orbit-zoom[hidden] { display: none; }
+.orbit-zoom button { min-width: 29px; min-height: 27px; padding: 1px 7px; border: 0; border-radius: 0;
+  background: transparent; font: 16px var(--mono); color: #cfdee5; }
+.orbit-zoom button + button { border-left: 1px solid #30404c; }
+.orbit-zoom button:last-child { font-size: 11px; }
+.orbit-zoom button:hover { background: #253541; }
 .orbit-motion { position: absolute; right: 9px; bottom: 5px; padding: 4px 7px; min-height: 25px;
   border: 0; border-radius: 4px; color: #cbdcde; background: #0c171ed9; font-size: 10px; }
 .orbit-motion::before { content: "▶"; font-size: 9px; color: #a9cdd3; margin-right: 5px; }
@@ -91,8 +104,13 @@
   .orbit-modes button { background: linear-gradient(#18252d, #18252d) center / 100% 30px no-repeat; }
   .orbit-modes button[aria-pressed=true] { background: linear-gradient(#c0dbdc, #c0dbdc) center / 100% 30px no-repeat; }
   .orbit-main { flex-direction: column; flex: none; }
-  .orbit-stage { height: 254px; flex: none; }
-  .orbit-motion { min-height: 44px; bottom: 0; }
+  .orbit-view { height: calc(clamp(290px, 85vw, 350px) + 45px); flex: none; }
+  #p-map[data-mode="3d"] .orbit-tools { display: flex; align-items: center; gap: 10px;
+    padding: 0 7px; background: #0c161e; border-top: 1px solid #263640; }
+  .orbit-zoom { position: static; border-width: 0 1px; border-radius: 0; }
+  .orbit-zoom button { min-width: 44px; min-height: 44px; }
+  .orbit-hint { display: block; color: #a4b6be; font: 9px/1.4 var(--mono); }
+  .orbit-motion { position: static; min-height: 44px; margin-left: auto; }
   #map-side { padding: 9px 12px; width: 100%; border: 0; border-top: 1px solid #29383e; }
   .orbit-list-head { margin-bottom: 5px; }
   .orbit-list { display: flex; gap: 5px; }
