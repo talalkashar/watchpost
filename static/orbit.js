@@ -36,7 +36,7 @@ function destination(from, bearing, angle) {
 // Fine 10 degree graticule; every 30 degrees is a major line, the equator is brightest.
 const graticule = [];
 for (let lon = -180; lon < 180; lon += 10)
-  graticule.push({ rank: lon % 30 ? 0 : 1, line: Array.from({ length: 61 }, (_, i) => position({ lon, lat: -90 + i * 3 })) });
+  graticule.push({ rank: lon % 30 ? 0 : 1, line: Array.from({ length: 61 }, (_, i) => position({ lon, lat: -80 + i * 160 / 60 })) });
 for (let lat = -80; lat <= 80; lat += 10)
   graticule.push({ rank: lat === 0 ? 2 : lat % 30 ? 0 : 1, line: Array.from({ length: 121 }, (_, i) => position({ lon: -180 + i * 3, lat })) });
 const RINGS_KM = [1000, 2500, 5000];
@@ -328,14 +328,18 @@ export async function createOrbit(stage, gl, { select, drag, lost, overheadChang
       flashes = flashes.filter(f => phase - f.start < 1.4);
       flashes.forEach(f => beam(f, 0, (phase - f.start) / 1.4));
       hits = [];
-      const labels = [];
+      // Camera controls overlaid on the stage count as occupied label space.
+      const base = stage.getBoundingClientRect();
+      const labels = [...stage.parentElement.querySelectorAll(".orbit-zoom, .orbit-motion")]
+        .map(n => n.getBoundingClientRect()).filter(r => r.width && r.top < base.bottom && r.bottom > base.top)
+        .map(r => ({ x: r.left - base.left - 4, y: r.top - base.top - 4, w: r.width + 8, h: r.height + 8 }));
       function label(p, name, color, city, count) {
         ctx.font = "500 11px ui-monospace, Menlo, monospace";
         const extra = count ? ctx.measureText(`  ${count}`).width : 0;
         const w = ctx.measureText(name).width + extra + 13;
         const x = p.x + w + 13 < width ? p.x + 10 : p.x - w - 10;
         const y = [p.y - 15, p.y + 4, p.y - 30].find(y =>
-          y > 24 && y+16 < height-23 && !labels.some(b => x < b.x + b.w + 2 && x+w+2 > b.x && y < b.y + 17 && y+17 > b.y));
+          y > 24 && y+16 < height-23 && !labels.some(b => x < b.x + b.w + 2 && x+w+2 > b.x && y < b.y + (b.h || 17) && y+17 > b.y));
         if (y === undefined) return;
         const box = { x, y, w };
         labels.push(box);
@@ -402,9 +406,8 @@ export async function createOrbit(stage, gl, { select, drag, lost, overheadChang
       if (!active) return;
       const dt = previous ? Math.min(.08, (now - previous)/1000) : 1/60;
       previous = now;
-      // Markers keep breathing while the orbit is paused; reduced motion freezes both.
-      if (!reduced) phase += dt;
-      if (running) lon += dt * 1.15;
+      // Pause freezes every motion (rotation, comets, ripples) so the loop can go idle.
+      if (running) { phase += dt; lon += dt * 1.15; }
       if (zoom !== targetZoom) {
         zoom = reduced || Math.abs(targetZoom - zoom) < .001 ? targetZoom :
           zoom + (targetZoom - zoom) * (1 - Math.exp(-dt * 18));
@@ -423,7 +426,7 @@ export async function createOrbit(stage, gl, { select, drag, lost, overheadChang
           if (active && !signal.aborted) loadDetail(); else detailRequested = false;
         });
       }
-      if (!reduced || flight || zoom !== targetZoom) invalidate(); else previous = 0;
+      if (running || flight || zoom !== targetZoom) invalidate(); else previous = 0;
     }
     function setZoom(value) {
       targetZoom = Math.max(.65, Math.min(4.5, value));
@@ -471,8 +474,10 @@ export async function createOrbit(stage, gl, { select, drag, lost, overheadChang
       const [a, b] = pointers.values();
       gesture = a ? { ...a, lon, lat, moved, zoom: targetZoom, span: b ? Math.max(1, distance(a, b)) : 0 } : null;
     }
-    on(stage, "pointerleave", e => { if (e.pointerType === "mouse" && !pointers.size) engage(false); });
-    on(document, "pointerdown", e => { if (!stage.contains(e.target)) engage(false); });
+    // The camera buttons sit beside the stage; using them keeps the globe engaged.
+    const region = stage.parentElement || stage;
+    on(region, "pointerleave", e => { if (e.pointerType === "mouse" && !pointers.size) engage(false); });
+    on(document, "pointerdown", e => { if (!region.contains(e.target)) engage(false); });
     on(window, "scroll", () => { if (!pointers.size) engage(false); }, { passive: true });
     on(overlay, "pointerdown", e => {
       if (e.button !== 0 || pointers.size === 2) return;
@@ -493,7 +498,7 @@ export async function createOrbit(stage, gl, { select, drag, lost, overheadChang
       }
       const dx = e.clientX - gesture.x, dy = e.clientY - gesture.y;
       if (!gesture.moved && Math.hypot(dx,dy) < 4) return;
-      if (!gesture.moved) { gesture.moved = true; flight = null; drag(); }
+      if (!gesture.moved) { gesture.moved = true; flight = null; setTactical(false); drag(); }
       lon = gesture.lon - dx * 65/radius;
       lat = Math.max(-85, Math.min(85, gesture.lat + dy * 65/radius));
       invalidate();
@@ -512,8 +517,9 @@ export async function createOrbit(stage, gl, { select, drag, lost, overheadChang
     return {
       zoomBy, fit,
       overhead(on) {
+        if (on && !hq) return;
         setTactical(on);
-        if (on && hq) { running = false; flyTo(hq, 2.6); } else setZoom(1);
+        if (on) { running = false; flyTo(hq, 2.6); } else setZoom(1);
       },
       data(rows, site) {
         hq = site || null;
@@ -530,10 +536,10 @@ export async function createOrbit(stage, gl, { select, drag, lost, overheadChang
         if (active) invalidate();
         else { cancelAnimationFrame(raf); raf = 0; previous = 0; pointers.clear(); gesture = null; }
       },
-      fly(r) { flyTo(r, tactical ? null : Math.max(targetZoom, 1.6)); },
+      fly(r) { setTactical(false); flyTo(r, Math.max(Math.min(targetZoom, 2), 1.6)); },
       highlight(city) { selected = city; invalidate(); },
       pulse(loc, dest, sev) {
-        if (active && !reduced && flashes.length < 16) flashes.push({ path: track(loc,dest), sev, weight: 1.6, start: phase });
+        if (active && running && flashes.length < 16) flashes.push({ path: track(loc,dest), sev, weight: 1.6, start: phase });
       },
       dispose() {
         active = false;
