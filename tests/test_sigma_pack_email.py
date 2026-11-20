@@ -279,3 +279,27 @@ class EmailSigmaPackTests(unittest.TestCase):
                     self.assertEqual(sigma.run([_stamp(event, 1)], params), [])
                 self.assertFalse(sigma.matches(params, UNRELATED))
                 self.assertEqual(sigma.run([_stamp(UNRELATED, 1)], params), [])
+
+
+
+class EmailNoiseFilterTests(unittest.TestCase):
+    def _compiled(self, name):
+        return sigma.compile_rule((PACK / name).read_text())
+
+    def test_owa_from_outside_is_low_and_spares_known_egress(self):
+        compiled = self._compiled("owa_logon_from_outside.yml")
+        self.assertEqual(compiled["severity"], "low")
+        logon = {"event_type": "auth_success", "user": "ceo", "src_ip": "198.51.100.40",
+                 "message": "Outlook Web App logon /owa/auth.owa succeeded"}
+        self.assertTrue(sigma.matches(compiled["params"], logon))
+        self.assertFalse(sigma.matches(compiled["params"], {**logon, "src_ip": "192.0.2.80"}))
+
+    def test_direct_smtp_spares_listed_mail_servers(self):
+        compiled = self._compiled("internal_direct_smtp_to_internet.yml")
+        workstation = {"event_type": "fw_allow", "src_ip": "10.4.8.21", "dest_ip": "203.0.113.80",
+                       "dest_port": 25, "host": "wrk-21", "message": "tcp outbound permitted"}
+        self.assertTrue(sigma.matches(compiled["params"], workstation))
+        # The mail server delivering to public MX hosts is listed in filter_mail_servers.
+        mta = {**workstation, "src_ip": "10.255.255.25", "host": "mta01"}
+        self.assertFalse(sigma.matches(compiled["params"], mta))
+        self.assertEqual(sigma.run([_stamp(mta, 1)], compiled["params"]), [])

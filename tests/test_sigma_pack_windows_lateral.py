@@ -142,5 +142,16 @@ class WindowsLateralPackTests(unittest.TestCase):
             self.assertNotIn(doc.get("id"), ids, path.name)
 
 
+
+class WinrmManagementFilterTests(unittest.TestCase):
+    def test_listed_management_hosts_do_not_match(self):
+        compiled = sigma.compile_rule((PACK / "winrm_session.yml").read_text())
+        session = {"event_type": "network_connection", "src_ip": "10.2.8.40", "dest_ip": "10.2.8.55",
+                   "dest_port": 5986, "message": "allowed wsman to wkstn04"}
+        self.assertTrue(sigma.matches(compiled["params"], session))
+        # A configuration-management server listed in filter_management_hosts opens WinRM all day.
+        self.assertFalse(sigma.matches(compiled["params"], {**session, "src_ip": "198.18.4.10"}))
+
+
 if __name__ == "__main__":
     unittest.main()

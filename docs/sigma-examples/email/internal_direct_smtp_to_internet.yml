@@ -8,6 +8,9 @@ description: |
   Workstations and servers should hand mail to an internal relay. A direct session to the internet
   is a common way to send data or spam over SMTP. Traffic that stays on a private destination does
   not match, and neither does SMTP that starts on a public address.
+  Your own mail servers do send straight to public MX hosts. List them in filter_mail_servers
+  before you enable the rule. The shipped value 10.255.255.25/32 is a placeholder for one
+  private relay address; replace it with your own.
 author: Watchpost example
 date: 2026-11-18
 references:
@@ -41,8 +44,12 @@ detection:
       - 'fc00::/7'
       - 'fe80::/10'
       - '::1/128'
-  condition: outbound and from_inside and not to_inside
+  filter_mail_servers:
+    # Placeholder: replace 10.255.255.25/32 with the private addresses of your mail transfer agents and relays.
+    SourceIp|cidr:
+      - 10.255.255.25/32
+  condition: outbound and from_inside and not to_inside and not filter_mail_servers
 falsepositives:
-  - The organization's mail transfer agent, when it sends from a private address straight to public MX hosts
+  - The organization's mail transfer agent, when it sends from a private address straight to public MX hosts; list it in filter_mail_servers
   - An SMTP connection whose destination address was not logged
 level: high

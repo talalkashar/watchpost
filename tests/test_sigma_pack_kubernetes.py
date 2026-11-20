@@ -202,5 +202,22 @@ class KubernetesSigmaPackTests(unittest.TestCase):
                 self.assertEqual(fired, set(range(1, len(malicious) + 1)))
 
 
+
+class ExternalCloudPrincipalFilterTests(unittest.TestCase):
+    def test_trusted_principals_and_known_egress_do_not_match(self):
+        compiled = sigma.compile_rule((PACK / "external_cloud_principal.yml").read_text())
+        params = compiled["params"]
+        unknown = ev(audit("list", 200, "/api/v1/pods", "arn:aws:sts::123456789012:assumed-role/Admin/alice",
+                           "pods", ""))
+        self.assertTrue(sigma.matches(params, unknown))
+        self.assertFalse(sigma.matches(params, {**unknown, "src_ip": "192.0.2.33"}))
+        trusted = ev(audit("list", 200, "/api/v1/pods",
+                           "arn:aws:iam::000000000000:role/replace-with-trusted-role", "pods", ""))
+        self.assertFalse(sigma.matches(params, trusted))
+        trusted_sa = ev(audit("list", 200, "/api/v1/pods",
+                              "replace-with-trusted-sa@example.iam.gserviceaccount.com", "pods", "", spaced=True))
+        self.assertFalse(sigma.matches(params, trusted_sa))
+
+
 if __name__ == "__main__":
     unittest.main()
