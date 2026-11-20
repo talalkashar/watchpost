@@ -21,15 +21,20 @@ class AttackMapView {
       on(button, "click", action);
       return button;
     };
-    this.zoomControls = el("div", { class: "orbit-zoom", role: "group", "aria-label": "Globe zoom", hidden: true },
+    // Overhead is the tactical "god's-eye" camera: straight down on HQ with range rings.
+    this.overheadButton = cameraButton("Overhead view of HQ with range rings", "Overhead", () => this.overhead());
+    this.overheadButton.classList.add("orbit-overhead");
+    this.overheadButton.setAttribute("aria-pressed", "false");
+    this.zoomControls = el("div", { class: "orbit-zoom", role: "group", "aria-label": "Globe camera", hidden: true },
       cameraButton("Zoom out", "−", () => this.orbit?.zoomBy(1 / 1.3)),
       cameraButton("Zoom in", "+", () => this.orbit?.zoomBy(1.3)),
-      cameraButton("Fit globe", "Fit", () => this.orbit?.fit()));
+      cameraButton("Fit globe", "Fit", () => this.orbit?.fit()),
+      this.overheadButton);
     this.stage = el("div", { class: "orbit-stage" },
       el("div", { class: "mapwrap", id: "map" }),
       el("span", { class: "orbit-bearing", "aria-hidden": "true" }));
     const cameraTools = el("div", { class: "orbit-tools" }, this.zoomControls,
-      el("span", { class: "orbit-hint" }, "Drag to rotate", el("br"), "Pinch to zoom"), this.motionButton);
+      el("span", { class: "orbit-hint" }, "Tap to steer", el("br"), "Pinch to zoom"), this.motionButton);
     this.list = el("div", { class: "orbit-list" });
     this.detail = el("div", { class: "orbit-detail", "aria-live": "polite" });
     this.side = el("aside", { id: "map-side", "aria-label": "Attack routes" },
@@ -87,6 +92,7 @@ class AttackMapView {
 
   async load() {
     this.loading = true;
+    this.stage.dataset.loading = "true";
     const signal = this.life.signal;
     let gl, handedOff = false;
     try {
@@ -100,6 +106,7 @@ class AttackMapView {
         select: city => this.select(city),
         drag: () => { this.running = false; this.select(null); this.refreshMode(); },
         lost: () => this.fallback(),
+        overheadChanged: on => this.overheadButton.setAttribute("aria-pressed", String(on)),
         signal,
       });
       if (signal.aborted) { this.orbit.dispose(); return; }
@@ -114,6 +121,13 @@ class AttackMapView {
     }
   }
 
+  overhead() {
+    const on = this.overheadButton.getAttribute("aria-pressed") !== "true";
+    if (on) { this.running = false; this.select(null); }
+    this.orbit?.overhead(on);
+    this.refreshMode();
+  }
+
   fallback() {
     this.failed = true;
     this.orbit?.dispose();
@@ -125,6 +139,7 @@ class AttackMapView {
     const allowed = !this.failed;
     this.active = !!(this.orbit && this.wantGlobe && allowed);
     this.card.dataset.mode = this.active ? "3d" : "2d";
+    this.stage.dataset.loading = String(!this.active && this.wantGlobe && !this.failed && !!this.loading);
     this.flatButton.setAttribute("aria-pressed", String(!this.active));
     this.globeButton.setAttribute("aria-pressed", String(this.active));
     this.globeButton.disabled = !allowed;
@@ -132,6 +147,7 @@ class AttackMapView {
     this.motionButton.hidden = !this.active || this.motion.matches;
     this.zoomControls.hidden = !this.active;
     this.motionButton.textContent = this.running ? "Pause orbit" : "Resume orbit";
+    this.motionButton.title = this.motionButton.textContent;
     this.motionButton.dataset.running = String(this.running);
     this.stage.querySelector(".orbit-bearing").hidden = !this.active;
     this.orbit?.state(this.active && this.near && !document.hidden, this.running, this.motion.matches);

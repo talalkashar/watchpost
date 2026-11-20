@@ -25,6 +25,23 @@ export function track(from, to) {
   });
 }
 
+// Point at a great-circle distance (radians) and bearing (degrees) from a location.
+function destination(from, bearing, angle) {
+  const p1 = from.lat * RAD, l1 = from.lon * RAD, b = bearing * RAD;
+  const p2 = Math.asin(Math.sin(p1) * Math.cos(angle) + Math.cos(p1) * Math.sin(angle) * Math.cos(b));
+  const l2 = l1 + Math.atan2(Math.sin(b) * Math.sin(angle) * Math.cos(p1), Math.cos(angle) - Math.sin(p1) * Math.sin(p2));
+  return { lat: p2 / RAD, lon: l2 / RAD };
+}
+
+// Fine 10 degree graticule; every 30 degrees is a major line, the equator is brightest.
+const graticule = [];
+for (let lon = -180; lon < 180; lon += 10)
+  graticule.push({ rank: lon % 30 ? 0 : 1, line: Array.from({ length: 61 }, (_, i) => position({ lon, lat: -90 + i * 3 })) });
+for (let lat = -80; lat <= 80; lat += 10)
+  graticule.push({ rank: lat === 0 ? 2 : lat % 30 ? 0 : 1, line: Array.from({ length: 121 }, (_, i) => position({ lon: -180 + i * 3, lat })) });
+const RINGS_KM = [1000, 2500, 5000];
+const ease = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
 const vertexShader = `
 varying vec2 coord;
 varying vec3 earthNormal;
@@ -78,12 +95,12 @@ void main() {
   gl_FragColor = vec4(color, 1.);
 }`;
 
-export async function createOrbit(stage, gl, { select, drag, lost, signal }) {
+export async function createOrbit(stage, gl, { select, drag, lost, overheadChanged = () => {}, signal }) {
   const surface = gl.canvas;
   const overlay = document.createElement("canvas");
   surface.className = "orbit-surface";
   overlay.className = "orbit-beams";
-  overlay.title = "Drag to rotate · Scroll or pinch to zoom · Double-click to fit";
+  overlay.title = "Drag to rotate · Ctrl or ⌘ + scroll, or pinch, to zoom · Double-click to fit";
   for (const c of [surface, overlay]) c.setAttribute("aria-hidden", "true");
   async function loadImage(name, size) {
     const img = new Image();
@@ -122,15 +139,21 @@ export async function createOrbit(stage, gl, { select, drag, lost, signal }) {
     const ctx = overlay.getContext("2d");
     const listeners = new AbortController();
     const on = (node, type, fn, options) => node.addEventListener(type, fn, { signal: listeners.signal, ...options });
-    const sky = document.createElement("div"), limb = document.createElement("div");
-    sky.className = "orbit-sky"; limb.className = "orbit-limb";
-    stage.prepend(sky, limb, surface, overlay);
+    const sky = document.createElement("div"), limb = document.createElement("div"), scan = document.createElement("div");
+    sky.className = "orbit-sky"; limb.className = "orbit-limb"; scan.className = "orbit-scan";
+    // The page keeps the wheel until the globe is engaged (clicked or tapped) or Ctrl/Cmd is held.
+    const wheelHint = document.createElement("div");
+    wheelHint.className = "orbit-wheel-hint";
+    wheelHint.setAttribute("aria-hidden", "true");
+    wheelHint.textContent = `${/Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl"} + scroll to zoom, or click the globe first`;
+    for (const node of [scan, wheelHint]) node.setAttribute("aria-hidden", "true");
+    stage.prepend(sky, limb, surface, overlay, scan, wheelHint);
     let width, height, radius, cx, cy;
     let lon = -17, lat = 31, flight = null, gesture = null, selected = null;
     let zoom = 1.18, targetZoom = zoom, reduced = false;
     let active = false, running = true, raf = 0, previous = 0, phase = 0;
-    let detailRequested = false;
-    let routes = [], flashes = [], target = null, hits = [];
+    let detailRequested = false, engaged = false, hintTimer = 0, tactical = false;
+    let routes = [], flashes = [], target = null, hq = null, rings = [], hits = [];
     const bearing = stage.querySelector(".orbit-bearing");
     const forward = new Vector3(), right = new Vector3(), up = new Vector3();
 
@@ -181,9 +204,73 @@ export async function createOrbit(stage, gl, { select, drag, lost, signal }) {
     function dot(x, y, r, color) {
       ctx.beginPath(); ctx.arc(x, y, r, 0, 2*Math.PI); ctx.fillStyle = color; ctx.fill();
     }
+    // Lines that lie on the surface: only the near hemisphere is drawn.
+    function surfaceLine(line) {
+      ctx.beginPath();
+      let pen = false;
+      for (const v of line) {
+        const front = v.dot(forward) > .015;
+        if (front) {
+          const x = cx + radius * v.dot(right), y = cy - radius * v.dot(up);
+          if (pen) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+        }
+        pen = front;
+      }
+      ctx.stroke();
+    }
+    function drawGrid() {
+      ctx.lineWidth = 1;
+      const boost = tactical ? 1.6 : 1;
+      for (const g of graticule) {
+        ctx.strokeStyle = `rgba(150,214,222,${[.05, .11, .2][g.rank] * boost})`;
+        surfaceLine(g.line);
+      }
+      if (!tactical || !hq) return;
+      // Range rings around the protected site, as on an overhead tactical display.
+      ctx.setLineDash([3, 4]);
+      ctx.strokeStyle = "rgba(155,230,229,.42)";
+      rings.forEach(r => surfaceLine(r.line));
+      ctx.setLineDash([]);
+      ctx.font = "500 10px ui-monospace, Menlo, monospace";
+      ctx.fillStyle = "rgba(178,237,235,.75)";
+      for (const r of rings) {
+        if (r.label.dot(forward) <= .05) continue;
+        const p = project(r.label);
+        ctx.fillText(`${r.km.toLocaleString("en-US")} km`, p.x + 4, p.y - 3);
+      }
+    }
+    // Compass bezel around the limb and a faint aim reticle at the view center.
+    function drawHud() {
+      ctx.strokeStyle = "rgba(160,205,215,.30)";
+      ctx.lineWidth = 1;
+      if (radius * 2 < Math.min(width, height) * 1.02) {
+        ctx.beginPath();
+        for (let a = 0; a < 360; a += 5) {
+          const t = a * RAD, major = a % 30 === 0;
+          const r0 = radius + 7, r1 = r0 + (major ? 7 : 3);
+          ctx.moveTo(cx + r0 * Math.sin(t), cy - r0 * Math.cos(t));
+          ctx.lineTo(cx + r1 * Math.sin(t), cy - r1 * Math.cos(t));
+        }
+        ctx.stroke();
+        ctx.font = "600 9px ui-monospace, Menlo, monospace";
+        ctx.fillStyle = "rgba(190,225,230,.55)";
+        ctx.fillText("N", cx - 3, cy - radius - 18);
+      }
+      const g = 5, l = 13;
+      ctx.strokeStyle = tactical ? "rgba(155,230,229,.65)" : "rgba(190,225,230,.30)";
+      ctx.beginPath();
+      for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+        ctx.moveTo(cx + dx*g, cy + dy*g); ctx.lineTo(cx + dx*l, cy + dy*l);
+      }
+      ctx.stroke();
+      if (tactical) {
+        ctx.beginPath(); ctx.arc(cx, cy, 22, 0, 2*Math.PI); ctx.stroke();
+      }
+    }
     function beam(route, index, progress) {
       const points = route.path.map(project);
       const color = colors[route.sev];
+      const dim = selected && route.city !== selected;
       ctx.beginPath();
       let pen = false;
       for (const p of points) {
@@ -192,18 +279,32 @@ export async function createOrbit(stage, gl, { select, drag, lost, signal }) {
         }
         pen = p.visible;
       }
+      ctx.lineCap = "round";
       ctx.strokeStyle = color;
-      ctx.globalAlpha = .14;
-      ctx.lineWidth = route.weight + 2.8; ctx.stroke();
-      ctx.globalAlpha = selected && route.city !== selected ? .4 : .88;
+      // Soft additive glow under a crisp core.
+      ctx.globalCompositeOperation = "lighter";
+      ctx.globalAlpha = dim ? .03 : .07; ctx.lineWidth = route.weight + 6; ctx.stroke();
+      ctx.globalAlpha = dim ? .05 : .14; ctx.lineWidth = route.weight + 2.4; ctx.stroke();
+      ctx.globalCompositeOperation = "source-over";
+      ctx.globalAlpha = dim ? .28 : .9;
       ctx.lineWidth = route.weight; ctx.stroke();
+      // A comet runs from the source toward the target.
       const t = progress ?? ((phase * .24 + index * .21) % 1);
-      const pulse = points[Math.min(64, Math.floor(t * 64))];
+      const head = Math.min(64, Math.floor(t * 64));
+      for (let k = Math.max(1, head - 9); k <= head; k++) {
+        const a = points[k - 1], b = points[k];
+        if (!a.visible || !b.visible) continue;
+        ctx.globalAlpha = (dim ? .25 : .85) * (1 - (head - k) / 10);
+        ctx.lineWidth = route.weight + 1.2;
+        ctx.strokeStyle = "#ffe9d2";
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      }
+      const pulse = points[head];
       if (pulse.visible) {
-        ctx.globalAlpha = .3;
-        dot(pulse.x, pulse.y, 3.9, color);
-        ctx.globalAlpha = .95;
-        dot(pulse.x, pulse.y, 1.6, "#ffead6");
+        ctx.globalAlpha = dim ? .12 : .3;
+        dot(pulse.x, pulse.y, 4.2, color);
+        ctx.globalAlpha = dim ? .35 : 1;
+        dot(pulse.x, pulse.y, 1.7, "#fff4e6");
       }
       ctx.globalAlpha = 1;
     }
@@ -219,16 +320,19 @@ export async function createOrbit(stage, gl, { select, drag, lost, signal }) {
       sky.style.transform = `translate3d(${(Math.sin(lon*RAD)*14).toFixed(2)}px,${(lat*.12).toFixed(2)}px,0) scale(${(1 + (zoom - 1)*.03).toFixed(4)})`;
       ctx.clearRect(0, 0, width, height);
       const longitude = ((lon % 360 + 540) % 360) - 180;
-      const coords = `${Math.abs(lat).toFixed(1)}°${lat < 0 ? "S" : "N"}  ${Math.abs(longitude).toFixed(1)}°${longitude < 0 ? "W" : "E"}`;
+      const coords = `${Math.abs(lat).toFixed(1)}°${lat < 0 ? "S" : "N"}  ${Math.abs(longitude).toFixed(1)}°${longitude < 0 ? "W" : "E"}  ×${zoom.toFixed(1)}`;
       if (bearing.textContent !== coords) bearing.textContent = coords;
+      drawGrid();
+      drawHud();
       routes.forEach((r, i) => beam(r, i));
       flashes = flashes.filter(f => phase - f.start < 1.4);
       flashes.forEach(f => beam(f, 0, (phase - f.start) / 1.4));
       hits = [];
       const labels = [];
-      function label(p, name, color, city) {
+      function label(p, name, color, city, count) {
         ctx.font = "500 11px ui-monospace, Menlo, monospace";
-        const w = ctx.measureText(name).width + 9;
+        const extra = count ? ctx.measureText(`  ${count}`).width : 0;
+        const w = ctx.measureText(name).width + extra + 13;
         const x = p.x + w + 13 < width ? p.x + 10 : p.x - w - 10;
         const y = [p.y - 15, p.y + 4, p.y - 30].find(y =>
           y > 24 && y+16 < height-23 && !labels.some(b => x < b.x + b.w + 2 && x+w+2 > b.x && y < b.y + 17 && y+17 > b.y));
@@ -236,8 +340,13 @@ export async function createOrbit(stage, gl, { select, drag, lost, signal }) {
         const box = { x, y, w };
         labels.push(box);
         if (city) hits.push({ box, city });
-        ctx.fillStyle = "rgba(5,15,21,.87)"; ctx.beginPath(); ctx.roundRect(x,y,w,16,3); ctx.fill();
-        ctx.fillStyle = color; ctx.fillText(name, x+4, y+11.5);
+        const strong = !selected || city === selected || !city;
+        ctx.globalAlpha = strong ? 1 : .55;
+        ctx.fillStyle = "rgba(5,13,19,.82)"; ctx.beginPath(); ctx.roundRect(x,y,w,16,3); ctx.fill();
+        ctx.fillStyle = color; ctx.fillRect(x, y + 3, 2, 10);
+        ctx.fillStyle = "#eef4f5"; ctx.fillText(name, x+7, y+11.5);
+        if (count) { ctx.fillStyle = "rgba(190,210,216,.8)"; ctx.fillText(`  ${count}`, x + 7 + w - extra - 13, y + 11.5); }
+        ctx.globalAlpha = 1;
       }
       if (target) {
         const p = project(target);
@@ -249,20 +358,39 @@ export async function createOrbit(stage, gl, { select, drag, lost, signal }) {
           for (const [dx,dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
             ctx.moveTo(x + dx*4, y + dy*4); ctx.lineTo(x + dx*10, y + dy*10);
           }
-          ctx.stroke(); dot(x,y,1.8,"#d7ffff"); label(p, "HQ", "#b2edeb");
+          ctx.stroke();
+          // Slowly turning outer brackets mark the protected site.
+          ctx.globalAlpha = .55; ctx.beginPath();
+          for (let q = 0; q < 4; q++) {
+            const a0 = phase * .5 + q * Math.PI / 2;
+            ctx.moveTo(x + 15 * Math.cos(a0), y + 15 * Math.sin(a0));
+            ctx.arc(x, y, 15, a0, a0 + .7);
+          }
+          ctx.stroke(); ctx.globalAlpha = 1;
+          dot(x,y,1.8,"#d7ffff"); label(p, "HQ", "#9be6e5");
         }
       }
       const sorted = selected ? [...routes].sort((a,b) => Number(b.city === selected) - Number(a.city === selected)) : routes;
-      for (const r of sorted) {
+      sorted.forEach((r, i) => {
         const p = project(r.source);
-        if (!p.visible) continue;
+        if (!p.visible) return;
         const color = colors[r.sev];
-        ctx.globalAlpha = .2; dot(p.x, p.y, 5.8 + Math.sin(phase*2)*1.1, color);
-        ctx.globalAlpha = 1; dot(p.x, p.y, 3.2, color);
-        dot(p.x, p.y, 1.15, "#fff2dc");
-        label(p, r.city, "#f0f4f5", r.city);
+        const size = 1 + .25 * Math.log2(1 + r.events);
+        // Expanding ripple from each origin, staggered so they do not beat together.
+        const f = (phase * .55 + i * .37) % 1;
+        ctx.strokeStyle = color; ctx.lineWidth = 1.1;
+        ctx.globalAlpha = (1 - f) * (selected && r.city !== selected ? .2 : .6);
+        ctx.beginPath(); ctx.arc(p.x, p.y, 3 + f * 13 * size, 0, 2*Math.PI); ctx.stroke();
+        ctx.globalAlpha = .22; dot(p.x, p.y, 4.5 + size, color);
+        ctx.globalAlpha = 1; dot(p.x, p.y, 3, color);
+        dot(p.x, p.y, 1.1, "#fff2dc");
+        if (r.city === selected) {
+          ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 1.2;
+          ctx.beginPath(); ctx.arc(p.x, p.y, 9 + size * 2, 0, 2*Math.PI); ctx.stroke();
+        }
+        label(p, r.city, color, r.city, r.events);
         hits.push({ ...p, city: r.city });
-      }
+      });
     }
 
     function invalidate() {
@@ -274,15 +402,17 @@ export async function createOrbit(stage, gl, { select, drag, lost, signal }) {
       if (!active) return;
       const dt = previous ? Math.min(.08, (now - previous)/1000) : 1/60;
       previous = now;
-      if (running) { phase += dt; lon += dt * 1.15; }
+      // Markers keep breathing while the orbit is paused; reduced motion freezes both.
+      if (!reduced) phase += dt;
+      if (running) lon += dt * 1.15;
       if (zoom !== targetZoom) {
         zoom = reduced || Math.abs(targetZoom - zoom) < .001 ? targetZoom :
           zoom + (targetZoom - zoom) * (1 - Math.exp(-dt * 18));
         projectCamera();
       }
       if (flight) {
-        const progress = reduced ? 1 : Math.min(1, (now - flight.start) / 780);
-        const t = progress * progress * (3 - 2 * progress);
+        const progress = reduced ? 1 : Math.min(1, (now - flight.start) / 1100);
+        const t = ease(progress);
         lon = flight.lon + flight.dx*t; lat = flight.lat + flight.dy*t;
         if (progress === 1) flight = null;
       }
@@ -293,19 +423,43 @@ export async function createOrbit(stage, gl, { select, drag, lost, signal }) {
           if (active && !signal.aborted) loadDetail(); else detailRequested = false;
         });
       }
-      if (running || flight || zoom !== targetZoom) invalidate(); else previous = 0;
+      if (!reduced || flight || zoom !== targetZoom) invalidate(); else previous = 0;
     }
     function setZoom(value) {
       targetZoom = Math.max(.65, Math.min(4.5, value));
       invalidate();
     }
     const zoomBy = factor => setZoom(targetZoom * factor);
-    const fit = () => setZoom(1);
+    function setTactical(on) {
+      if (tactical === on) return;
+      tactical = on;
+      stage.dataset.tactical = String(on);
+      overheadChanged(on);
+      invalidate();
+    }
+    function flyTo(loc, zoomTo) {
+      flight = { lon, lat, dx: ((loc.lon - lon) % 360 + 540) % 360 - 180, dy: loc.lat - lat, start: performance.now() };
+      if (zoomTo) setZoom(zoomTo);
+      invalidate();
+    }
+    const fit = () => { setTactical(false); setZoom(1); };
+    function engage(on) {
+      if (engaged === on) return;
+      engaged = on;
+      stage.dataset.engaged = String(on);
+    }
+    function showWheelHint() {
+      wheelHint.classList.add("is-shown");
+      clearTimeout(hintTimer);
+      hintTimer = setTimeout(() => wheelHint.classList.remove("is-shown"), 1600);
+    }
     const observer = new ResizeObserver(resize);
     observer.observe(stage);
     resize();
     on(surface, "webglcontextlost", lost);
     on(overlay, "wheel", e => {
+      // Plain wheel scrolls the page. Trackpad pinch arrives as a ctrl+wheel.
+      if (!engaged && !e.ctrlKey && !e.metaKey) { showWheelHint(); return; }
       e.preventDefault();
       const pixels = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? height : 1);
       zoomBy(Math.exp(-Math.max(-240, Math.min(240, pixels)) * .0025));
@@ -317,8 +471,13 @@ export async function createOrbit(stage, gl, { select, drag, lost, signal }) {
       const [a, b] = pointers.values();
       gesture = a ? { ...a, lon, lat, moved, zoom: targetZoom, span: b ? Math.max(1, distance(a, b)) : 0 } : null;
     }
+    on(stage, "pointerleave", e => { if (e.pointerType === "mouse" && !pointers.size) engage(false); });
+    on(document, "pointerdown", e => { if (!stage.contains(e.target)) engage(false); });
+    on(window, "scroll", () => { if (!pointers.size) engage(false); }, { passive: true });
     on(overlay, "pointerdown", e => {
       if (e.button !== 0 || pointers.size === 2) return;
+      engage(true);
+      wheelHint.classList.remove("is-shown");
       pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       overlay.setPointerCapture(e.pointerId);
       beginGesture(pointers.size === 2);
@@ -352,8 +511,15 @@ export async function createOrbit(stage, gl, { select, drag, lost, signal }) {
     for (const event of ["pointerup", "pointercancel", "lostpointercapture"]) on(overlay, event, endGesture);
     return {
       zoomBy, fit,
-      data(rows, hq) {
+      overhead(on) {
+        setTactical(on);
+        if (on && hq) { running = false; flyTo(hq, 2.6); } else setZoom(1);
+      },
+      data(rows, site) {
+        hq = site || null;
         target = hq && position(hq);
+        rings = hq ? RINGS_KM.map(km => ({ km, label: position(destination(hq, 0, km / 6371)),
+          line: Array.from({ length: 91 }, (_, i) => position(destination(hq, i * 4, km / 6371))) })) : [];
         routes = hq ? rows.map(r => ({ ...r, source: position(r), path: track(r, hq), weight: .65 + .19*Math.log2(1+r.events) })) : [];
         invalidate();
       },
@@ -364,20 +530,17 @@ export async function createOrbit(stage, gl, { select, drag, lost, signal }) {
         if (active) invalidate();
         else { cancelAnimationFrame(raf); raf = 0; previous = 0; pointers.clear(); gesture = null; }
       },
-      fly(r) {
-        flight = { lon, lat, dx: ((r.lon - lon) % 360 + 540) % 360 - 180, dy: r.lat - lat, start: performance.now() };
-        invalidate();
-      },
+      fly(r) { flyTo(r, tactical ? null : Math.max(targetZoom, 1.6)); },
       highlight(city) { selected = city; invalidate(); },
       pulse(loc, dest, sev) {
-        if (active && running && flashes.length < 16) flashes.push({ path: track(loc,dest), sev, weight: 1.6, start: phase });
+        if (active && !reduced && flashes.length < 16) flashes.push({ path: track(loc,dest), sev, weight: 1.6, start: phase });
       },
       dispose() {
         active = false;
-        cancelAnimationFrame(raf); observer.disconnect(); listeners.abort();
+        cancelAnimationFrame(raf); clearTimeout(hintTimer); observer.disconnect(); listeners.abort();
         for (const key of ["day", "night", "surfaceMap", "clouds"]) uniforms[key].value?.dispose();
         geometry.dispose(); material.dispose(); renderer.dispose();
-        renderer.forceContextLoss(); sky.remove(); limb.remove(); surface.remove(); overlay.remove();
+        renderer.forceContextLoss(); sky.remove(); limb.remove(); surface.remove(); overlay.remove(); scan.remove(); wheelHint.remove();
       },
     };
   }
