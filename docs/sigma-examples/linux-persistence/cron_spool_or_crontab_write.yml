@@ -6,6 +6,9 @@ status: experimental
 description: |
   A process wrote a crontab or a file under the cron spool, /etc/cron.d, or /etc/crontab.
   Listing the crontab and the cron daemon's own job lines are excluded.
+  Only host events match (event.action process_start, file_access,
+  privilege_escalation, privilege_use). logsource does not filter in Watchpost,
+  so a web request or firewall line that names the same path is ignored.
 author: Watchpost example
 date: 2026-11-18
 references:
@@ -17,6 +20,12 @@ logsource:
   category: process_creation
   product: linux
 detection:
+  host_activity:
+    event.action:
+      - process_start
+      - file_access
+      - privilege_escalation
+      - privilege_use
   selection:
     message|contains:
       - 'crontab -'
@@ -26,7 +35,7 @@ detection:
   filter_list:
     message|contains:
       - 'crontab -l'
-  condition: selection and not filter_list
+  condition: host_activity and selection and not filter_list
 falsepositives:
   - An administrator installing a reviewed crontab or a package script dropping a file in /etc/cron.d
 level: high

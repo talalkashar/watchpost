@@ -5,6 +5,9 @@ status: experimental
 description: |
   A command appended or rewrote a user or system shell startup file (.bashrc, .profile, .zshrc,
   /etc/profile, /etc/bash.bashrc). A shell sourcing the file at login does not match.
+  Only host events match (event.action process_start, file_access,
+  privilege_escalation, privilege_use). logsource does not filter in Watchpost,
+  so a web request or firewall line that names the same path is ignored.
 author: Watchpost example
 date: 2026-11-18
 references:
@@ -16,6 +19,12 @@ logsource:
   category: process_creation
   product: linux
 detection:
+  host_activity:
+    event.action:
+      - process_start
+      - file_access
+      - privilege_escalation
+      - privilege_use
   selection_file:
     message|contains:
       - '.bashrc'
@@ -32,7 +41,7 @@ detection:
       - 'echo '
       - 'sed -i'
       - '>>'
-  condition: selection_file and selection_write
+  condition: host_activity and selection_file and selection_write
 falsepositives:
   - A user or configuration management editing a shell rc file
 level: high

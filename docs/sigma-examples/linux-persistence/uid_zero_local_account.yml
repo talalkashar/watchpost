@@ -5,6 +5,9 @@ status: experimental
 description: |
   useradd or usermod was invoked with -u 0, which creates or converts a local account into
   another UID 0 identity. A normal useradd without -u 0 does not match.
+  Only host events match (event.action process_start, file_access,
+  privilege_escalation, privilege_use, user_created). logsource does not filter in Watchpost,
+  so a web request or firewall line that names the same path is ignored.
 author: Watchpost example
 date: 2026-11-18
 references:
@@ -16,6 +19,13 @@ logsource:
   category: process_creation
   product: linux
 detection:
+  host_activity:
+    event.action:
+      - process_start
+      - file_access
+      - privilege_escalation
+      - privilege_use
+      - user_created
   selection_useradd:
     message|contains|all:
       - 'useradd'
@@ -24,7 +34,7 @@ detection:
     message|contains|all:
       - 'usermod'
       - '-u 0'
-  condition: 1 of selection_*
+  condition: host_activity and 1 of selection_*
 falsepositives:
   - Rare recovery work that intentionally creates a second UID 0 account
 level: critical

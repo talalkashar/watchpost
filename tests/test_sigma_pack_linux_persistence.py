@@ -83,3 +83,35 @@ class LinuxPersistencePackTests(unittest.TestCase):
         self.assertEqual(len(ids), len(set(ids)))
         self.assertEqual(len(rule_ids), len(set(rule_ids)))
         self.assertEqual(len(CASES), 6)
+
+
+
+class LinuxPersistenceScopeTests(unittest.TestCase):
+    """logsource does not filter, so each rule scopes itself to host events with event.action."""
+
+    def test_web_and_firewall_lines_naming_persistence_paths_do_not_match(self):
+        probes = {
+            "cron_spool_or_crontab_write.yml": "GET /cgi-bin/x?f=/etc/crontab HTTP/1.1 404",
+            "systemd_service_unit.yml": "GET /static/../../etc/systemd/system/ssh.service HTTP/1.1 400",
+            "ssh_authorized_keys.yml": "GET /?q=echo%20key%20>>%20.ssh/authorized_keys HTTP/1.1 404",
+            "shell_startup_file.yml": "GET /?cmd=echo%20x%20>>%20/root/.bashrc HTTP/1.1 404",
+            "ld_so_preload.yml": "GET /?env=LD_PRELOAD=/tmp/x.so HTTP/1.1 404",
+            "uid_zero_local_account.yml": "GET /?c=useradd%20-o%20-u 0%20x HTTP/1.1 404",
+        }
+        self.assertEqual(sorted(probes), sorted(CASES))
+        for name, probe in probes.items():
+            compiled = sigma.compile_rule((PACK / name).read_text())
+            malicious = CASES[name][1]
+            for event_type in ("web_request", "web_scan", "web_error", "fw_deny", "syslog"):
+                with self.subTest(rule=name, event_type=event_type):
+                    self.assertFalse(sigma.matches(compiled["params"], {
+                        "event_type": event_type, "src_ip": "203.0.113.7", "host": "web01", "message": probe}))
+                    # The same command text outside a host event no longer matches either.
+                    self.assertFalse(sigma.matches(compiled["params"], {**malicious, "event_type": event_type}))
+
+    def test_host_event_types_still_match(self):
+        for name, (_, malicious, _) in CASES.items():
+            compiled = sigma.compile_rule((PACK / name).read_text())
+            for event_type in ("process_start", "file_access", "privilege_escalation", "privilege_use"):
+                with self.subTest(rule=name, event_type=event_type):
+                    self.assertTrue(sigma.matches(compiled["params"], {**malicious, "event_type": event_type}))

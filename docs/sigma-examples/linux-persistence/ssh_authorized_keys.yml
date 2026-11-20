@@ -6,6 +6,9 @@ status: experimental
 description: |
   A command appended or installed an SSH authorized_keys file. Reading the file and sshd
   Accepted publickey lines do not contain a write tool and do not match.
+  Only host events match (event.action process_start, file_access,
+  privilege_escalation, privilege_use). logsource does not filter in Watchpost,
+  so a web request or firewall line that names the same path is ignored.
 author: Watchpost example
 date: 2026-11-18
 references:
@@ -17,6 +20,12 @@ logsource:
   category: process_creation
   product: linux
 detection:
+  host_activity:
+    event.action:
+      - process_start
+      - file_access
+      - privilege_escalation
+      - privilege_use
   selection_file:
     message|contains:
       - 'authorized_keys'
@@ -28,7 +37,7 @@ detection:
       - 'sed -i'
       - 'install '
       - '>>'
-  condition: selection_file and selection_write
+  condition: host_activity and selection_file and selection_write
 falsepositives:
   - An administrator adding their own key with tee or a shell redirect
 level: high

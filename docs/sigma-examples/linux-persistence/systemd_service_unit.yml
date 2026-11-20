@@ -5,6 +5,9 @@ status: experimental
 description: |
   A command wrote or referenced a unit path under the system or user systemd directories.
   Read-only systemctl status, cat, and show lines are excluded.
+  Only host events match (event.action process_start, file_access,
+  privilege_escalation, privilege_use). logsource does not filter in Watchpost,
+  so a web request or firewall line that names the same path is ignored.
 author: Watchpost example
 date: 2026-11-18
 references:
@@ -17,6 +20,12 @@ logsource:
   category: process_creation
   product: linux
 detection:
+  host_activity:
+    event.action:
+      - process_start
+      - file_access
+      - privilege_escalation
+      - privilege_use
   selection:
     message|contains:
       - '/etc/systemd/system/'
@@ -28,7 +37,7 @@ detection:
       - 'systemctl status'
       - 'systemctl cat'
       - 'systemctl show'
-  condition: selection and not filter_read
+  condition: host_activity and selection and not filter_read
 falsepositives:
   - Package installers and administrators adding a reviewed unit under /etc/systemd/system
 level: high

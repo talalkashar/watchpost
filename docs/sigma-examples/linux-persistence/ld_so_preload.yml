@@ -5,6 +5,9 @@ status: experimental
 description: |
   A command referenced /etc/ld.so.preload or set LD_PRELOAD. Rebuilding /etc/ld.so.cache
   does not contain either string.
+  Only host events match (event.action process_start, file_access,
+  privilege_escalation, privilege_use). logsource does not filter in Watchpost,
+  so a web request or firewall line that names the same path is ignored.
 author: Watchpost example
 date: 2026-11-18
 references:
@@ -18,11 +21,17 @@ logsource:
   category: process_creation
   product: linux
 detection:
+  host_activity:
+    event.action:
+      - process_start
+      - file_access
+      - privilege_escalation
+      - privilege_use
   selection:
     message|contains:
       - '/etc/ld.so.preload'
       - 'LD_PRELOAD='
-  condition: selection
+  condition: host_activity and selection
 falsepositives:
   - A developer intentionally preloading a library while debugging
 level: critical
