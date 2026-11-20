@@ -6,6 +6,11 @@ status: experimental
 description: |
   A command appended or installed an SSH authorized_keys file. Reading the file and sshd
   Accepted publickey lines do not contain a write tool and do not match.
+  logsource does not filter in Watchpost, so web, firewall, network, and VPN events
+  (event.action network_or_web) are excluded: a scanner probing the same path does not match.
+  Host lines that normalize to other or syslog, such as auditd EXECVE records and shell
+  command logs, still match. A web access line forwarded through syslog is stored as other
+  and is not excluded.
 author: Watchpost example
 date: 2026-11-18
 references:
@@ -17,6 +22,15 @@ logsource:
   category: process_creation
   product: linux
 detection:
+  network_or_web:
+    event.action:
+      - web_request
+      - web_scan
+      - web_error
+      - fw_deny
+      - fw_allow
+      - network_connection
+      - vpn_login
   selection_file:
     message|contains:
       - 'authorized_keys'
@@ -28,7 +42,7 @@ detection:
       - 'sed -i'
       - 'install '
       - '>>'
-  condition: selection_file and selection_write
+  condition: (selection_file and selection_write) and not network_or_web
 falsepositives:
   - An administrator adding their own key with tee or a shell redirect
 level: high

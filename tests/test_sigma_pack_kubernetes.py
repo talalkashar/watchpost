@@ -202,5 +202,41 @@ class KubernetesSigmaPackTests(unittest.TestCase):
                 self.assertEqual(fired, set(range(1, len(malicious) + 1)))
 
 
+
+class ExternalCloudPrincipalFilterTests(unittest.TestCase):
+    def test_trusted_principals_and_known_egress_do_not_match(self):
+        compiled = sigma.compile_rule((PACK / "external_cloud_principal.yml").read_text())
+        params = compiled["params"]
+        unknown = ev(audit("list", 200, "/api/v1/pods", "arn:aws:sts::123456789012:assumed-role/Admin/alice",
+                           "pods", ""))
+        self.assertTrue(sigma.matches(params, unknown))
+        self.assertFalse(sigma.matches(params, {**unknown, "src_ip": "192.0.2.33"}))
+        trusted = ev(audit("list", 200, "/api/v1/pods",
+                           "arn:aws:sts::000000000000:assumed-role/replace-with-trusted-role/ci-run-7", "pods", ""))
+        self.assertFalse(sigma.matches(params, trusted))
+        trusted_sa = ev(audit("list", 200, "/api/v1/pods",
+                              "replace-with-trusted-sa@example.iam.gserviceaccount.com", "pods", "", spaced=True))
+        self.assertFalse(sigma.matches(params, trusted_sa))
+
+    def test_trusted_string_outside_the_username_does_not_suppress(self):
+        params = sigma.compile_rule((PACK / "external_cloud_principal.yml").read_text())["params"]
+        attacker = "arn:aws:sts::123456789012:assumed-role/Admin/mallory"
+        role = "arn:aws:sts::000000000000:assumed-role/replace-with-trusted-role/x"
+        sa = "replace-with-trusted-sa@example.iam.gserviceaccount.com"
+        planted = [
+            # Trusted text in the request URI.
+            ev(audit("list", 200, "/api/v1/pods?labelSelector=" + role + sa, attacker, "pods", "")),
+            # Trusted text as a JSON value under another key in the request object.
+            ev(audit("create", 201, "/api/v1/namespaces/dev/configmaps", attacker, "configmaps", "dev",
+                     request_object={"data": {"note": role, "owner": sa}})),
+            # Trusted text inside an annotation that quotes a username-like value.
+            ev(audit("create", 201, "/api/v1/namespaces/dev/configmaps", attacker, "configmaps", "dev",
+                     spaced=True, request_object={"metadata": {"annotations": {"x": "username " + role}}})),
+        ]
+        for event in planted:
+            with self.subTest(message=event["message"][:80]):
+                self.assertTrue(sigma.matches(params, event))
+
+
 if __name__ == "__main__":
     unittest.main()

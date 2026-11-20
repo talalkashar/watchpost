@@ -9,6 +9,9 @@ description: |
   address outside the private ranges. An office sign-in to the same console is excluded.
   An event with no source address is not treated as internal. Each match is one event;
   Watchpost groups them per source IP.
+  Remote administrators sign in from public addresses every day, so this rule is level medium.
+  The tuning knob is filter_known_egress: list your office and VPN egress ranges there. The
+  shipped value is a placeholder that matches nothing real.
 author: Watchpost example
 date: 2026-11-18
 references:
@@ -34,7 +37,12 @@ detection:
       - 172.16.0.0/12
       - 192.168.0.0/16
       - 127.0.0.0/8
-  condition: console and not internal
+  filter_known_egress:
+    # Placeholder: replace 192.0.2.0/24 (TEST-NET-1, never routed) with your office, VPN, and CI egress ranges.
+    source.ip|cidr:
+      - 192.0.2.0/24
+  condition: console and not internal and not filter_known_egress
 falsepositives:
   - An administrator signing in from a home network, hotel, or mobile hotspot
-level: high
+  - Sign-ins from your own egress ranges until filter_known_egress lists them
+level: medium

@@ -173,3 +173,29 @@ class SaasSigmaPackTests(unittest.TestCase):
                 continue
             for _, _, our_rule in ours.values():
                 self.assertNotEqual(other["rule_id"], our_rule, path.name)
+
+
+
+class SaasNoiseFilterTests(unittest.TestCase):
+    """Rules that would fire on routine public-address traffic carry a level and a filter_ allowlist."""
+
+    def _compiled(self, name):
+        return sigma.compile_rule((PACK / name).read_text(encoding="utf-8"))
+
+    def test_storage_download_is_low_and_spares_known_egress_and_trusted_principals(self):
+        compiled = self._compiled("cloud_storage_download_from_public.yml")
+        self.assertEqual(compiled["severity"], "low")
+        read = {"event_type": "cloud_data_access", "user": "analyst", "src_ip": "203.0.113.150",
+                "message": "GetObject on s3.amazonaws.com"}
+        self.assertTrue(sigma.matches(compiled["params"], read))
+        # Routine reads from an allowlisted egress range or by an allowlisted principal stay quiet.
+        self.assertFalse(sigma.matches(compiled["params"], {**read, "src_ip": "192.0.2.44"}))
+        self.assertFalse(sigma.matches(compiled["params"], {**read, "user": "replace-with-trusted-principal"}))
+
+    def test_admin_signin_is_medium_and_spares_known_egress(self):
+        compiled = self._compiled("admin_signin_from_public_address.yml")
+        self.assertEqual(compiled["severity"], "medium")
+        signin = {"event_type": "auth_success", "user": "alice", "src_ip": "198.51.100.20",
+                  "message": "UserLoggedIn to Microsoft 365 admin center"}
+        self.assertTrue(sigma.matches(compiled["params"], signin))
+        self.assertFalse(sigma.matches(compiled["params"], {**signin, "src_ip": "192.0.2.10"}))

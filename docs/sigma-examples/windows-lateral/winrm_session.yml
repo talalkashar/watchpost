@@ -7,6 +7,9 @@ description: |
   A network connection to the Windows Remote Management ports, the WinRM host process, or an
   explicit remoting client (winrs, Enter-PSSession, Invoke-Command -ComputerName). Loopback
   traffic and local PowerShell do not match.
+  Configuration-management and jump hosts open WinRM all day. List them in
+  filter_management_hosts (source addresses) before you enable the rule. The shipped value
+  198.51.100.0/24 (TEST-NET-2, never routed) matches nothing real.
 author: Watchpost example
 date: 2026-11-18
 references:
@@ -37,7 +40,11 @@ detection:
   loopback:
     SourceIp|cidr:
       - 127.0.0.0/8
-  condition: (1 of winrm_*) and not loopback
+  filter_management_hosts:
+    # Placeholder: replace 198.51.100.0/24 with the addresses of your management and jump hosts.
+    SourceIp|cidr:
+      - 198.51.100.0/24
+  condition: (1 of winrm_*) and not loopback and not filter_management_hosts
 falsepositives:
-  - A configuration-management server opening WinRM to enrolled hosts
+  - A configuration-management server opening WinRM to enrolled hosts, until filter_management_hosts lists it
 level: medium
