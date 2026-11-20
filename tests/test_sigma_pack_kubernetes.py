@@ -218,10 +218,6 @@ class ExternalCloudPrincipalFilterTests(unittest.TestCase):
                               "replace-with-trusted-sa@example.iam.gserviceaccount.com", "pods", "", spaced=True))
         self.assertFalse(sigma.matches(params, trusted_sa))
 
-
-if __name__ == "__main__":
-    unittest.main()
-
     def test_trusted_string_outside_the_username_does_not_suppress(self):
         params = sigma.compile_rule((PACK / "external_cloud_principal.yml").read_text())["params"]
         attacker = "arn:aws:sts::123456789012:assumed-role/Admin/mallory"
@@ -240,3 +236,7 @@ if __name__ == "__main__":
         for event in planted:
             with self.subTest(message=event["message"][:80]):
                 self.assertTrue(sigma.matches(params, event))
+
+
+if __name__ == "__main__":
+    unittest.main()
