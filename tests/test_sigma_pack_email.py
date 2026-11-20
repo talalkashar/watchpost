@@ -299,7 +299,13 @@ class EmailNoiseFilterTests(unittest.TestCase):
         workstation = {"event_type": "fw_allow", "src_ip": "10.4.8.21", "dest_ip": "203.0.113.80",
                        "dest_port": 25, "host": "wrk-21", "message": "tcp outbound permitted"}
         self.assertTrue(sigma.matches(compiled["params"], workstation))
-        # The mail server delivering to public MX hosts is listed in filter_mail_servers.
-        mta = {**workstation, "src_ip": "10.255.255.25", "host": "mta01"}
-        self.assertFalse(sigma.matches(compiled["params"], mta))
-        self.assertEqual(sigma.run([_stamp(mta, 1)], compiled["params"]), [])
+        mta = {**workstation, "src_ip": "10.1.1.25", "host": "mta01"}
+        # The shipped placeholder is TEST-NET-1, so it suppresses no inside source.
+        self.assertTrue(sigma.matches(compiled["params"], mta))
+        # Listing the relay in filter_mail_servers quiets it and nothing else.
+        text = (PACK / "internal_direct_smtp_to_internet.yml").read_text()
+        self.assertIn("      - 192.0.2.25/32\n", text)
+        tuned = sigma.compile_rule(text.replace("      - 192.0.2.25/32\n", "      - 10.1.1.25/32\n"))
+        self.assertFalse(sigma.matches(tuned["params"], mta))
+        self.assertEqual(sigma.run([_stamp(mta, 1)], tuned["params"]), [])
+        self.assertTrue(sigma.matches(tuned["params"], workstation))

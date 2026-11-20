@@ -3,7 +3,7 @@
 import unittest
 from pathlib import Path
 
-from watchpost import sigma
+from watchpost import normalize, sigma
 
 PACK = Path(__file__).resolve().parent.parent / "docs" / "sigma-examples" / "linux-persistence"
 EXAMPLES = PACK.parent
@@ -87,7 +87,9 @@ class LinuxPersistencePackTests(unittest.TestCase):
 
 
 class LinuxPersistenceScopeTests(unittest.TestCase):
-    """logsource does not filter, so each rule scopes itself to host events with event.action."""
+    """logsource does not filter, so each rule excludes web, firewall, network, and VPN events."""
+
+    NOT_HOST = ("web_request", "web_scan", "web_error", "fw_deny", "fw_allow", "network_connection", "vpn_login")
 
     def test_web_and_firewall_lines_naming_persistence_paths_do_not_match(self):
         probes = {
@@ -102,16 +104,51 @@ class LinuxPersistenceScopeTests(unittest.TestCase):
         for name, probe in probes.items():
             compiled = sigma.compile_rule((PACK / name).read_text())
             malicious = CASES[name][1]
-            for event_type in ("web_request", "web_scan", "web_error", "fw_deny", "syslog"):
+            for event_type in self.NOT_HOST:
                 with self.subTest(rule=name, event_type=event_type):
                     self.assertFalse(sigma.matches(compiled["params"], {
                         "event_type": event_type, "src_ip": "203.0.113.7", "host": "web01", "message": probe}))
-                    # The same command text outside a host event no longer matches either.
+                    # The same command text in a web or network event no longer matches either.
                     self.assertFalse(sigma.matches(compiled["params"], {**malicious, "event_type": event_type}))
 
     def test_host_event_types_still_match(self):
         for name, (_, malicious, _) in CASES.items():
             compiled = sigma.compile_rule((PACK / name).read_text())
-            for event_type in ("process_start", "file_access", "privilege_escalation", "privilege_use"):
+            for event_type in ("process_start", "file_access", "privilege_escalation", "privilege_use",
+                               "user_created", "syslog", "other"):
                 with self.subTest(rule=name, event_type=event_type):
                     self.assertTrue(sigma.matches(compiled["params"], {**malicious, "event_type": event_type}))
+
+    def test_auditd_and_shell_command_log_lines_still_fire(self):
+        # These normalize to event_type "other": EXECVE has no exe= field and bash command logs have no pattern.
+        lines = {
+            "ld_so_preload.yml": 'Nov 20 10:00:00 web01 audit: type=EXECVE msg=audit(1763632800.123:42): '
+                                 'argc=3 a0="env" a1="LD_PRELOAD=/tmp/x.so" a2="/usr/bin/id"',
+            "ssh_authorized_keys.yml": 'Nov 20 10:00:00 web01 bash[100]: root: '
+                                       'bash -c "echo k >> /root/.ssh/authorized_keys"',
+            "uid_zero_local_account.yml": "Nov 20 10:00:00 web01 bash[100]: root: useradd -o -u 0 -g 0 sysbackup",
+        }
+        for name, line in lines.items():
+            with self.subTest(rule=name):
+                event = normalize.normalize_authlog_line(line, "authlog")
+                self.assertEqual(event["event_type"], "other")
+                compiled = sigma.compile_rule((PACK / name).read_text())
+                self.assertTrue(sigma.matches(compiled["params"], event))
+                self.assertEqual(len(sigma.run([{**event, "id": 1}], compiled["params"])), 1)
+
+    def test_web_scan_probe_lines_through_the_web_parser_do_not_fire(self):
+        probes = ("/etc/crontab", "/?env=LD_PRELOAD=/tmp/x.so", "/?c=useradd%20-o%20-u%200%20x",
+                  "/?c=echo%20k%20%3E%3E%20.ssh/authorized_keys", "/../../etc/systemd/system/x.service",
+                  "/?c=echo%20x%20%3E%3E%20.bashrc")
+        events = []
+        for probe in probes:
+            line = (f'203.0.113.7 - - [20/Nov/2026:10:00:00 +0000] "GET {probe} HTTP/1.1" 404 153 "-" '
+                    '"Mozilla/5.0 (compatible; Nmap Scripting Engine)"')
+            event = normalize.normalize_weblog_line(line, "weblog")
+            self.assertIn(event["event_type"], self.NOT_HOST, line)
+            events.append(event)
+        for name in CASES:
+            compiled = sigma.compile_rule((PACK / name).read_text())
+            for event in events:
+                with self.subTest(rule=name, message=event["message"][:60]):
+                    self.assertFalse(sigma.matches(compiled["params"], event))

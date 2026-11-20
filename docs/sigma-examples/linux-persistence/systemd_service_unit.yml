@@ -5,9 +5,11 @@ status: experimental
 description: |
   A command wrote or referenced a unit path under the system or user systemd directories.
   Read-only systemctl status, cat, and show lines are excluded.
-  Only host events match (event.action process_start, file_access,
-  privilege_escalation, privilege_use). logsource does not filter in Watchpost,
-  so a web request or firewall line that names the same path is ignored.
+  logsource does not filter in Watchpost, so web, firewall, network, and VPN events
+  (event.action network_or_web) are excluded: a scanner probing the same path does not match.
+  Host lines that normalize to other or syslog, such as auditd EXECVE records and shell
+  command logs, still match. A web access line forwarded through syslog is stored as other
+  and is not excluded.
 author: Watchpost example
 date: 2026-11-18
 references:
@@ -20,12 +22,15 @@ logsource:
   category: process_creation
   product: linux
 detection:
-  host_activity:
+  network_or_web:
     event.action:
-      - process_start
-      - file_access
-      - privilege_escalation
-      - privilege_use
+      - web_request
+      - web_scan
+      - web_error
+      - fw_deny
+      - fw_allow
+      - network_connection
+      - vpn_login
   selection:
     message|contains:
       - '/etc/systemd/system/'
@@ -37,7 +42,7 @@ detection:
       - 'systemctl status'
       - 'systemctl cat'
       - 'systemctl show'
-  condition: host_activity and selection and not filter_read
+  condition: (selection and not filter_read) and not network_or_web
 falsepositives:
   - Package installers and administrators adding a reviewed unit under /etc/systemd/system
 level: high

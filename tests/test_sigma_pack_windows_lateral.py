@@ -150,7 +150,7 @@ class WinrmManagementFilterTests(unittest.TestCase):
                    "dest_port": 5986, "message": "allowed wsman to wkstn04"}
         self.assertTrue(sigma.matches(compiled["params"], session))
         # A configuration-management server listed in filter_management_hosts opens WinRM all day.
-        self.assertFalse(sigma.matches(compiled["params"], {**session, "src_ip": "198.18.4.10"}))
+        self.assertFalse(sigma.matches(compiled["params"], {**session, "src_ip": "198.51.100.10"}))
 
 
 if __name__ == "__main__":

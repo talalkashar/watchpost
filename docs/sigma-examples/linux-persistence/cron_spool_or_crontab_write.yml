@@ -6,9 +6,11 @@ status: experimental
 description: |
   A process wrote a crontab or a file under the cron spool, /etc/cron.d, or /etc/crontab.
   Listing the crontab and the cron daemon's own job lines are excluded.
-  Only host events match (event.action process_start, file_access,
-  privilege_escalation, privilege_use). logsource does not filter in Watchpost,
-  so a web request or firewall line that names the same path is ignored.
+  logsource does not filter in Watchpost, so web, firewall, network, and VPN events
+  (event.action network_or_web) are excluded: a scanner probing the same path does not match.
+  Host lines that normalize to other or syslog, such as auditd EXECVE records and shell
+  command logs, still match. A web access line forwarded through syslog is stored as other
+  and is not excluded.
 author: Watchpost example
 date: 2026-11-18
 references:
@@ -20,12 +22,15 @@ logsource:
   category: process_creation
   product: linux
 detection:
-  host_activity:
+  network_or_web:
     event.action:
-      - process_start
-      - file_access
-      - privilege_escalation
-      - privilege_use
+      - web_request
+      - web_scan
+      - web_error
+      - fw_deny
+      - fw_allow
+      - network_connection
+      - vpn_login
   selection:
     message|contains:
       - 'crontab -'
@@ -35,7 +40,7 @@ detection:
   filter_list:
     message|contains:
       - 'crontab -l'
-  condition: host_activity and selection and not filter_list
+  condition: (selection and not filter_list) and not network_or_web
 falsepositives:
   - An administrator installing a reviewed crontab or a package script dropping a file in /etc/cron.d
 level: high
