@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, unquote_plus, urlparse
 
-from . import (__version__, assets, attack, auth, case_record, dashboard_views, ecs, engine, entities, geo, hunt, improve, incidents,
+from . import (__version__, assets, attack, auth, case_record, dashboard_views, ecs, engine, entities, geo, graph, hunt, improve, incidents,
                masking, portability, queries, report, search_rules, sigma, simulate, sources, storyline, stream,
                triage)
 from . import backtest as backtest_mod
@@ -754,6 +754,11 @@ def dashboard(req):
             "risky_entities_omitted": ranked["entities_omitted"]}
 
 
+@route("GET", "/api/graph")
+def investigation_graph(req):
+    return graph.snapshot(req.conn)
+
+
 @route("GET", "/api/entities")
 def entity_list(req):
     return entities.list_entities(req.conn, req.query)
@@ -1453,6 +1458,11 @@ class Handler(BaseHTTPRequestHandler):
             groups = match.groups()
             # The one masking choke point: a viewer's pseudonyms resolve on the way in (pivots), and every
             # response below (JSON, downloads, and the stream in _frame) is masked on the way out.
+            if fn is investigation_graph:
+                # Masking candidates, alert membership and evidence must see the same snapshot.
+                # Create the masking key first so the snapshot transaction stays read-only.
+                masking.key(self.conn)
+                self.conn.execute("BEGIN")
             self.masker = masking.for_user(self.conn, self.user)
             if self.masker is not None:
                 self.query = {k: self.masker.unmask(self.conn, v) for k, v in self.query.items()}
@@ -1468,7 +1478,7 @@ class Handler(BaseHTTPRequestHandler):
                 headers["Content-Disposition"] = f'attachment; filename="{result.filename}"'
                 return self._send(self.status, self._download_body(result), result.content_type, headers)
             if self.masker is not None:
-                result = self.masker.mask(result)
+                result = graph.mask_snapshot(result, self.masker) if fn is investigation_graph else self.masker.mask(result)
             self._send(self.status, result, extra_headers=headers)
         except ApiError as exc:
             self._send_error(exc.status, str(exc))
@@ -1479,11 +1489,15 @@ class Handler(BaseHTTPRequestHandler):
             # A path id or JSON integer past SQLite's signed 64-bit range. Not a Health incident.
             self._send_error(400, "integer is out of range")
         except Exception as exc:
+            if self.conn is not None and self.conn.in_transaction:
+                self.conn.execute("ROLLBACK")  # so the error record below commits
             record_error(self.conn, "api", exc, guidance=f"Unhandled error on {self.command} {parsed.path}")
             self._send(500, {"error": "internal error; it has been recorded on the Health page"},
                        extra_headers=self._unread_body_headers({"Cache-Control": "no-store"}))
         finally:
             if self.conn is not None:
+                if self.conn.in_transaction:
+                    self.conn.execute("ROLLBACK")  # the graph snapshot is read-only; end it explicitly
                 self.conn.close()
 
     def _send_error(self, status, message):

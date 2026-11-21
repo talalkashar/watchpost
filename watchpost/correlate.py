@@ -51,7 +51,7 @@ def rule_summary(window_seconds=DEFAULT_WINDOW_SECONDS):
     )
 
 
-def _epoch(ts):
+def epoch_seconds(ts):
     """Epoch seconds. A timestamp with no zone is UTC, matching parse_iso's callers."""
     dt = parse_iso(ts)
     if dt.tzinfo is None:
@@ -66,7 +66,7 @@ def _span(alert):
     alert's own values, so an ordered alert keeps the text it stored.
     """
     first, last = alert["first_seen"], alert["last_seen"]
-    start, end = _epoch(first), _epoch(last)
+    start, end = epoch_seconds(first), epoch_seconds(last)
     if end < start:
         return end, start, last, first
     return start, end, first, last
@@ -122,7 +122,7 @@ def correlate(alerts, window_seconds=DEFAULT_WINDOW_SECONDS):
     for a in alerts:
         if a.get("sightings"):
             for kind, value, ts in a["sightings"]:
-                t = _epoch(ts)
+                t = epoch_seconds(ts)
                 by_entity[(kind, entity_key(kind, value))].append((t, t, a))
         else:
             start, end, _, _ = _span(a)

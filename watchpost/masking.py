@@ -151,8 +151,12 @@ def key(conn):
     if audit_key:
         raw = audit_key.encode() if isinstance(audit_key, str) else audit_key
         return hmac.new(raw, b"watchpost viewer masking key", hashlib.sha256).digest()
-    conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('masking_key', ?)", (secrets.token_hex(32),))
-    return bytes.fromhex(conn.execute("SELECT value FROM meta WHERE key = 'masking_key'").fetchone()[0])
+    row = conn.execute("SELECT value FROM meta WHERE key = 'masking_key'").fetchone()
+    if row is None:
+        # Only write when the key is missing, so a read-only snapshot never takes the write lock.
+        conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('masking_key', ?)", (secrets.token_hex(32),))
+        row = conn.execute("SELECT value FROM meta WHERE key = 'masking_key'").fetchone()
+    return bytes.fromhex(row[0])
 
 
 def enabled(conn):
