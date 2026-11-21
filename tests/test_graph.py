@@ -88,3 +88,15 @@ class GraphTests(ServerTestCase):
             data = graph.snapshot(self.db)
         self.assertTrue(data["limited"])
         self.assertIn("newest", [n["label"] for n in data["nodes"]])
+
+    def test_snapshot_transaction_ends_and_errors_are_recorded(self):
+        self.populate()
+        self.db.execute("UPDATE settings SET value='1' WHERE key='viewer_masking'")
+        viewer = self.client("viewer")
+        first = viewer.get("/api/graph")[1]
+        # The masking key survives the read-only snapshot, so pseudonyms stay stable across requests.
+        self.assertEqual(first, viewer.get("/api/graph")[1])
+        self.db.execute("INSERT INTO meta(key, value) VALUES ('graph_probe', '1')")  # no lingering write lock
+        with patch.object(graph, "snapshot", side_effect=RuntimeError("boom")):
+            self.assertEqual(viewer.get("/api/graph")[0], 500)
+        self.assertTrue(self.db.execute("SELECT 1 FROM error_log WHERE message LIKE '%boom%'").fetchone())

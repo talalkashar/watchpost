@@ -1460,6 +1460,8 @@ class Handler(BaseHTTPRequestHandler):
             # response below (JSON, downloads, and the stream in _frame) is masked on the way out.
             if fn is investigation_graph:
                 # Masking candidates, alert membership and evidence must see the same snapshot.
+                # Create the masking key first so the snapshot transaction stays read-only.
+                masking.key(self.conn)
                 self.conn.execute("BEGIN")
             self.masker = masking.for_user(self.conn, self.user)
             if self.masker is not None:
@@ -1487,11 +1489,15 @@ class Handler(BaseHTTPRequestHandler):
             # A path id or JSON integer past SQLite's signed 64-bit range. Not a Health incident.
             self._send_error(400, "integer is out of range")
         except Exception as exc:
+            if self.conn is not None and self.conn.in_transaction:
+                self.conn.execute("ROLLBACK")  # so the error record below commits
             record_error(self.conn, "api", exc, guidance=f"Unhandled error on {self.command} {parsed.path}")
             self._send(500, {"error": "internal error; it has been recorded on the Health page"},
                        extra_headers=self._unread_body_headers({"Cache-Control": "no-store"}))
         finally:
             if self.conn is not None:
+                if self.conn.in_transaction:
+                    self.conn.execute("ROLLBACK")  # the graph snapshot is read-only; end it explicitly
                 self.conn.close()
 
     def _send_error(self, status, message):
