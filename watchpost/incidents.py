@@ -46,7 +46,7 @@ def _incident(row):
     return item
 
 
-def _technique_objects(raw, include_unlisted=False):
+def technique_objects(raw, include_unlisted=False):
     """Catalog techniques named by one rule, in stored order.
 
     Missing, corrupt, or non-list JSON contributes nothing. A legacy id becomes the catalog's
@@ -102,7 +102,7 @@ def top_techniques(conn, incident_ids):
         f" WHERE ia.incident_id IN ({placeholders})", incident_ids)
     best = {}
     for row in rows:
-        for technique in _technique_objects(row["techniques"]):
+        for technique in technique_objects(row["techniques"]):
             candidate = {"id": technique["id"], "name": technique.get("name") or "",
                          "tactic": technique.get("tactic") or ""}
             key = (attack.tactic_rank(candidate["tactic"]), candidate["id"])
@@ -158,7 +158,7 @@ def linked_alerts(conn, incident_id, *, include_unlisted=False):
     """
     # Read technique JSON here. load_rules rejects every rule when one row's JSON is corrupt.
     rules = {
-        row["id"]: (row["name"], _technique_objects(row["techniques"], include_unlisted))
+        row["id"]: (row["name"], technique_objects(row["techniques"], include_unlisted))
         for row in conn.execute("SELECT id, name, techniques FROM rules")
     }
     alerts = [alert_row(r) for r in conn.execute(

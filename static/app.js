@@ -198,6 +198,7 @@ function openModal(trigger = document.activeElement) {
 
 // ---------- auth ----------
 function showLogin() {
+  Graph.unmount();
   viewRevision++;
   state.focusSearch = false;
   state.user = null; state.csrf = null;
@@ -321,10 +322,11 @@ function route() {
     b.classList.toggle("active", b.dataset.view === view);
     if (b.dataset.view === view) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
   });
+  Graph.unmount();
   if (view !== "dashboard") Dash.unmount();
   const loading = el("p", { class: "muted", role: "status" }, "Loading…");
   render(loading);
-  const views = { dashboard: socDashboard, incidents: () => id ? incidentDetail(Number(id)) : incidentList(),
+  const views = { dashboard: socDashboard, graph: () => Graph.open(), incidents: () => id ? incidentDetail(Number(id)) : incidentList(),
     alerts: () => (id ? alertDetail(Number(id)) : alerts()), events, overview, ingest, rules: () => rules(id),
     noise: noiseLab, coverage: coverageView, health, admin, account, hunt: () => huntView(huntQueryFromHash([id, ...rest].join("/"))),
     entity: () => entityDetail(id, decodeURIComponent(rest.join("/"))) };

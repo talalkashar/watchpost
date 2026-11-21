@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, unquote_plus, urlparse
 
-from . import (__version__, assets, attack, auth, case_record, dashboard_views, ecs, engine, entities, geo, hunt, improve, incidents,
+from . import (__version__, assets, attack, auth, case_record, dashboard_views, ecs, engine, entities, geo, graph, hunt, improve, incidents,
                masking, portability, queries, report, search_rules, sigma, simulate, sources, storyline, stream,
                triage)
 from . import backtest as backtest_mod
@@ -754,6 +754,11 @@ def dashboard(req):
             "risky_entities_omitted": ranked["entities_omitted"]}
 
 
+@route("GET", "/api/graph")
+def investigation_graph(req):
+    return graph.snapshot(req.conn)
+
+
 @route("GET", "/api/entities")
 def entity_list(req):
     return entities.list_entities(req.conn, req.query)
@@ -1453,6 +1458,9 @@ class Handler(BaseHTTPRequestHandler):
             groups = match.groups()
             # The one masking choke point: a viewer's pseudonyms resolve on the way in (pivots), and every
             # response below (JSON, downloads, and the stream in _frame) is masked on the way out.
+            if fn is investigation_graph:
+                # Masking candidates, alert membership and evidence must see the same snapshot.
+                self.conn.execute("BEGIN")
             self.masker = masking.for_user(self.conn, self.user)
             if self.masker is not None:
                 self.query = {k: self.masker.unmask(self.conn, v) for k, v in self.query.items()}
@@ -1468,7 +1476,7 @@ class Handler(BaseHTTPRequestHandler):
                 headers["Content-Disposition"] = f'attachment; filename="{result.filename}"'
                 return self._send(self.status, self._download_body(result), result.content_type, headers)
             if self.masker is not None:
-                result = self.masker.mask(result)
+                result = graph.mask_snapshot(result, self.masker) if fn is investigation_graph else self.masker.mask(result)
             self._send(self.status, result, extra_headers=headers)
         except ApiError as exc:
             self._send_error(exc.status, str(exc))

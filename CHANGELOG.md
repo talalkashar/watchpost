@@ -4,6 +4,10 @@ All bundled data is synthetic. PR numbers refer to https://github.com/talalkasha
 
 ## Unreleased
 
+### Added
+
+- The [investigation graph](docs/screenshots/07-investigation-graph.jpg) connects alerts, incidents, and evidence entities. Open **Graph** to filter by type or severity and follow a node to its case or entity page. The authenticated snapshot is available at `GET /api/graph`.
+
 ### Fixed
 
 - A promoted saved search groups `user` with the ASCII fold the `user:` filter uses. `Alice`, `alice`, and `ALICE` stay one key. `ÉRIN` and `érin` stay two keys and no longer trip a threshold together. The finding key is the folded spelling. A host group stays the stored spelling, so `WEB01` and `web01` stay two groups.

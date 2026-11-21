@@ -28,6 +28,12 @@ Then glance at the rest, in order: **Alerts over time** (stacked severity plus e
 
 If the store were empty, the panels would be hidden and one card would say there are no events. This account cannot load demo data.
 
+## 0:30 Graph
+
+Open **Graph** from Investigate. Follow a purple incident ring to an alert diamond. A gold arc between two alerts means their evidence shared a host, account, or source IP within 30 minutes in the same incident. Hover or hold a node to highlight its neighbors and see its details. With the canvas focused, use the arrow keys to inspect nodes.
+
+Open **Filters & legend** on a phone. Choose **High** to see high-severity findings and the entities in their evidence. Choose **All**, then click or tap an incident ring to open the case.
+
 ## 0:40 Incidents
 
 Click **Incidents**, or a card on the board. Columns are Open, Investigating, and Resolved, highest severity first, then newest, up to fifty cards a column. A card title is the kill-chain path plus up to three entities (source IP, account, host). `j` / `k` move the selection, Enter opens it. Press `?` for the shortcut list. This account has no action keys.

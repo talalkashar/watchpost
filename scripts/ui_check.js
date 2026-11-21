@@ -214,7 +214,7 @@ async function main() {
     check(await page.locator("#login-view[hidden]").count() === 1 && !admin.errors.length, "sign-in succeeds after the expired challenge");
     await admin.ctx.close();
 
-    const views = ["dashboard", "incidents", "alerts", `alerts/${alertId}`, incidentId ? `incidents/${incidentId}` : null, "events",
+    const views = ["dashboard", "graph", "incidents", "alerts", `alerts/${alertId}`, incidentId ? `incidents/${incidentId}` : null, "events",
       "hunt", "hunt/user%3Aalice%20last%3A7d", "overview", "ingest", "rules", "noise", "coverage", "health", "admin", "account",
       "entity/user/alice"].filter(Boolean);
 
@@ -492,7 +492,7 @@ async function main() {
       await page.keyboard.press("?");
       check(!/(^|\n)r\b/.test(await page.textContent("#modal")) && !(await page.textContent("#modal")).includes("resolve dialog"), "viewer: help lists no action keys");
       await page.keyboard.press("Escape");
-      for (const v of ["dashboard", "alerts", "hunt", "coverage", "rules"]) { await show(page, v); await auditView(page, `viewer #${v}`, 390); }
+      for (const v of ["dashboard", "graph", "alerts", "hunt", "coverage", "rules"]) { await show(page, v); await auditView(page, `viewer #${v}`, 390); }
       check(await page.locator("a[href='/api/rules/export']").count() === 1 && await page.locator("button:has-text('Import rules…')").count() === 0
         && await page.locator("button:has-text('Import Sigma rule…')").count() === 0,
         "viewer: rules export link shown, no import buttons");
