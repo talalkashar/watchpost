@@ -6,6 +6,8 @@ All bundled data is synthetic. PR numbers refer to https://github.com/talalkasha
 
 ### Added
 
+- Syslog can receive TLS 1.2+ streams with optional client certificates. See [Live ingestion](docs/LIVE_INGEST.md#syslog-over-tls).
+
 - The [investigation graph](docs/screenshots/07-investigation-graph.jpg) connects alerts, incidents, and evidence entities. Open **Graph** to filter by type or severity and follow a node to its case or entity page. The authenticated snapshot is available at `GET /api/graph`.
 
 ### Fixed
