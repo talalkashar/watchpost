@@ -15,6 +15,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote_plus
 
+from . import firewall
 from .db import iso, utcnow
 from .diagnostics import redact_cut
 
@@ -435,7 +436,7 @@ def normalize_record(record, default_source, now=None):
 
 _SYSLOG_PREFIX = re.compile(
     r"^(?:(?P<iso>\d{4}-\d{2}-\d{2}T\S+)|(?P<bsd>[A-Z][a-z]{2}\s+\d{1,2}\s\d{2}:\d{2}:\d{2}))"
-    r"\s+(?P<host>\S+)\s+(?P<prog>[\w\-/.]+)(?:\[\d+\])?:\s*(?P<msg>.*)$"
+    r"\s+(?P<host>\S+)\s+(?P<prog>%?[\w\-/.]+)(?:\[\d+\])?:\s*(?P<msg>.*)$"
 )
 _SSH_PATTERNS = [
     (re.compile(r"^Failed (?:password|publickey|keyboard-interactive/pam) for (?:invalid user )?"
@@ -483,15 +484,6 @@ _IPTABLES = re.compile(
     r"\b(?P<action>BLOCKED|DENIED|REJECTED|DROPPED|PERMITTED|ACCEPTED|BLOCK|DENY|DROP|REJECT|"
     r"ALLOW|ACCEPT|PERMIT|PASS)\b.*?\bSRC=(?P<ip>\S+)\s+DST=(?P<dst>\S+)"
     r"(?:.*?\bDPT=(?P<dpt>\d+))?", re.I)
-_ASA_106023 = re.compile(
-    r"%(?:ASA|FTD)-\d+-106023:\s*(?P<action>Deny|Denied|Permit|Permitted)\s+\S+\s+"
-    r"src\s+\S+:(?P<ip>\d{1,3}(?:\.\d{1,3}){3})/\d+\s+"
-    r"dst\s+\S+:(?P<dst>\d{1,3}(?:\.\d{1,3}){3})/(?P<dpt>\d+)", re.I)
-_ASA_106100 = re.compile(
-    r"%(?:ASA|FTD)-\d+-106100:\s*access-list\s+\S+\s+"
-    r"(?P<action>permitted|denied|deny|permit)\s+\S+\s+"
-    r"\S+/(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\(\d+\)\s*(?:->|to)\s*"
-    r"\S+/(?P<dst>\d{1,3}(?:\.\d{1,3}){3})\((?P<dpt>\d+)\)", re.I)
 _PRI = re.compile(r"^<(?P<pri>\d{1,3})>")
 _RFC5424 = re.compile(
     r"^1 (?P<iso>\S+) (?P<host>\S+) (?P<prog>\S+) \S+ \S+ (?:-|\[[^\]]*\]) (?P<msg>.*)$")
@@ -598,12 +590,6 @@ def _match_firewall(message):
     parsed = _pfsense_fields(message)
     if parsed:
         return parsed
-    for pattern in (_ASA_106023, _ASA_106100):
-        found = pattern.search(message)
-        if found:
-            kind = _FIREWALL_ACTIONS.get(found.group("action").upper())
-            if kind:
-                return kind, found.groupdict()
     parsed = _fortigate_fields(message)
     if parsed:
         return parsed
@@ -665,7 +651,8 @@ def normalize_authlog_line(line, default_source, year=None, now=None):
             fields = found.groupdict()
             event_type = _FIREWALL_ACTIONS[fields["action"]] if kind == "firewall" else kind
             break
-    if event_type == "other":
+    appliance = firewall.parse(parts["prog"], message) if event_type == "other" else None
+    if event_type == "other" and not appliance:
         extra = _match_extra_auth(message)
         if extra:
             event_type, fields = extra
@@ -676,6 +663,8 @@ def normalize_authlog_line(line, default_source, year=None, now=None):
         "dest_ip": _ip_or_none(fields.get("dst")), "dest_port": fields.get("dpt"),
         "message": message, "program": parts["prog"],
     }
+    if appliance:
+        record.update(appliance)
     if fields.get("outcome"):
         record["outcome"] = fields["outcome"]
     if fields.get("bytes") is not None:

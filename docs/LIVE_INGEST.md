@@ -111,6 +111,29 @@ Syslog has no authentication or encryption. Pick one of these:
   Watchpost logs a warning at startup if it listens beyond loopback without an allow list.
 - **Over the internet:** use the file shipper with HTTPS instead.
 
+### Firewalls over syslog
+
+Point a firewall's remote syslog at the listener and its traffic lines become `fw_deny` and `fw_allow` events with source, destination and port. Those are the events the port sweep and large data transfer rules read. Admin and VPN logins on the firewall become `auth_failure` and `auth_success`.
+
+| Firewall | What is read | Becomes |
+|---|---|---|
+| Linux UFW / iptables | `[UFW BLOCK]`, `[UFW ALLOW]` and the same prefixes from iptables `LOG` rules | `fw_deny`, `fw_allow` |
+| pfSense / OPNsense | `filterlog` lines, IPv4 and IPv6 (`block`, `reject`, `pass`) | `fw_deny`, `fw_allow` |
+| FortiGate | `type="traffic"` lines (`action` deny, accept, close and the like), with `sentbyte` as the byte count; `type="event"` admin logins | `fw_deny`, `fw_allow`, `auth_failure`, `auth_success` |
+| Cisco ASA / FTD | Denies 106001, 106006, 106007, 106015, 106023, 710003; ACL hits 106100; built connections 302013 and 302015; AAA 113004 and 113005; logins 605004 and 605005 | `fw_deny`, `fw_allow`, `auth_failure`, `auth_success` |
+| Palo Alto | `TRAFFIC` logs in the default comma-separated format, with bytes sent as the byte count | `fw_deny`, `fw_allow` |
+
+Any other line from these devices is stored as a generic `syslog` event, so nothing is dropped. FortiGate lines carry their own device name and time (`devname`, `date`, `time`, `tz`), and the device timestamp takes precedence only with a valid numeric UTC offset. Otherwise the envelope or receipt time is used.
+
+On the firewall, turn on remote syslog and give it the Watchpost address and port. Use a transport supported by both the firewall and the listener. pfSense and OPNsense send UDP unless a syslog-ng package is added. A firewall is another machine, so the choices under [Sending from another machine](#sending-from-another-machine) apply.
+
+Limits:
+
+- The parsers follow the vendors' published log formats and are tested on synthetic lines. They have not been run against the devices themselves.
+- Only the default log formats are read. A custom log format on the device will not match, and its lines stay generic `syslog` events.
+- Cisco connection teardown lines (302014, 302016) are not read, so Cisco events carry no byte counts. Palo Alto `THREAT` logs are not read.
+- `samples/firewall_syslog.log` has pfSense and Cisco lines to try by upload. FortiGate and Palo Alto lines have no syslog program tag, so they are read from the listener only.
+
 ### Time zones
 
 RFC 3164 timestamps (`Sep 28 10:00:01`) have no year and no zone. Watchpost treats them as UTC in the current year, the same rule it applies to uploaded auth.log files. If the sending box runs on local time, use the `RSYSLOG_SyslogProtocol23Format` template shown above. It sends RFC 5424 timestamps with an offset.

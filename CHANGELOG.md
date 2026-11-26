@@ -8,6 +8,8 @@ All bundled data is synthetic. PR numbers refer to https://github.com/talalkasha
 
 - The [investigation graph](docs/screenshots/07-investigation-graph.jpg) connects alerts, incidents, and evidence entities. Open **Graph** to filter by type or severity and follow a node to its case or entity page. The authenticated snapshot is available at `GET /api/graph`.
 
+- Firewalls over syslog, part of the second item of #8. Syslog lines from pfSense/OPNsense (`filterlog`), FortiGate, Cisco ASA/FTD and Palo Alto (`TRAFFIC`) become `fw_deny` and `fw_allow` events with source, destination and port, and firewall admin and VPN logins become `auth_failure` and `auth_success`. Lines in other formats stay generic `syslog` events. The parsers follow the published log formats and are tested on synthetic lines, not on the devices. New sample: `samples/firewall_syslog.log`.
+
 ### Fixed
 
 - A promoted saved search groups `user` with the ASCII fold the `user:` filter uses. `Alice`, `alice`, and `ALICE` stay one key. `ÉRIN` and `érin` stay two keys and no longer trip a threshold together. The finding key is the folded spelling. A host group stays the stored spelling, so `WEB01` and `web01` stay two groups.
