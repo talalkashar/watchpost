@@ -36,7 +36,8 @@ from .normalize import (MAX_FUTURE, MAX_LEN, EventError, clean_text, normalize_a
 SOURCE = "syslog"
 SUBMITTED_BY = "syslog-listener"
 MAX_FRAME_BYTES = 16 * 1024   # longer frames are truncated
-MAX_OCTET_DIGITS = 9          # bound the declared length before converting it to an integer
+TCP_OCTET_DIGITS = 6          # preserve line framing for long numeric prefixes on plaintext TCP
+TLS_OCTET_DIGITS = 9
 MAX_QUEUE = 50000             # frames held between flushes; beyond this they are dropped and counted
 TCP_IDLE_TIMEOUT = 300
 MAX_TLS_CONNECTIONS = 64
@@ -368,7 +369,7 @@ def _readline_limited(rfile, max_bytes):
     return pending + _read_until_trailer(rfile, max_bytes - len(pending))
 
 
-def read_tcp_frame(rfile, max_bytes=MAX_FRAME_BYTES):
+def read_tcp_frame(rfile, max_bytes=MAX_FRAME_BYTES, *, max_octet_digits=TCP_OCTET_DIGITS):
     """Read one RFC 6587 frame: octet-counted ("LEN SP MSG") or LF/NUL-terminated. None at EOF."""
     first = _read1(rfile)
     if not first:
@@ -381,7 +382,7 @@ def read_tcp_frame(rfile, max_bytes=MAX_FRAME_BYTES):
                 return bytes(digits[:max_bytes])
             if char == b" ":
                 break
-            if not char.isdigit() or len(digits) == MAX_OCTET_DIGITS:
+            if not char.isdigit() or len(digits) == max_octet_digits:
                 return _read_line(rfile, bytes(digits) + char, max_bytes)
             digits.extend(char)
         length = int(digits)
@@ -477,12 +478,12 @@ def tls_context(cert, key, client_ca=None):
     return context
 
 
-def _read_frames(listener, rfile, peer):
+def _read_frames(listener, rfile, peer, *, max_octet_digits):
     """Queue frames from one stream. True when the peer ended it cleanly; False on a timeout, a broken
     stream, or shutdown."""
     try:
         while not listener.stopping.is_set():
-            frame = read_tcp_frame(rfile)
+            frame = read_tcp_frame(rfile, max_octet_digits=max_octet_digits)
             if frame is None:
                 return True
             if frame.strip(b" \t\r\n\v\f\x00"):
@@ -506,7 +507,7 @@ class _TCPHandler(socketserver.StreamRequestHandler):
         if not listener.allowed(peer):
             listener.count("denied")
             return
-        _read_frames(listener, self.rfile, peer)
+        _read_frames(listener, self.rfile, peer, max_octet_digits=TCP_OCTET_DIGITS)
 
 
 class _TLSHandler(socketserver.BaseRequestHandler):
@@ -540,7 +541,7 @@ class _TLSHandler(socketserver.BaseRequestHandler):
         with conn:
             conn.settimeout(TCP_IDLE_TIMEOUT)
             with conn.makefile("rb") as rfile:
-                ended_cleanly = _read_frames(listener, rfile, peer)
+                ended_cleanly = _read_frames(listener, rfile, peer, max_octet_digits=TLS_OCTET_DIGITS)
             if ended_cleanly:  # the sender said close_notify: answer it
                 try:
                     conn.settimeout(0)  # one small record: never wait on a peer that is already leaving

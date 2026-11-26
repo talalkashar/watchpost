@@ -37,7 +37,7 @@ export SIEM_SYSLOG_PORT=5514      # UDP and TCP; ports below 1024 need root, so 
 
 What the listener does with each message:
 
-1. It reads the frame. UDP takes one message per datagram. TCP accepts newline-terminated messages and RFC 6587 octet-counted messages (`LEN SP MSG`). TLS carries the TCP framing. Frames longer than 16 KB are truncated.
+1. It reads the frame. UDP takes one message per datagram. Plain TCP accepts LF- or NUL-terminated messages and RFC 6587 octet-counted messages (`LEN SP MSG`) with up to six length digits. A line beginning with seven or more digits, such as `20261126 backup complete`, keeps its LF or NUL framing. Frames longer than 16 KB are truncated.
 2. It parses PRI and the RFC 5424 or RFC 3164 header. A missing hostname falls back to the sender's IP, and a missing timestamp falls back to the receive time.
 3. It tries the auth.log parser first (sshd, sudo/su, useradd, auditd, UFW/iptables firewall, OpenVPN). A message that parser does not recognize is tried as an nginx/Apache combined access line, so `access_log syslog:server=127.0.0.1:5514 combined;` in nginx gives `web_request`/`web_scan`/`web_error` events with the host from the syslog header and the time from the access line. Lines neither parser recognizes become `event_type=syslog`. Their severity comes from PRI: emerg, alert, and crit map to `critical`, err to `high`, warning to `medium`, notice to `low`, and info and debug to `info`.
 4. Every 2 seconds, everything queued is handed to the engine as one batch. The batch source is `syslog` and the submitter is `syslog-listener`, so it shows up under **Ingest > Recent batches**.
@@ -119,9 +119,9 @@ Plain syslog has no authentication and no encryption. Pick one of these:
 
 ### Syslog over TLS
 
-Each listener admits up to 64 concurrent TLS connections, including handshakes. Excess connections close immediately and increment `tls_busy`. Senders should reconnect. An octet-counted frame is stored only after all declared bytes arrive. Watchpost recognizes counts of up to nine digits. Records starting with ten or more digits, such as Unix timestamps, use LF or NUL framing.
+Each listener admits up to 64 concurrent TLS connections, including handshakes. Excess connections close immediately and increment `tls_busy`. Senders should reconnect. An octet-counted frame is stored only after all declared bytes arrive. The TLS listener recognizes counts of up to nine digits. Records starting with ten or more digits, such as Unix timestamps, use LF or NUL framing.
 
-With a certificate, the listener takes syslog over TLS ([RFC 5425](https://www.rfc-editor.org/rfc/rfc5425)) on TCP port 6514: the same messages and framing as plain TCP, inside TLS 1.2 or 1.3.
+With a certificate, the listener takes syslog over TLS ([RFC 5425](https://www.rfc-editor.org/rfc/rfc5425)) on TCP port 6514 using TLS 1.2 or 1.3.
 
 | Setting | What it adds |
 |---|---|

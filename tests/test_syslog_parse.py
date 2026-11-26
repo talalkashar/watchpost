@@ -177,13 +177,19 @@ class SyslogParseTests(unittest.TestCase):
         self.assertEqual(frames(b"123456789012x extra digits\n"), [b"123456789012x extra digits\n"])
         self.assertEqual(frames(b"0 \n<13>next\n"), [b"", b"\n", b"<13>next\n"])
 
-    def test_long_octet_count_consumes_the_entire_frame(self):
-        body = b"first\n" + b"x" * 999994
-        self.assertEqual(frames(b"1000000 " + body + b"next\n", max_bytes=8), [body[:8], b"next\n"])
-
     def test_unix_timestamp_line_preserves_both_tcp_records(self):
         records = [b"1795651200 backup complete\n", b"<13>second event\n"]
         self.assertEqual(frames(b"".join(records)), records)
+
+    def test_plain_tcp_submits_date_prefixed_record_and_following_event(self):
+        records = [b"<13>start\n", b"20261126 backup complete\n", b"<13>second event\n"]
+        listener = Mock()
+        listener.stopping.is_set.return_value = False
+        with _OpenWriter() as pipe:
+            pipe.send(b"".join(records))
+            pipe.writer.shutdown(socket.SHUT_WR)
+            _TCPHandler(pipe.reader, ("127.0.0.1", 0), SimpleNamespace(listener=listener))
+        self.assertEqual([c.args[0] for c in listener.submit.call_args_list], records)
 
     def test_tcp_handler_submits_only_nonempty_records(self):
         listener = Mock()

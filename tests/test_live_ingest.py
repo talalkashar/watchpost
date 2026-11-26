@@ -464,6 +464,15 @@ class SyslogTlsTests(ListenerTestCase):
         # Even after the retained prefix is full, the declared tail must arrive.
         self.assertIsNone(read_tcp_frame(io.BytesIO(b"9 12345678"), max_bytes=4))
 
+    def test_tls_long_octet_count_consumes_the_entire_frame(self):
+        listener = self.tls_listener()
+        body = b"first\n" + b"x" * 999994
+        with mock.patch.object(listener, "submit") as submit, self.connect(listener) as tls:
+            tls.sendall(b"1000000 " + body + b"next\n")
+            tls.unwrap()
+        self.assertEqual([call.args[0] for call in submit.call_args_list],
+                         [body[:syslog_listener.MAX_FRAME_BYTES], b"next\n"])
+
     def test_close_notify_discards_short_body_with_seven_digit_count(self):
         listener = self.tls_listener()
         with self.connect(listener) as tls:
