@@ -119,7 +119,7 @@ Plain syslog has no authentication and no encryption. Pick one of these:
 
 ### Syslog over TLS
 
-Each listener admits up to 64 concurrent TLS connections, including handshakes. Excess connections close immediately and increment `tls_busy`. Senders should reconnect. An octet-counted frame is stored only after all declared bytes arrive. A length prefix with more than nine digits closes the connection.
+Each listener admits up to 64 concurrent TLS connections, including handshakes. Excess connections close immediately and increment `tls_busy`. Senders should reconnect. An octet-counted frame is stored only after all declared bytes arrive. Watchpost recognizes counts of up to nine digits. Records starting with ten or more digits, such as Unix timestamps, use LF or NUL framing.
 
 With a certificate, the listener takes syslog over TLS ([RFC 5425](https://www.rfc-editor.org/rfc/rfc5425)) on TCP port 6514: the same messages and framing as plain TCP, inside TLS 1.2 or 1.3.
 

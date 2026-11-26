@@ -375,20 +375,15 @@ def read_tcp_frame(rfile, max_bytes=MAX_FRAME_BYTES):
         return None
     if first.isdigit():
         digits = bytearray(first)
-        prefix_limit = max(max_bytes, MAX_OCTET_DIGITS + 1)
         while True:
             char = _read1(rfile)
             if not char:
                 return bytes(digits[:max_bytes])
             if char == b" ":
-                if len(digits) > MAX_OCTET_DIGITS:
-                    raise ConnectionError("unsupported syslog octet count")
                 break
-            if not char.isdigit():
+            if not char.isdigit() or len(digits) == MAX_OCTET_DIGITS:
                 return _read_line(rfile, bytes(digits) + char, max_bytes)
-            # Until the separator arrives this may still be a digit-leading line.
-            if len(digits) < prefix_limit:
-                digits.extend(char)
+            digits.extend(char)
         length = int(digits)
         data = bytearray()
         remaining = length
