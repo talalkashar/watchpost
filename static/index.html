@@ -28,17 +28,14 @@
   <link rel="icon" href="/favicon.ico?v=reticle" sizes="16x16 32x32 48x48">
   <link rel="icon" href="/favicon.svg?v=reticle" sizes="any" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=reticle">
-  <link rel="stylesheet" href="/style.css">
-  <link rel="stylesheet" href="/views.css">
-  <link rel="stylesheet" href="/glass.css">
-  <link rel="stylesheet" href="/orbit.css">
-  <link rel="stylesheet" href="/declutter.css">
-  <link rel="stylesheet" href="/graph.css">
-  <script src="/graph.js" defer></script>
-  <script src="/charts.js" defer></script>
-  <script src="/map-view.js" defer></script>
-  <script src="/dashboard.js" defer></script>
-  <script src="/app.js" defer></script>
+  <link rel="stylesheet" href="/console.css">
+  <script src="/load-console.js" defer></script>
+  <template id="console-scripts">
+    <script src="/charts.js" defer></script>
+    <script src="/map-view.js" defer></script>
+    <script src="/dashboard.js" defer></script>
+    <script src="/app.js" defer></script>
+  </template>
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
@@ -108,10 +105,10 @@
         <b>Watchpost</b>
       </div>
       <h1 id="sign-in-heading">Sign in</h1>
-      <form id="login-form">
+      <form id="login-form" method="post">
         <label>Username <input name="username" autocomplete="username" required maxlength="64"></label>
         <label>Password <input name="password" type="password" autocomplete="current-password" required maxlength="256"></label>
-        <button type="submit">Sign in</button>
+        <button type="submit" disabled>Sign in</button>
         <p class="error" id="login-error" role="alert"></p>
       </form>
       <footer class="login-footer">

@@ -158,8 +158,16 @@ async function main() {
     for (const width of [320, 390, 1440]) {
       const ctx = await browser.newContext({ viewport: { width, height: width === 320 ? 568 : width === 390 ? 844 : 900 } });
       const p = await ctx.newPage();
-      await p.goto(BASE);
+      let releaseLoader;
+      const loaderGate = new Promise((resolve) => { releaseLoader = resolve; });
+      await p.route("**/load-console.js", async (route) => { await loaderGate; await route.continue(); });
+      await p.goto(BASE, { waitUntil: "commit" });
+      const submit = p.locator("#login-form button[type=submit]");
+      check(await submit.isDisabled(), `${width}px sign-in is disabled before the loader runs`);
+      releaseLoader();
+      await p.waitForLoadState("load");
       await p.waitForSelector("#login-view:not([hidden])");
+      check(await submit.isEnabled(), `${width}px sign-in is enabled after the submit guard loads`);
       await auditView(p, "login form", width);
       check(await p.locator("#login-view").getByText("All data is synthetic.").isVisible(),
         `${width}px sign-in includes the data disclosure`);

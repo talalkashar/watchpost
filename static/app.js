@@ -177,6 +177,16 @@ async function readView(view, read) {
   }
 }
 
+let graphModule;
+async function openGraph() {
+  // A late module fetch follows the same navigation guard as a late API read.
+  const graph = await readView("graph", () => import("./graph.js"));
+  if (graph) {
+    graphModule = graph;
+    await graph.open();
+  }
+}
+
 function render(...nodes) {
   const view = $("#view");
   view.replaceChildren(...nodes.flat().filter((n) => n !== null && n !== undefined && n !== false));
@@ -203,7 +213,7 @@ function openModal(trigger = document.activeElement) {
 
 // ---------- auth ----------
 function showLogin() {
-  Graph.unmount();
+  graphModule?.unmount();
   Dash.unmount();
   Dash.resetSession();
   $("#toast-status").replaceChildren();
@@ -259,6 +269,11 @@ async function boot() {
     if (target) target.scrollIntoView(); else route();
   });
   try { onLogin(await api("/api/auth/me")); } catch { showLogin(); }
+  const form = $("#login-form");
+  if (form.dataset.pendingSubmit) {
+    delete form.dataset.pendingSubmit;
+    if (!state.user) form.requestSubmit();
+  }
 }
 
 // Second sign-in step for an account with an authenticator app enrolled. The token from the password step is
@@ -331,11 +346,11 @@ function route() {
     b.classList.toggle("active", b.dataset.view === view);
     if (b.dataset.view === view) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
   });
-  Graph.unmount();
+  graphModule?.unmount();
   if (view !== "dashboard") Dash.unmount(view === "map-2d");
   const loading = el("p", { class: "muted", role: "status" }, "Loading…");
   render(loading);
-  const views = { dashboard: socDashboard, "map-2d": flatMapPage, graph: () => Graph.open(), incidents: () => id ? incidentDetail(Number(id)) : incidentList(),
+  const views = { dashboard: socDashboard, "map-2d": flatMapPage, graph: openGraph, incidents: () => id ? incidentDetail(Number(id)) : incidentList(),
     alerts: () => (id ? alertDetail(Number(id)) : alerts()), events, overview, ingest, rules: () => rules(id),
     noise: noiseLab, coverage: coverageView, health, admin, account, hunt: () => huntView(huntQueryFromHash([id, ...rest].join("/"))),
     entity: () => entityDetail(id, decodeURIComponent(rest.join("/"))) };

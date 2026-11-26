@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, unquote_plus, urlparse
 
 from . import (__version__, assets, attack, auth, case_record, dashboard_views, ecs, engine, entities, geo, graph, hunt, improve, incidents,
-               masking, portability, queries, report, search_rules, sigma, simulate, sources, storyline, stream,
+               masking, portability, queries, report, search_rules, sigma, simulate, sources, static_assets, storyline, stream,
                triage)
 from . import backtest as backtest_mod
 from .ratelimit import TokenBucketLimiter
@@ -1645,13 +1645,30 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(405, {"error": "method not allowed"},
                               extra_headers=self._unread_body_headers({"Cache-Control": "no-store"}))
         name = "index.html" if path in ("", "/") else path.lstrip("/")
-        target = (STATIC_DIR / name).resolve()
-        if STATIC_DIR.resolve() not in target.parents or not target.is_file():
+        names = static_assets.CONSOLE_STYLES if path == "/console.css" else (name,)
+        root = STATIC_DIR.resolve()
+        paths = tuple(static_assets.public_file(root, filename) for filename in names)
+        if None in paths:
             return self._send(404, b"not found", "text/plain", {"Cache-Control": "no-store"})
-        ctype = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        headers = {"Cache-Control": "no-cache"}
+        compress = False
         if ctype.startswith("text/") or ctype.endswith("javascript"):
             ctype += "; charset=utf-8"
-        self._send(200, target.read_bytes(), ctype, {"Cache-Control": "no-cache"})
+            headers["Vary"] = "Accept-Encoding"
+            compress = static_assets.accepts_gzip(self.headers.get("Accept-Encoding", ""))
+            if compress:
+                headers["Content-Encoding"] = "gzip"
+        body, etag = static_assets.representation(paths, compress)
+        headers["ETag"] = etag
+        validators = self.headers.get("If-None-Match", "")
+        if any(tag.strip().removeprefix("W/") in ("*", etag) for tag in validators.split(",")):
+            self.send_response(304)
+            for key, value in headers.items():
+                self.send_header(key, value)
+            self.end_headers()
+            return
+        self._send(200, body, ctype, headers)
 
 
 def make_server(config=None):
