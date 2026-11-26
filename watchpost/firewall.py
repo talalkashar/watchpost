@@ -44,8 +44,12 @@ def _filterlog(message):
 # --- FortiGate key=value -------------------------------------------------------------
 
 _KEY_VALUE = re.compile(r'(\w+)=(?:"([^"]*)"|(\S+))')
-_FORTI_DENY = {"deny", "blocked", "dropped"}
-_FORTI_ALLOW = {"accept", "allow", "close", "timeout", "client-rst", "server-rst", "ip-conn", "start"}
+_FORTI_TRAFFIC = {
+    "deny": _DENY, "blocked": _DENY, "dropped": _DENY,
+    "accept": _ALLOW, "allow": _ALLOW, "close": _ALLOW, "timeout": _ALLOW,
+    "client-rst": _ALLOW, "server-rst": _ALLOW, "start": _ALLOW,
+    "ip-conn": "network_connection",
+}
 _FORTI_TZ = re.compile(r"[+-](?:[01][0-9]|2[0-3])[0-5][0-9]")
 
 
@@ -62,10 +66,10 @@ def _fortigate(program, message):
     if kv.get("date") and kv.get("time") and tz != "-0000" and _FORTI_TZ.fullmatch(tz):
         out["ts"] = f"{kv['date']}T{kv['time']}{tz[:3]}:{tz[3:]}"
     action = kv.get("action", "").lower()
-    if kv.get("type") == "traffic" and (action in _FORTI_DENY or action in _FORTI_ALLOW):
-        out.update(event_type=_DENY if action in _FORTI_DENY else _ALLOW, src_ip=kv.get("srcip"),
-                   dest_ip=kv.get("dstip"), dest_port=kv.get("dstport"), bytes=kv.get("sentbyte"),
-                   user=kv.get("user"))
+    if kv.get("type") == "traffic" and action in _FORTI_TRAFFIC:
+        out.update(event_type=_FORTI_TRAFFIC[action], src_ip=kv.get("srcip") or kv.get("src"),
+                   dest_ip=kv.get("dstip") or kv.get("dst"), dest_port=kv.get("dstport") or kv.get("dport"),
+                   bytes=kv.get("sentbyte"), user=kv.get("user"))
         return out
     if kv.get("type") == "event" and action == "login" and kv.get("status") in ("success", "failed"):
         out.update(event_type="auth_success" if kv["status"] == "success" else "auth_failure",

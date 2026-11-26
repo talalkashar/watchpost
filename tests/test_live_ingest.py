@@ -159,6 +159,18 @@ class SyslogParsingTests(unittest.TestCase):
                  'logid=13 type=traffic action=deny srcip=203.0.113.9 dstip=192.0.2.10 dstport=22')
         self.assert_firewall_event(frame, ("fw_deny", "203.0.113.9", "192.0.2.10", 22), "2026-09-28T12:15:00.000Z")
 
+    def test_fortigate_failed_connection_is_a_network_connection(self):
+        frame = ('<189>1 2026-09-28T12:15:00Z relay FortiGate - - - logid=13 type=traffic '
+                 'action=ip-conn msg="Connection Failed" srcip=203.0.113.9 dstip=10.0.0.15 dstport=3389')
+        self.assert_firewall_event(frame, ("network_connection", "203.0.113.9", "10.0.0.15", 3389))
+
+    def test_fortigate_deny_preserves_endpoint_aliases(self):
+        frame = "<189>1 2026-09-28T12:15:00Z relay FortiGate - - - logid=13 type=traffic action=deny "
+        for fields in ("srcip=203.0.113.9 dst=10.0.0.15 dport=443", "src=203.0.113.9 dstip=10.0.0.15 dport=443",
+                       "srcip=203.0.113.9 dstip=10.0.0.15 dstport=443 src=192.0.2.1 dst=192.0.2.2 dport=80"):
+            with self.subTest(fields=fields):
+                self.assert_firewall_event(frame + fields, ("fw_deny", "203.0.113.9", "10.0.0.15", 443))
+
     def test_fortigate_nil_timestamp_uses_receipt_time(self):
         frame = ('<189>1 - relay FortiGate - - - date=2026-09-27 time=23:58:00 logid=13 type=traffic '
                  'action=deny srcip=203.0.113.9 dstip=192.0.2.10 dstport=22')
