@@ -91,9 +91,9 @@ class EmptyDashboardUiTests(unittest.TestCase):
         self.assertIn("Live.refreshSummary()", load)
 
         mount = method_body(src, "mount")
-        self.assertLess(mount.index('id: "dash-empty"'), mount.index('id: "soc"'))
+        self.assertLess(mount.index('id: "dash-empty"'), mount.index('class: "soc", id: "soc"'))
         self.assertIn('id: "dashboard-view-bar", hidden: true', mount)
-        self.assertIn('id: "soc", hidden: true', mount)
+        self.assertIn('id: "soc", hidden: this.data?.events_total === 0', mount)
 
         update = method_body(src, "update")
         self.assertLess(update.index("this.renderEmpty()"), update.index("fillFeed"))

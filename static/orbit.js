@@ -147,7 +147,10 @@ export async function createOrbit(stage, gl, { select, drag, lost, overheadChang
     wheelHint.setAttribute("aria-hidden", "true");
     wheelHint.textContent = `${/Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl"} + scroll to zoom, or click the globe first`;
     for (const node of [scan, wheelHint]) node.setAttribute("aria-hidden", "true");
-    stage.prepend(sky, limb, surface, overlay, scan, wheelHint);
+    const layers = document.createElement("div");
+    layers.className = "orbit-layers";
+    layers.append(sky, limb, surface, overlay, scan, wheelHint);
+    stage.prepend(layers);
     let width, height, radius, cx, cy;
     let lon = -17, lat = 31, flight = null, gesture = null, selected = null;
     let zoom = 1.18, targetZoom = zoom, reduced = false;
@@ -317,6 +320,7 @@ export async function createOrbit(stage, gl, { select, drag, lost, overheadChang
       camera.position.copy(forward).multiplyScalar(3);
       camera.up.copy(up); camera.lookAt(0, 0, 0);
       renderer.render(scene, camera);
+      if (!layers.classList.contains("painted")) layers.classList.add("painted");
       sky.style.transform = `translate3d(${(Math.sin(lon*RAD)*14).toFixed(2)}px,${(lat*.12).toFixed(2)}px,0) scale(${(1 + (zoom - 1)*.03).toFixed(4)})`;
       ctx.clearRect(0, 0, width, height);
       const longitude = ((lon % 360 + 540) % 360) - 180;
@@ -546,7 +550,7 @@ export async function createOrbit(stage, gl, { select, drag, lost, overheadChang
         cancelAnimationFrame(raf); clearTimeout(hintTimer); observer.disconnect(); listeners.abort();
         for (const key of ["day", "night", "surfaceMap", "clouds"]) uniforms[key].value?.dispose();
         geometry.dispose(); material.dispose(); renderer.dispose();
-        renderer.forceContextLoss(); sky.remove(); limb.remove(); surface.remove(); overlay.remove(); scan.remove(); wheelHint.remove();
+        renderer.forceContextLoss(); layers.remove();
       },
     };
   }

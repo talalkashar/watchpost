@@ -26,8 +26,14 @@
 }
 .orbit-surface, .orbit-beams { position: absolute; inset: 0; width: 100%; height: 100%; display: none; }
 #p-map[data-mode="3d"] :is(.orbit-surface, .orbit-beams) { display: block; }
-#p-map[data-mode="3d"] #map { pointer-events: none; }
-#p-map[data-mode="3d"] #map svg { display: none; }
+#soc.flat-map-view #p-map { grid-column: 1 / -1; }
+.orbit-placeholder, .orbit-layers { position: absolute; inset: 0; }
+.orbit-placeholder { display: grid; place-items: center; background: #050910; container-type: size; }
+.orbit-placeholder::after { content: ""; width: min(100cqw, 100cqh); aspect-ratio: 1; border-radius: 50%;
+  background: radial-gradient(circle at 40% 37%, #14212b, #0c151d 58%, #081019 78%); }
+.orbit-layers { z-index: 1; opacity: 0; transition: opacity .32s ease-out; }
+#p-map[data-mode="3d"] .orbit-layers.painted { opacity: 1; }
+#p-map[data-mode="preview"] .orbit-layers { visibility: hidden; }
 .orbit-sky, .orbit-limb { display: none; position: absolute; pointer-events: none; }
 #p-map[data-mode="3d"] :is(.orbit-sky, .orbit-limb) { display: block; }
 .orbit-sky { inset: -20px; background: #050910 url("/textures/orbit-sky.webp") center / cover; filter: brightness(1.7) contrast(1.12); }
@@ -105,7 +111,8 @@
   .orbit-modes button[aria-pressed=true] { background: linear-gradient(#c0dbdc, #c0dbdc) center / 100% 30px no-repeat; }
   .orbit-main { flex-direction: column; flex: none; }
   .orbit-view { height: calc(clamp(290px, 85vw, 350px) + 45px); flex: none; }
-  #p-map[data-mode="3d"] .orbit-tools { display: flex; align-items: center; gap: 10px;
+  #p-map[data-mode="preview"] .orbit-tools { visibility: hidden; }
+  #p-map:is([data-mode="preview"], [data-mode="3d"]) .orbit-tools { display: flex; min-height: 0; flex: 0 0 45px; align-items: center; gap: 10px;
     padding: 0 7px; background: #0c161e; border-top: 1px solid #263640; }
   .orbit-zoom { position: static; border-width: 0 1px; border-radius: 0; }
   .orbit-zoom button { min-width: 44px; min-height: 44px; }
@@ -150,8 +157,6 @@
   color: #d5e7ea; font: 500 11px var(--sans); white-space: nowrap; pointer-events: none; opacity: 0;
   transition: opacity .2s, transform .2s; }
 .orbit-wheel-hint.is-shown { opacity: 1; transform: translate(-50%, 0); }
-.orbit-stage[data-loading="true"]::after { content: "Loading globe imagery…"; position: absolute; inset: auto 0 14px; text-align: center;
-  background: none; opacity: 1; color: #9fb6c0; font: 11px var(--mono); letter-spacing: .04em; }
 .orbit-bearing { z-index: 3; color: #b6cbd2; letter-spacing: .04em; }
 .orbit-zoom, .orbit-motion { z-index: 3; }
 .orbit-zoom .orbit-overhead { font: 600 10.5px var(--mono); letter-spacing: .04em; padding: 1px 9px; }
@@ -165,4 +170,7 @@
   /* Icon-only on phones; the text stays as the accessible name. */
   .orbit-motion { min-width: 44px; padding: 0; font-size: 0; }
   .orbit-motion::before { margin: 0; font-size: 12px; }
+}
+@media (max-width: 360px) {
+  .orbit-hint { display: none; }
 }

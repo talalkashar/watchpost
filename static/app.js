@@ -32,7 +32,7 @@ const Motion = {
         observer.unobserve(entry.target);
       }
     }, { threshold: 0.05 });
-    const sections = root.querySelectorAll(":scope > .card, :scope > .grid > .card, :scope > .kpis > .kpi, :scope > .soc > .panel");
+    const sections = root.querySelectorAll(":scope > .card, :scope > .grid > .card, :scope > .kpis > .kpi");
     for (const section of sections) {
       section.classList.add("scroll-reveal", "reveal-pending");
       this.observer.observe(section);
@@ -177,7 +177,7 @@ function render(...nodes) {
   view.replaceChildren(...nodes.flat().filter((n) => n !== null && n !== undefined && n !== false));
   Motion.reveal(view);
   const intro = view.querySelector(".view-bar, .page-head, h1");
-  if (intro) Motion.intro(intro);
+  if (intro && intro.id !== "dashboard-view-bar") Motion.intro(intro);
   if (location.hash === "#main") $("#main").scrollIntoView();
 }
 
@@ -326,7 +326,7 @@ function route() {
   if (view !== "dashboard") Dash.unmount();
   const loading = el("p", { class: "muted", role: "status" }, "Loading…");
   render(loading);
-  const views = { dashboard: socDashboard, graph: () => Graph.open(), incidents: () => id ? incidentDetail(Number(id)) : incidentList(),
+  const views = { dashboard: socDashboard, "map-2d": flatMapPage, graph: () => Graph.open(), incidents: () => id ? incidentDetail(Number(id)) : incidentList(),
     alerts: () => (id ? alertDetail(Number(id)) : alerts()), events, overview, ingest, rules: () => rules(id),
     noise: noiseLab, coverage: coverageView, health, admin, account, hunt: () => huntView(huntQueryFromHash([id, ...rest].join("/"))),
     entity: () => entityDetail(id, decodeURIComponent(rest.join("/"))) };

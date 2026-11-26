@@ -1,11 +1,11 @@
 "use strict";
 
-// The flat view is available immediately. Only an intersecting card in globe
-// mode imports the renderer and imagery. Each dashboard mount owns one controller.
+// Only the dedicated 2D view owns a flat-map container. The dashboard reserves
+// the globe stage while its lazy renderer and textures load.
 class AttackMapView {
-  constructor() {
+  constructor(flat) {
+    this.flat = flat;
     this.motion = matchMedia("(prefers-reduced-motion: reduce)");
-    this.wantGlobe = !this.motion.matches;
     this.active = false;
     this.rows = [];
     this.selected = null;
@@ -31,7 +31,8 @@ class AttackMapView {
       cameraButton("Fit globe", "Fit", () => this.orbit?.fit()),
       this.overheadButton);
     this.stage = el("div", { class: "orbit-stage" },
-      el("div", { class: "mapwrap", id: "map" }),
+      flat ? el("div", { class: "mapwrap", id: "map" })
+        : el("div", { class: "orbit-placeholder", role: "img", "aria-label": "Globe preview" }),
       el("span", { class: "orbit-bearing", "aria-hidden": "true" }));
     const cameraTools = el("div", { class: "orbit-tools" }, this.zoomControls,
       el("span", { class: "orbit-hint" }, "Tap to steer", el("br"), "Pinch to zoom"), this.motionButton);
@@ -53,8 +54,8 @@ class AttackMapView {
       el("dl", { class: "orbit-metrics" }, metric("Mapped arcs", "map-count"), metric("Events/min", "map-rate"),
         metric("Last event", "map-last"), metric("UTC clock", "map-clock")),
       el("div", { class: "orbit-foot" }, this.legend, el("span", { id: "map-unknown" })));
-    on(this.flatButton, "click", () => this.mode(false));
-    on(this.globeButton, "click", () => this.mode(true));
+    on(this.flatButton, "click", () => go("map-2d"));
+    on(this.globeButton, "click", () => go("dashboard"));
     on(this.motionButton, "click", () => {
       this.running = !this.running;
       if (this.running) this.select(null);
@@ -62,7 +63,7 @@ class AttackMapView {
     });
     on(this.motion, "change", () => {
       this.running = !this.motion.matches;
-      this.mode(!this.motion.matches);
+      this.refreshMode();
     });
     on(this.stage, "click", e => {
       const city = e.target.closest(".mk")?.dataset.city;
@@ -85,14 +86,8 @@ class AttackMapView {
     this.refreshMode();
   }
 
-  mode(globe) {
-    this.wantGlobe = globe;
-    this.refreshMode();
-  }
-
   async load() {
     this.loading = true;
-    this.stage.dataset.loading = "true";
     const signal = this.life.signal;
     let gl, handedOff = false;
     try {
@@ -100,7 +95,7 @@ class AttackMapView {
       gl = surface.getContext("webgl2", { alpha: true, antialias: true, powerPreference: "low-power" });
       if (!gl) throw Error("WebGL 2 unavailable");
       const { createOrbit } = await import("./orbit.js");
-      if (signal.aborted || !this.wantGlobe || !this.near) return;
+      if (signal.aborted || this.motion.matches || !this.near) return;
       handedOff = true;
       this.orbit = await createOrbit(this.stage, gl, {
         select: city => this.select(city),
@@ -136,14 +131,12 @@ class AttackMapView {
   }
 
   refreshMode() {
-    const allowed = !this.failed;
-    this.active = !!(this.orbit && this.wantGlobe && allowed);
-    this.card.dataset.mode = this.active ? "3d" : "2d";
-    this.stage.dataset.loading = String(!this.active && this.wantGlobe && !this.failed && !!this.loading);
-    this.flatButton.setAttribute("aria-pressed", String(!this.active));
-    this.globeButton.setAttribute("aria-pressed", String(this.active));
-    this.globeButton.disabled = !allowed;
-    this.globeButton.title = this.failed ? "3D view unavailable on this device" : "Orbital globe";
+    const allowed = !this.flat && !this.failed && !this.motion.matches;
+    this.active = !!this.orbit && allowed;
+    this.card.dataset.mode = this.flat ? "2d" : this.active ? "3d" : "preview";
+    this.flatButton.setAttribute("aria-pressed", String(this.flat));
+    this.globeButton.setAttribute("aria-pressed", String(!this.flat));
+    this.globeButton.title = this.flat ? "Return to dashboard" : this.failed ? "3D view unavailable on this device" : "Orbital globe";
     this.motionButton.hidden = !this.active || this.motion.matches;
     this.zoomControls.hidden = !this.active;
     this.motionButton.textContent = this.running ? "Pause orbit" : "Resume orbit";
@@ -151,7 +144,7 @@ class AttackMapView {
     this.motionButton.dataset.running = String(this.running);
     this.stage.querySelector(".orbit-bearing").hidden = !this.active;
     this.orbit?.state(this.active && this.near && !document.hidden, this.running, this.motion.matches);
-    if (allowed && this.wantGlobe && this.near && !document.hidden && !this.orbit && !this.loading) this.load();
+    if (allowed && this.near && !document.hidden && !this.orbit && !this.loading) this.load();
   }
 
   select(city) {

@@ -543,12 +543,18 @@ const Dash = {
     this.mapSize = null;
     this.mapDims = null;
     this.lastMapEvent = null;
-    this.mapView = new AttackMapView();
+    this.data = Live.summary;
+    this.mapView = new AttackMapView(state.view === "map-2d");
+    if (this.mapView.flat) {
+      render(el("div", { class: "soc flat-map-view", id: "soc" }, this.mapView.card));
+      this.observeSize();
+      return;
+    }
     this.feedCount = 0;
     const pause = el("button", { class: "mini ghost", id: "feed-pause", type: "button", "aria-pressed": "false", onclick: () => this.togglePause() }, "Pause");
     render(el("div", { class: "view-bar", id: "dashboard-view-bar", hidden: true }),
       el("div", { id: "dash-empty", hidden: true }),
-      el("div", { class: "soc", id: "soc", hidden: true },
+      el("div", { class: "soc", id: "soc", hidden: this.data?.events_total === 0 },
       this.mapView.card,
       panel("p-feed", "Live event stream", [el("span", { class: "muted", id: "feed-poll", hidden: true }), el("span", { class: "muted", id: "feed-rate" }), pause],
         el("div", { class: "feed-head" }, el("span", {}, "Time"), el("span", {}, "Sev"), el("span", {}, "Event")),
@@ -567,13 +573,17 @@ const Dash = {
     Live.paintFeedPoll();
     this.timers.drip = setInterval(() => this.drip(), 110);
     this.timers.details = setInterval(() => this.loadHealthDetails(), 30000);
+    this.renderViewBar();
+    this.observeSize();
+    this.loadViews();
+  },
+  observeSize() {
     const soc = $("#soc");
     if (window.ResizeObserver && soc) {
       const onResize = debounce(() => this.redraw(), 150);
       this.observer = new ResizeObserver(onResize);
       this.observer.observe(soc);
     }
-    this.loadViews();
   },
   unmount() {
     if (!this.mounted) return;
@@ -589,6 +599,7 @@ const Dash = {
   async load() {
     if (Live.summary) this.update(Live.summary);
     Live.refreshSummary();
+    if (this.mapView.flat) return;
     this.renderBoard();
     this.loadCoverage();
     this.loadHealthDetails();
@@ -596,7 +607,7 @@ const Dash = {
   async update(d) {
     this.data = d;
     if (this.renderEmpty()) { this.lastMapEvent = null; return; }
-    if (!this.feedCount) this.fillFeed(d.recent_events);
+    if (!this.mapView.flat && !this.feedCount) this.fillFeed(d.recent_events);
     const recent = d.recent_events || [];
     this.noteMapTime(recent);
     const ips = [...(d.attackers || []).map((a) => a.ip), ...recent.map((e) => e.src_ip), ...recent.map((e) => e.dest_ip), "10.0.0.10"].filter(Boolean);
@@ -662,6 +673,7 @@ const Dash = {
   },
   redraw() {
     if (!this.mounted || !this.data || emptyDashboard(this.data.events_total, false)) return;
+    if (this.mapView.flat) { this.renderMap(); return; }
     this.applyLayout();
     this.renderMap(); this.renderTimeline(); this.renderAttackers(); this.renderRules(); this.renderEntities(); this.renderMatrix(); this.renderBoard(); this.renderHealth();
     this.applyView();
@@ -685,7 +697,7 @@ const Dash = {
     const bar = $("#dashboard-view-bar");
     if (!bar) return;
     // An empty store has one next action. Do not leave the saved-view form up.
-    if (!this.data || emptyDashboard(this.data.events_total, "viewer")) {
+    if (emptyDashboard(this.data?.events_total, "viewer")) {
       bar.hidden = true;
       bar.replaceChildren();
       return;
@@ -785,7 +797,10 @@ const Dash = {
   },
   renderMap() {
     const box = $("#map");
-    if (!box) return;
+    if (box) this.renderFlatBase(box);
+    this.renderMarks();
+  },
+  renderFlatBase(box) {
     // Use the laid-out box. A 320px floor draws past a phone panel and overflow:hidden clips it.
     const w = box.clientWidth, h = box.clientHeight;
     if (w < 2 || h < 2) return;
@@ -797,7 +812,6 @@ const Dash = {
       this.mapSize = size;
       this.mapDims = [mw, mh];
     }
-    this.renderMarks();
   },
   sources() {
     // Evidence counts come from the server snapshot. Stream events can animate
@@ -805,9 +819,7 @@ const Dash = {
     return (this.data?.attackers || []).map(a => ({ ip: a.ip, events: a.events, sev: sevOf(a.max_severity) }));
   },
   renderMarks() {
-    const svg = $("#map svg");
-    if (!svg || !this.mapDims || !this.mapView) return;
-    const [w, h] = this.mapDims;
+    if (!this.mapView) return;
     const hq = this.hq();
     const summary = mapSide(this.sources(), ip => Geo.get(ip), Infinity);
     if (!hq) {
@@ -815,6 +827,13 @@ const Dash = {
       return;
     }
     const ranked = summary.arcs.filter(c => this.severities.includes(c.sev === "info" ? "low" : c.sev));
+    const svg = $("#map svg");
+    if (svg && this.mapDims) this.renderFlatMarks(svg, ranked, hq);
+    this.mapView.update(ranked, hq, summary.unknown);
+    this.mapView.tick(new Date(), Live.rollingEpm(), this.lastMapEvent);
+  },
+  renderFlatMarks(svg, ranked, hq) {
+    const [w, h] = this.mapDims;
     const esc = WPCharts.esc;
     const [hx, hy] = WPMap.project(hq.lon, hq.lat, w, h);
     const placed = [{ x: hx, y: hy }];
@@ -833,8 +852,6 @@ const Dash = {
       `<circle class="core" cx="${hx}" cy="${hy}" r="2.5"/><text class="ml" x="${hx + 10}" y="${hy - 6}">HQ</text></g>`;
     setSvgChildren(svg.querySelector("g.arcs"), arcs);
     setSvgChildren(svg.querySelector("g.marks"), marks);
-    this.mapView.update(ranked, hq, summary.unknown);
-    this.mapView.tick(new Date(), Live.rollingEpm(), this.lastMapEvent);
   },
   noteMapTime(events) {
     for (const e of events) {
@@ -874,7 +891,10 @@ const Dash = {
   },
   enqueue(events) {
     // Batches arrive newest-first; drip them in oldest-first so the stream reads in order.
-    for (const e of [...events].reverse()) this.queue.push(e);
+    for (const e of [...events].reverse()) {
+      if (this.mapView?.flat) this.pulse(e);
+      else this.queue.push(e);
+    }
     if (this.queue.length > 600) this.queue.splice(0, this.queue.length - 600);
     const ips = events.flatMap((e) => [e.src_ip, e.dest_ip]).filter(Boolean);
     this.noteMapTime(events);
@@ -1127,6 +1147,10 @@ function incidentBoard(inc, alerts, perColumn) {
       items.length > perColumn ? el("div", { class: "muted bmore" }, `+${items.length - perColumn} more`) : null,
       !items.length ? el("div", { class: "muted bmore" }, "—") : null);
   });
+}
+
+async function flatMapPage() {
+  if (await readView("map-2d", () => import("./map.js"))) await socDashboard();
 }
 
 async function socDashboard() {

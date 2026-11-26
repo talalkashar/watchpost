@@ -9,6 +9,7 @@
 // link has an accessible name (a small in-page audit, not axe), landmarks and aria-current are present,
 // tap targets are at least 44px tall on phones, and no JS errors. It is not a screen-reader audit.
 "use strict";
+const { checkDashboardGlobe } = require("./check_dashboard_globe");
 const { chromium } = require("playwright-core");
 const { spawn } = require("child_process");
 const fs = require("fs");
@@ -170,6 +171,11 @@ async function main() {
     await admin.page.click("text=Load demo data");
     await admin.page.waitForSelector("text=Alerts created", { timeout: 60000 });
     ok("demo data loaded");
+    const globePage = await admin.page.context().newPage();
+    try {
+      await checkDashboardGlobe(globePage, BASE);
+      ok("the dashboard never attaches the flat map");
+    } finally { await globePage.close(); }
     await admin.page.goto(BASE + "#dashboard");
     for (const width of [1101, 1180, 1280, 1440, 1920]) {
       await admin.page.setViewportSize({ width, height: 900 });
