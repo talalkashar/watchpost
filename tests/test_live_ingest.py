@@ -351,11 +351,20 @@ class ShipperTests(unittest.TestCase):
             handle.write(text.encode())
 
     def test_redirect_preserves_unsent_position(self):
-        fake = self.fake((302,))
-        self.append("line 1\n")
+        redirect = self.fake((302,))
+        self.append("old line\n")
+        tail = self.make(redirect.url, from_start=False)
+        self.append("new line\n")
         with self.assertRaisesRegex(shipper.FatalError, "configure the final endpoint"):
-            self.make(fake.url).ship_once(max_retries=0)
-        self.assertFalse(self.state.exists())
+            tail.ship_once(max_retries=0)
+        tail.close()
+        self.assertEqual([r["body"] for r in redirect.requests], [b"new line\n"])
+
+        endpoint = self.fake()
+        restarted = self.make(endpoint.url, from_start=False)
+        self.assertEqual(restarted.ship_once(), 1)
+        self.assertEqual(self.make(endpoint.url, from_start=False).ship_once(), 0)
+        self.assertEqual([r["body"] for r in endpoint.requests], [b"new line\n"])
 
     def test_ships_complete_lines_and_resumes_from_position_file(self):
         fake = self.fake()

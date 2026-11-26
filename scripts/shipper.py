@@ -215,6 +215,10 @@ class Shipper:
         while True:
             try:
                 status = self.post(tailed, lines)
+            except FatalError:
+                # A first-time tail needs its batch start on disk before exiting.
+                self.save_state()
+                raise
             except (OSError, ValueError) as exc:  # URLError, timeouts, resets, bad JSON from a proxy
                 status, problem = None, f"{type(exc).__name__}: {getattr(exc, 'reason', exc)}"
             else:
