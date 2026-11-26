@@ -174,8 +174,16 @@ class SyslogParseTests(unittest.TestCase):
         body = b"<13>hi"
         self.assertEqual(frames(b"<13>one\x00%d %s" % (len(body), body)), [b"<13>one\x00", body])
         self.assertEqual(frames(b"12x not octet\n"), [b"12x not octet\n"])
-        self.assertEqual(frames(b"1234567 extra digits\n"), [b"1234567 extra digits\n"])
+        self.assertEqual(frames(b"123456789012x extra digits\n"), [b"123456789012x extra digits\n"])
         self.assertEqual(frames(b"0 \n<13>next\n"), [b"", b"\n", b"<13>next\n"])
+
+    def test_long_octet_count_consumes_the_entire_frame(self):
+        body = b"first\n" + b"x" * 999994
+        self.assertEqual(frames(b"1000000 " + body + b"next\n", max_bytes=8), [body[:8], b"next\n"])
+
+    def test_unsupported_octet_count_ends_stream(self):
+        with self.assertRaises(ConnectionError):
+            frames(b"1234567890 short\nnext\n", max_bytes=4)
 
     def test_tcp_handler_submits_only_nonempty_records(self):
         listener = Mock()

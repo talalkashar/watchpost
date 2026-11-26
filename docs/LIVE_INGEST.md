@@ -119,7 +119,7 @@ Plain syslog has no authentication and no encryption. Pick one of these:
 
 ### Syslog over TLS
 
-Each listener admits up to 64 concurrent TLS connections, including handshakes. Excess connections close immediately and increment `tls_busy`. Senders should reconnect. An octet-counted frame is stored only after all declared bytes arrive.
+Each listener admits up to 64 concurrent TLS connections, including handshakes. Excess connections close immediately and increment `tls_busy`. Senders should reconnect. An octet-counted frame is stored only after all declared bytes arrive. A length prefix with more than nine digits closes the connection.
 
 With a certificate, the listener takes syslog over TLS ([RFC 5425](https://www.rfc-editor.org/rfc/rfc5425)) on TCP port 6514: the same messages and framing as plain TCP, inside TLS 1.2 or 1.3.
 
@@ -177,10 +177,12 @@ Then set these (in `/etc/watchpost.env` for the deploy kit) and restart Watchpos
 
 ```bash
 SIEM_SYSLOG=1
-SIEM_SYSLOG_BIND=0.0.0.0                                 # reachable from other machines
+# Reachable from other machines
+SIEM_SYSLOG_BIND=0.0.0.0
 SIEM_SYSLOG_TLS_CERT=/etc/watchpost-tls/server.pem
 SIEM_SYSLOG_TLS_KEY=/etc/watchpost-tls/server.key
-SIEM_SYSLOG_TLS_CLIENT_CA=/etc/watchpost-tls/ca.pem      # leave out to take any sender, encrypted only
+# Leave out the client CA to take any sender over TLS.
+SIEM_SYSLOG_TLS_CLIENT_CA=/etc/watchpost-tls/ca.pem
 ```
 
 Open TCP 6514 to the senders and to nobody else, for example `sudo ufw allow from 10.0.0.12 to any port 6514 proto tcp`. The Health page then shows the `syslog` component as `listening on 0.0.0.0 (tls 6514, client certificates required)`.

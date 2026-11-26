@@ -464,6 +464,15 @@ class SyslogTlsTests(ListenerTestCase):
         # Even after the retained prefix is full, the declared tail must arrive.
         self.assertIsNone(read_tcp_frame(io.BytesIO(b"9 12345678"), max_bytes=4))
 
+    def test_close_notify_discards_short_body_with_seven_digit_count(self):
+        listener = self.tls_listener()
+        with self.connect(listener) as tls:
+            tls.sendall(b"7 <13>one1000000 <13>first line\n")
+            tls.unwrap()
+        listener.flush()
+        self.assertEqual(listener.stats["frames_received"], 1)
+        self.assertEqual([row["raw"] for row in self.rows()], ["<13>one"])
+
     def test_tls_capacity_is_reserved_before_dispatch_and_released_on_exit(self):
         with mock.patch.object(syslog_listener, "MAX_TLS_CONNECTIONS", 1):
             listener = self.tls_listener()
@@ -554,6 +563,20 @@ class SyslogTlsTests(ListenerTestCase):
                              ("/etc/wp/server.pem", "/etc/wp/server.key", "/etc/wp/ca.pem", 7514, True))
             os.environ["SIEM_SYSLOG_PLAINTEXT"] = "0"
             self.assertIs(Config.from_env().syslog_plaintext, False)
+
+
+class SyslogDeployDocsTests(unittest.TestCase):
+    def test_tls_environment_file_example(self):
+        guide = (ROOT / "docs" / "LIVE_INGEST.md").read_text()
+        section = guide.split("#### 2. Configure Watchpost", 1)[1].split("#### 3.", 1)[0]
+        example = next(block for block in section.split("```")[1::2] if "SIEM_SYSLOG=" in block)
+        # EnvironmentFile keeps inline '#' characters in these unquoted assignments.
+        settings = dict(line.split("=", 1) for line in example.splitlines()[1:]
+                        if line.strip() and not line.lstrip().startswith("#"))
+        with mock.patch.dict(os.environ, settings, clear=True):
+            config = Config.from_env()
+        self.assertEqual(config.syslog_bind, "0.0.0.0")
+        self.assertEqual(config.syslog_tls_client_ca, "/etc/watchpost-tls/ca.pem")
 
 
 class SyslogHealthApiTests(ServerTestCase):

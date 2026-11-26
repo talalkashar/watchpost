@@ -36,6 +36,7 @@ from .normalize import (MAX_FUTURE, MAX_LEN, EventError, clean_text, normalize_a
 SOURCE = "syslog"
 SUBMITTED_BY = "syslog-listener"
 MAX_FRAME_BYTES = 16 * 1024   # longer frames are truncated
+MAX_OCTET_DIGITS = 9          # bound the declared length before converting it to an integer
 MAX_QUEUE = 50000             # frames held between flushes; beyond this they are dropped and counted
 TCP_IDLE_TIMEOUT = 300
 MAX_TLS_CONNECTIONS = 64
@@ -373,16 +374,21 @@ def read_tcp_frame(rfile, max_bytes=MAX_FRAME_BYTES):
     if not first:
         return None
     if first.isdigit():
-        digits = first
+        digits = bytearray(first)
+        prefix_limit = max(max_bytes, MAX_OCTET_DIGITS + 1)
         while True:
             char = _read1(rfile)
             if not char:
-                return digits[:max_bytes]
+                return bytes(digits[:max_bytes])
             if char == b" ":
+                if len(digits) > MAX_OCTET_DIGITS:
+                    raise ConnectionError("unsupported syslog octet count")
                 break
-            if not char.isdigit() or len(digits) >= 6:
-                return _read_line(rfile, digits + char, max_bytes)  # not octet counting after all
-            digits += char
+            if not char.isdigit():
+                return _read_line(rfile, bytes(digits) + char, max_bytes)
+            # Until the separator arrives this may still be a digit-leading line.
+            if len(digits) < prefix_limit:
+                digits.extend(char)
         length = int(digits)
         data = bytearray()
         remaining = length
