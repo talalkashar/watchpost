@@ -260,6 +260,11 @@ async function boot() {
     if (target) target.scrollIntoView(); else route();
   });
   try { onLogin(await api("/api/auth/me")); } catch { showLogin(); }
+  const form = $("#login-form");
+  if (form.dataset.pendingSubmit) {
+    delete form.dataset.pendingSubmit;
+    if (!state.user) form.requestSubmit();
+  }
 }
 
 // Second sign-in step for an account with an authenticator app enrolled. The token from the password step is
