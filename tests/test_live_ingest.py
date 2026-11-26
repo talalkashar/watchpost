@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -127,6 +128,37 @@ class SyslogParsingTests(unittest.TestCase):
                 event = frame_to_event(frame + zone)
                 self.assertEqual((event["host"], event["event_type"], event["ts"]),
                                  ("FG100", "fw_deny", "2026-09-28T12:15:00.000Z"))
+
+    def assert_firewall_deny(self, frame, port, ts=None):
+        now = datetime(2026, 9, 28, 15, 30, tzinfo=timezone.utc)
+        for path in ("live", "auto", "authlog"):
+            with self.subTest(path=path):
+                if path == "live":
+                    event = frame_to_event(frame, now=now)
+                else:
+                    events, rejected = parse_payload(frame, path, "upload", now=now)
+                    self.assertEqual(rejected, [])
+                    event, = events
+                self.assertEqual((event["event_type"], event["src_ip"], event["dest_ip"], event["dest_port"]),
+                                 ("fw_deny", "203.0.113.9", "192.0.2.10", port))
+                if ts is not None:
+                    self.assertEqual(event["ts"], ts)
+
+    def test_cisco_icmp_deny_without_ports(self):
+        frame = ('<164>Sep 28 10:00:05 asa01 %ASA-4-106023: Deny icmp src outside:203.0.113.9 '
+                 'dst inside:192.0.2.10 (type 8, code 0) by access-group "outside_in" [0x0, 0x0]')
+        self.assert_firewall_deny(frame, None)
+
+    def test_fortigate_multiple_structured_data_elements(self):
+        frame = ('<189>1 2026-09-28T12:15:00Z relay FortiGate - - '
+                 r'[origin ip="192.0.2.1"][timeQuality tzKnown="1" note="a\]b"] '
+                 'logid=13 type=traffic action=deny srcip=203.0.113.9 dstip=192.0.2.10 dstport=22')
+        self.assert_firewall_deny(frame, 22, "2026-09-28T12:15:00.000Z")
+
+    def test_fortigate_nil_timestamp_uses_receipt_time(self):
+        frame = ('<189>1 - relay FortiGate - - - date=2026-09-27 time=23:58:00 logid=13 type=traffic '
+                 'action=deny srcip=203.0.113.9 dstip=192.0.2.10 dstport=22')
+        self.assert_firewall_deny(frame, 22, "2026-09-28T15:30:00.000Z")
 
     def test_relayed_cisco_id_in_message_reaches_live_and_upload(self):
         for device in ("ASA", "FTD"):

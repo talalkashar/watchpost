@@ -485,8 +485,9 @@ _IPTABLES = re.compile(
     r"ALLOW|ACCEPT|PERMIT|PASS)\b.*?\bSRC=(?P<ip>\S+)\s+DST=(?P<dst>\S+)"
     r"(?:.*?\bDPT=(?P<dpt>\d+))?", re.I)
 _PRI = re.compile(r"^<(?P<pri>\d{1,3})>")
+RFC5424_SD = r"(?:-|(?:\[(?:[^\]\\]|\\.)*\])+)"
 _RFC5424 = re.compile(
-    r"^1 (?P<iso>\S+) (?P<host>\S+) (?P<prog>\S+) \S+ \S+ (?:-|\[[^\]]*\]) \ufeff?(?P<msg>.*)$")
+    rf"^1 (?P<iso>\S+) (?P<host>\S+) (?P<prog>\S+) \S+ \S+ {RFC5424_SD} \ufeff?(?P<msg>.*)$")
 _SYSLOG_LOOSE = re.compile(
     r"^(?:(?P<iso>\d{4}-\d{2}-\d{2}T\S+)|(?P<bsd>[A-Z][a-z]{2}\s+\d{1,2}\s\d{2}:\d{2}:\d{2}))"
     r"\s+(?P<host>\S+)\s+(?P<msg>.*)$")
@@ -629,7 +630,7 @@ def normalize_authlog_line(line, default_source, year=None, now=None):
     if not parts:
         raise EventError("line is not in syslog format")
     if parts["iso"]:
-        ts_value = parts["iso"]
+        ts_value = iso(now) if parts["iso"] == "-" else parts["iso"]
     else:
         # BSD syslog has no year or zone: assume UTC and the given/current year,
         # rolling back a year if that would put the event in the future.

@@ -77,9 +77,11 @@ def _fortigate(program, message):
 # --- Cisco ASA / FTD -----------------------------------------------------------------
 
 ASA_TAG = re.compile(r"%(?:ASA|FTD)-[0-7]-(?P<id>[0-9]{6})", re.I)
-_ASA_PEER = rf"(?P<{{0}}>(?:[\w.\-]+:)?{_IP})/(?P<{{0}}_port>\d+)"
+_ASA_ADDRESS = rf"(?:[\w.\-]+:)?{_IP}"
+_ASA_PEER = rf"(?P<{{0}}>{_ASA_ADDRESS})/(?P<{{0}}_port>\d+)"
 _ASA_FROM_TO = re.compile(rf"from {_ASA_PEER.format('src')} to {_ASA_PEER.format('dst')}")
-_ASA_SRC_DST = re.compile(rf"src\s+{_ASA_PEER.format('src')}\s+dst\s+{_ASA_PEER.format('dst')}", re.I)
+_ASA_SRC_DST = re.compile(rf"\bsrc\s+(?P<src>{_ASA_ADDRESS})(?:/\d+)?\s+"
+                          rf"dst\s+(?P<dst>{_ASA_ADDRESS})(?:/(?P<dst_port>\d+))?(?=\s|$)", re.I)
 _ASA_BUILT = re.compile(rf"^Built (?P<direction>inbound|outbound) (?:TCP|UDP) connection \d+ "
                         rf"for {_ASA_PEER.format('a')} \([^)]*\) to {_ASA_PEER.format('b')}")
 _ASA_ACL = re.compile(rf"^access-list\s+\S+\s+(?P<verdict>permitted|denied|permit|deny)\s+\S+\s+"

@@ -26,7 +26,7 @@ from .firewall import ASA_TAG
 from . import engine, health
 from .db import connect, iso, now_iso, utcnow
 from .diagnostics import describe_exception, log, record_error, redact_cut
-from .normalize import (MAX_FUTURE, MAX_LEN, EventError, clean_text, normalize_authlog_line,
+from .normalize import (MAX_FUTURE, MAX_LEN, RFC5424_SD, EventError, clean_text, normalize_authlog_line,
                         normalize_weblog_line, stored_text)
 
 SOURCE = "syslog"
@@ -44,7 +44,7 @@ PRI_SEVERITY = {0: "critical", 1: "critical", 2: "critical", 3: "high",
 _PRI = re.compile(r"^<(\d*)>")
 _RFC5424 = re.compile(
     r"^1 (?P<ts>\S+) (?P<host>\S+) (?P<app>\S+) (?P<procid>\S+) (?P<msgid>\S+) "
-    r"(?P<sd>-|(?:\[(?:[^\]\\]|\\.)*\])+)(?: (?P<msg>.*))?$", re.S)
+    rf"{RFC5424_SD}(?: (?P<msg>.*))?$", re.S)
 # Optional Cisco sequence (`123: `), BSD timestamp with an optional year and fraction, or an ISO timestamp.
 _RFC3164 = re.compile(
     r"^(?:\d{1,5}:\s+)?"
