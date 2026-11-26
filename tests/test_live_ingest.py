@@ -303,6 +303,8 @@ class FakeIngest:
                 payload = json.dumps({"accepted": lines if status < 300 else 0,
                                       "rejected": 0 if status < 300 else lines}).encode()
                 self.send_response(status)
+                if 300 <= status < 400:
+                    self.send_header("Location", "/moved")
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
@@ -347,6 +349,22 @@ class ShipperTests(unittest.TestCase):
     def append(self, text, path=None):
         with open(path or self.log, "ab") as handle:
             handle.write(text.encode())
+
+    def test_redirect_preserves_unsent_position(self):
+        redirect = self.fake((302,))
+        self.append("old line\n")
+        tail = self.make(redirect.url, from_start=False)
+        self.append("new line\n")
+        with self.assertRaisesRegex(shipper.FatalError, "configure the final endpoint"):
+            tail.ship_once(max_retries=0)
+        tail.close()
+        self.assertEqual([r["body"] for r in redirect.requests], [b"new line\n"])
+
+        endpoint = self.fake()
+        restarted = self.make(endpoint.url, from_start=False)
+        self.assertEqual(restarted.ship_once(), 1)
+        self.assertEqual(self.make(endpoint.url, from_start=False).ship_once(), 0)
+        self.assertEqual([r["body"] for r in endpoint.requests], [b"new line\n"])
 
     def test_ships_complete_lines_and_resumes_from_position_file(self):
         fake = self.fake()

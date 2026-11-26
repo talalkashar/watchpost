@@ -273,7 +273,7 @@ def check_dependencies(db_path):
     return "ok", "runtime and bundled assets present (no external services required)", None, details
 
 
-def run_health_checks(open_conn, db_path):
+def _builtin_checks(open_conn, db_path):
     """`open_conn` is a callable so a storage outage is reported rather than crashing the check."""
     try:
         conn = open_conn()
@@ -285,19 +285,42 @@ def run_health_checks(open_conn, db_path):
             "means": status_means("storage"),
             "details": {}, "latency_ms": 0,
         }
-        checks = [failing, _check("dependencies", check_dependencies, db_path), *_component_checks()]
-        return {"status": "failing", "checked_at": now_iso(), "checks": checks}
+        return [failing, _check("dependencies", check_dependencies, db_path)]
     try:
-        checks = [
+        return [
             _check("storage", check_storage, conn, db_path),
             _check("ingestion", check_ingestion, conn),
             _check("detection", check_detection, conn),
             _check("dependencies", check_dependencies, db_path),
-            *_component_checks(),
         ]
     finally:
         conn.close()
-    for check in checks:
-        _coerce_status(check)
+
+
+def _health_report(builtin_checks):
+    checks = [*builtin_checks, *_component_checks()]
     overall = max((c["status"] for c in checks), key=STATUS_ORDER.__getitem__)
     return {"status": overall, "checked_at": now_iso(), "checks": checks}
+
+
+def run_health_checks(open_conn, db_path):
+    return _health_report(_builtin_checks(open_conn, db_path))
+
+
+class HealthSnapshot:
+    """Share expensive database probes between public polls and stream connections."""
+
+    def __init__(self, open_conn, db_path):
+        self.open_conn = open_conn
+        self.db_path = db_path
+        self.lock = threading.Lock()
+        self.checks = None
+        self.expires = 0
+
+    def report(self):
+        with self.lock:
+            if self.checks is None or time.monotonic() >= self.expires:
+                self.checks = _builtin_checks(self.open_conn, self.db_path)
+                self.expires = time.monotonic() + 5
+            checks = self.checks
+        return _health_report(checks)

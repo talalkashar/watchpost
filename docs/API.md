@@ -409,6 +409,8 @@ The dashboard also reads `GET /api/incidents`, `GET /api/attack/coverage`, and `
 | `GET /api/audit` | admin | Last 200 audit entries by `id`. The body stays a bare array. `X-Watchpost-Omitted` is how many entries were past that cap (0 when the table fits) |
 | `GET /api/audit/verify` | admin | Walks the audit hash chain: `{ok, status (verified\|partial\|broken), entries, keyed, head, chain_started, legacy, first_break}` (README, "Tamper-evident audit log") |
 
+Public health polls, viewer diagnostics, and stream connections share database probes for up to five seconds. Registered component checks run on each poll. Analyst and administrator diagnostics refresh all checks.
+
 ## Attack storyline (synthetic demo)
 
 A scripted six-stage intrusion (recon → credential attack → foothold → escalation → lateral movement and cloud IAM → exfiltration) replayed over wall-clock time so a viewer can watch the dashboard react. Every record is stored with `synthetic=1`, `source=demo:storyline`, and uses RFC 5737 addresses (`203.0.113.80`, `198.51.100.140`) plus fictional hosts and users. One attacker address, one victim account (`dave`), and one rogue cloud principal (`svc-deploy-tmp`) tie the alerts together so correlation builds multi-stage incidents. Baseline traffic from other employees runs alongside so the attack stands out against a living system.

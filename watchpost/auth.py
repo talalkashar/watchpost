@@ -620,7 +620,7 @@ def create_api_token(conn, name, actor, role="analyst", capabilities=None, expir
     return token
 
 
-def token_user(conn, token):
+def token_user(conn, token, *, record_use=True):
     """Return a bearer principal when the token is active and unexpired."""
     if not token or not token.startswith("wp_"):
         return None
@@ -640,7 +640,8 @@ def token_user(conn, token):
             or len(set(capabilities)) != len(capabilities) or not set(capabilities) <= TOKEN_CAPABILITIES \
             or row["role"] == "viewer" and capabilities != ["read"]:
         return None
-    conn.execute("UPDATE api_tokens SET last_used_at = ? WHERE id = ?", (now_iso(), row["id"]))
+    if record_use:
+        conn.execute("UPDATE api_tokens SET last_used_at = ? WHERE id = ?", (now_iso(), row["id"]))
     return {"username": f"token:{row['name']}", "role": row["role"],
             "capabilities": capabilities, "via": "token"}
 
