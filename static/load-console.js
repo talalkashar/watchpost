@@ -7,6 +7,7 @@ document.addEventListener("submit", (event) => {
     event.target.dataset.pendingSubmit = "true";
   }
 });
+document.querySelector('#login-form button[type="submit"]').disabled = false;
 
 // The deferred loader runs after the stylesheet. Fetch the console scripts in
 // parallel from there, preserving their original execution order.

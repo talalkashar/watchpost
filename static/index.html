@@ -106,10 +106,10 @@
         <b>Watchpost</b>
       </div>
       <h1 id="sign-in-heading">Sign in</h1>
-      <form id="login-form">
+      <form id="login-form" method="post">
         <label>Username <input name="username" autocomplete="username" required maxlength="64"></label>
         <label>Password <input name="password" type="password" autocomplete="current-password" required maxlength="256"></label>
-        <button type="submit">Sign in</button>
+        <button type="submit" disabled>Sign in</button>
         <p class="error" id="login-error" role="alert"></p>
       </form>
       <footer class="login-footer">
