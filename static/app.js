@@ -200,6 +200,10 @@ function openModal(trigger = document.activeElement) {
 // ---------- auth ----------
 function showLogin() {
   Graph.unmount();
+  Dash.unmount();
+  Dash.resetViews();
+  $("#toast-status").replaceChildren();
+  $("#toast-alert").replaceChildren();
   viewRevision++;
   state.focusSearch = false;
   state.user = null; state.csrf = null;

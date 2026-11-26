@@ -10,7 +10,7 @@
 // tap targets are at least 44px tall on phones, and no JS errors. It is not a screen-reader audit.
 "use strict";
 const { checkDashboardGlobe } = require("./check_dashboard_globe");
-const { checkSavedViewDraft, checkFeedPause, checkEmptyFlatMap } = require("./check_dashboard_state");
+const { checkSavedViewDraft, checkFeedPause, checkEmptyFlatMap, checkAccountViews, checkFeedCatchup, checkFirstFlatPulse } = require("./check_dashboard_state");
 const { chromium } = require("playwright-core");
 const { spawn } = require("child_process");
 const fs = require("fs");
@@ -172,7 +172,13 @@ async function main() {
     await admin.page.click("text=Load demo data");
     await admin.page.waitForSelector("text=Alerts created", { timeout: 60000 });
     ok("demo data loaded");
-    for (const checkDashboard of [checkSavedViewDraft, checkFeedPause, checkEmptyFlatMap, checkDashboardGlobe]) {
+    const handoff = await login(browser, "admin", ADMIN_PW, 390);
+    try {
+      await handoff.page.close();
+      await checkAccountViews(await handoff.ctx.newPage(), BASE, VIEWER_PW);
+      ok("checkAccountViews");
+    } finally { await handoff.ctx.close(); }
+    for (const checkDashboard of [checkSavedViewDraft, checkFeedPause, checkEmptyFlatMap, checkFeedCatchup, checkFirstFlatPulse, checkDashboardGlobe]) {
       const dashboardPage = await admin.ctx.newPage();
       try {
         await checkDashboard(dashboardPage, BASE);

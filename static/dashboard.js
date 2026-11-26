@@ -452,7 +452,7 @@ const Live = {
       this.epm = d.events_per_minute.slice();
       if (!this.lastEventId) this.lastEventId = Math.max(0, ...(d.recent_events || []).map((e) => e.id || 0));
       this.renderStrip();
-      if (Dash.mounted) Dash.update(d);
+      if (Dash.mounted) Dash.update(d, true);
     } catch { /* offline; the strip keeps its last values */ }
   },
   async refreshIncidents() {
@@ -534,11 +534,14 @@ const Live = {
 // ---------- the dashboard view ----------
 const Dash = {
   mounted: false, data: null, coverage: { state: "loading" }, details: null,
-  queue: [], feedCount: 0, paused: false, mapView: null, lastMapEvent: null, mapSize: null, timers: {}, observer: null,
+  queue: [], paused: false, mapView: null, lastMapEvent: null, mapSize: null, timers: {}, observer: null,
   views: [], viewsError: "", currentView: null, severities: DASH_FILTERS.all, layout: DASH_LAYOUTS.full,
 
   mount() {
+    // The flat map has no feed to drain its live events.
+    const backlog = this.mapView?.flat && state.view === "dashboard" ? this.queue : [];
     this.unmount();
+    this.seedEvents = backlog;
     this.mounted = true;
     this.mapSize = null;
     this.mapDims = null;
@@ -551,7 +554,6 @@ const Dash = {
       this.observeSize();
       return;
     }
-    this.feedCount = 0;
     const pause = el("button", { class: "mini ghost", id: "feed-pause", type: "button", onclick: () => this.togglePause() });
     this.paintPause(pause);
     render(el("div", { class: "view-bar", id: "dashboard-view-bar", hidden: true }),
@@ -596,6 +598,7 @@ const Dash = {
     this.timers = {};
     if (this.observer) { this.observer.disconnect(); this.observer = null; }
     this.queue = [];
+    this.pendingFeed = null;
   },
 
   async load() {
@@ -606,11 +609,21 @@ const Dash = {
     this.loadCoverage();
     this.loadHealthDetails();
   },
-  async update(d) {
+  async update(d, fresh = false) {
     this.data = d;
     if (this.renderEmpty()) { this.lastMapEvent = null; return; }
-    if (!this.mapView.flat && !this.feedCount) this.fillFeed(d.recent_events);
     const recent = d.recent_events || [];
+    if (!this.mapView.flat && this.seedEvents) {
+      // Combine the flat-map backlog, cached rows and first fresh snapshot by event ID.
+      const byId = new Map([...this.seedEvents, ...recent].map(e => [e.id, e]));
+      this.seedEvents = [...byId.values()].sort((a, b) => b.ts.localeCompare(a.ts) || b.id - a.id).slice(0, FEED_MAX);
+      if (this.paused && $("#feed").firstChild) this.pendingFeed = this.seedEvents;
+      else {
+        this.pendingFeed = null;
+        this.fillFeed(this.seedEvents);
+      }
+      if (fresh) this.seedEvents = null;
+    }
     this.noteMapTime(recent);
     const ips = [...(d.attackers || []).map((a) => a.ip), ...recent.map((e) => e.src_ip), ...recent.map((e) => e.dest_ip), "10.0.0.10"].filter(Boolean);
     this.redraw();
@@ -680,15 +693,23 @@ const Dash = {
     this.renderMap(); this.renderTimeline(); this.renderAttackers(); this.renderRules(); this.renderEntities(); this.renderMatrix(); this.renderBoard(); this.renderHealth();
     this.applyView();
   },
+  resetViews() {
+    this.views = [];
+    this.viewsError = "";
+    this.currentView = null;
+    this.severities = DASH_FILTERS.all;
+    this.layout = DASH_LAYOUTS.full;
+  },
   async loadViews({ refreshPicker = false } = {}) {
     if (!this.mounted) return;
     try {
-      this.views = await api("/api/dashboard/views");
+      const views = await readView(state.view, () => api("/api/dashboard/views"));
+      if (!views) return;
+      this.views = views;
       this.viewsError = "";
     } catch (e) {
       this.viewsError = e.message;
     }
-    if (!this.mounted) return;
     // The initial list can arrive while the user is typing in the adjacent form.
     const picker = refreshPicker && $('#dashboard-view-bar [name="saved_view"]');
     if (picker && !this.viewsError) this.fillViewPicker(picker);
@@ -733,9 +754,11 @@ const Dash = {
     const controls = [picker, el("button", { type: "button", class: "ghost", onclick: apply }, "Apply")];
     let save = null;
     if (can("analyst")) {
+      const user = state.user;
       if (this.currentView?.owner === state.user.username) controls.push(
         el("button", { type: "button", class: "danger", onclick: () => confirm(`Delete dashboard view "${this.currentView.name}"?`) && guarded(async () => {
           await api(`/api/dashboard/views/${this.currentView.id}/delete`, { method: "POST" });
+          if (state.user !== user) return;
           this.currentView = null; this.severities = DASH_FILTERS.all; this.layout = DASH_LAYOUTS.full;
           await this.loadViews(); this.applyView(); this.redraw();
         }) }, "Delete mine"));
@@ -749,9 +772,20 @@ const Dash = {
           el("option", { value: "private" }, "Private"), el("option", { value: "shared" }, "Shared"))),
         el("button", { type: "submit" }, "Save new"));
       form.addEventListener("submit", (ev) => { ev.preventDefault(); guarded(async () => {
-        this.currentView = await api("/api/dashboard/views", { method: "POST", body: this.viewPayload(form) });
+        let saved;
+        try {
+          saved = await api("/api/dashboard/views", { method: "POST", body: this.viewPayload(form) });
+        } catch (e) {
+          // A duplicate-name error can include the private view name.
+          if (state.user === user) throw e;
+          return;
+        }
+        if (state.user !== user) return;
+        this.currentView = saved;
         this.severities = this.currentView.filters.severities; this.layout = this.currentView.layout;
-        await this.loadViews(); this.applyView(); this.redraw(); toast(`Saved dashboard view "${this.currentView.name}"`);
+        await this.loadViews();
+        if (state.user !== user) return;
+        this.applyView(); this.redraw(); toast(`Saved dashboard view "${saved.name}"`);
       }); });
       save = el("details", { class: "view-save" }, el("summary", {}, "Save a view"), form);
     }
@@ -894,38 +928,48 @@ const Dash = {
   fillFeed(events) {
     const feed = $("#feed");
     if (!feed) return;
-    const list = events || [];
-    feed.replaceChildren(...(list.length ? list.slice(0, FEED_MAX).map((e) => this.feedRow(e, false))
-      : [el("p", { class: "empty-note" }, "No events received yet.")]));
-    this.feedCount = list.length || 1;
+    // Live rows (including alerts) can arrive while the summary request is in flight.
+    const live = [...feed.querySelectorAll(".fr.new")];
+    const shown = new Set(live.map(row => Number(row.dataset.eventId)));
+    const rows = events.filter(e => !shown.has(e.id)).map(e => this.feedRow(e, false));
+    const list = [...live, ...rows].slice(0, FEED_MAX);
+    feed.replaceChildren(...(list.length ? list : [el("p", { class: "empty-note" }, "No events received yet.")]));
     this.applySeverity();
   },
   enqueue(events) {
     // Batches arrive newest-first; drip them in oldest-first so the stream reads in order.
-    for (const e of [...events].reverse()) {
-      if (this.mapView?.flat) this.pulse(e);
-      else this.queue.push(e);
-    }
+    const batch = [...events].reverse();
+    this.queue.push(...batch);
+    const view = this.mapView;
     if (this.queue.length > 600) this.queue.splice(0, this.queue.length - 600);
     const ips = events.flatMap((e) => [e.src_ip, e.dest_ip]).filter(Boolean);
+    if (view?.flat) ips.push("10.0.0.10");  // fallback target for external destinations
     this.noteMapTime(events);
-    Geo.resolve(ips).then((changed) => { if (changed) this.renderMarks(); });
+    Geo.resolve(ips).then((changed) => {
+      if (this.mapView !== view) return;
+      if (changed) this.renderMarks();
+      if (view?.flat) batch.forEach(e => this.pulse(e));
+    });
     this.scheduleMarks();
   },
   scheduleMarks: debounce(() => Dash.renderMarks(), 800),
   drip() {
     const rate = $("#feed-rate");
     if (rate) rate.textContent = this.queue.length ? `${this.queue.length} queued` : "";
-    if (this.paused || !this.queue.length) return;
+    if (this.paused) return;
+    if (this.pendingFeed) {
+      this.fillFeed(this.pendingFeed);
+      this.pendingFeed = null;
+    }
+    if (!this.queue.length) return;
     const feed = $("#feed");
     if (!feed) return;
     feed.querySelector(".empty-note")?.remove();
     const take = Math.min(this.queue.length, Math.max(1, Math.ceil(this.queue.length / 10)));
     for (const e of this.queue.splice(0, take)) {
-      feed.prepend(this.feedRow(e, true));
+      if (!feed.querySelector(`[data-event-id="${e.id}"]`)) feed.prepend(this.feedRow(e, true));
       this.pulse(e);
     }
-    this.feedCount += take;
     while (feed.childElementCount > FEED_MAX) feed.lastElementChild.remove();
     this.applySeverity();
   },
@@ -937,7 +981,7 @@ const Dash = {
       e.src_ip ? el("code", {}, e.src_ip) : null,
       e.src_ip && target ? el("span", { class: "arrow" }, "→") : null,
       target ? el("span", { class: "fu" }, target) : null) : null;
-    return el("div", { class: `fr sev-${s}${fresh ? " new" : ""}`, title: msg },
+    return el("div", { class: `fr sev-${s}${fresh ? " new" : ""}`, "data-event-id": e.id, title: msg },
       el("span", { class: "ft" }, clock(e.ts)),
       sevTag(s),
       el("span", { class: "fy" }, el("span", { class: "fn" }, e.event_type)),
