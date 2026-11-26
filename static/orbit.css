@@ -184,7 +184,12 @@
   .orbit-motion::before { margin: 0; font-size: 12px; }
 }
 @media (max-width: 360px) {
-  #p-map[data-mode="3d"] .orbit-tools { flex-wrap: wrap; row-gap: 0; }
-  .orbit-hint { order: 1; flex-basis: 100%; text-align: center; padding-bottom: 4px; }
+  #p-map:is([data-mode="preview"], [data-mode="3d"]) .orbit-view {
+    display: grid; height: auto; grid-template-rows: clamp(290px, 85vw, 350px) auto;
+  }
+  #p-map:is([data-mode="preview"], [data-mode="3d"]) .orbit-tools {
+    display: grid; grid-template-columns: auto 1fr; grid-template-rows: minmax(44px, auto) auto; row-gap: 0;
+  }
+  .orbit-hint { grid-area: 2 / 1 / 3 / -1; text-align: center; padding-bottom: 4px; }
   .orbit-hint br { display: none; }
 }

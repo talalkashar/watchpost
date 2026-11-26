@@ -9,8 +9,8 @@
 // link has an accessible name (a small in-page audit, not axe), landmarks and aria-current are present,
 // tap targets are at least 44px tall on phones, and no JS errors. It is not a screen-reader audit.
 "use strict";
-const { checkDashboardGlobe, checkSelectedRoute, checkStationaryGlobe } = require("./check_dashboard_globe");
-const { checkSavedViewDraft, checkFullFeed, checkAlertDuringMapLoad, checkFeedPause, checkEmptyFlatMap, checkAccountViews, checkAccountFeed, checkAlertFeed, checkFeedCatchup, checkFirstFlatPulse } = require("./check_dashboard_state");
+const { checkCameraHint, checkDashboardGlobe, checkSelectedRoute, checkStationaryGlobe } = require("./check_dashboard_globe");
+const { checkBookmarkedMapAlert, checkSavedViewDraft, checkFullFeed, checkAlertDuringMapLoad, checkFeedPause, checkEmptyFlatMap, checkAccountViews, checkAccountFeed, checkAlertFeed, checkFeedCatchup, checkFirstFlatPulse } = require("./check_dashboard_state");
 const { chromium } = require("playwright-core");
 const { spawn } = require("child_process");
 const fs = require("fs");
@@ -188,12 +188,20 @@ async function main() {
         ok(checkHandoff.name);
       } finally { await handoff.ctx.close(); }
     }
-    for (const checkDashboard of [checkSavedViewDraft, checkFullFeed, checkAlertDuringMapLoad, checkFeedPause, checkEmptyFlatMap, checkFeedCatchup, checkAlertFeed, checkFirstFlatPulse, checkDashboardGlobe, checkSelectedRoute, checkStationaryGlobe]) {
+    for (const checkDashboard of [checkBookmarkedMapAlert, checkSavedViewDraft, checkFullFeed, checkAlertDuringMapLoad, checkFeedPause, checkEmptyFlatMap, checkFeedCatchup, checkAlertFeed, checkFirstFlatPulse, checkDashboardGlobe, checkSelectedRoute, checkStationaryGlobe]) {
       const dashboardPage = await admin.ctx.newPage();
       try {
         await checkDashboard(dashboardPage, BASE);
         ok(checkDashboard.name);
       } finally { await dashboardPage.close(); }
+    }
+    for (const [width, height] of [[320, 568], [390, 844], [1440, 900]]) {
+      const page = await admin.ctx.newPage();
+      try {
+        await page.setViewportSize({ width, height });
+        await checkCameraHint(page, BASE);
+        ok(`${width}px camera hint`);
+      } finally { await page.close(); }
     }
     await admin.page.goto(BASE + "#dashboard");
     for (const width of [1101, 1180, 1280, 1440, 1920]) {

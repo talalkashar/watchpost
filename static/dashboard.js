@@ -560,6 +560,13 @@ const Dash = {
   queue: [], paused: false, mapView: null, lastMapEvent: null, mapSize: null, timers: {}, observer: null,
   views: [], viewsError: "", currentView: null, severities: DASH_FILTERS.all, layout: DASH_LAYOUTS.full,
 
+  ensureFeed() {
+    // Both projections share the live rows, including alert links absent from event snapshots.
+    this.feed ??= el("div", { class: "feed", id: "feed", tabindex: "0", role: "region", "aria-label": "Live event stream",
+      onmouseenter: () => this.hover(true), onmouseleave: () => this.hover(false),
+      onfocusin: () => this.focusFeed(true), onfocusout: (ev) => { if (!ev.currentTarget.contains(ev.relatedTarget)) this.focusFeed(false); } });
+  },
+
   mount() {
     this.unmount(true);
     this.seedEvents = this.pendingFeed || [];
@@ -569,10 +576,7 @@ const Dash = {
     this.lastMapEvent = null;
     this.data = Live.summary;
     this.mapView = new AttackMapView(state.view === "map-2d", this.projection);
-    // Both projections share the live rows, including alert links absent from event snapshots.
-    this.feed ??= el("div", { class: "feed", id: "feed", tabindex: "0", role: "region", "aria-label": "Live event stream",
-      onmouseenter: () => this.hover(true), onmouseleave: () => this.hover(false),
-      onfocusin: () => this.focusFeed(true), onfocusout: (ev) => { if (!ev.currentTarget.contains(ev.relatedTarget)) this.focusFeed(false); } });
+    this.ensureFeed();
     const empty = el("div", { id: "dash-empty", hidden: true });
     if (this.mapView.flat) {
       render(empty, el("div", { class: "soc flat-map-view", id: "soc", hidden: this.data?.events_total === 0 }, this.mapView.card));
@@ -614,15 +618,20 @@ const Dash = {
       this.observer.observe(soc);
     }
   },
-  unmount(keepFeed = false) {
-    if (!keepFeed) {
+  unmount(keepProjection = false) {
+    if (!keepProjection) {
+      this.viewDraft = null;
       this.feed = null;
       this.queue = [];
       this.pendingFeed = null;
       this.projection = null;
     } else if (this.mapView) {
-      const { selected, running, globeRequested } = this.mapView;
-      this.projection = { selected, running, globeRequested };
+      const { selected, running, globeRequested, overheadActive } = this.mapView;
+      this.projection = { selected, running, globeRequested, overheadActive };
+      if (!this.mapView.flat) {
+        const save = $(".view-save");
+        this.viewDraft = save && { open: save.open, fields: new FormData(save.querySelector("form")) };
+      }
     }
     if (!this.mounted) return;
     this.mounted = false;
@@ -827,6 +836,11 @@ const Dash = {
         this.applyView(); this.redraw(); toast(`Saved dashboard view "${saved.name}"`);
       }); });
       save = el("details", { class: "view-save" }, el("summary", {}, "Save a view"), form);
+      if (this.viewDraft) {
+        save.open = this.viewDraft.open;
+        for (const [name, value] of this.viewDraft.fields) form.elements.namedItem(name).value = value;
+        this.viewDraft = null;
+      }
     }
     // A link, not a redirect, so an explicit dashboard URL and a saved layout stay put.
     const lead = [el("h1", { class: "view-name" }, this.currentView ? this.currentView.name : "Dashboard"), queue];
@@ -1262,6 +1276,8 @@ function incidentBoard(inc, alerts, perColumn) {
 }
 
 async function flatMapPage() {
+  // A bookmarked map can receive stream messages before its module arrives.
+  Dash.ensureFeed();
   if (await readView("map-2d", () => import("./map.js"))) await socDashboard();
 }
 

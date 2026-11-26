@@ -26,6 +26,13 @@ async function checkSavedViewDraft(page, base) {
       name: "Morning triage", filter: "critical", layout: "triage", visibility: "shared",
     });
     assert.ok(await form.locator("[name=name]").evaluate(input => input === document.activeElement));
+    await page.locator("#map-flat").click();
+    await page.locator(".flat-map-view #map-globe").click();
+    await page.locator('[name=saved_view] option[value="17"]').waitFor({ state: "attached" });
+    assert.ok(await form.isVisible(), "returning from 2D closed the draft");
+    assert.deepEqual(await form.evaluate(f => Object.fromEntries(new FormData(f))), {
+      name: "Morning triage", filter: "critical", layout: "triage", visibility: "shared",
+    });
   } finally {
     release();
     await page.unroute(views, holdViews);
@@ -194,6 +201,26 @@ async function checkAlertFeed(page, base) {
   assert.deepEqual(await link.locator(".fn").allTextContents(), [title], "projection switch lost the live alert link");
 }
 
+async function checkBookmarkedMapAlert(page, base) {
+  let release;
+  const loading = new Promise(resolve => { release = resolve; });
+  const requested = page.waitForRequest("**/map.js");
+  await page.route("**/map.js", async route => { await loading; await route.continue(); });
+  try {
+    await page.goto(base + "#map-2d", { waitUntil: "domcontentloaded" });
+    await requested;
+    await page.waitForFunction(() => typeof Live !== "undefined" && Live.es);
+    await page.evaluate(() => {
+      const alert = { id: 47, change: "created", title: "Bookmarked map alert", rule_id: "test",
+        severity: "high", last_seen: new Date().toISOString() };
+      Live.es.dispatchEvent(new MessageEvent("alert", { data: JSON.stringify(alert) }));
+    });
+  } finally { release(); }
+  await page.locator(".flat-map-view #map-globe").click();
+  await page.locator("#feed").waitFor();
+  assert.deepEqual(await page.locator('#feed a[href="#alerts/47"] .fn').allTextContents(), ["Bookmarked map alert"]);
+}
+
 async function checkAlertDuringMapLoad(page, base) {
   await page.goto(base + "#dashboard", { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => typeof Dash !== "undefined" && Dash.data?.alerts?.length);
@@ -254,4 +281,4 @@ async function checkFirstFlatPulse(page, base) {
   assert.equal(await page.locator("#map g.fx .shot.s-high").count(), 1, "first event from a cold source should draw one pulse");
 }
 
-module.exports = { checkFullFeed, checkAlertDuringMapLoad, checkSavedViewDraft, checkFeedPause, checkEmptyFlatMap, checkAccountViews, checkAccountFeed, checkAlertFeed, checkFeedCatchup, checkFirstFlatPulse };
+module.exports = { checkBookmarkedMapAlert, checkFullFeed, checkAlertDuringMapLoad, checkSavedViewDraft, checkFeedPause, checkEmptyFlatMap, checkAccountViews, checkAccountFeed, checkAlertFeed, checkFeedCatchup, checkFirstFlatPulse };

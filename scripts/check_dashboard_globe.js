@@ -37,6 +37,7 @@ async function checkStationaryGlobe(page, base) {
     await page.getByRole("button", { name, exact: true }).click();
   }
   const overhead = page.getByRole("button", { name: /Overhead view/ });
+  await page.locator("#map-side button").first().waitFor();
   await overhead.click();
   assert.equal(await overhead.getAttribute("aria-pressed"), "true");
 
@@ -45,6 +46,22 @@ async function checkStationaryGlobe(page, base) {
   await globe.click();
   await page.locator('#p-map[data-mode="3d"] .orbit-bearing').waitFor();
   assert.equal(await page.locator(".orbit-motion").getAttribute("data-running"), "false");
+  assert.equal(await overhead.getAttribute("aria-pressed"), "true", "Overhead camera was lost");
+  assert.equal(await page.locator(".orbit-stage").getAttribute("data-tactical"), "true", "range rings were lost");
+}
+
+async function checkCameraHint(page, base) {
+  await page.goto(base + "#dashboard", { waitUntil: "domcontentloaded" });
+  await page.locator('#p-map[data-mode="3d"] .orbit-overhead').waitFor();
+  const hint = page.locator(".orbit-hint");
+  if (page.viewportSize().width > 760) {
+    assert.ok(await hint.isHidden());
+    return;
+  }
+  const [text, tools, arcs] = await Promise.all([hint, page.locator(".orbit-tools"), page.locator("#map-side")]
+    .map(node => node.boundingBox()));
+  assert.ok(text && text.y >= tools.y && text.y + text.height <= Math.min(tools.y + tools.height, arcs.y) + 0.5,
+    "camera hint extends beyond the toolbar");
 }
 
 async function checkDashboardGlobe(page, base) {
@@ -106,4 +123,4 @@ async function checkDashboardGlobe(page, base) {
   await page.locator(".orbit-placeholder").waitFor();
   assert.equal(await page.evaluate(() => window.flatMapAttachments), 0, "flat map attached on return to dashboard");
 }
-module.exports = { checkSelectedRoute, checkDashboardGlobe, checkStationaryGlobe };
+module.exports = { checkCameraHint, checkSelectedRoute, checkDashboardGlobe, checkStationaryGlobe };

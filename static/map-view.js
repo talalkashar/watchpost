@@ -6,6 +6,7 @@ class AttackMapView {
   constructor(flat, projection) {
     this.globeRequested = projection?.globeRequested || false;
     this.flat = flat;
+    this.overheadActive = projection?.overheadActive ?? false;
     this.motion = matchMedia("(prefers-reduced-motion: reduce)");
     this.active = false;
     this.rows = [];
@@ -107,11 +108,14 @@ class AttackMapView {
         select: city => this.select(city),
         drag: () => { this.running = false; this.select(null); this.refreshMode(); },
         lost: () => this.fallback(),
-        overheadChanged: on => this.overheadButton.setAttribute("aria-pressed", String(on)),
+        overheadChanged: on => {
+          this.overheadActive = on;
+          this.overheadButton.setAttribute("aria-pressed", String(on));
+        },
         signal,
       });
       if (signal.aborted) { this.orbit.dispose(); return; }
-      this.orbit.data(this.rows, this.hq);
+      this.syncOrbitData();
       if (this.selected) { this.orbit.fly(this.selected); this.orbit.highlight(this.selected.city); }
     } catch {
       if (!signal.aborted) this.fallback();
@@ -160,6 +164,7 @@ class AttackMapView {
   select(city) {
     this.selected = this.rows.find(r => r.city === city) || null;
     if (this.selected) {
+      this.overheadActive = false;
       this.running = false;
       this.orbit?.fly(this.selected);
     }
@@ -168,11 +173,18 @@ class AttackMapView {
     this.refreshMode();
   }
 
+  syncOrbitData() {
+    if (!this.orbit) return;
+    this.orbit.data(this.rows, this.hq);
+    // The HQ location and the lazy renderer can arrive in either order.
+    if (this.overheadActive && this.hq && this.stage.dataset.tactical !== "true") this.orbit.overhead(true);
+  }
+
   update(rows, hq, unknown) {
     this.rows = rows;
     this.hq = hq;
     this.selected = rows.find(r => r.city === this.selected?.city) || null;
-    this.orbit?.data(rows, hq);
+    this.syncOrbitData();
     this.orbit?.highlight(this.selected?.city);
     // Reconcile by city so a data refresh never replaces a focused source.
     const old = new Map([...this.list.querySelectorAll("button")].map(b => [b.dataset.city, b]));
