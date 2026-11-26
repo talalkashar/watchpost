@@ -107,8 +107,8 @@ def _asa_address(peer, *, interface_expected):
 
 
 def _asa(program, message):
-    if program is None:
-        # RFC 5424 relays can put the device tag at the start of MSG and leave APP-NAME empty.
+    if program is None or program.upper() in ("ASA", "FTD"):
+        # Relays can keep the message ID in MSG and use a device name or NILVALUE for APP-NAME.
         program, _, message = message.lstrip().partition(":")
     found = ASA_TAG.fullmatch(program)
     if not found:
@@ -174,4 +174,8 @@ def parse(program, message):
     """Fields of a firewall or login event read from one syslog line, or None."""
     if program == "filterlog":
         return _filterlog(message)
+    if program is None:
+        tag = re.match(r"\s*filterlog(?:\[\d+\])?:\s*", message)
+        if tag:
+            return _filterlog(message[tag.end():])
     return _asa(program, message) or _fortigate(program, message) or parse_palo_alto(program, message) or None
