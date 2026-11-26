@@ -545,15 +545,17 @@ const Dash = {
     this.lastMapEvent = null;
     this.data = Live.summary;
     this.mapView = new AttackMapView(state.view === "map-2d");
+    const empty = el("div", { id: "dash-empty", hidden: true });
     if (this.mapView.flat) {
-      render(el("div", { class: "soc flat-map-view", id: "soc" }, this.mapView.card));
+      render(empty, el("div", { class: "soc flat-map-view", id: "soc", hidden: this.data?.events_total === 0 }, this.mapView.card));
       this.observeSize();
       return;
     }
     this.feedCount = 0;
-    const pause = el("button", { class: "mini ghost", id: "feed-pause", type: "button", "aria-pressed": "false", onclick: () => this.togglePause() }, "Pause");
+    const pause = el("button", { class: "mini ghost", id: "feed-pause", type: "button", onclick: () => this.togglePause() });
+    this.paintPause(pause);
     render(el("div", { class: "view-bar", id: "dashboard-view-bar", hidden: true }),
-      el("div", { id: "dash-empty", hidden: true }),
+      empty,
       el("div", { class: "soc", id: "soc", hidden: this.data?.events_total === 0 },
       this.mapView.card,
       panel("p-feed", "Live event stream", [el("span", { class: "muted", id: "feed-poll", hidden: true }), el("span", { class: "muted", id: "feed-rate" }), pause],
@@ -575,7 +577,7 @@ const Dash = {
     this.timers.details = setInterval(() => this.loadHealthDetails(), 30000);
     this.renderViewBar();
     this.observeSize();
-    this.loadViews();
+    this.loadViews({ refreshPicker: true });
   },
   observeSize() {
     const soc = $("#soc");
@@ -678,7 +680,7 @@ const Dash = {
     this.renderMap(); this.renderTimeline(); this.renderAttackers(); this.renderRules(); this.renderEntities(); this.renderMatrix(); this.renderBoard(); this.renderHealth();
     this.applyView();
   },
-  async loadViews() {
+  async loadViews({ refreshPicker = false } = {}) {
     if (!this.mounted) return;
     try {
       this.views = await api("/api/dashboard/views");
@@ -686,7 +688,18 @@ const Dash = {
     } catch (e) {
       this.viewsError = e.message;
     }
-    if (this.mounted) this.renderViewBar();
+    if (!this.mounted) return;
+    // The initial list can arrive while the user is typing in the adjacent form.
+    const picker = refreshPicker && $('#dashboard-view-bar [name="saved_view"]');
+    if (picker && !this.viewsError) this.fillViewPicker(picker);
+    else if (picker && $(".view-save[open]")) {
+      picker.parentElement.replaceChildren(el("p", { class: "error", role: "alert" }, this.viewsError));
+    } else this.renderViewBar();
+  },
+  fillViewPicker(picker) {
+    picker.replaceChildren(el("option", { value: "" }, "Default view"),
+      ...this.views.map((v) => el("option", { value: v.id }, `${v.name} · ${v.visibility}${v.owner === state.user.username ? " · mine" : ""}`)));
+    picker.value = this.currentView ? String(this.currentView.id) : "";
   },
   viewPayload(form) {
     const f = new FormData(form);
@@ -708,9 +721,8 @@ const Dash = {
       bar.replaceChildren(queue, el("p", { class: "error", role: "alert" }, this.viewsError));
       return;
     }
-    const picker = el("select", { name: "saved_view", "aria-label": "Saved dashboard view" },
-      el("option", { value: "" }, "Default view"),
-      ...this.views.map((v) => el("option", { value: v.id }, `${v.name} · ${v.visibility}${v.owner === state.user.username ? " · mine" : ""}`)));
+    const picker = el("select", { name: "saved_view", "aria-label": "Saved dashboard view" });
+    this.fillViewPicker(picker);
     const apply = () => {
       const selected = this.views.find((v) => String(v.id) === picker.value);
       this.currentView = selected || null;
@@ -718,7 +730,6 @@ const Dash = {
       this.layout = selected ? selected.layout : DASH_LAYOUTS.full;
       this.applyView(); this.redraw(); this.renderViewBar();
     };
-    picker.value = this.currentView ? String(this.currentView.id) : "";
     const controls = [picker, el("button", { type: "button", class: "ghost", onclick: apply }, "Apply")];
     let save = null;
     if (can("analyst")) {
@@ -950,7 +961,9 @@ const Dash = {
   togglePause() {
     this.userPaused = !this.userPaused;
     this.syncPause();
-    const btn = $("#feed-pause");
+    this.paintPause($("#feed-pause"));
+  },
+  paintPause(btn) {
     if (!btn) return;
     btn.textContent = this.userPaused ? "Resume" : "Pause";
     btn.setAttribute("aria-pressed", this.userPaused ? "true" : "false");
