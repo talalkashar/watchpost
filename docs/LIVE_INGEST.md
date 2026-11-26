@@ -28,7 +28,7 @@ export SIEM_SYSLOG_PORT=5514      # UDP and TCP; ports below 1024 need root, so 
 | `SIEM_SYSLOG` | `0` | `1` starts the UDP and TCP listener from `main.py` |
 | `SIEM_SYSLOG_BIND` | `127.0.0.1` | Bind address. Use `::1` or `::` for IPv6 |
 | `SIEM_SYSLOG_PORT` | `5514` | Same port number for UDP and TCP |
-| `SIEM_SYSLOG_ALLOW` | empty (any sender) | Comma-separated IPs or CIDR networks allowed to send, e.g. `10.0.0.0/24,192.0.2.7`. Other senders are counted as `denied` and dropped. An invalid entry stops the listener from starting, so it fails closed |
+| `SIEM_SYSLOG_ALLOW` | empty (any sender) | Comma-separated IPs or CIDR networks allowed to send, e.g. `10.0.0.0/24,192.0.2.7`. Other senders are counted as `denied` and dropped. On a dual-stack listener a mapped sender can match either its IPv6 address or its IPv4 address. Its fallback host is stored as dotted IPv4. An invalid entry stops the listener from starting, so it fails closed |
 
 What the listener does with each message:
 

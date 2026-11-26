@@ -10,6 +10,8 @@ All bundled data is synthetic. PR numbers refer to https://github.com/talalkasha
 
 ### Fixed
 
+- Dual-stack syslog listeners accept IPv4 senders covered by IPv4 or mapped IPv6 allow-list entries and store the fallback host as dotted IPv4.
+
 - A promoted saved search groups `user` with the ASCII fold the `user:` filter uses. `Alice`, `alice`, and `ALICE` stay one key. `ÉRIN` and `érin` stay two keys and no longer trip a threshold together. The finding key is the folded spelling. A host group stays the stored spelling, so `WEB01` and `web01` stay two groups.
 
 - Viewer masking folds usernames on ASCII letters only. `Alice` and `alice` stay one pseudonym. `ÉRIN` and `érin` stay two, and a viewer named `érin` no longer sees `ÉRIN` in clear. The 10,000-name cap still counts those as two and still fails closed. Public addresses stay visible and internal addresses stay masked.

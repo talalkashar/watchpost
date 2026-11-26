@@ -418,6 +418,15 @@ def _is_loopback(host):
         return host == "localhost"
 
 
+def plain_address(peer):
+    """Use dotted IPv4 for mapped senders in stored evidence."""
+    try:
+        address = ipaddress.ip_address(peer)
+    except ValueError:
+        return peer
+    return str(getattr(address, "ipv4_mapped", None) or address)
+
+
 def parse_allow(value):
     """Comma-separated IPs or CIDR networks. Empty means any peer."""
     nets = []
@@ -545,7 +554,8 @@ class SyslogListener:
             address = ipaddress.ip_address(peer)
         except ValueError:
             return False
-        return any(address in net for net in self.allow)
+        mapped = getattr(address, "ipv4_mapped", None)
+        return any(address in net or (mapped is not None and mapped in net) for net in self.allow)
 
     def count(self, key, n=1):
         with self._lock:
@@ -563,7 +573,7 @@ class SyslogListener:
                 self.stats["dropped"] += 1
                 self.last_drop_at = time.monotonic()
                 return
-            self._queue.append((frame, peer))
+            self._queue.append((frame, plain_address(peer)))
 
     # --- batching into the engine --------------------------------------------------
 

@@ -230,6 +230,45 @@ class SyslogListenerTests(unittest.TestCase):
         listener.flush()
         self.assertEqual(self.rows(), [])
 
+    def test_an_ipv4_sender_matches_the_allow_list_when_the_listener_is_bound_to_every_address(self):
+        # Bound to "::", the listener sees an IPv4 sender as ::ffff:a.b.c.d. That must still match an IPv4 entry.
+        listener = self.listener(allow="192.0.2.0/24,2001:db8::/32")
+        for peer, allowed in (("192.0.2.5", True), ("::ffff:192.0.2.5", True), ("::ffff:198.51.100.5", False),
+                              ("2001:db8::1", True), ("2001:db9::1", False), ("not-an-address", False)):
+            self.assertEqual(listener.allowed(peer), allowed, peer)
+        self.assertEqual([syslog_listener.plain_address(p) for p in ("::ffff:192.0.2.5", "192.0.2.5", "2001:db8::1", "unknown")],
+                         ["192.0.2.5", "192.0.2.5", "2001:db8::1", "unknown"])
+
+        listener = self.listener(bind="::", allow="127.0.0.1")
+        if not listener.start():
+            self.skipTest("this machine cannot bind an IPv6 socket")
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+                udp.sendto(b"<13>hello over udp", ("127.0.0.1", listener.udp_port))
+            with socket.create_connection(("127.0.0.1", listener.tcp_port), timeout=5) as tcp:
+                tcp.sendall(b"<13>hello over tcp\n")
+        except OSError:
+            self.skipTest("this machine does not route IPv4 to an IPv6 socket")
+        self.assertTrue(wait_for(lambda: listener.stats["frames_received"] == 2), listener.stats)
+        self.assertEqual(listener.stats["denied"], 0)
+        listener.flush()
+        self.assertEqual({row["host"] for row in self.rows()}, {"127.0.0.1"})   # stored as the sender writes it
+
+        refusing = self.listener(bind="::", allow="192.0.2.0/24")
+        refusing.start()
+        with socket.create_connection(("127.0.0.1", refusing.tcp_port), timeout=5) as tcp:
+            tcp.sendall(b"<13>hello\n")
+        self.assertTrue(wait_for(lambda: refusing.stats["denied"] == 1))
+
+    def test_mapped_ipv6_policies_match_before_the_peer_is_normalized_for_storage(self):
+        for policy in ("::ffff:192.0.2.5/128", "::ffff:192.0.2.0/120"):
+            with self.subTest(policy=policy):
+                listener = self.listener(allow=policy)
+                listener.submit(b"<13>accepted", "::ffff:192.0.2.5")
+                listener.submit(b"<13>denied", "::ffff:198.51.100.5")
+                self.assertEqual(listener.stats["denied"], 1)
+                self.assertEqual(list(listener._queue), [("<13>accepted", "192.0.2.5")])
+
     def test_invalid_allow_list_fails_closed(self):
         listener = self.listener(allow="not-an-ip")
         self.assertFalse(listener.start())
