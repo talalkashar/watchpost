@@ -98,6 +98,67 @@ async function checkAccountViews(page, base, viewerPassword) {
   await bar.locator('option[value="28"]').waitFor({ state: "attached" });
 }
 
+async function checkAccountFeed(page, base, viewerPassword) {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const summary = await (await page.request.get(base + "api/dashboard")).json();
+  const event = { ...summary.recent_events[0], id: 101, user: "admin-fixture", src_ip: "10.8.0.24" };
+  const masked = { ...event, id: 102, user: "user-fixture", src_ip: "internal-fixture" };
+  const dashboard = "**/api/dashboard";
+  const snapshot = row => ({ ...summary, recent_events: [row] });
+  await page.route(dashboard, route => route.fulfill({ json: snapshot(event) }));
+  await page.goto(base + "#dashboard", { waitUntil: "domcontentloaded" });
+  const feed = page.locator("#feed");
+  await page.waitForFunction(user => document.querySelector("#feed .fu")?.textContent === user, event.user);
+
+  let holdOutgoing, releaseViewer;
+  const outgoingRequest = new Promise(resolve => { holdOutgoing = resolve; });
+  const viewerReady = new Promise(resolve => { releaseViewer = resolve; });
+  await page.route(dashboard, async route => {
+    await viewerReady;
+    await route.fulfill({ json: snapshot(masked) });
+  });
+  await page.route(dashboard, holdOutgoing, { times: 1 });
+  await page.evaluate(() => { window.oldSummaryRequest = Live.refreshSummary(); });
+  const outgoing = await outgoingRequest;
+  try {
+    await page.locator("#logout").dispatchEvent("click");
+    await page.locator("#login-form [name=username]").fill("viewer");
+    await page.locator("#login-form [name=password]").fill(viewerPassword);
+    await page.locator("#login-form button[type=submit]").click();
+    await feed.waitFor({ state: "attached" });
+    const pending = await feed.textContent();
+    releaseViewer();
+    await page.waitForFunction(user => document.querySelector("#feed .fu")?.textContent === user, masked.user);
+    const loaded = await feed.textContent();
+    await outgoing.fulfill({ json: snapshot(event) });
+    await page.evaluate(() => window.oldSummaryRequest);
+    const cached = await page.evaluate(() => Live.summary.recent_events.map(e => e.id));
+    for (const contents of [pending, loaded, await feed.textContent()]) {
+      assert.ok(!contents.includes(event.user) && !contents.includes(event.src_ip),
+        "the viewer feed included the previous session's event");
+    }
+    assert.deepEqual(cached, [masked.id], "a late response replaced the viewer's summary");
+  } finally { releaseViewer(); }
+}
+
+async function checkAlertFeed(page, base) {
+  await page.goto(base + "#dashboard", { waitUntil: "domcontentloaded" });
+  await page.waitForFunction(() => Dash.data?.alerts?.length);
+  const id = await page.evaluate(() => {
+    const alert = Dash.data.alerts[0];
+    Live.onAlert({ ...alert, change: "created" });
+    return alert.id;
+  });
+  const link = page.locator(`#feed a[href="#alerts/${id}"]`);
+  await link.waitFor();
+  const title = await link.locator(".fn").textContent();
+  await page.locator("#map-flat").click();
+  await page.locator(".flat-map-view").waitFor();
+  await page.locator("#map-globe").click();
+  await page.locator("#feed .fr").first().waitFor();
+  assert.deepEqual(await link.locator(".fn").allTextContents(), [title], "projection switch lost the live alert link");
+}
+
 async function checkFeedCatchup(page, base) {
   const summary = await (await page.request.get(base + "api/dashboard")).json();
   const first = { ...summary.recent_events[0], id: 1, event_type: "first.sample" };
@@ -135,4 +196,4 @@ async function checkFirstFlatPulse(page, base) {
   assert.equal(await page.locator("#map g.fx .shot.s-high").count(), 1, "first event from a cold source should draw one pulse");
 }
 
-module.exports = { checkSavedViewDraft, checkFeedPause, checkEmptyFlatMap, checkAccountViews, checkFeedCatchup, checkFirstFlatPulse };
+module.exports = { checkSavedViewDraft, checkFeedPause, checkEmptyFlatMap, checkAccountViews, checkAccountFeed, checkAlertFeed, checkFeedCatchup, checkFirstFlatPulse };

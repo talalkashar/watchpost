@@ -2,6 +2,32 @@
 // creation so a flat SVG that is attached and removed between paints still fails.
 const assert = require("node:assert/strict");
 
+async function checkStationaryGlobe(page, base) {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto(base + "#dashboard", { waitUntil: "domcontentloaded" });
+  const globe = page.locator("#map-globe");
+  await globe.scrollIntoViewIfNeeded();
+  await page.waitForFunction(() => Dash.mapView?.near);
+  assert.equal(await page.locator("#p-map").getAttribute("data-mode"), "preview");
+  assert.equal(await page.locator(".orbit-stage canvas").count(), 0);
+  await globe.click();
+  await page.locator('#p-map[data-mode="3d"] .orbit-bearing').waitFor();
+  assert.equal(await page.locator(".orbit-motion").getAttribute("data-running"), "false");
+  assert.ok(await page.locator(".orbit-motion").isHidden());
+  for (const name of ["Zoom in", "Zoom out", "Fit globe"]) {
+    await page.getByRole("button", { name, exact: true }).click();
+  }
+  const overhead = page.getByRole("button", { name: /Overhead view/ });
+  await overhead.click();
+  assert.equal(await overhead.getAttribute("aria-pressed"), "true");
+
+  await page.locator("#map-flat").click();
+  await page.locator(".flat-map-view").waitFor();
+  await globe.click();
+  await page.locator('#p-map[data-mode="3d"] .orbit-bearing').waitFor();
+  assert.equal(await page.locator(".orbit-motion").getAttribute("data-running"), "false");
+}
+
 async function checkDashboardGlobe(page, base) {
   page.setDefaultTimeout(30000);
   await page.addInitScript(() => {
@@ -61,4 +87,4 @@ async function checkDashboardGlobe(page, base) {
   await page.locator(".orbit-placeholder").waitFor();
   assert.equal(await page.evaluate(() => window.flatMapAttachments), 0, "flat map attached on return to dashboard");
 }
-module.exports = { checkDashboardGlobe };
+module.exports = { checkDashboardGlobe, checkStationaryGlobe };

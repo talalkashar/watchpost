@@ -3,7 +3,8 @@
 // Only the dedicated 2D view owns a flat-map container. The dashboard reserves
 // the globe stage while its lazy renderer and textures load.
 class AttackMapView {
-  constructor(flat) {
+  constructor(flat, globeRequested = false) {
+    this.globeRequested = globeRequested;
     this.flat = flat;
     this.motion = matchMedia("(prefers-reduced-motion: reduce)");
     this.active = false;
@@ -55,13 +56,18 @@ class AttackMapView {
         metric("Last event", "map-last"), metric("UTC clock", "map-clock")),
       el("div", { class: "orbit-foot" }, this.legend, el("span", { id: "map-unknown" })));
     on(this.flatButton, "click", () => go("map-2d"));
-    on(this.globeButton, "click", () => go("dashboard"));
+    on(this.globeButton, "click", () => {
+      this.globeRequested = true;
+      if (this.flat) go("dashboard");
+      else this.refreshMode();
+    });
     on(this.motionButton, "click", () => {
       this.running = !this.running;
       if (this.running) this.select(null);
       this.refreshMode();
     });
     on(this.motion, "change", () => {
+      this.globeRequested = false;
       this.running = !this.motion.matches;
       this.refreshMode();
     });
@@ -95,7 +101,7 @@ class AttackMapView {
       gl = surface.getContext("webgl2", { alpha: true, antialias: true, powerPreference: "low-power" });
       if (!gl) throw Error("WebGL 2 unavailable");
       const { createOrbit } = await import("./orbit.js");
-      if (signal.aborted || this.motion.matches || !this.near) return;
+      if (signal.aborted || !this.globeAllowed || !this.near) return;
       handedOff = true;
       this.orbit = await createOrbit(this.stage, gl, {
         select: city => this.select(city),
@@ -130,8 +136,12 @@ class AttackMapView {
     this.refreshMode();
   }
 
+  get globeAllowed() {
+    return !this.flat && !this.failed && (!this.motion.matches || this.globeRequested);
+  }
+
   refreshMode() {
-    const allowed = !this.flat && !this.failed && !this.motion.matches;
+    const allowed = this.globeAllowed;
     this.active = !!this.orbit && allowed;
     this.card.dataset.mode = this.flat ? "2d" : this.active ? "3d" : "preview";
     this.flatButton.setAttribute("aria-pressed", String(this.flat));

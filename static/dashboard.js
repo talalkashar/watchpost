@@ -318,12 +318,14 @@ const Geo = {
   cache: new Map(),  // ip -> location | null (null = no table entry: "unknown")
   get(ip) { return this.cache.get(ip); },
   async resolve(ips) {
+    const cache = this.cache;
     const missing = [...new Set(ips)].filter((ip) => ip && !this.cache.has(ip));
     for (let i = 0; i < missing.length; i += 200) {
       const chunk = missing.slice(i, i + 200);
       try {
         const r = await api(`/api/geo?ips=${encodeURIComponent(chunk.join(","))}`);
-        for (const ip of chunk) this.cache.set(ip, r.ips[ip] ?? null);
+        if (cache !== this.cache) return false;
+        for (const ip of chunk) cache.set(ip, r.ips[ip] ?? null);
       } catch { /* retried on the next update */ }
     }
     return missing.length > 0;
@@ -350,7 +352,16 @@ const Live = {
     if (this.es) { this.es.close(); this.es = null; }
     for (const t of Object.values(this.timers)) { clearInterval(t); clearTimeout(t); }
     this.timers = {};
+    this.summary = null;
+    this.lastEventId = 0;
+    this.epm = [];
+    this.incidents = { state: "loading" };
+    this.health = {};
+    this.healthStatus = null;
+    this.subscribers = this.errors = 0;
+    $("#k-story").hidden = true;
     this.setMode("off");
+    this.renderStrip();
   },
 
   connect() {
@@ -359,7 +370,10 @@ const Live = {
     let es;
     try { es = new EventSource("/api/stream"); } catch { return this.startPolling(); }
     this.es = es;
-    const on = (kind, fn) => es.addEventListener(kind, (m) => { try { fn(JSON.parse(m.data)); } catch (e) { console.warn(kind, e); } });
+    const on = (kind, fn) => es.addEventListener(kind, (m) => {
+      if (this.es !== es) return;
+      try { fn(JSON.parse(m.data)); } catch (e) { console.warn(kind, e); }
+    });
     on("hello", () => { this.opened = true; this.errors = 0; this.stopPolling(); this.setMode("live"); });
     on("event", (d) => this.onEvents(d.events || [], d.count || 0));
     on("alert", (a) => this.onAlert(a));
@@ -368,6 +382,7 @@ const Live = {
     on("heartbeat", (h) => { this.subscribers = h.subscribers; if (Dash.mounted) Dash.renderHealth(); });
     on("resync", () => { this.refreshSummary(); this.refreshIncidents(); });
     es.onerror = () => {
+      if (this.es !== es) return;
       this.errors += 1;
       if (es.readyState === EventSource.CLOSED || this.errors >= 3 || !this.opened) {
         es.close();
@@ -380,11 +395,13 @@ const Live = {
   startPolling() {
     if (!state.user || this.timers.poll) return;
     this.setMode("poll");
+    const user = state.user;
     let ticks = 0;
     const poll = async () => {
       ticks += 1;
       try {
         const r = await api(`/api/events?limit=50&since_id=${this.lastEventId}`);
+        if (user !== state.user) return;
         if (this.lastEventId && r.events.length) this.onEvents(r.events, r.total);
         this.lastEventId = Math.max(0, this.lastEventId || 0, ...r.events.map((e) => e.id || 0));
         if (ticks % 5 === 0) this.refreshSummary();
@@ -445,9 +462,11 @@ const Live = {
 
   scheduleRefresh: debounce(() => { Live.refreshSummary(); Live.refreshIncidents(); }, 1200),
   async refreshSummary() {
-    if (!state.user) return;
+    const user = state.user;
+    if (!user) return;
     try {
       const d = await api("/api/dashboard");
+      if (user !== state.user) return;
       this.summary = d;
       this.epm = d.events_per_minute.slice();
       if (!this.lastEventId) this.lastEventId = Math.max(0, ...(d.recent_events || []).map((e) => e.id || 0));
@@ -456,8 +475,10 @@ const Live = {
     } catch { /* offline; the strip keeps its last values */ }
   },
   async refreshIncidents() {
-    if (!state.user) return;
+    const user = state.user;
+    if (!user) return;
     const r = await optional("/api/incidents");
+    if (user !== state.user) return;
     this.incidents = r.state === "ok" ? { state: "ok", list: normIncidents(r.data) } : r;
     this.renderStrip();
     if (Dash.mounted) Dash.renderBoard();
@@ -516,7 +537,9 @@ const Live = {
   },
 
   async pollStory() {
+    const user = state.user;
     const r = await optional("/api/storyline/status");
+    if (user !== state.user) return;
     const tile = $("#k-story");
     if (r.state === "pending" || !state.user) { if (tile) tile.hidden = true; return; }  // storyline not merged yet
     if (r.state === "ok" && tile) {
@@ -540,14 +563,19 @@ const Dash = {
   mount() {
     // The flat map has no feed to drain its live events.
     const backlog = this.mapView?.flat && state.view === "dashboard" ? this.queue : [];
-    this.unmount();
+    const globeRequested = this.mapView?.flat && this.mapView.globeRequested;
+    this.unmount(true);
     this.seedEvents = backlog;
     this.mounted = true;
     this.mapSize = null;
     this.mapDims = null;
     this.lastMapEvent = null;
     this.data = Live.summary;
-    this.mapView = new AttackMapView(state.view === "map-2d");
+    this.mapView = new AttackMapView(state.view === "map-2d", globeRequested);
+    // Both projections share the live rows, including alert links absent from event snapshots.
+    this.feed ??= el("div", { class: "feed", id: "feed", tabindex: "0", role: "region", "aria-label": "Live event stream",
+      onmouseenter: () => this.hover(true), onmouseleave: () => this.hover(false),
+      onfocusin: () => this.focusFeed(true), onfocusout: (ev) => { if (!ev.currentTarget.contains(ev.relatedTarget)) this.focusFeed(false); } });
     const empty = el("div", { id: "dash-empty", hidden: true });
     if (this.mapView.flat) {
       render(empty, el("div", { class: "soc flat-map-view", id: "soc", hidden: this.data?.events_total === 0 }, this.mapView.card));
@@ -563,9 +591,7 @@ const Dash = {
       panel("p-feed", "Live event stream", [el("span", { class: "muted", id: "feed-poll", hidden: true }), el("span", { class: "muted", id: "feed-rate" }), pause],
         el("div", { class: "feed-head" }, el("span", {}, "Time"), el("span", {}, "Sev"), el("span", {}, "Event")),
         el("p", { class: "empty-note feed-filter-empty", role: "status" }, "No matching events."),
-        el("div", { class: "feed", id: "feed", tabindex: "0", role: "region", "aria-label": "Live event stream",
-          onmouseenter: () => this.hover(true), onmouseleave: () => this.hover(false),
-          onfocusin: () => this.focusFeed(true), onfocusout: (ev) => { if (!ev.currentTarget.contains(ev.relatedTarget)) this.focusFeed(false); } })),
+        this.feed),
       panel("p-timeline", "Alerts over time", [el("span", { class: "muted", id: "tl-bucket" })], el("div", { class: "chartbox", id: "tl-chart" }),
         el("div", { class: "legend" }, ...["critical", "high", "medium", "low"].map((s) => el("span", {}, el("i", { class: `dot sev-${s}` }), s)),
           el("span", {}, el("i", { class: "dot volume" }), "event volume"))),
@@ -591,7 +617,8 @@ const Dash = {
       this.observer.observe(soc);
     }
   },
-  unmount() {
+  unmount(keepFeed = false) {
+    if (!keepFeed) this.feed = null;
     if (!this.mounted) return;
     this.mounted = false;
     this.mapView.dispose();
@@ -601,6 +628,8 @@ const Dash = {
     if (this.observer) { this.observer.disconnect(); this.observer = null; }
     this.queue = [];
     this.pendingFeed = null;
+    this.hovering = this.feedFocused = false;
+    this.syncPause();
   },
 
   async load() {
@@ -695,7 +724,12 @@ const Dash = {
     this.renderMap(); this.renderTimeline(); this.renderAttackers(); this.renderRules(); this.renderEntities(); this.renderMatrix(); this.renderBoard(); this.renderHealth();
     this.applyView();
   },
-  resetViews() {
+  resetSession() {
+    this.data = this.details = this.seedEvents = this.lastMapEvent = null;
+    this.coverage = { state: "loading" };
+    this.userPaused = false;
+    this.syncPause();
+    Geo.cache = new Map();
     this.views = [];
     this.viewsError = "";
     this.currentView = null;
@@ -990,13 +1024,15 @@ const Dash = {
       el("span", { class: "fd" }, route, msg ? el("span", { class: "fm" }, msg) : null));
   },
   alertRow(a) {
-    const feed = $("#feed");
+    const feed = this.feed;
     if (!feed) return;
     const row = el("a", { class: `fr alert-row sev-${sevOf(a.severity)} new`, href: `#alerts/${a.id}` },
       el("span", { class: "ft" }, clock(a.last_seen)), sevTag(a.severity),
       el("span", { class: "fy" }, el("span", { class: "fn" }, a.title)),
       el("span", { class: "fd" }, el("span", { class: "fm" }, a.rule_id)));
+    feed.querySelector(".empty-note")?.remove();
     feed.prepend(row);
+    if (feed.childElementCount > FEED_MAX) feed.lastElementChild.remove();
     this.applySeverity();
     const p = $("#p-feed");
     if (p) { p.classList.remove("flash"); void p.offsetWidth; p.classList.add("flash"); }
@@ -1077,7 +1113,9 @@ const Dash = {
 
   // --- ATT&CK matrix ---
   async loadCoverage() {
+    const user = state.user;
     const r = await optional("/api/attack/coverage");
+    if (user !== state.user) return;
     this.coverage = r.state === "ok" ? { state: "ok", list: normCoverage(r.data) } : r;
     this.renderMatrix();
   },
@@ -1149,7 +1187,12 @@ const Dash = {
   // --- health ---
   async loadHealthDetails() {
     if (!this.mounted) return;
-    try { this.details = await api("/api/health/details", { allow: [503] }); } catch { /* keep last */ }
+    const user = state.user;
+    try {
+      const details = await api("/api/health/details", { allow: [503] });
+      if (user !== state.user) return;
+      this.details = details;
+    } catch { /* keep last */ }
     this.renderHealth();
   },
   renderHealth() {

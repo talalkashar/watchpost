@@ -125,6 +125,7 @@ function toast(msg, isError = false) {
 }
 
 async function api(path, { method = "GET", body, raw, contentType, allow = [] } = {}) {
+  const user = state.user;
   const headers = {};
   if (method !== "GET" && state.csrf) headers["X-CSRF-Token"] = state.csrf;
   let payload;
@@ -133,7 +134,10 @@ async function api(path, { method = "GET", body, raw, contentType, allow = [] } 
   const res = await fetch(path, { method, headers, body: payload, credentials: "same-origin" });
   let data = null;
   try { data = await res.json(); } catch { /* empty body */ }
-  if (res.status === 401 && path !== "/api/auth/login" && path !== "/api/auth/mfa") { showLogin(); throw new Error("Session expired"); }
+  if (res.status === 401 && path !== "/api/auth/login" && path !== "/api/auth/mfa") {
+    if (user === state.user) showLogin();
+    throw new Error("Session expired");
+  }
   if (!res.ok && res.status !== 207 && !allow.includes(res.status)) {
     const err = new Error((data && data.error) || `HTTP ${res.status}`);
     err.status = res.status; err.data = data;
@@ -201,7 +205,7 @@ function openModal(trigger = document.activeElement) {
 function showLogin() {
   Graph.unmount();
   Dash.unmount();
-  Dash.resetViews();
+  Dash.resetSession();
   $("#toast-status").replaceChildren();
   $("#toast-alert").replaceChildren();
   viewRevision++;
@@ -328,7 +332,7 @@ function route() {
     if (b.dataset.view === view) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
   });
   Graph.unmount();
-  if (view !== "dashboard") Dash.unmount();
+  if (view !== "dashboard") Dash.unmount(view === "map-2d");
   const loading = el("p", { class: "muted", role: "status" }, "Loading…");
   render(loading);
   const views = { dashboard: socDashboard, "map-2d": flatMapPage, graph: () => Graph.open(), incidents: () => id ? incidentDetail(Number(id)) : incidentList(),
