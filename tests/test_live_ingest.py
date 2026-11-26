@@ -140,6 +140,40 @@ class SyslogParsingTests(unittest.TestCase):
                     self.assertEqual((event["event_type"], event["src_ip"], event["dest_ip"], event["dest_port"]),
                                      ("fw_deny", "203.0.113.9", "192.0.2.10", 3389))
 
+    def test_rfc5424_bom_before_relayed_cisco_tag(self):
+        frame = ("<164>1 2026-09-28T11:00:00Z asa01 - - - - \ufeff%ASA-4-106023: Deny tcp "
+                 "src outside:203.0.113.9/40000 dst inside:192.0.2.10/3389")
+        for fmt in ("auto", "authlog"):
+            with self.subTest(fmt=fmt):
+                events, rejected = parse_payload(frame, fmt, "upload")
+                self.assertEqual(rejected, [])
+                event, = events
+                self.assertEqual((event["event_type"], event["src_ip"], event["dest_ip"], event["dest_port"]),
+                                 ("fw_deny", "203.0.113.9", "192.0.2.10", 3389))
+
+    def test_cisco_aaa_preserves_spaces_in_account_name(self):
+        frame = ("Sep 28 10:00:09 asa01 %ASA-6-113005: AAA user authentication Rejected : reason = AAA failure : "
+                 "server = 10.0.0.5 : user = Mary Smith : user IP = 203.0.113.9")
+        uploaded, rejected = parse_payload(frame, "auto", "upload")
+        self.assertEqual(rejected, [])
+        event, = uploaded
+        for path, parsed in (("live", frame_to_event(frame)), ("upload", event)):
+            with self.subTest(path=path):
+                self.assertEqual((parsed["event_type"], parsed["user"], parsed["src_ip"]),
+                                 ("auth_failure", "Mary Smith", "203.0.113.9"))
+
+    def test_bsd_palo_alto_traffic_without_app_on_upload(self):
+        frame = "<14>Sep 28 10:00:13 pa01 " + PAN_TRAFFIC
+        for fmt in ("auto", "authlog"):
+            with self.subTest(fmt=fmt):
+                events, rejected = parse_payload(frame, fmt, "upload")
+                self.assertEqual(rejected, [])
+                self.assertEqual(len(events), 1)
+                event = events[0]
+                self.assertEqual((event["event_type"], event["host"], event["src_ip"], event["dest_ip"],
+                                  event["dest_port"], event["bytes"]),
+                                 ("fw_allow", "pa01", "10.0.3.15", "198.51.100.99", 443, 1250000000))
+
     def test_cisco_deny_preserves_ipv6_peers_on_live_and_upload(self):
         for message in (
             "%ASA-2-106001: Inbound TCP connection denied from 2001:db8::9/40001 to 2001:db8::10/23",

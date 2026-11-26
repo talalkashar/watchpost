@@ -84,7 +84,7 @@ _ASA_BUILT = re.compile(rf"^Built (?P<direction>inbound|outbound) (?:TCP|UDP) co
                         rf"for {_ASA_PEER.format('a')} \([^)]*\) to {_ASA_PEER.format('b')}")
 _ASA_ACL = re.compile(rf"^access-list\s+\S+\s+(?P<verdict>permitted|denied|permit|deny)\s+\S+\s+"
                       rf"[\w.\-]+/(?P<src>{_IP})\(\d+\)(?:\([^)]*\))?\s*(?:->|to)\s*[\w.\-]+/(?P<dst>{_IP})\((?P<dst_port>\d+)\)", re.I)
-_ASA_AAA = re.compile(rf"^AAA user authentication (?P<verdict>Successful|Rejected) :.*?\buser = (?P<user>[^\s:]+)"
+_ASA_AAA = re.compile(rf"^AAA user authentication (?P<verdict>Successful|Rejected) :.*?\buser = (?P<user>[^\s:][^:]*)"
                       rf"(?:.*?\buser IP = (?P<src>{_IP}))?")
 _ASA_LOGIN = re.compile(rf"^Login (?P<verdict>permitted|denied) from (?P<src>{_IP})/\d+ to .*? for user \"(?P<user>[^\"]*)\"")
 _ASA_DENIES = {"106001": _ASA_FROM_TO, "106006": _ASA_FROM_TO, "106007": _ASA_FROM_TO, "106015": _ASA_FROM_TO,
@@ -139,7 +139,7 @@ def _asa(program, message):
     if msg_id in ("113004", "113005"):
         aaa = _ASA_AAA.match(text)
         return aaa and {"event_type": "auth_success" if aaa["verdict"] == "Successful" else "auth_failure",
-                        "user": aaa["user"], "src_ip": aaa["src"]}
+                        "user": aaa["user"].rstrip(), "src_ip": aaa["src"]}
     if msg_id in ("605004", "605005"):
         login = _ASA_LOGIN.match(text)
         return login and {"event_type": "auth_success" if login["verdict"] == "permitted" else "auth_failure",
@@ -153,7 +153,7 @@ def _asa(program, message):
 _PAN_DENY = {"deny", "drop", "drop-icmp", "reset-client", "reset-server", "reset-both"}
 
 
-def _palo_alto(program, message):
+def parse_palo_alto(program, message):
     if (program and program.lower() != "pan-os") or ",TRAFFIC," not in message:
         return None
     try:
@@ -172,4 +172,4 @@ def parse(program, message):
     """Fields of a firewall or login event read from one syslog line, or None."""
     if program == "filterlog":
         return _filterlog(message)
-    return _asa(program, message) or _fortigate(program, message) or _palo_alto(program, message) or None
+    return _asa(program, message) or _fortigate(program, message) or parse_palo_alto(program, message) or None

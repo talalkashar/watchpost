@@ -486,7 +486,7 @@ _IPTABLES = re.compile(
     r"(?:.*?\bDPT=(?P<dpt>\d+))?", re.I)
 _PRI = re.compile(r"^<(?P<pri>\d{1,3})>")
 _RFC5424 = re.compile(
-    r"^1 (?P<iso>\S+) (?P<host>\S+) (?P<prog>\S+) \S+ \S+ (?:-|\[[^\]]*\]) (?P<msg>.*)$")
+    r"^1 (?P<iso>\S+) (?P<host>\S+) (?P<prog>\S+) \S+ \S+ (?:-|\[[^\]]*\]) \ufeff?(?P<msg>.*)$")
 _SYSLOG_LOOSE = re.compile(
     r"^(?:(?P<iso>\d{4}-\d{2}-\d{2}T\S+)|(?P<bsd>[A-Z][a-z]{2}\s+\d{1,2}\s\d{2}:\d{2}:\d{2}))"
     r"\s+(?P<host>\S+)\s+(?P<msg>.*)$")
@@ -511,7 +511,7 @@ def _firewall_hint(message):
     folded = message.lower()
     if "srcip=" in folded or "%asa-" in folded or "%ftd-" in folded or "filterlog" in folded:
         return True
-    return "SRC=" in message and "DST=" in message
+    return ("SRC=" in message and "DST=" in message) or firewall.parse_palo_alto(None, message) is not None
 
 
 def _syslog_parts(line):
