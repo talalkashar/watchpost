@@ -21,6 +21,32 @@ async function checkSelectedRoute(page, base) {
     [city, city, "false"], "both projections should retain the source and the globe should stay paused");
 }
 
+async function checkProjectionCamera(page, base) {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.goto(base + "#dashboard", { waitUntil: "domcontentloaded" });
+  const surface = page.locator('#p-map[data-mode="3d"] .orbit-beams');
+  await surface.scrollIntoViewIfNeeded();
+  const box = await surface.boundingBox();
+  const x = box.x + box.width / 2, y = box.y + box.height / 2;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x + 36, y + 20, { steps: 4 });
+  await page.mouse.up();
+  const zoom = page.getByRole("button", { name: "Zoom in", exact: true });
+  await zoom.click();
+  await zoom.click();
+  const bearing = page.locator(".orbit-bearing");
+  await bearing.filter({ hasText: "×2.0" }).waitFor();
+  assert.equal(await page.locator(".orbit-motion").getAttribute("data-running"), "false");
+  const paused = await bearing.textContent();
+  assert.doesNotMatch(paused, /31\.0°N/, "drag should change the latitude");
+
+  await page.locator("#map-flat").click();
+  await page.locator(".flat-map-view #map-globe").click();
+  await page.locator('#p-map[data-mode="3d"] .orbit-bearing').filter({ hasText: "×" }).waitFor();
+  assert.equal(await bearing.textContent(), paused, "globe bearing and zoom should survive a projection switch");
+}
+
 async function checkStationaryGlobe(page, base) {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto(base + "#dashboard", { waitUntil: "domcontentloaded" });
@@ -123,4 +149,4 @@ async function checkDashboardGlobe(page, base) {
   await page.locator(".orbit-placeholder").waitFor();
   assert.equal(await page.evaluate(() => window.flatMapAttachments), 0, "flat map attached on return to dashboard");
 }
-module.exports = { checkCameraHint, checkSelectedRoute, checkDashboardGlobe, checkStationaryGlobe };
+module.exports = { checkProjectionCamera, checkCameraHint, checkSelectedRoute, checkDashboardGlobe, checkStationaryGlobe };

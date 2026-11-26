@@ -6,6 +6,7 @@ class AttackMapView {
   constructor(flat, projection) {
     this.globeRequested = projection?.globeRequested || false;
     this.flat = flat;
+    this.savedCamera = projection?.camera;
     this.overheadActive = projection?.overheadActive ?? false;
     this.motion = matchMedia("(prefers-reduced-motion: reduce)");
     this.active = false;
@@ -112,11 +113,14 @@ class AttackMapView {
           this.overheadActive = on;
           this.overheadButton.setAttribute("aria-pressed", String(on));
         },
-        signal,
+        initialCamera: this.savedCamera, signal,
       });
       if (signal.aborted) { this.orbit.dispose(); return; }
       this.syncOrbitData();
-      if (this.selected) { this.orbit.fly(this.selected); this.orbit.highlight(this.selected.city); }
+      if (this.selected) {
+        if (!this.savedCamera) this.orbit.fly(this.selected);
+        this.orbit.highlight(this.selected.city);
+      }
     } catch {
       if (!signal.aborted) this.fallback();
     } finally {
@@ -164,6 +168,7 @@ class AttackMapView {
   select(city) {
     this.selected = this.rows.find(r => r.city === city) || null;
     if (this.selected) {
+      this.savedCamera = null;  // A source chosen in 2D sets the next globe destination.
       this.overheadActive = false;
       this.running = false;
       this.orbit?.fly(this.selected);

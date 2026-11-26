@@ -9,8 +9,8 @@
 // link has an accessible name (a small in-page audit, not axe), landmarks and aria-current are present,
 // tap targets are at least 44px tall on phones, and no JS errors. It is not a screen-reader audit.
 "use strict";
-const { checkCameraHint, checkDashboardGlobe, checkSelectedRoute, checkStationaryGlobe } = require("./check_dashboard_globe");
-const { checkBookmarkedMapAlert, checkSavedViewDraft, checkFullFeed, checkAlertDuringMapLoad, checkFeedPause, checkEmptyFlatMap, checkAccountViews, checkAccountFeed, checkAlertFeed, checkFeedCatchup, checkFirstFlatPulse } = require("./check_dashboard_state");
+const { checkProjectionCamera, checkCameraHint, checkDashboardGlobe, checkSelectedRoute, checkStationaryGlobe } = require("./check_dashboard_globe");
+const { checkProjectionEventTime, checkBookmarkedMapAlert, checkSavedViewDraft, checkFullFeed, checkAlertDuringMapLoad, checkFeedPause, checkEmptyFlatMap, checkAccountViews, checkAccountFeed, checkAlertFeed, checkFeedCatchup, checkFirstFlatPulse } = require("./check_dashboard_state");
 const { chromium } = require("playwright-core");
 const { spawn } = require("child_process");
 const fs = require("fs");
@@ -188,7 +188,7 @@ async function main() {
         ok(checkHandoff.name);
       } finally { await handoff.ctx.close(); }
     }
-    for (const checkDashboard of [checkBookmarkedMapAlert, checkSavedViewDraft, checkFullFeed, checkAlertDuringMapLoad, checkFeedPause, checkEmptyFlatMap, checkFeedCatchup, checkAlertFeed, checkFirstFlatPulse, checkDashboardGlobe, checkSelectedRoute, checkStationaryGlobe]) {
+    for (const checkDashboard of [checkProjectionEventTime, checkProjectionCamera, checkBookmarkedMapAlert, checkSavedViewDraft, checkFullFeed, checkAlertDuringMapLoad, checkFeedPause, checkEmptyFlatMap, checkFeedCatchup, checkAlertFeed, checkFirstFlatPulse, checkDashboardGlobe, checkSelectedRoute, checkStationaryGlobe]) {
       const dashboardPage = await admin.ctx.newPage();
       try {
         await checkDashboard(dashboardPage, BASE);

@@ -244,6 +244,30 @@ async function checkAlertDuringMapLoad(page, base) {
   assert.deepEqual(await link.locator(".fn").allTextContents(), [alert.title]);
 }
 
+async function checkProjectionEventTime(page, base) {
+  const summary = await (await page.request.get(base + "api/dashboard")).json();
+  const first = { ...summary.recent_events[0], ts: "2026-01-01T12:00:00Z" };
+  const live = { ...first, id: first.id + 1, ts: "2026-01-01T12:05:00Z", event_type: "projection.sample" };
+  let offline = false;
+  await page.route("**/api/dashboard", route => offline ? route.fulfill({ status: 503, json: {} })
+    : route.fulfill({ json: { ...summary, recent_events: [first] } }));
+  await page.goto(base + "#dashboard", { waitUntil: "domcontentloaded" });
+  await page.locator(`#map-last[title="${first.ts}"]`).waitFor();
+  offline = true;
+  await page.evaluate(event => Live.onEvents([event], 1), live);
+  await page.locator(`#map-last[title="${live.ts}"]`).waitFor();
+  const times = [];
+  for (const button of ["#map-flat", "#map-globe"]) {
+    await Promise.all([
+      page.waitForResponse(r => r.url() === base + "api/dashboard" && r.status() === 503),
+      page.locator(button).click(),
+    ]);
+    times.push(await page.locator("#map-last[title]").getAttribute("title"));
+  }
+  await page.locator("#feed").getByText(live.event_type, { exact: true }).waitFor();
+  assert.deepEqual(times, [live.ts, live.ts], "both projections should retain the latest live event");
+}
+
 async function checkFeedCatchup(page, base) {
   const summary = await (await page.request.get(base + "api/dashboard")).json();
   const first = { ...summary.recent_events[0], id: 1, event_type: "first.sample" };
@@ -281,4 +305,4 @@ async function checkFirstFlatPulse(page, base) {
   assert.equal(await page.locator("#map g.fx .shot.s-high").count(), 1, "first event from a cold source should draw one pulse");
 }
 
-module.exports = { checkBookmarkedMapAlert, checkFullFeed, checkAlertDuringMapLoad, checkSavedViewDraft, checkFeedPause, checkEmptyFlatMap, checkAccountViews, checkAccountFeed, checkAlertFeed, checkFeedCatchup, checkFirstFlatPulse };
+module.exports = { checkProjectionEventTime, checkBookmarkedMapAlert, checkFullFeed, checkAlertDuringMapLoad, checkSavedViewDraft, checkFeedPause, checkEmptyFlatMap, checkAccountViews, checkAccountFeed, checkAlertFeed, checkFeedCatchup, checkFirstFlatPulse };

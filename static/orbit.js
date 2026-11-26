@@ -95,7 +95,7 @@ void main() {
   gl_FragColor = vec4(color, 1.);
 }`;
 
-export async function createOrbit(stage, gl, { select, drag, lost, overheadChanged = () => {}, signal }) {
+export async function createOrbit(stage, gl, { select, drag, lost, overheadChanged = () => {}, initialCamera, signal }) {
   const surface = gl.canvas;
   const overlay = document.createElement("canvas");
   surface.className = "orbit-surface";
@@ -152,8 +152,9 @@ export async function createOrbit(stage, gl, { select, drag, lost, overheadChang
     layers.append(sky, limb, surface, overlay, scan, wheelHint);
     stage.prepend(layers);
     let width, height, radius, cx, cy;
-    let lon = -17, lat = 31, flight = null, gesture = null, selected = null;
-    let zoom = 1.18, targetZoom = zoom, reduced = false;
+    let lon = initialCamera?.lon ?? -17, lat = initialCamera?.lat ?? 31;
+    let flight = null, gesture = null, selected = null;
+    let zoom = initialCamera?.zoom ?? 1.18, targetZoom = zoom, reduced = false;
     let active = false, running = true, raf = 0, previous = 0, phase = 0;
     let detailRequested = false, engaged = false, hintTimer = 0, tactical = false;
     let routes = [], flashes = [], target = null, hq = null, rings = [], hits = [];
@@ -518,8 +519,14 @@ export async function createOrbit(stage, gl, { select, drag, lost, overheadChang
       beginGesture(true);
     }
     for (const event of ["pointerup", "pointercancel", "lostpointercapture"]) on(overlay, event, endGesture);
+    if (initialCamera?.tactical) setTactical(true);
     return {
       zoomBy, fit,
+      cameraView() {
+        // Keep the requested destination even if the switch interrupts a camera animation.
+        return { lon: flight ? flight.lon + flight.dx : lon, lat: flight ? flight.lat + flight.dy : lat,
+          zoom: targetZoom, tactical };
+      },
       overhead(on) {
         if (on && !hq) return;
         setTactical(on);

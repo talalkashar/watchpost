@@ -573,7 +573,6 @@ const Dash = {
     this.mounted = true;
     this.mapSize = null;
     this.mapDims = null;
-    this.lastMapEvent = null;
     this.data = Live.summary;
     this.mapView = new AttackMapView(state.view === "map-2d", this.projection);
     this.ensureFeed();
@@ -625,9 +624,11 @@ const Dash = {
       this.queue = [];
       this.pendingFeed = null;
       this.projection = null;
+      this.lastMapEvent = null;
     } else if (this.mapView) {
       const { selected, running, globeRequested, overheadActive } = this.mapView;
-      this.projection = { selected, running, globeRequested, overheadActive };
+      const camera = this.mapView.orbit?.cameraView() ?? this.mapView.savedCamera;
+      this.projection = { selected, running, globeRequested, overheadActive, camera };
       if (!this.mapView.flat) {
         const save = $(".view-save");
         this.viewDraft = save && { open: save.open, fields: new FormData(save.querySelector("form")) };
