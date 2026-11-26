@@ -3,14 +3,14 @@
 // Only the dedicated 2D view owns a flat-map container. The dashboard reserves
 // the globe stage while its lazy renderer and textures load.
 class AttackMapView {
-  constructor(flat, globeRequested = false) {
-    this.globeRequested = globeRequested;
+  constructor(flat, projection) {
+    this.globeRequested = projection?.globeRequested || false;
     this.flat = flat;
     this.motion = matchMedia("(prefers-reduced-motion: reduce)");
     this.active = false;
     this.rows = [];
-    this.selected = null;
-    this.running = !this.motion.matches;
+    this.selected = projection?.selected || null;
+    this.running = !this.motion.matches && (projection?.running ?? true);
     this.life = new AbortController();
     const on = (node, type, fn) => node.addEventListener(type, fn, { signal: this.life.signal });
     const modeButton = (id, text) => el("button", { id, type: "button", "aria-pressed": "false" }, text);

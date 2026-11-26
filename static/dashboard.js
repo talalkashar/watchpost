@@ -438,14 +438,14 @@ const Live = {
     if (this.summary) this.summary.events_total += count;
     for (const e of events) this.lastEventId = Math.max(this.lastEventId, e.id || 0);
     this.renderStrip();
-    if (Dash.mounted) {
+    if (Dash.feed) {
       // The first stored event replaces the empty-store card with the panels.
       if ($("#soc")?.hidden && this.summary && this.summary.events_total > 0) Dash.update(this.summary);
       Dash.enqueue(events);
     }
   },
   onAlert(a) {
-    if (Dash.mounted && a.change === "created") Dash.alertRow(a);
+    if (a.change === "created") Dash.alertRow(a);
     this.scheduleRefresh();
   },
   onHealth(h) {
@@ -561,17 +561,14 @@ const Dash = {
   views: [], viewsError: "", currentView: null, severities: DASH_FILTERS.all, layout: DASH_LAYOUTS.full,
 
   mount() {
-    // The flat map has no feed to drain its live events.
-    const backlog = this.mapView?.flat && state.view === "dashboard" ? this.queue : [];
-    const globeRequested = this.mapView?.flat && this.mapView.globeRequested;
     this.unmount(true);
-    this.seedEvents = backlog;
+    this.seedEvents = this.pendingFeed || [];
     this.mounted = true;
     this.mapSize = null;
     this.mapDims = null;
     this.lastMapEvent = null;
     this.data = Live.summary;
-    this.mapView = new AttackMapView(state.view === "map-2d", globeRequested);
+    this.mapView = new AttackMapView(state.view === "map-2d", this.projection);
     // Both projections share the live rows, including alert links absent from event snapshots.
     this.feed ??= el("div", { class: "feed", id: "feed", tabindex: "0", role: "region", "aria-label": "Live event stream",
       onmouseenter: () => this.hover(true), onmouseleave: () => this.hover(false),
@@ -618,7 +615,15 @@ const Dash = {
     }
   },
   unmount(keepFeed = false) {
-    if (!keepFeed) this.feed = null;
+    if (!keepFeed) {
+      this.feed = null;
+      this.queue = [];
+      this.pendingFeed = null;
+      this.projection = null;
+    } else if (this.mapView) {
+      const { selected, running, globeRequested } = this.mapView;
+      this.projection = { selected, running, globeRequested };
+    }
     if (!this.mounted) return;
     this.mounted = false;
     this.mapView.dispose();
@@ -626,8 +631,6 @@ const Dash = {
     for (const t of Object.values(this.timers)) clearInterval(t);
     this.timers = {};
     if (this.observer) { this.observer.disconnect(); this.observer = null; }
-    this.queue = [];
-    this.pendingFeed = null;
     this.hovering = this.feedFocused = false;
     this.syncPause();
   },
@@ -645,10 +648,10 @@ const Dash = {
     if (this.renderEmpty()) { this.lastMapEvent = null; return; }
     const recent = d.recent_events || [];
     if (!this.mapView.flat && this.seedEvents) {
-      // Combine the flat-map backlog, cached rows and first fresh snapshot by event ID.
+      // Combine the cached and fresh snapshots, including a snapshot deferred while paused.
       const byId = new Map([...this.seedEvents, ...recent].map(e => [e.id, e]));
       this.seedEvents = [...byId.values()].sort((a, b) => b.ts.localeCompare(a.ts) || b.id - a.id).slice(0, FEED_MAX);
-      if (this.paused && $("#feed").firstChild) this.pendingFeed = this.seedEvents;
+      if (this.paused) this.pendingFeed = this.seedEvents;
       else {
         this.pendingFeed = null;
         this.fillFeed(this.seedEvents);
@@ -964,11 +967,18 @@ const Dash = {
   fillFeed(events) {
     const feed = $("#feed");
     if (!feed) return;
-    // Live rows (including alerts) can arrive while the summary request is in flight.
-    const live = [...feed.querySelectorAll(".fr.new")];
-    const shown = new Set(live.map(row => Number(row.dataset.eventId)));
-    const rows = events.filter(e => !shown.has(e.id)).map(e => this.feedRow(e, false));
-    const list = [...live, ...rows].slice(0, FEED_MAX);
+    // A snapshot can overlap retained rows and events queued in either projection.
+    const rows = [...feed.querySelectorAll(".fr")];
+    const shown = new Set(rows.filter(row => row.hasAttribute("data-event-id")).map(row => Number(row.dataset.eventId)));
+    for (const e of [...this.queue, ...events]) {
+      if (shown.has(e.id)) continue;
+      shown.add(e.id);
+      rows.push(this.feedRow(e, false));
+    }
+    this.queue = [];
+    rows.sort((a, b) => (b.dataset.ts || "").localeCompare(a.dataset.ts || "")
+      || Number(b.dataset.eventId || 0) - Number(a.dataset.eventId || 0));
+    const list = rows.slice(0, FEED_MAX);
     feed.replaceChildren(...(list.length ? list : [el("p", { class: "empty-note" }, "No events received yet.")]));
     this.applySeverity();
   },
@@ -1017,7 +1027,7 @@ const Dash = {
       e.src_ip ? el("code", {}, e.src_ip) : null,
       e.src_ip && target ? el("span", { class: "arrow" }, "→") : null,
       target ? el("span", { class: "fu" }, target) : null) : null;
-    return el("div", { class: `fr sev-${s}${fresh ? " new" : ""}`, "data-event-id": e.id, title: msg },
+    return el("div", { class: `fr sev-${s}${fresh ? " new" : ""}`, "data-event-id": e.id, "data-ts": e.ts, title: msg },
       el("span", { class: "ft" }, clock(e.ts)),
       sevTag(s),
       el("span", { class: "fy" }, el("span", { class: "fn" }, e.event_type)),
@@ -1026,7 +1036,7 @@ const Dash = {
   alertRow(a) {
     const feed = this.feed;
     if (!feed) return;
-    const row = el("a", { class: `fr alert-row sev-${sevOf(a.severity)} new`, href: `#alerts/${a.id}` },
+    const row = el("a", { class: `fr alert-row sev-${sevOf(a.severity)} new`, "data-ts": a.last_seen, href: `#alerts/${a.id}` },
       el("span", { class: "ft" }, clock(a.last_seen)), sevTag(a.severity),
       el("span", { class: "fy" }, el("span", { class: "fn" }, a.title)),
       el("span", { class: "fd" }, el("span", { class: "fm" }, a.rule_id)));

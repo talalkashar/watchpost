@@ -2,6 +2,25 @@
 // creation so a flat SVG that is attached and removed between paints still fails.
 const assert = require("node:assert/strict");
 
+async function checkSelectedRoute(page, base) {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.goto(base + "#dashboard", { waitUntil: "domcontentloaded" });
+  await page.locator("#map-globe").scrollIntoViewIfNeeded();
+  await page.locator('#p-map[data-mode="3d"]').waitFor();
+  const source = page.locator("#map-side button").first();
+  await source.click();
+  const city = await source.getAttribute("data-city");
+  const detail = page.locator(".orbit-detail strong");
+  assert.equal(await detail.textContent(), city);
+  await page.locator("#map-flat").click();
+  await page.locator(".flat-map-view #map-side button").first().waitFor();
+  const flatCity = await detail.textContent();
+  await page.locator("#map-globe").click();
+  await page.locator('#p-map[data-mode="3d"] #map-side button').first().waitFor();
+  assert.deepEqual([flatCity, await detail.textContent(), await page.locator(".orbit-motion").getAttribute("data-running")],
+    [city, city, "false"], "both projections should retain the source and the globe should stay paused");
+}
+
 async function checkStationaryGlobe(page, base) {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto(base + "#dashboard", { waitUntil: "domcontentloaded" });
@@ -87,4 +106,4 @@ async function checkDashboardGlobe(page, base) {
   await page.locator(".orbit-placeholder").waitFor();
   assert.equal(await page.evaluate(() => window.flatMapAttachments), 0, "flat map attached on return to dashboard");
 }
-module.exports = { checkDashboardGlobe, checkStationaryGlobe };
+module.exports = { checkSelectedRoute, checkDashboardGlobe, checkStationaryGlobe };

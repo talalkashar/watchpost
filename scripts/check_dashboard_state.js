@@ -32,20 +32,55 @@ async function checkSavedViewDraft(page, base) {
   }
 }
 
-async function checkFeedPause(page, base) {
+// Stream batches and the 60-row dashboard snapshot both arrive newest first.
+async function feedFixture(page, base, count) {
+  const summary = await (await page.request.get(base + "api/dashboard")).json();
+  const events = Array.from({ length: count }, (_, i) => ({
+    ...summary.recent_events[0], id: i + 1, event_type: `sample.${i + 1}`,
+    ts: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
+  })).reverse();
+  let recent = [];
+  await page.route("**/api/dashboard", route => route.fulfill({ json: { ...summary, recent_events: recent } }));
   await page.goto(base + "#dashboard", { waitUntil: "domcontentloaded" });
+  await page.waitForFunction(() => typeof Dash !== "undefined" && Dash.data && Dash.seedEvents === null);
+  return { events, snapshot: () => { recent = events.slice(0, 60); } };
+}
+
+async function checkFullFeed(page, base) {
+  const { events, snapshot } = await feedFixture(page, base, 141);
+  await page.evaluate(batch => Live.onEvents(batch, batch.length), events.slice(1));
+  await page.locator('#feed [data-event-id="140"]').waitFor({ state: "attached" });
+  await page.locator("#map-flat").click();
+  await page.locator(".flat-map-view").waitFor();
+  await page.evaluate(event => Live.onEvents([event], 1), events[0]);
+  snapshot();
+  await page.locator("#map-globe").click();
+  await page.waitForFunction(() => Dash.data?.recent_events[0]?.id === 141 && !Dash.queue.length);
+  const ids = await page.locator("#feed [data-event-id]").evaluateAll(rows => rows.map(row => +row.dataset.eventId));
+  assert.deepEqual(ids, events.slice(0, 140).map(e => e.id), "the newest 140 events should appear in order");
+}
+
+async function checkFeedPause(page, base) {
+  const { events, snapshot } = await feedFixture(page, base, 61);
   const pause = page.locator("#feed-pause");
   await pause.click();
   assert.equal(await pause.getAttribute("aria-pressed"), "true");
+  await page.evaluate(batch => Live.onEvents(batch, batch.length), events);
+  assert.equal(await page.evaluate(() => Dash.queue.length), 61);
+  snapshot();
   await page.locator("#map-flat").click();
   await page.waitForURL("**/#map-2d");
   await page.locator("#map-globe").click();
   await page.waitForURL("**/#dashboard");
   assert.equal(await pause.textContent(), "Resume");
   assert.equal(await pause.getAttribute("aria-pressed"), "true");
+  await page.waitForFunction(() => Dash.data?.recent_events.length === 60 && Dash.seedEvents === null);
+  assert.equal(await page.locator("#feed [data-event-id]").count(), 0);
   await pause.click();
   assert.equal(await pause.textContent(), "Pause");
   assert.equal(await pause.getAttribute("aria-pressed"), "false");
+  await page.waitForFunction(() => !Dash.queue.length && !Dash.pendingFeed);
+  assert.deepEqual(await page.locator("#feed .fn").allTextContents(), events.map(e => e.event_type));
 }
 
 async function checkEmptyFlatMap(page, base) {
@@ -143,7 +178,7 @@ async function checkAccountFeed(page, base, viewerPassword) {
 
 async function checkAlertFeed(page, base) {
   await page.goto(base + "#dashboard", { waitUntil: "domcontentloaded" });
-  await page.waitForFunction(() => Dash.data?.alerts?.length);
+  await page.waitForFunction(() => typeof Dash !== "undefined" && Dash.data?.alerts?.length);
   const id = await page.evaluate(() => {
     const alert = Dash.data.alerts[0];
     Live.onAlert({ ...alert, change: "created" });
@@ -159,6 +194,29 @@ async function checkAlertFeed(page, base) {
   assert.deepEqual(await link.locator(".fn").allTextContents(), [title], "projection switch lost the live alert link");
 }
 
+async function checkAlertDuringMapLoad(page, base) {
+  await page.goto(base + "#dashboard", { waitUntil: "domcontentloaded" });
+  await page.waitForFunction(() => typeof Dash !== "undefined" && Dash.data?.alerts?.length);
+  const requested = page.waitForRequest("**/map.js");
+  let release;
+  const loading = new Promise(resolve => { release = resolve; });
+  await page.route("**/map.js", async route => { await loading; await route.continue(); });
+  let alert;
+  try {
+    await page.locator("#map-flat").click();
+    await requested;
+    alert = await page.evaluate(() => {
+      const row = Live.summary.alerts[0];
+      Live.onAlert({ ...row, change: "created" });
+      return row;
+    });
+  } finally { release(); }
+  await page.locator("#map-globe").click();
+  await page.locator("#feed").waitFor();
+  const link = page.locator(`#feed a[href="#alerts/${alert.id}"]`);
+  assert.deepEqual(await link.locator(".fn").allTextContents(), [alert.title]);
+}
+
 async function checkFeedCatchup(page, base) {
   const summary = await (await page.request.get(base + "api/dashboard")).json();
   const first = { ...summary.recent_events[0], id: 1, event_type: "first.sample" };
@@ -168,7 +226,7 @@ async function checkFeedCatchup(page, base) {
   let recent = [first];
   await page.route("**/api/dashboard", route => route.fulfill({ json: { ...summary, recent_events: recent } }));
   await page.goto(base + "#map-2d", { waitUntil: "domcontentloaded" });
-  await page.waitForFunction(() => Dash.mapView?.flat && Dash.data?.recent_events[0]?.id === 1);
+  await page.waitForFunction(() => typeof Dash !== "undefined" && Dash.mapView?.flat && Dash.data?.recent_events[0]?.id === 1);
   await page.evaluate(events => Live.onEvents(events, events.length), [second, older]);
   // The fresh snapshot overlaps the stream and includes a row missed by the stream.
   recent = [third, second, first];
@@ -196,4 +254,4 @@ async function checkFirstFlatPulse(page, base) {
   assert.equal(await page.locator("#map g.fx .shot.s-high").count(), 1, "first event from a cold source should draw one pulse");
 }
 
-module.exports = { checkSavedViewDraft, checkFeedPause, checkEmptyFlatMap, checkAccountViews, checkAccountFeed, checkAlertFeed, checkFeedCatchup, checkFirstFlatPulse };
+module.exports = { checkFullFeed, checkAlertDuringMapLoad, checkSavedViewDraft, checkFeedPause, checkEmptyFlatMap, checkAccountViews, checkAccountFeed, checkAlertFeed, checkFeedCatchup, checkFirstFlatPulse };
