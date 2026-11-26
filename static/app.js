@@ -32,7 +32,8 @@ const Motion = {
         observer.unobserve(entry.target);
       }
     }, { threshold: 0.05 });
-    const sections = root.querySelectorAll(":scope > .card, :scope > .grid > .card, :scope > .kpis > .kpi");
+    // Paint the dashboard's map and feed immediately. Lower panels still reveal on scroll.
+    const sections = root.querySelectorAll(":scope > .card, :scope > .grid > .card, :scope > .kpis > .kpi, :scope > .soc > .panel:not(#p-map, #p-feed)");
     for (const section of sections) {
       section.classList.add("scroll-reveal", "reveal-pending");
       this.observer.observe(section);
