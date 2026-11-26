@@ -13,6 +13,7 @@ format on the device will not match.
 """
 
 import csv
+import ipaddress
 import re
 
 _ALLOW, _DENY = "fw_allow", "fw_deny"
@@ -76,7 +77,7 @@ def _fortigate(program, message):
 # --- Cisco ASA / FTD -----------------------------------------------------------------
 
 ASA_TAG = re.compile(r"%(?:ASA|FTD)-[0-7]-(?P<id>[0-9]{6})", re.I)
-_ASA_PEER = rf"(?:[\w.\-]+:)?(?P<{{0}}>{_IP})/(?P<{{0}}_port>\d+)"
+_ASA_PEER = rf"(?P<{{0}}>(?:[\w.\-]+:)?{_IP})/(?P<{{0}}_port>\d+)"
 _ASA_FROM_TO = re.compile(rf"from {_ASA_PEER.format('src')} to {_ASA_PEER.format('dst')}")
 _ASA_SRC_DST = re.compile(rf"src\s+{_ASA_PEER.format('src')}\s+dst\s+{_ASA_PEER.format('dst')}", re.I)
 _ASA_BUILT = re.compile(rf"^Built (?P<direction>inbound|outbound) (?:TCP|UDP) connection \d+ "
@@ -88,6 +89,19 @@ _ASA_AAA = re.compile(rf"^AAA user authentication (?P<verdict>Successful|Rejecte
 _ASA_LOGIN = re.compile(rf"^Login (?P<verdict>permitted|denied) from (?P<src>{_IP})/\d+ to .*? for user \"(?P<user>[^\"]*)\"")
 _ASA_DENIES = {"106001": _ASA_FROM_TO, "106006": _ASA_FROM_TO, "106007": _ASA_FROM_TO, "106015": _ASA_FROM_TO,
                "106023": _ASA_SRC_DST, "710003": _ASA_FROM_TO}
+
+
+def _asa_address(peer, *, interface_expected):
+    _, separator, suffix = peer.partition(":")
+    if not separator:
+        return peer
+    # A hex interface name can also be an IPv6 group. Prefer the form used by this message ID.
+    preferred, fallback = (suffix, peer) if interface_expected else (peer, suffix)
+    try:
+        ipaddress.ip_address(preferred)
+    except ValueError:
+        return fallback
+    return preferred
 
 
 def _asa(program, message):
@@ -106,7 +120,8 @@ def _asa(program, message):
             if action not in ("deny", "denied", "permit", "permitted"):
                 return None
             verdict = _ALLOW if action.startswith("permit") else _DENY
-        return peers and {"event_type": verdict, "src_ip": peers["src"], "dest_ip": peers["dst"],
+        return peers and {"event_type": verdict, "src_ip": _asa_address(peers["src"], interface_expected=msg_id == "106023"),
+                          "dest_ip": _asa_address(peers["dst"], interface_expected=msg_id in ("106023", "710003")),
                           "dest_port": peers["dst_port"]}
     if msg_id in ("302013", "302015"):
         built = _ASA_BUILT.match(text)
@@ -114,7 +129,9 @@ def _asa(program, message):
             return None
         # "for" names the outside peer and "to" the inside one, whichever of them opened the connection.
         src, dst = ("a", "b") if built["direction"] == "inbound" else ("b", "a")
-        return {"event_type": _ALLOW, "src_ip": built[src], "dest_ip": built[dst], "dest_port": built[f"{dst}_port"]}
+        return {"event_type": _ALLOW, "src_ip": _asa_address(built[src], interface_expected=True),
+                "dest_ip": _asa_address(built[dst], interface_expected=True),
+                "dest_port": built[f"{dst}_port"]}
     if msg_id == "106100":
         acl = _ASA_ACL.match(text)
         return acl and {"event_type": _ALLOW if acl["verdict"].lower().startswith("permit") else _DENY, "src_ip": acl["src"],
@@ -136,14 +153,16 @@ def _asa(program, message):
 _PAN_DENY = {"deny", "drop", "drop-icmp", "reset-client", "reset-server", "reset-both"}
 
 
-def _palo_alto(message):
-    if ",TRAFFIC," not in message:
+def _palo_alto(program, message):
+    if (program and program.lower() != "pan-os") or ",TRAFFIC," not in message:
         return None
     try:
         fields = next(csv.reader([message]))
     except (csv.Error, StopIteration):
         return None
-    if len(fields) < 33 or fields[3] != "TRAFFIC" or not (fields[30] in _PAN_DENY or fields[30] == "allow"):
+    if len(fields) < 33 or not re.fullmatch(r"[0-9]+", fields[0]) or fields[3] != "TRAFFIC":
+        return None
+    if fields[30] not in _PAN_DENY and fields[30] != "allow":
         return None
     return {"event_type": _ALLOW if fields[30] == "allow" else _DENY, "src_ip": fields[7], "dest_ip": fields[8],
             "dest_port": fields[25], "bytes": fields[32], "user": fields[12] or None}
@@ -153,4 +172,4 @@ def parse(program, message):
     """Fields of a firewall or login event read from one syslog line, or None."""
     if program == "filterlog":
         return _filterlog(message)
-    return _asa(program, message) or _fortigate(program, message) or _palo_alto(message) or None
+    return _asa(program, message) or _fortigate(program, message) or _palo_alto(program, message) or None

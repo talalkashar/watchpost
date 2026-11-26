@@ -25,6 +25,12 @@ _spec = importlib.util.spec_from_file_location("shipper", ROOT / "scripts" / "sh
 shipper = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(shipper)
 
+PAN_TRAFFIC = ('1,2026/09/28 10:00:13,007000001234,TRAFFIC,end,2049,'
+               '2026/09/28 10:00:13,10.0.3.15,198.51.100.99,192.0.2.1,198.51.100.99,"allow, web",'
+               'corp\\dave,,ssl,vsys1,trust,untrust,ethernet1/2,ethernet1/1,log-fwd,'
+               '2026/09/28 10:00:13,4321,1,52000,443,61000,443,0x400053,tcp,allow,1250000900,'
+               '1250000000,900,9000,2026/09/28 09:50:00,600,any')
+
 
 def wait_for(predicate, timeout=5.0):
     deadline = time.monotonic() + timeout
@@ -134,6 +140,36 @@ class SyslogParsingTests(unittest.TestCase):
                     self.assertEqual((event["event_type"], event["src_ip"], event["dest_ip"], event["dest_port"]),
                                      ("fw_deny", "203.0.113.9", "192.0.2.10", 3389))
 
+    def test_cisco_deny_preserves_ipv6_peers_on_live_and_upload(self):
+        for message in (
+            "%ASA-2-106001: Inbound TCP connection denied from 2001:db8::9/40001 to 2001:db8::10/23",
+            "%ASA-2-106001: Inbound TCP connection denied from outside:2001:db8::9/40001 to inside:2001:db8::10/23",
+            "%ASA-4-106023: Deny tcp src face:2001:db8::9/40001 dst cafe:2001:db8::10/23",
+        ):
+            frame = f"<164>Sep 28 10:00:05 asa01 {message}"
+            uploaded, rejected = parse_payload(frame, "auto", "upload")
+            self.assertEqual(rejected, [])
+            self.assertEqual(len(uploaded), 1)
+            for path, event in (("live", frame_to_event(frame)), ("upload", uploaded[0])):
+                with self.subTest(message=message, path=path):
+                    self.assertEqual((event["event_type"], event["src_ip"], event["dest_ip"], event["dest_port"]),
+                                     ("fw_deny", "2001:db8::9", "2001:db8::10", 23))
+
+    def test_palo_alto_traffic_respects_sender_and_record_start_on_live_and_upload(self):
+        for app, prefix, genuine in (("reporter", "archived example: ", False), ("reporter", "", False),
+                                     ("-", "archived example: ", False), ("-", "", True), ("PAN-OS", "", True)):
+            frame = f"<14>1 2026-09-28T11:00:00Z app01 {app} - - - {prefix}{PAN_TRAFFIC}"
+            uploaded, rejected = parse_payload(frame, "auto", "upload")
+            self.assertEqual(rejected, [])
+            self.assertEqual(len(uploaded), 1)
+            for generic, event in (("syslog", frame_to_event(frame)), ("other", uploaded[0])):
+                with self.subTest(app=app, prefix=prefix, path=generic):
+                    expected = ("fw_allow", "10.0.3.15", "198.51.100.99", 443, 1250000000) if genuine else (
+                        generic, None, None, None, None)
+                    self.assertEqual((event["event_type"], event["src_ip"], event["dest_ip"], event["dest_port"],
+                                      event["bytes"]), expected)
+                    self.assertEqual((event["host"], event["ts"]), ("app01", "2026-09-28T11:00:00.000Z"))
+
     def test_fortigate_login_respects_syslog_sender_on_live_and_upload(self):
         payload = ('date=2026-09-28 time=10:00:00 tz="+0000" devname="FG100" logid="0100032002" '
                    'type="event" action="login" status="failed" user="admin" srcip=192.0.2.5')
@@ -174,11 +210,7 @@ class SyslogParsingTests(unittest.TestCase):
                                'action="login" status="failed"', "192.0.2.254")
         self.assertEqual((login["event_type"], login["user"], login["src_ip"]), ("auth_failure", "admin", "203.0.113.9"))
         # Palo Alto: the default comma-separated TRAFFIC log, with a quoted rule name that contains a comma.
-        allow = frame_to_event('<14>Sep 28 10:00:13 pa01 1,2026/09/28 10:00:13,007000001234,TRAFFIC,end,2049,'
-                               '2026/09/28 10:00:13,10.0.3.15,198.51.100.99,192.0.2.1,198.51.100.99,"allow, web",'
-                               'corp\\dave,,ssl,vsys1,trust,untrust,ethernet1/2,ethernet1/1,log-fwd,'
-                               '2026/09/28 10:00:13,4321,1,52000,443,61000,443,0x400053,tcp,allow,1250000900,'
-                               '1250000000,900,9000,2026/09/28 09:50:00,600,any')
+        allow = frame_to_event("<14>Sep 28 10:00:13 pa01 " + PAN_TRAFFIC)
         self.assertEqual((allow["event_type"], allow["host"], allow["user"], allow["dest_port"], allow["bytes"]),
                          ("fw_allow", "pa01", "corp\\dave", 443, 1250000000))
         drop = frame_to_event("<14>Sep 28 10:00:12 pa01 1,2026/09/28 10:00:12,007000001234,TRAFFIC,drop,2049,"
