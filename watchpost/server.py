@@ -1647,8 +1647,8 @@ class Handler(BaseHTTPRequestHandler):
         name = "index.html" if path in ("", "/") else path.lstrip("/")
         names = static_assets.CONSOLE_STYLES if path == "/console.css" else (name,)
         root = STATIC_DIR.resolve()
-        paths = tuple((root / filename).resolve() for filename in names)
-        if not all(root in asset.parents and asset.is_file() for asset in paths):
+        paths = tuple(static_assets.public_file(root, filename) for filename in names)
+        if None in paths:
             return self._send(404, b"not found", "text/plain", {"Cache-Control": "no-store"})
         ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
         headers = {"Cache-Control": "no-cache"}

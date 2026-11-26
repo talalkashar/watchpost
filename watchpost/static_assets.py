@@ -7,6 +7,21 @@ from functools import lru_cache
 CONSOLE_STYLES = ("style.css", "views.css", "glass.css", "orbit.css", "declutter.css", "graph.css")
 
 
+def public_file(root, name):
+    # Select each component from the directory itself; resolve symlinks before descending.
+    current = root
+    for part in name.split("/"):
+        if not current.is_dir():
+            return None
+        entry = next((child for child in current.iterdir() if child.name == part), None)
+        if entry is None:
+            return None
+        current = entry.resolve()
+        if root not in current.parents:
+            return None
+    return current if current.is_file() else None
+
+
 def accepts_gzip(header):
     qualities = {}
     for item in header.lower().split(","):
