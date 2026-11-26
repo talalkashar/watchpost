@@ -394,3 +394,5 @@ const Graph = (() => {
 
   return { open, unmount() { if (dispose) dispose(); dispose = null; } };
 })();
+
+export const { open, unmount } = Graph;
