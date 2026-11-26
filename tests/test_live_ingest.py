@@ -16,7 +16,7 @@ from watchpost.config import Config
 from watchpost.db import connect
 from watchpost.diagnostics import redact
 from watchpost.health import run_health_checks
-from watchpost.normalize import MAX_LEN, EventError
+from watchpost.normalize import MAX_LEN, EventError, parse_payload
 from watchpost.server import App
 from watchpost.syslog_listener import SyslogListener, frame_to_event, parse_frame, read_tcp_frame
 
@@ -121,6 +121,35 @@ class SyslogParsingTests(unittest.TestCase):
                 event = frame_to_event(frame + zone)
                 self.assertEqual((event["host"], event["event_type"], event["ts"]),
                                  ("FG100", "fw_deny", "2026-09-28T12:15:00.000Z"))
+
+    def test_relayed_cisco_id_in_message_reaches_live_and_upload(self):
+        for device in ("ASA", "FTD"):
+            frame = (f"<164>1 2026-09-28T11:00:00Z asa01 - - - - %{device}-4-106023: Deny tcp "
+                     "src outside:203.0.113.9/40000 dst inside:192.0.2.10/3389")
+            uploaded, rejected = parse_payload(frame, "auto", "upload")
+            self.assertEqual(rejected, [])
+            self.assertEqual(len(uploaded), 1)
+            for path, event in (("live", frame_to_event(frame)), ("upload", uploaded[0])):
+                with self.subTest(device=device, path=path):
+                    self.assertEqual((event["event_type"], event["src_ip"], event["dest_ip"], event["dest_port"]),
+                                     ("fw_deny", "203.0.113.9", "192.0.2.10", 3389))
+
+    def test_fortigate_login_respects_syslog_sender_on_live_and_upload(self):
+        payload = ('date=2026-09-28 time=10:00:00 tz="+0000" devname="FG100" logid="0100032002" '
+                   'type="event" action="login" status="failed" user="admin" srcip=192.0.2.5')
+        for app, prefix in (("reporter", "archived example: "), ("reporter", ""), ("syslog", ""),
+                            ("-", "archived example: "), ("-", ""), ("FortiGate", "")):
+            frame = f"<13>1 2026-09-28T11:00:00Z app01 {app} - - - {prefix}{payload}"
+            uploaded, rejected = parse_payload(frame, "auto", "upload")
+            self.assertEqual(rejected, [])
+            self.assertEqual(len(uploaded), 1)
+            for generic, event in (("syslog", frame_to_event(frame)), ("other", uploaded[0])):
+                with self.subTest(app=app, prefix=prefix, generic=generic):
+                    expected = (generic, "app01", "2026-09-28T11:00:00.000Z", None, None)
+                    if app in ("-", "FortiGate") and not prefix:
+                        expected = ("auth_failure", "FG100", "2026-09-28T10:00:00.000Z", "admin", "192.0.2.5")
+                    self.assertEqual((event["event_type"], event["host"], event["ts"], event["user"], event["src_ip"]),
+                                     expected)
 
     def test_ordinary_application_quoting_an_asa_message_stays_generic(self):
         payload = "%ASA-4-106023: Deny tcp src outside:192.0.2.5/1234 dst inside:192.0.2.6/443"

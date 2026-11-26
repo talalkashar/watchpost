@@ -132,7 +132,7 @@ Limits:
 - The parsers follow the vendors' published log formats and are tested on synthetic lines. They have not been run against the devices themselves.
 - Only the default log formats are read. A custom log format on the device will not match, and its lines stay generic `syslog` events.
 - Cisco connection teardown lines (302014, 302016) are not read, so Cisco events carry no byte counts. Palo Alto `THREAT` logs are not read.
-- `samples/firewall_syslog.log` has pfSense and Cisco lines to try by upload. FortiGate and Palo Alto lines have no syslog program tag, so they are read from the listener only.
+- `samples/firewall_syslog.log` has pfSense and Cisco lines to try by upload. Use the listener for headerless FortiGate and Palo Alto records. FortiGate records in an RFC 5424 envelope can also be uploaded with a `FortiGate` or empty (`-`) application name.
 
 ### Time zones
 

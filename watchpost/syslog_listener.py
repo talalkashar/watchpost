@@ -260,7 +260,7 @@ def frame_to_event(frame, peer_ip=None, now=None):
     procid = parsed["procid"]
     if not (procid and procid.isdigit() and len(procid) <= _MAX_PROCID):
         procid = None
-    prog = (app or "syslog") + (f"[{procid}]" if procid else "")
+    prog = (app or "-") + (f"[{procid}]" if procid else "")
     # Rebuild an auth.log-style line so the existing parser (and its timestamp rules) does the work.
     try:
         line = f"{_timestamp_for_auth(parsed['ts'], now) or iso(now)} {host} {prog}: {msg}"

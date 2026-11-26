@@ -531,7 +531,7 @@ def _syslog_parts(line):
         if not match or not _firewall_hint(match.group("msg")):
             return None
         groups = match.groupdict()
-        prog = "syslog"
+        prog = None
     host = groups.get("host")
     if host == "-":
         host = None

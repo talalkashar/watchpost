@@ -48,7 +48,11 @@ _FORTI_ALLOW = {"accept", "allow", "close", "timeout", "client-rst", "server-rst
 _FORTI_TZ = re.compile(r"[+-](?:[01][0-9]|2[0-3])[0-5][0-9]")
 
 
-def _fortigate(message):
+def _fortigate(program, message):
+    if program and program.lower() != "fortigate":
+        return None
+    if not _KEY_VALUE.match(message.lstrip()):
+        return None
     if "logid=" not in message or "type=" not in message:
         return None
     kv = {key: quoted if quoted else bare for key, quoted, bare in _KEY_VALUE.findall(message)}
@@ -87,7 +91,10 @@ _ASA_DENIES = {"106001": _ASA_FROM_TO, "106006": _ASA_FROM_TO, "106007": _ASA_FR
 
 
 def _asa(program, message):
-    found = ASA_TAG.fullmatch(program or "")
+    if program is None:
+        # RFC 5424 relays can put the device tag at the start of MSG and leave APP-NAME empty.
+        program, _, message = message.lstrip().partition(":")
+    found = ASA_TAG.fullmatch(program)
     if not found:
         return None
     msg_id, text = found["id"], message.lstrip()
@@ -146,4 +153,4 @@ def parse(program, message):
     """Fields of a firewall or login event read from one syslog line, or None."""
     if program == "filterlog":
         return _filterlog(message)
-    return _asa(program, message) or _fortigate(message) or _palo_alto(message) or None
+    return _asa(program, message) or _fortigate(program, message) or _palo_alto(message) or None
