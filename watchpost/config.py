@@ -248,7 +248,7 @@ class Config:
     max_batch_events: int
     admin_password: str | None
     analyst_password: str | None
-    # Live syslog listener (off unless SIEM_SYSLOG=1). Loopback by default: syslog is unauthenticated.
+    # Live syslog listener (off unless SIEM_SYSLOG=1). Loopback by default: plain syslog is unauthenticated.
     syslog_enabled: bool = False
     syslog_bind: str = "127.0.0.1"
     syslog_port: int = 5514
@@ -269,6 +269,14 @@ class Config:
     # HMAC key for the hash-chained audit log. Unset: plain SHA-256, which detects edits but not a full rewrite.
     audit_key: str | None = None
 
+    # Syslog over TLS (RFC 5425), on when a certificate and key are set. A client CA makes senders present a
+    # certificate it signed. TLS replaces the plaintext UDP/TCP listeners unless syslog_plaintext is True.
+    syslog_tls_cert: str | None = None
+    syslog_tls_key: str | None = None
+    syslog_tls_client_ca: str | None = None
+    syslog_tls_port: int = 6514
+    syslog_plaintext: bool | None = None  # None: plaintext only when TLS is not configured
+
     def __post_init__(self):
         self.db_path = _coerce_db_path(self.db_path)
         self.host = _coerce_host("SIEM_HOST", self.host, "127.0.0.1")
@@ -285,6 +293,8 @@ class Config:
         self.syslog_enabled = _coerce_flag("SIEM_SYSLOG", self.syslog_enabled, False)
         self.syslog_bind = _coerce_host("SIEM_SYSLOG_BIND", self.syslog_bind, "127.0.0.1")
         self.syslog_port = _coerce_int("SIEM_SYSLOG_PORT", self.syslog_port, _PORT_MIN, _PORT_MAX, 5514)
+        self.syslog_tls_port = _coerce_int("SIEM_SYSLOG_TLS_PORT", self.syslog_tls_port, _PORT_MIN, _PORT_MAX, 6514)
+        self.syslog_plaintext = _coerce_flag("SIEM_SYSLOG_PLAINTEXT", self.syslog_plaintext, None)
         self.syslog_allow = _coerce_allow(self.syslog_allow)
         self.viewer_password = _coerce_secret("SIEM_VIEWER_PASSWORD", self.viewer_password)
         self.rate_limit_enabled = _coerce_flag("SIEM_RATE_LIMIT", self.rate_limit_enabled, True)
@@ -314,6 +324,11 @@ class Config:
             syslog_enabled=os.environ.get("SIEM_SYSLOG"),
             syslog_bind=os.environ.get("SIEM_SYSLOG_BIND"),
             syslog_port=os.environ.get("SIEM_SYSLOG_PORT"),
+            syslog_tls_cert=os.environ.get("SIEM_SYSLOG_TLS_CERT") or None,
+            syslog_tls_key=os.environ.get("SIEM_SYSLOG_TLS_KEY") or None,
+            syslog_tls_client_ca=os.environ.get("SIEM_SYSLOG_TLS_CLIENT_CA") or None,
+            syslog_tls_port=os.environ.get("SIEM_SYSLOG_TLS_PORT"),
+            syslog_plaintext=os.environ.get("SIEM_SYSLOG_PLAINTEXT"),
             syslog_allow=os.environ.get("SIEM_SYSLOG_ALLOW"),
             viewer_password=os.environ.get("SIEM_VIEWER_PASSWORD"),
             rate_limit_enabled=os.environ.get("SIEM_RATE_LIMIT"),
