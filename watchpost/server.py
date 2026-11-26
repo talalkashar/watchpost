@@ -20,7 +20,7 @@ from .ratelimit import TokenBucketLimiter
 from .config import Config
 from .db import audit, connect, init_schema, now_iso, row_to_dict, utcnow, verify_chain
 from .diagnostics import configure_logging, log, record_error
-from .health import STATIC_DIR, run_health_checks
+from .health import STATIC_DIR, HealthSnapshot, run_health_checks
 from .normalize import EventError, parse_payload, validate_source
 
 SESSION_COOKIE = "wp_session"
@@ -136,6 +136,7 @@ class App:
             # cheap thing to repeat and get the tight bucket; rule proposals and approvals get their own.
             self.backtest_limiter = TokenBucketLimiter(BACKTEST_BURST, BACKTEST_PER_MINUTE)
             self.change_backtest_limiter = TokenBucketLimiter(CHANGE_BACKTEST_BURST, BACKTEST_PER_MINUTE)
+        self.health_snapshot = HealthSnapshot(self.conn, config.db_path)
         self.storyline = storyline.Runner(self.conn)
 
     def conn(self):
@@ -251,7 +252,7 @@ def my_session_revoke(req, sid):
 
 @route("GET", "/api/health", role="public")
 def health_summary(req):
-    report = run_health_checks(lambda: connect(req.app.config.db_path), req.app.config.db_path)
+    report = req.app.health_snapshot.report()
     req.status = 503 if report["status"] == "failing" else 200
     # Public view: statuses only, no internal details.
     return {"status": report["status"], "version": __version__, "checked_at": report["checked_at"],
@@ -272,7 +273,10 @@ def _set_omitted(req, omitted):
 
 @route("GET", "/api/health/details")
 def health_details(req):
-    report = run_health_checks(lambda: connect(req.app.config.db_path), req.app.config.db_path)
+    if req.user["role"] == "viewer":
+        report = req.app.health_snapshot.report()
+    else:
+        report = run_health_checks(req.app.conn, req.app.config.db_path)
     errors, errors_omitted = _newest(
         req.conn, "SELECT COUNT(*) FROM error_log",
         "SELECT created_at, component, message, guidance FROM error_log ORDER BY id DESC LIMIT ?",
@@ -1263,9 +1267,26 @@ class Handler(BaseHTTPRequestHandler):
     sys_version = ""
     app: App = None
 
+    def end_headers(self):
+        for key, value in SECURITY_HEADERS.items():
+            self.send_header(key, value)
+        if self.app.config.secure_cookies:
+            self.send_header("Strict-Transport-Security", "max-age=31536000")
+        super().end_headers()
+
+    def send_error(self, code, message=None, explain=None):
+        # The stdlib handles parser errors and unsupported methods before routing.
+        self.close_connection = True
+        self._send(code, {"error": self.responses.get(code, ("HTTP error",))[0]},
+                   extra_headers={"Cache-Control": "no-store", "Connection": "close"})
+
     def log_message(self, fmt, *args):
         # Path only (no query string, which may carry search terms).
-        log.info("%s %s %s", self.command, urlparse(self.path).path, args[1] if len(args) > 1 else "")
+        try:
+            path = urlparse(getattr(self, "path", "")).path
+        except ValueError:
+            path = "<invalid request target>"
+        log.info("%s %s %s", self.command, path, args[1] if len(args) > 1 else "")
 
     def do_GET(self):
         self._handle()
@@ -1325,8 +1346,6 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        for key, value in SECURITY_HEADERS.items():
-            self.send_header(key, value)
         for key, value in (extra_headers or {}).items():
             self.send_header(key, value)
         self.end_headers()
@@ -1520,14 +1539,14 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(403, "this download is not available in the masked view")  # fail closed
         return self.masker.text(download.body.decode("utf-8")).encode("utf-8")
 
-    def _authorize(self, role, csrf, fn=None):
+    def _authorize(self, role, csrf, fn=None, *, record_token_use=True):
         self.session_token = self._session_token()
         self.user = None
         if role == "public":
             return
         header = self.headers.get("Authorization", "")
         if header.startswith("Bearer "):
-            self.user = auth.token_user(self.conn, header[7:].strip())
+            self.user = auth.token_user(self.conn, header[7:].strip(), record_use=record_token_use)
             if self.user is None:
                 raise ApiError(401, "invalid or revoked API token")
             mutation_capabilities = {
@@ -1567,17 +1586,16 @@ class Handler(BaseHTTPRequestHandler):
         try:
             sub = stream.BROKER.subscribe()
         except stream.TooManySubscribers:
-            return self._send(503, {"error": "too many live stream connections; retry later"})
+            return self._send(503, {"error": "too many live stream connections; retry later"},
+                              extra_headers={"Cache-Control": "no-store"})
         try:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Accel-Buffering", "no")
-            for key, value in SECURITY_HEADERS.items():
-                self.send_header(key, value)
             self.end_headers()
             self.close_connection = True
-            report = run_health_checks(lambda: connect(self.app.config.db_path), self.app.config.db_path)
+            report = self.app.health_snapshot.report()
             self._frame("hello", {"version": __version__, "user": self.user["username"],
                                   "heartbeat_seconds": stream.HEARTBEAT_SECONDS}, retry=3000)
             self._frame("health", {"partial": False, "status": report["status"], "checked_at": report["checked_at"],
@@ -1594,15 +1612,18 @@ class Handler(BaseHTTPRequestHandler):
             stream.BROKER.unsubscribe(sub)
 
     def _frame(self, kind, data, retry=None):
-        if self.user["role"] == "viewer":  # rebuilt per frame: the setting or the known usernames may have changed
-            conn = self.app.conn()
-            try:
-                masker = masking.for_user(conn, self.user)
-            except (sqlite3.Error, masking.Unavailable):
-                raise ConnectionAbortedError("masking unavailable; end the stream rather than send it unmasked")
-            finally:
-                conn.close()
+        # Each frame must honor expiry, revocation and the current masking policy.
+        try:
+            self.conn = self.app.conn()
+            self._authorize("viewer", False, event_stream, record_token_use=False)
+            masker = masking.for_user(self.conn, self.user)
             data = masker.mask(data) if masker else data
+        except (ApiError, sqlite3.Error, masking.Unavailable) as exc:
+            raise ConnectionAbortedError("stream authorization unavailable") from exc
+        finally:
+            if self.conn is not None:
+                self.conn.close()
+                self.conn = None
         payload = (f"retry: {retry}\n".encode() if retry else b"") + \
             stream.frame(kind, data, stream.BROKER.next_id())
         self.wfile.write(payload)

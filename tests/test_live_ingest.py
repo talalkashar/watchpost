@@ -303,6 +303,8 @@ class FakeIngest:
                 payload = json.dumps({"accepted": lines if status < 300 else 0,
                                       "rejected": 0 if status < 300 else lines}).encode()
                 self.send_response(status)
+                if 300 <= status < 400:
+                    self.send_header("Location", "/moved")
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
@@ -347,6 +349,13 @@ class ShipperTests(unittest.TestCase):
     def append(self, text, path=None):
         with open(path or self.log, "ab") as handle:
             handle.write(text.encode())
+
+    def test_redirect_preserves_unsent_position(self):
+        fake = self.fake((302,))
+        self.append("line 1\n")
+        with self.assertRaisesRegex(shipper.FatalError, "configure the final endpoint"):
+            self.make(fake.url).ship_once(max_retries=0)
+        self.assertFalse(self.state.exists())
 
     def test_ships_complete_lines_and_resumes_from_position_file(self):
         fake = self.fake()
