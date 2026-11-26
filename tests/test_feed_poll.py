@@ -65,7 +65,8 @@ process.stdout.write(JSON.stringify(feedPollNote(input.mode)));
         paint = mode[mode.index("paintFeedPoll() {"):]
         self.assertIn("feedPollNote(this.mode)", paint)
         self.assertIn("note.hidden = !text", paint)
-        mount = self.dash[self.dash.index("mount() {"):self.dash.index("unmount() {")]
+        start = self.dash.index("\n  mount() {")
+        mount = self.dash[start:self.dash.index("\n  unmount(", start)]
         self.assertLess(mount.index('id: "feed-poll"'), mount.index("Live.paintFeedPoll()"))
 
 
