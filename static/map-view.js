@@ -34,7 +34,7 @@ class AttackMapView {
       el("div", { class: "mapwrap", id: "map" }),
       el("span", { class: "orbit-bearing", "aria-hidden": "true" }));
     const cameraTools = el("div", { class: "orbit-tools" }, this.zoomControls,
-      el("span", { class: "orbit-hint" }, "Tap to steer", el("br"), "Pinch to zoom"), this.motionButton);
+      el("span", { class: "orbit-hint" }, "Tap to steer", el("br"), " Pinch to zoom"), this.motionButton);
     this.list = el("div", { class: "orbit-list" });
     this.detail = el("div", { class: "orbit-detail", "aria-live": "polite" });
     this.side = el("aside", { id: "map-side", "aria-label": "Attack routes" },

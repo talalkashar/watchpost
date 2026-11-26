@@ -324,9 +324,12 @@ dialog::backdrop { background: rgb(8 8 8 / .72); }
 
 /* live feed: time and severity span the row; the message sits under the address */
 #p-feed .pb { padding: 0; display: flex; flex-direction: column; }
+#feed-pause { min-width: 7em; }
 .feed-head, .fr { display: grid; grid-template-columns: 68px 52px minmax(0, 1fr); column-gap: 8px; padding: 0 12px; }
 .feed-head { align-items: center; font: 500 11px var(--sans); color: var(--muted); height: 26px; border-bottom: 1px solid var(--line); flex: none; }
-.feed { flex: 1; overflow: hidden; font: 12.5px/1.4 var(--sans); }
+.feed { flex: 1; overflow-y: auto; font: 12.5px/1.4 var(--sans); }
+.feed-filter-empty { display: none; }
+#p-feed:has(.fr[hidden]):not(:has(.fr:not([hidden]))) .feed-filter-empty { display: block; }
 .fr .ft { font: 11.5px var(--mono); font-variant-numeric: tabular-nums; }
 .fr { align-items: start; min-height: 40px; padding-top: 5px; padding-bottom: 5px; grid-template-rows: auto auto;
   border-bottom: 1px solid rgb(255 255 255 / .044); color: var(--ink-2); box-shadow: inset 2px 0 0 currentColor; }
@@ -506,7 +509,7 @@ dialog::backdrop { background: rgb(8 8 8 / .72); }
 main:focus { outline: none; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* The feed clips anything drawn outside a row, so the ring sits inside the row. */
-.feed :focus-visible { outline-offset: -2px; }
+.feed:focus-visible, .feed :focus-visible { outline-offset: -2px; }
 tr.clickable:focus-visible, tr.kbd-selected:focus { outline: 2px solid var(--accent); outline-offset: -2px; background: rgb(255 255 255 / .045); }
 a.bcard.kbd-selected:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 kbd { font: 600 11px var(--sans); padding: 0 5px; border: 1px solid var(--line-2); border-bottom-width: 2px; border-radius: 3px; color: var(--ink); background: var(--bg-2); }
@@ -543,7 +546,10 @@ kbd { font: 600 11px var(--sans); padding: 0 5px; border: 1px solid var(--line-2
   .brand { padding: 0 2px; border: 0; }
   .nav-toggle { display: inline-block; }
   .rail:not(.menu-open) nav, .rail:not(.menu-open) .rail-foot { display: none; }
-  nav { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+  nav { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(8.5rem, 100%), 1fr)); }
+  .menu-open nav { overflow-y: auto; }
+  .menu-open .brand, .menu-open .rail-foot { flex-shrink: 0; }
+  .rail-foot .credit { display: inline-flex; align-items: center; min-height: 44px; }
   nav button { min-height: 44px; }
   .rail-foot { margin: 0; } .who { flex-direction: row; flex-wrap: wrap; align-items: center; }
   /* Targets are 44px, and fields are 16px so iOS does not zoom. */
@@ -580,7 +586,17 @@ kbd { font: 600 11px var(--sans); padding: 0 5px; border: 1px solid var(--line-2
   .soc { display: flex; flex-direction: column; align-items: stretch; }
   #p-map { height: 240px; } .map-side { display: none; }
   .map-legend { left: 10px; flex-wrap: wrap; justify-content: flex-end; gap: 4px 10px; }
+  #p-feed .ph { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 8px; padding-block: 0; }
+  #p-feed-meta { display: contents; }
+  #feed-pause { grid-area: 1 / 2; justify-self: end; }
+  #feed-rate:empty { display: none; }
+  #feed-rate, #feed-poll { padding-bottom: 6px; }
+  .fr .ft, .fr .sevtag { grid-row: 1; }
+  .fr .fn { white-space: normal; overflow-wrap: anywhere; }
+  .fr .fd { grid-column: 1 / -1; }
+  .fr.alert-row { min-height: 44px; }
   .fr .route { flex-wrap: wrap; }
+  .fr .fd code { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
   .fr .fu { white-space: normal; overflow-wrap: anywhere; }
   .ph:has(a) { padding-block: 0; }
   .board { flex-direction: column; height: auto; }
