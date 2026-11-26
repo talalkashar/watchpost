@@ -120,16 +120,28 @@
   .orbit-motion { position: static; min-height: 44px; margin-left: auto; }
   #map-side { padding: 9px 12px; width: 100%; border: 0; border-top: 1px solid #29383e; }
   .orbit-list-head { margin-bottom: 5px; }
-  .orbit-list { display: flex; gap: 5px; }
+  .orbit-list { display: flex; gap: 5px; min-height: 44px; }
+  .orbit-empty { align-self: center; margin: 0; }
   #map-side .ms-row { min-width: 127px; width: auto; min-height: 44px; flex: none; padding: 5px 8px; border: 1px solid #2a3942; border-radius: 4px; }
-  .orbit-detail { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; padding-top: 6px; }
+  .orbit-detail { grid-template-columns: auto minmax(0, 1fr); align-content: start; align-items: baseline;
+    gap: 2px 8px; min-height: 48px; font-size: 12px; }
+  .orbit-caption { font-size: 11px; }
+  .orbit-detail strong { font-size: 14px; overflow-wrap: anywhere; }
+  .orbit-detail > span:not(.orbit-caption) { grid-column: 1 / -1; }
   .orbit-metrics { padding: 9px 1px; }
   .orbit-metrics > div { padding: 0 7px; }
   .orbit-metrics dt { font-size: 9px; letter-spacing: .03em; }
   .orbit-metrics dd { font-size: 13px; }
-  .orbit-foot { align-items: baseline; padding: 0 12px; }
+  .orbit-foot { align-items: flex-start; gap: 10px; padding: 0 12px; }
+  #map-unknown { flex: none; display: flex; align-items: center; min-height: 44px; font-size: 11px; }
   .orbit-key summary { min-height: 44px; align-content: center; font-size: 11px; }
   .orbit-swatches { flex-wrap: wrap; padding-bottom: 10px; }
+}
+@media (max-width: 390px) {
+  .orbit-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 8px; }
+  .orbit-metrics > div { padding: 0 12px; }
+  .orbit-metrics > div:nth-child(even) { border-right: 0; }
+  .orbit-metrics dt { font-size: 11px; }
 }
 @media (prefers-reduced-motion: reduce) {
   #p-map *, #p-map *::after, #p-map *::before { animation: none !important; transition: none !important; }
@@ -172,5 +184,7 @@
   .orbit-motion::before { margin: 0; font-size: 12px; }
 }
 @media (max-width: 360px) {
-  .orbit-hint { display: none; }
+  #p-map[data-mode="3d"] .orbit-tools { flex-wrap: wrap; row-gap: 0; }
+  .orbit-hint { order: 1; flex-basis: 100%; text-align: center; padding-bottom: 4px; }
+  .orbit-hint br { display: none; }
 }
