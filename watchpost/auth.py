@@ -47,7 +47,7 @@ def _stored_iterations(stored):
     return count
 
 
-def verify_password(password, stored):
+def verify_password(password, stored, *, disabled=False):
     try:
         if not isinstance(password, str):
             return False
@@ -58,8 +58,14 @@ def verify_password(password, stored):
             secret = password.encode()
         except UnicodeEncodeError:
             return False
-        candidate = hashlib.pbkdf2_hmac("sha256", secret, base64.b64decode(salt), int(iterations))
-        return hmac.compare_digest(candidate, base64.b64decode(digest))
+        rounds = int(iterations)
+        salt = base64.b64decode(salt)
+        candidate = hashlib.pbkdf2_hmac("sha256", secret, salt, rounds)
+        matches = hmac.compare_digest(candidate, base64.b64decode(digest))
+        if (disabled or not matches) and rounds < PBKDF2_ITERATIONS:
+            # Rejected legacy credentials should cost as many rounds as the dummy hash.
+            hashlib.pbkdf2_hmac("sha256", secret, salt, PBKDF2_ITERATIONS - rounds)
+        return matches
     except (ValueError, TypeError, OverflowError, AttributeError):
         return False
 
@@ -315,7 +321,7 @@ def _reject_disabled_login(conn, user, password):
     audit row. failed_logins is not incremented and the account is not locked.
     The error text does not say the account is disabled.
     """
-    verify_password(password, user["pw_hash"])
+    verify_password(password, user["pw_hash"], disabled=True)
     audit(conn, user["username"], "login_failed", None, {"reason": "disabled"})
     raise AuthError("invalid username or password")
 
@@ -351,25 +357,33 @@ def login(conn, username, password, ttl_seconds):
     with _verification_slot(conn, user["id"]) as attempt:
         if user["disabled"]:
             _reject_disabled_login(conn, user, password)
-        ok = verify_password(password, user["pw_hash"])
-        # Hash outside the write lock. The transaction stores it only after the password is accepted.
-        upgraded = hash_password(password) if ok and not _locked(user) and _needs_rehash(user["pw_hash"]) else None
-        with transaction(conn):
-            row = conn.execute("SELECT * FROM users WHERE id=?", (user["id"],)).fetchone()
-            if not _consume_slot(conn, user["id"], attempt) or row is None:
-                raise AuthError("invalid username or password")
-            if row["disabled"] or row["pw_hash"] != user["pw_hash"]:
-                reason = "disabled" if row["disabled"] else "credential_changed"
-                audit(conn, username, "login_failed", None, {"reason": reason})
-            elif _locked(row):
-                audit(conn, username, "login_blocked", None, {"reason": "locked"})
-            elif not ok:
-                audit(conn, username, "login_failed", None, {"locked": _count_failure(conn, row["id"])})
-            elif row["totp_secret"]:
-                return _issue_challenge(conn, _store_rehash(conn, row, upgraded))
-            else:
-                _store_rehash(conn, row, upgraded)
-                return _start_session(conn, row, ttl_seconds)
+        for rechecking in (False, True):
+            ok = verify_password(password, user["pw_hash"])
+            # Hash outside the write lock. The transaction stores it only after the password is accepted.
+            upgraded = hash_password(password) if ok and not _locked(user) and _needs_rehash(user["pw_hash"]) else None
+            with transaction(conn):
+                row = conn.execute("SELECT * FROM users WHERE id=?", (user["id"],)).fetchone()
+                if (not rechecking and upgraded is not None and row is not None and not row["disabled"]
+                        and row["pw_hash"] != user["pw_hash"]):
+                    # A concurrent login may have migrated the same password. Release the
+                    # write lock and verify the new hash once, keeping this request's slot.
+                    user = row
+                    continue
+                if not _consume_slot(conn, user["id"], attempt) or row is None:
+                    raise AuthError("invalid username or password")
+                if row["disabled"] or row["pw_hash"] != user["pw_hash"] or (rechecking and not ok):
+                    reason = "disabled" if row["disabled"] else "credential_changed"
+                    audit(conn, username, "login_failed", None, {"reason": reason})
+                elif _locked(row):
+                    audit(conn, username, "login_blocked", None, {"reason": "locked"})
+                elif not ok:
+                    audit(conn, username, "login_failed", None, {"locked": _count_failure(conn, row["id"])})
+                elif row["totp_secret"]:
+                    return _issue_challenge(conn, _store_rehash(conn, row, upgraded))
+                else:
+                    _store_rehash(conn, row, upgraded)
+                    return _start_session(conn, row, ttl_seconds)
+            break
     if _locked(row) and not row["disabled"]:
         raise AuthError(_LOCKED, 429)
     raise AuthError("invalid username or password")

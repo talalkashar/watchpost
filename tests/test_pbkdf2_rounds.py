@@ -67,6 +67,24 @@ class Pbkdf2RoundTests(unittest.TestCase):
         self.assertNotEqual(upgraded, stored)
         self.assertTrue(auth.verify_password(PASSWORD, upgraded))
 
+    def test_rejected_sign_ins_do_the_configured_number_of_rounds(self):
+        conn = memory_db()
+        self.addCleanup(conn.close)
+        with mock.patch.object(auth, "PBKDF2_ITERATIONS", 2000):
+            for name, rounds, disabled in [("legacy", 1000, 0), ("current", 2000, 0), ("disabled", 1000, 1)]:
+                conn.execute("INSERT INTO users(username, pw_hash, role, created_at, disabled) VALUES (?,?,?,?,?)",
+                             (name, auth.hash_password(PASSWORD, rounds), "analyst", now_iso(), disabled))
+            with mock.patch.object(auth, "_DUMMY_HASH", auth.hash_password(auth._TIMING_PASSWORD)):
+                for name, password in [("unknown", "wrong"), ("current", "wrong"), ("legacy", "wrong"),
+                                       ("disabled", "wrong"), ("disabled", PASSWORD)]:
+                    with self.subTest(username=name, password=password):
+                        with mock.patch.object(auth.hashlib, "pbkdf2_hmac", wraps=auth.hashlib.pbkdf2_hmac) as derive:
+                            with self.assertRaises(AuthError) as caught:
+                                auth.login(conn, name, password, 3600)
+                        self.assertEqual((caught.exception.status, str(caught.exception)),
+                                         (401, "invalid username or password"))
+                        self.assertEqual(sum(call.args[3] for call in derive.call_args_list), 2000)
+
     def test_wrong_password_does_not_upgrade(self):
         conn = memory_db()
         self.addCleanup(conn.close)

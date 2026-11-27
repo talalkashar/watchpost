@@ -105,6 +105,43 @@ class PasswordLockoutTests(FileDb):
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM mfa_pending").fetchone()[0], challenge)
                 conn.execute("DELETE FROM sessions")
 
+    def test_overlapping_logins_can_both_use_the_migrated_password(self):
+        conn, other = self.connect(), self.connect()
+        conn.execute("UPDATE users SET pw_hash=?", (auth.hash_password(PASSWORD, 500),))
+        hash_password = auth.hash_password
+        sessions = []
+
+        def finish_other_login(password):
+            with mock.patch.object(auth, "hash_password", hash_password):
+                sessions.append(auth.login(other, "alice", password, 3600)[0])
+            return hash_password(password)
+
+        with mock.patch.object(auth, "PBKDF2_ITERATIONS", 1000):
+            with mock.patch.object(auth, "hash_password", side_effect=finish_other_login):
+                sessions.append(auth.login(conn, "alice", PASSWORD, 3600)[0])
+        self.assertNotEqual(*sessions)
+        for session in sessions:
+            self.assertEqual(auth.session_user(conn, session)["username"], "alice")
+        self.assertEqual(auth._stored_iterations(conn.execute("SELECT pw_hash FROM users").fetchone()[0]), 1000)
+
+    def test_password_reset_during_migration_rejects_the_old_password(self):
+        conn, writer = self.connect(), self.connect()
+        conn.execute("UPDATE users SET pw_hash=?", (auth.hash_password(PASSWORD, 500),))
+        replacement = auth.hash_password("replacement-password", 1000)
+        hash_password = auth.hash_password
+
+        def reset_password(password):
+            writer.execute("UPDATE users SET pw_hash=?", (replacement,))
+            return hash_password(password)
+
+        with mock.patch.object(auth, "PBKDF2_ITERATIONS", 1000):
+            with mock.patch.object(auth, "hash_password", side_effect=reset_password):
+                with self.assertRaises(AuthError) as caught:
+                    auth.login(conn, "alice", PASSWORD, 3600)
+        self.assertEqual(caught.exception.status, 401)
+        self.assertEqual(conn.execute("SELECT pw_hash FROM users").fetchone()[0], replacement)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0], 0)
+
     def test_disabled_accounts_share_a_bounded_hash_budget(self):
         conn = self.connect()
         conn.execute("UPDATE users SET disabled=1")
