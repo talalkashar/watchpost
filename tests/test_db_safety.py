@@ -1,7 +1,12 @@
 """SQL identifier checks, hot-path indexes, and transaction boundaries in watchpost.db."""
 
+import os
 import sqlite3
+import stat
+import tempfile
 import unittest
+from contextlib import closing
+from pathlib import Path
 
 from watchpost.db import (
     ADDED_COLUMNS,
@@ -40,6 +45,46 @@ def _columns(conn, table):
 
 def _plan(conn, sql, args=()):
     return "\n".join(r["detail"] for r in conn.execute("EXPLAIN QUERY PLAN " + sql, args))
+
+
+class DatabaseFileTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "requires POSIX file modes")
+    def test_new_database_and_sqlite_companions_are_private(self):
+        for mask in (0o022, 0o777):
+            with self.subTest(umask=oct(mask)), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "watchpost #1.db"
+                previous = os.umask(mask)
+                try:
+                    with closing(connect(path)) as conn:
+                        conn.execute("CREATE TABLE entries (id INTEGER)")
+                        for suffix in ("", "-wal", "-shm"):
+                            file = path.with_name(path.name + suffix)
+                            self.assertEqual(stat.S_IMODE(file.stat().st_mode), 0o600, file.name)
+                        conn.execute("PRAGMA journal_mode = DELETE")
+                        conn.execute("BEGIN")
+                        conn.execute("INSERT INTO entries VALUES (1)")
+                        journal = path.with_name(path.name + "-journal")
+                        self.assertEqual(stat.S_IMODE(journal.stat().st_mode), 0o600)
+                finally:
+                    os.umask(previous)
+
+    def test_existing_database_keeps_its_data_and_permissions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "watchpost.db"
+            with closing(sqlite3.connect(path)) as conn:
+                conn.execute("CREATE TABLE entries AS SELECT 42 AS id")
+            if os.name == "posix":
+                path.chmod(0o640)
+            with closing(connect(path)) as conn:
+                self.assertEqual(conn.execute("SELECT id FROM entries").fetchone()[0], 42)
+                if os.name == "posix":
+                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o640)
+
+    def test_in_memory_database_has_no_backing_file(self):
+        with closing(connect(":memory:")) as conn:
+            conn.execute("CREATE TABLE entries AS SELECT 42 AS id")
+            self.assertEqual(conn.execute("SELECT id FROM entries").fetchone()[0], 42)
+            self.assertEqual(conn.execute("PRAGMA database_list").fetchone()["file"], "")
 
 
 class SafetyCase(unittest.TestCase):

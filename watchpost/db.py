@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 import json
+import os
 import re
 import sqlite3
 from contextlib import contextmanager
@@ -553,15 +554,35 @@ class Connection(sqlite3.Connection):
     audit_key = None
 
 
+def _private_db_uri(path):
+    # SQLite's POSIX VFS copies the database mode to its journal, WAL and SHM.
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    except FileExistsError:
+        pass  # Keep the operator's permissions on existing databases.
+    else:
+        try:
+            os.fchmod(fd, 0o600)  # Restore owner bits masked by a restrictive umask.
+        finally:
+            os.close(fd)
+    # If the file disappears before SQLite opens it, fail instead of recreating it.
+    return path.as_uri() + "?mode=rw"
+
+
 def connect(db_path, audit_key=None):
-    if db_path != ":memory:":
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path, timeout=10, isolation_level=None, factory=Connection)
+    on_disk = os.fspath(db_path) not in ("", ":memory:")
+    use_uri = on_disk and os.name == "posix"
+    if on_disk:
+        path = Path(db_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if use_uri:
+            db_path = _private_db_uri(path.resolve())
+    conn = sqlite3.connect(db_path, uri=use_uri, timeout=10, isolation_level=None, factory=Connection)
     conn.audit_key = audit_key or None
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 10000")
-    if db_path != ":memory:":
+    if on_disk:
         conn.execute("PRAGMA journal_mode = WAL")
     return conn
 
