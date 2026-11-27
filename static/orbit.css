@@ -27,7 +27,7 @@
 .orbit-surface, .orbit-beams { position: absolute; inset: 0; width: 100%; height: 100%; display: none; }
 #p-map[data-mode="3d"] :is(.orbit-surface, .orbit-beams) { display: block; }
 #p-map[data-mode="3d"] #map { pointer-events: none; }
-#p-map[data-mode="3d"] #map svg { display: none; }
+#p-map:not([data-mode="2d"]) #map svg { display: none; }
 .orbit-sky, .orbit-limb { display: none; position: absolute; pointer-events: none; }
 #p-map[data-mode="3d"] :is(.orbit-sky, .orbit-limb) { display: block; }
 .orbit-sky { inset: -20px; background: #050910 url("/textures/orbit-sky.webp") center / cover; filter: brightness(1.7) contrast(1.12); }
@@ -162,7 +162,7 @@
   color: #d5e7ea; font: 500 11px var(--sans); white-space: nowrap; pointer-events: none; opacity: 0;
   transition: opacity .2s, transform .2s; }
 .orbit-wheel-hint.is-shown { opacity: 1; transform: translate(-50%, 0); }
-.orbit-stage[data-loading="true"]::after { content: "Loading globe imagery…"; position: absolute; inset: auto 0 14px; text-align: center;
+#p-map[data-mode="loading"] .orbit-stage::after { content: "Loading globe imagery…"; position: absolute; inset: auto 0 14px; text-align: center;
   background: none; opacity: 1; color: #9fb6c0; font: 11px var(--mono); letter-spacing: .04em; }
 .orbit-bearing { z-index: 3; color: #b6cbd2; letter-spacing: .04em; }
 .orbit-zoom, .orbit-motion { z-index: 3; }
