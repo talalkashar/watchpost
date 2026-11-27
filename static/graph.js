@@ -144,17 +144,17 @@ const Graph = (() => {
         .some(value => value != null && String(value).toLowerCase().includes(query)));
       for (const n of matches.slice(0, 8)) {
         results.append(chip([el("small", {}, types[n.type].name, n.ref ? ` #${n.ref}` : ""),
-          n.title || n.label], () => {
+          n.title || n.label], (ev) => {
           if (mobile.matches) key.open = false;
           canvas.focus({ preventScroll: true }); stage.scrollIntoView({ block: "nearest" });
-          resize(); focusNode(n);
+          resize(); focusNode(n, ev.pointerType === "touch");
         }));
       }
       if (!matches.length) results.append(el("small", { role: "status" }, "No matching nodes."));
     }
 
-    function focusNode(n) {
-      locked = n; select(n); followingFit = false;
+    function focusNode(n, viaTouch) {
+      locked = n; select(n, viaTouch); followingFit = false;
       flight = { n, x: cx, y: cy, zoom, start: elapsed, endZoom: Math.min(bounds.maxZoom, Math.max(zoom, 2)) };
       requestDraw();
     }
@@ -201,7 +201,8 @@ const Graph = (() => {
     }
 
     function select(n, viaTouch = false) {
-      if (n === selected) return;
+      const needsTouchAction = n && viaTouch && !tip.querySelector("button");
+      if (n === selected && !needsTouchAction) return;
       selected = n;
       neighborhood = new Set([n]);
       if (n) {
@@ -537,7 +538,9 @@ const Graph = (() => {
       if (drag.node && drag.moved) {
         refreshBounds();
       }
-      const tap = ev.type === "pointerup" && !drag.moved && !drag.inspected;
+      const releasedInPlace = ev.type === "pointerup" && !drag.moved;
+      if (releasedInPlace && drag.inspected) locked = drag.node;
+      const tap = releasedInPlace && !drag.inspected;
       const n = drag.node;
       drag = pointers.size ? { moved: true, pinch: pointers.size === 2 ? pinch() : null } : null;
       if (tap && ev.pointerType === "touch") {
