@@ -151,7 +151,10 @@ DEFAULT_RULES = [
                        "listed name also covers its subdomains. The service is read from cloud audit events of "
                        "the form '<action> on <service>' (CloudTrail-style JSON, or a proxy/CASB feed sent as "
                        "JSON); events that name no service are skipped. Uses of one service by one account "
-                       "within `window_seconds` join the same alert. Unsanctioned is not the same as hostile: "
+                       "within `window_seconds` join the same alert. The account folds ASCII letters only, the "
+                       "same fold as `ignore_users`: `Alice` and `alice` are one account, and `ÉRIN` and `érin` "
+                       "stay two. Sanctioned-service matching still folds the whole service name. Unsanctioned "
+                       "is not the same as hostile: "
                        "a newly approved tool alerts until the list is changed through review.",
         "techniques": techniques("T1567"),
         "severity": "medium",
@@ -234,6 +237,48 @@ class RuleConfigError(ValueError):
     pass
 
 
+# Same control characters ingest replaces before it stores a field. A list entry that still has one,
+# or surrounding whitespace, cannot match the stored value.
+def _has_control(value):
+    return any(ch <= "\x08" or "\x0b" <= ch <= "\x1f" or ch == "\x7f" for ch in value)
+
+
+def _shown(value, limit=60):
+    text = repr(value)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
+def _check_list_entry(key, index, entry):
+    """Reject one list entry that cannot match a stored event.
+
+    Ingest strips surrounding whitespace and replaces control characters. A service or logging
+    action is one word. A sanctioned name is compared after the same leading-dot strip as
+    list_entry, and without the trailing .,;() the service parser removes.
+    """
+    where = f"{key}[{index}]"
+    if not isinstance(entry, str):
+        raise RuleConfigError(f"{key} entries must be non-empty strings ({where} is {type(entry).__name__})")
+    if not entry or len(entry) > 128:
+        raise RuleConfigError(
+            f"{key} entries must be non-empty strings of at most 128 characters ({where} has length {len(entry)})")
+    if entry != entry.strip() or _has_control(entry):
+        raise RuleConfigError(
+            f"{key} entry {_shown(entry)} has surrounding whitespace or control characters; "
+            "stored events do not keep them, so this entry would match nothing")
+    if key in ("sanctioned_services", "logging_actions") and any(ch.isspace() for ch in entry):
+        raise RuleConfigError(f"{key} entry {_shown(entry)} must be a single word; a space never matches")
+    if key == "sanctioned_services":
+        folded = entry.lower().lstrip(".")
+        if not folded:
+            raise RuleConfigError(f"sanctioned_services entry {_shown(entry)} is only dots and matches no service")
+        if folded != folded.strip(".,;()"):
+            raise RuleConfigError(
+                f"sanctioned_services entry {_shown(entry)} has punctuation the service parser strips, "
+                "so it would match nothing")
+
+
 def validate_params(rule_id, params):
     import ipaddress
 
@@ -241,40 +286,60 @@ def validate_params(rule_id, params):
         try:
             return sigma.validate_params(params)
         except sigma.SigmaError as exc:
-            raise RuleConfigError(str(exc))
+            raise RuleConfigError(str(exc)) from exc
     if search_rules.is_search(rule_id):  # a promoted saved search: only threshold and window_seconds are tunable
         try:
             return search_rules.validate_params(params)
         except search_rules.SearchRuleError as exc:
-            raise RuleConfigError(str(exc))
+            raise RuleConfigError(str(exc)) from exc
     defaults = next((r["params"] for r in DEFAULT_RULES if r["id"] == rule_id), None)
     if defaults is None:
         raise RuleConfigError(f"unknown rule {rule_id!r}")
     if not isinstance(params, dict):
-        raise RuleConfigError("params must be an object")
+        raise RuleConfigError(f"params must be an object (got {type(params).__name__})")
     unknown = set(params) - set(defaults)
     if unknown:
-        raise RuleConfigError(f"unknown parameter(s) for {rule_id}: {', '.join(sorted(unknown))}")
+        if all(isinstance(name, str) for name in unknown):
+            names = ", ".join(sorted(unknown))
+        else:
+            names = ", ".join(sorted((repr(name) for name in unknown)))
+        known = ", ".join(sorted(defaults))
+        raise RuleConfigError(f"unknown parameter(s) for {rule_id}: {names}. Known parameters: {known}")
     merged = dict(defaults)
     for key, value in params.items():
         kind, low, high = PARAM_SCHEMA[key]
         if kind == "int":
-            if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
-                raise RuleConfigError(f"{key} must be an integer between {low} and {high}")
+            if isinstance(value, bool) or not isinstance(value, int):
+                got = "a boolean" if isinstance(value, bool) else f"a {type(value).__name__}"
+                raise RuleConfigError(
+                    f"{key} must be an integer between {low} and {high} (got {_shown(value)}, {got})")
+            if not low <= value <= high:
+                raise RuleConfigError(f"{key} must be an integer between {low} and {high} (got {value})")
         else:
-            if not isinstance(value, list) or not low <= len(value) <= high:
-                raise RuleConfigError(f"{key} must be a list with {low}-{high} entries")
-            if not all(isinstance(v, str) and 0 < len(v) <= 128 for v in value):
-                raise RuleConfigError(f"{key} entries must be non-empty strings")
+            if not isinstance(value, list):
+                raise RuleConfigError(
+                    f"{key} must be a list with {low}-{high} entries (got a {type(value).__name__})")
+            if not low <= len(value) <= high:
+                raise RuleConfigError(f"{key} must be a list with {low}-{high} entries (got {len(value)})")
+            for index, entry in enumerate(value):
+                _check_list_entry(key, index, entry)
             if key == "ignore_ips":
-                for v in value:
+                for entry in value:
                     try:
-                        ipaddress.ip_address(v)
+                        ipaddress.ip_address(entry)
                     except ValueError:
-                        raise RuleConfigError(f"ignore_ips entry {v!r} is not an IP address")
+                        reason = f"ignore_ips entry {entry!r} is not an IP address"
+                        try:
+                            ipaddress.ip_network(entry, strict=False)
+                        except ValueError:
+                            raise RuleConfigError(reason)
+                        raise RuleConfigError(f"{reason} (a prefix is not one address)")
         merged[key] = value
-    if merged.get("business_start_hour", 0) >= merged.get("business_end_hour", 24):
-        raise RuleConfigError("business_start_hour must be before business_end_hour")
+    if "business_start_hour" in merged and "business_end_hour" in merged:
+        start, end = merged["business_start_hour"], merged["business_end_hour"]
+        if start >= end:
+            raise RuleConfigError(
+                f"business_start_hour must be before business_end_hour (got {start} and {end})")
     return merged
 
 
@@ -290,23 +355,54 @@ def _epoch(event):
 HIDING_EDITS = {"ignore_ips": "added", "ignore_users": "added", "sanctioned_services": "added",
                 "privileged_users": "removed", "logging_actions": "removed"}
 
+# SQLite COLLATE NOCASE folds these letters only. User lists and host keys use the same fold.
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+_USER_LISTS = ("ignore_users", "privileged_users")
+
+
+def _ascii_fold(value):
+    return value.translate(_ASCII_FOLD)
+
+
+def _stored_ip(value):
+    """The address form ingest stores, or None when value is not one complete address.
+
+    A prefix and any other non-address are None. Comparing them is a non-match, not an error.
+    """
+    if isinstance(value, str):
+        import ipaddress
+        try:
+            return str(ipaddress.ip_address(value))
+        except ValueError:
+            return None
+    return None
+
 
 def list_entry(param, value):
     """One list entry in the form the rules compare it in."""
     if param == "ignore_ips":
-        return value
+        stored = _stored_ip(value)
+        # A prefix or other non-address is kept as written. covers will not treat it as an address.
+        return value if stored is None else stored
+    if param in _USER_LISTS:
+        # ASCII letters only. érin does not match ÉRIN, the same split entity keys keep.
+        return _ascii_fold(value)
+    # Sanctioned services and logging actions still fold the whole string.
     return value.lower().lstrip(".") if param == "sanctioned_services" else value.lower()
 
 
 def covers(param, entries, event):
     """Whether `event` matches any of `entries` (already passed through list_entry) of a list parameter."""
     if param == "ignore_ips":
-        return event.get("src_ip") in entries
+        address = _stored_ip(event.get("src_ip"))
+        return address is not None and address in entries
     if param == "sanctioned_services":  # the service itself or any subdomain of an entry
         service = _service(event)
         return bool(service) and any(service == s or service.endswith("." + s) for s in entries)
     if param == "logging_actions":
         return (_action(event) or "").lower() in entries
+    if param in _USER_LISTS:
+        return _ascii_fold(event.get("user") or "") in entries
     return (event.get("user") or "").lower() in entries
 
 
@@ -372,12 +468,33 @@ def _group(events, key):
 
 
 def _group_users(events):
-    """Group by account name, ignoring case."""
+    """Group by account. ASCII letters only, the same fold as ignore_users.
+
+    Alice, alice, and ALICE are one account. ÉRIN and érin stay two.
+    """
     groups = defaultdict(list)
     for event in events:
         if event.get("user"):
-            groups[event["user"].lower()].append(event)
+            groups[_ascii_fold(event["user"])].append(event)
     return groups
+
+
+def _account_name(user):
+    """Account spelling for a count. ASCII letters only. Alice and alice are one name."""
+    return _ascii_fold(user)
+
+
+def _principal(event):
+    """The account, or the source IP when the event has no account.
+
+    An account folds ASCII letters only, the same fold as ignore_users.
+    Alice and alice are one principal. ÉRIN and érin stay two.
+    An IP principal stays the stored address.
+    """
+    user = event.get("user") or ""
+    if user:
+        return _ascii_fold(user)
+    return event.get("src_ip")
 
 
 def brute_force_ip(events, params):
@@ -385,7 +502,9 @@ def brute_force_ip(events, params):
     findings = []
     for ip, group in _group(_filtered(events, params, "auth_failure"), "src_ip").items():
         for cluster in _clusters(group, window, lambda w: len(w) >= threshold):
-            users = Counter(e.get("user") or "?" for e in cluster)
+            # The raw spelling lists Alice and alice as two accounts. The
+            # threshold still counts events, and the finding key stays the IP.
+            users = Counter(_account_name(e["user"]) if e.get("user") else "?" for e in cluster)
             top = ", ".join(f"{u} ({n})" for u, n in users.most_common(3))
             findings.append(_finding(
                 ip, cluster,
@@ -397,13 +516,19 @@ def brute_force_ip(events, params):
     return findings
 
 
+def _account_names(events):
+    """Distinct account names. ASCII letters only. Alice and alice are one account."""
+    return {_account_name(e["user"]) for e in events if e.get("user")}
+
+
 def password_spray(events, params):
     needed, window = params["distinct_users"], params["window_seconds"]
     findings = []
     for ip, group in _group(_filtered(events, params, "auth_failure"), "src_ip").items():
-        qualifies = lambda w: len({e.get("user") for e in w if e.get("user")}) >= needed
+        # Counting the raw spelling lets one account meet a threshold of 2.
+        qualifies = lambda w: len(_account_names(w)) >= needed
         for cluster in _clusters(group, window, qualifies):
-            users = sorted({e.get("user") for e in cluster if e.get("user")})
+            users = sorted(_account_names(cluster))
             findings.append(_finding(
                 ip, cluster,
                 f"Password spray from {ip}: {len(users)} accounts targeted",
@@ -417,11 +542,13 @@ def password_spray(events, params):
 def account_repeated_failures(events, params):
     threshold, window = params["threshold"], params["window_seconds"]
     findings = []
-    for user, group in _group(_filtered(events, params, "auth_failure"), "user").items():
+    # One list per ASCII-folded account. Spellings that share those letters
+    # are one group, so four plus four can reach the threshold.
+    for user, group in _group_users(_filtered(events, params, "auth_failure")).items():
         for cluster in _clusters(group, window, lambda w: len(w) >= threshold):
             ips = sorted({e.get("src_ip") or "unknown" for e in cluster})
             findings.append(_finding(
-                user.lower(), cluster,
+                user, cluster,
                 f"Repeated failures for account {user}: {len(cluster)} attempts",
                 f"Account {user} had {len(cluster)} failed logins from {len(ips)} source IP(s) "
                 f"({', '.join(ips[:5])}) between {cluster[0]['ts']} and {cluster[-1]['ts']}. "
@@ -432,11 +559,12 @@ def account_repeated_failures(events, params):
 
 def success_after_failures(events, params):
     needed, window = params["failures"], params["window_seconds"]
-    failures = _group(_filtered(events, params, "auth_failure"), "user")
-    failures = {u.lower(): v for u, v in failures.items()}
+    # One list per ASCII-folded account. A dict of exact spellings drops every
+    # spelling but the last, so a success can miss failures that still count.
+    failures = _group_users(_filtered(events, params, "auth_failure"))
     findings = []
     for success in _filtered(events, params, LOGIN_SUCCESS_TYPES):
-        user = (success.get("user") or "").lower()
+        user = _ascii_fold(success.get("user") or "")
         if not user or user not in failures:
             continue
         t = _epoch(success)
@@ -463,7 +591,8 @@ def off_hours_privileged_login(events, params):
     start, end = params["business_start_hour"], params["business_end_hour"]
     findings = []
     for event in _filtered(events, params, LOGIN_SUCCESS_TYPES):
-        user = (event.get("user") or "").lower()
+        # ASCII only, the same fold covers already used, so ÉRIN and érin are two alerts.
+        user = _ascii_fold(event.get("user") or "")
         if not covers("privileged_users", privileged, event):
             continue
         dt = parse_iso(event["ts"])
@@ -554,7 +683,7 @@ def privilege_escalation_after_login(events, params):
     logins = _group_users(_filtered(events, params, LOGIN_SUCCESS_TYPES))
     findings = []
     for esc in _filtered(events, params, "privilege_escalation"):
-        user = (esc.get("user") or "").lower()
+        user = _ascii_fold(esc.get("user") or "")
         t = _epoch(esc)
         recent = [l for l in logins.get(user, []) if 0 <= t - _epoch(l) <= reach]
         for login in reversed(recent):  # most recent qualifying login first
@@ -562,9 +691,11 @@ def privilege_escalation_after_login(events, params):
             if len(prior) < needed:
                 continue
             host = esc.get("host") or "unknown"
+            # ASCII only, the same fold entities use, so WEB01 and web01 are one alert.
+            host_key = _ascii_fold(host)
             minutes = (t - _epoch(login)) / 60
             findings.append(_finding(
-                f"{user}|{host}", prior + [login, esc],
+                f"{user}|{host_key}", prior + [login, esc],
                 f"Privilege escalation by {esc.get('user')} on {host} after suspicious login",
                 f"{esc.get('user')} elevated privileges on {host} at {esc['ts']}, {minutes:,.0f} min after "
                 f"logging in from {login.get('src_ip') or 'an unknown IP'} at {login['ts']}. That login followed "
@@ -630,7 +761,7 @@ def data_exfil_volume(events, params):
     for e in _filtered(events, params, EXFIL_TYPES):
         if e["event_type"] != "cloud_data_access" and not e.get("bytes"):
             continue
-        key = (e.get("user") or "").lower() or e.get("src_ip")
+        key = _principal(e)
         if key:
             groups[key].append(e)
     multiplier, history = params["baseline_multiplier"], params["history_seconds"]
@@ -699,7 +830,9 @@ def unsanctioned_cloud_service(events, params):
     window = params["window_seconds"]
     groups = defaultdict(list)
     for e in _filtered(events, params, CLOUD_TYPES):
-        service, user = _service(e), (e.get("user") or "").lower()
+        service = _service(e)
+        # ASCII letters only, the same fold as ignore_users. ÉRIN and érin stay two accounts.
+        user = _ascii_fold(e.get("user") or "")
         if not service or not user or covers("sanctioned_services", sanctioned, e):
             continue
         groups[(user, service)].append(e)
@@ -719,28 +852,78 @@ def unsanctioned_cloud_service(events, params):
     return findings
 
 
+def _request_denied(event):
+    """Whether the projected record shows a denied call.
+
+    Detection does not receive the raw event. A CloudTrail error code survives as a
+    single-token parenthetical at the end of the message. A note with a space, such as
+    "(change ticket)", is not an error code. `outcome` is not a detection field; it
+    counts only when a caller still attached it.
+    """
+    outcome = event.get("outcome")
+    if isinstance(outcome, str) and _ascii_fold(outcome.strip()) == "failure":
+        return True
+    _, found, rest = (event.get("message") or "").partition(" on ")
+    if not found or not rest.endswith(")"):
+        return False
+    token = rest[rest.rfind("(") + 1:-1]
+    return bool(token) and " " not in token and token == token.strip()
+
+
 def cloud_logging_disabled(events, params):
     actions = {list_entry("logging_actions", a) for a in params["logging_actions"]}
     window = params["window_seconds"]
     groups = defaultdict(list)
     for e in _filtered(events, params, CLOUD_TYPES):
-        key = (e.get("user") or "").lower() or e.get("src_ip")
+        key = _principal(e)
         if key and covers("logging_actions", actions, e):
             groups[key].append(e)
     findings = []
     for principal, group in groups.items():
         for cluster in _clusters(group, window, lambda w: True):
             done = Counter(_action(e) for e in cluster)
+            denied = sum(1 for e in cluster if _request_denied(e))
+            shown = ", ".join(done)
+            if denied == len(cluster):
+                title = f"Cloud audit logging action requested by {principal} and denied: {shown}"
+                proved = "Each call was denied, so this record did not change logging."
+            elif denied:
+                title = (f"Cloud audit logging action requested by {principal}: {shown} "
+                         "(a denied call is included)")
+                proved = "A denied call is included. The record names the action that was requested."
+            else:
+                title = f"Cloud audit logging action requested by {principal}: {shown}"
+                proved = ("The record names the action that was requested, not that logging is off. "
+                          "Check the trail status.")
             ips = sorted({e.get("src_ip") or "unknown" for e in cluster})
             findings.append(_finding(
-                principal, cluster,
-                f"Cloud audit logging disabled by {principal}: {', '.join(done)}",
+                principal, cluster, title,
                 f"{principal} called {', '.join(f'{a} ({n})' for a, n in done.items())} between {cluster[0]['ts']} "
-                f"and {cluster[-1]['ts']} from {', '.join(ips[:5])}. These actions stop or delete cloud audit "
-                f"logging, which hides what happens next. A denied attempt is recorded the same way, so check "
-                f"whether logging is actually off.",
+                f"and {cluster[-1]['ts']} from {', '.join(ips[:5])}. {proved}",
             ))
     return findings
+
+
+# Titles that claim the trail is already off. A requested-action title does not match these.
+_SHUTDOWN_CLAIMS = ("disabled", "shutdown", "logging is off", "logging was off", "logging off")
+
+
+def stale_logging_display(conn):
+    """Alert titles for cloud_logging_disabled that still claim a completed shutdown.
+
+    Read only. Stored rows are left as they are, including rule id, name, and params.
+    """
+    rows = conn.execute(
+        "SELECT id, title FROM alerts WHERE rule_id = ? ORDER BY id",
+        ("cloud_logging_disabled",),
+    )
+    stale = []
+    for row in rows:
+        title = row["title"] or ""
+        folded = title.lower()
+        if any(claim in folded for claim in _SHUTDOWN_CLAIMS):
+            stale.append({"id": row["id"], "title": title})
+    return stale
 
 
 PRIVILEGED_TYPES = ("privilege_use", "privilege_escalation", "cloud_iam_change")

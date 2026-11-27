@@ -1,0 +1,33 @@
+# Host and service probes: Zeek port-scan notices and the usual Windows/Linux discovery tools.
+title: Network Service Discovery Sweep
+id: c8a1f063-7e24-4b9d-95c1-0f6a3d82b417
+status: experimental
+description: |
+  A network connection or a firewall deny whose message names a service-discovery tool
+  or Zeek's Scan::Port_Scan notice. A plain SMB session with no tool name does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1046/
+tags:
+  - attack.discovery
+  - attack.t1046
+logsource:
+  category: firewall
+  product: zeek
+detection:
+  net:
+    event.action:
+      - network_connection
+      - fw_deny
+  tool:
+    message|contains:
+      - 'Scan::Port_Scan'
+      - nbtscan
+      - enum4linux
+      - CrackMapExec
+      - netexec
+  condition: net and tool
+falsepositives:
+  - An administrator running enum4linux, nbtscan, or CrackMapExec during an approved test
+level: medium

@@ -86,9 +86,11 @@ $ReservedFields = @(
     'severity', 'level', 'user', 'username', 'user_name', 'TargetUserName', 'account', 'src_ip', 'source_ip',
     'client_ip', 'ip', 'IpAddress', 'remote_addr', 'dest_ip', 'destination_ip', 'server_ip', 'dst_ip', 'dest_port',
     'destination_port', 'dst_port', 'dport', 'bytes', 'bytes_out', 'bytes_sent', 'sent_bytes', 'out_bytes',
-    'message', 'msg', 'description', 'EventID', 'event_id', 'raw', 'synthetic'
+    'ComputerName', 'AccountName', 'SourceAddress', 'ClientAddress', 'DestAddress', 'DestinationAddress',
+    'DestinationIp', 'DestPort', 'DestinationPort', 'message', 'msg', 'description', 'EventID', 'event_id', 'raw', 'synthetic'
 )
-$WindowsFields = @('TargetUserName', 'IpAddress')   # event data Watchpost is meant to read
+$WindowsFields = @('TargetUserName', 'AccountName', 'IpAddress', 'SourceAddress', 'ClientAddress',
+    'DestAddress', 'DestinationAddress', 'DestinationIp', 'DestPort', 'DestinationPort')   # event data Watchpost is meant to read
 
 function Write-Log {
     # Write-Host, not Write-Output: a function's output is its return value, and log lines must not join it.
@@ -174,15 +176,24 @@ function ConvertTo-WatchpostRecord {
         $record[(ConvertTo-FieldName $pair[0])] = Limit-Text $pair[1]
     }
 
-    if ($record.Contains('IpAddress')) {
-        # "-", "LOCAL" or a host name would make Watchpost refuse the whole event.
-        $address = "$($record['IpAddress'])".Trim()
+    foreach ($field in @('IpAddress', 'SourceAddress', 'ClientAddress', 'DestAddress', 'DestinationAddress', 'DestinationIp')) {
+        if (-not $record.Contains($field)) { continue }
+        $address = "$($record[$field])".Trim()
         $parsedAddress = $null
-        $record.Remove('IpAddress')
+        $record.Remove($field)
         if ($address -and [System.Net.IPAddress]::TryParse($address, [ref] $parsedAddress) -and $address -match '[.:]') {
-            $record['IpAddress'] = $parsedAddress.ToString()
+            $record[$field] = $parsedAddress.ToString()
         } elseif ($address) {
-            $record['win_IpAddress'] = $address
+            $record["win_$field"] = $address
+        }
+    }
+    foreach ($field in @('DestPort', 'DestinationPort')) {
+        if (-not $record.Contains($field)) { continue }
+        $portText = "$($record[$field])".Trim()
+        $port = 0
+        if ($portText -notmatch '^[0-9]+$' -or -not [int]::TryParse($portText, [ref] $port) -or $port -gt 65535) {
+            $record["win_$field"] = $record[$field]
+            $record.Remove($field)
         }
     }
 

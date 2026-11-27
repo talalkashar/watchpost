@@ -1,0 +1,55 @@
+# SQL injection against a public web app. Watchpost stores a combined access line as
+# "METHOD path -> status ua=agent" and leaves the path percent-encoded, so the list
+# covers both that stored form and a decoded copy an analyst might paste.
+title: Web SQL Injection Attempt
+id: e8eb38c5-edba-4f49-97ae-ece699e8d84c
+status: experimental
+description: |
+  A web request whose URL carries a SQL injection payload (UNION SELECT, a tautology,
+  or a timing or file function). Each matching event is evidence; Watchpost groups
+  them per source IP.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1190/
+  - https://cwe.mitre.org/data/definitions/89.html
+tags:
+  - attack.initial_access
+  - attack.t1190
+logsource:
+  category: webserver
+detection:
+  web:
+    event.action:
+      - web_request
+      - web_scan
+      - web_error
+  sqli:
+    message|contains:
+      - 'union select* -> ???'
+      - 'union%20select* -> ???'
+      - 'union+select* -> ???'
+      - 'union all select* -> ???'
+      - 'union%20all%20select* -> ???'
+      - 'union/\*\*/select* -> ???'
+      - 'or 1=1* -> ???'
+      - 'or%201=1* -> ???'
+      - 'or+1=1* -> ???'
+      - 'or%201%3d1* -> ???'
+      - 'or+1%3d1* -> ???'
+      - "' or '* -> ???"
+      - '%27%20or%20* -> ???'
+      - '%27+or+* -> ???'
+      - 'pg_sleep(* -> ???'
+      - 'waitfor delay* -> ???'
+      - 'waitfor%20delay* -> ???'
+      - 'load_file(* -> ???'
+      - 'into outfile* -> ???'
+      - 'into%20outfile* -> ???'
+      - 'benchmark(* -> ???'
+      - 'extractvalue(* -> ???'
+      - 'updatexml(* -> ???'
+  condition: web and sqli
+falsepositives:
+  - A documentation URL that includes a sample payload on purpose
+level: high

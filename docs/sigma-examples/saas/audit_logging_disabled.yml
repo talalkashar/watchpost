@@ -1,0 +1,34 @@
+# High-signal operations that turn off a cloud or SaaS audit trail. Enabling the same
+# Microsoft 365 control ($true) does not match, and StartLogging does not match StopLogging.
+title: SaaS Audit Logging Disabled
+id: d5f7b2c1-8a40-4c9e-a6d3-2e8f1b047c95
+status: experimental
+description: |
+  CloudTrail StopLogging or DeleteTrail, a VPC DeleteFlowLogs, an Okta log-stream
+  deactivate or delete, or Set-AdminAuditLogConfig together with $false (unified audit
+  log turned off). Each match is one event; Watchpost groups them per source IP.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1562/008/
+tags:
+  - attack.defense_evasion
+  - attack.t1562.008
+logsource:
+  category: cloud
+  product: saas
+detection:
+  disabled:
+    - message|contains:
+        - StopLogging
+        - DeleteTrail
+        - DeleteFlowLogs
+        - system.log_stream.lifecycle.deactivate
+        - system.log_stream.lifecycle.delete
+    - message|contains|all:
+        - Set-AdminAuditLogConfig
+        - $false
+  condition: disabled
+falsepositives:
+  - A maintenance window that stops a trail and writes that operation into the audit log
+level: critical

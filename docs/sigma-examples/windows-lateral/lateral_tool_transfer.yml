@@ -1,0 +1,44 @@
+# Copying an executable onto another host's admin share or Windows temp directory (T1570).
+# A local copy, or a copy onto a user share, does not match.
+title: Windows Lateral Tool Transfer to Admin Share
+id: 7d96a854-a7b1-4a6f-b6a3-5eb00b151440
+status: experimental
+description: |
+  copy, xcopy, robocopy, certutil, or bitsadmin writing an executable, script, or library onto
+  a remote ADMIN$ share or into C:\Windows\Temp or C:\ProgramData on another host.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1570/
+tags:
+  - attack.lateral_movement
+  - attack.t1570
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  remote_dest:
+    event.action: process_start
+    message|contains:
+      - '\ADMIN$\'
+      - '\C$\Windows\Temp\'
+      - '\C$\ProgramData\'
+  transfer_tool:
+    message|contains:
+      - 'copy '
+      - xcopy
+      - robocopy
+      - certutil
+      - bitsadmin
+      - Copy-Item
+      - Move-Item
+  payload:
+    message|contains:
+      - .exe
+      - .dll
+      - .ps1
+      - .bat
+  condition: remote_dest and transfer_tool and payload
+falsepositives:
+  - A deployment job that copies a signed installer onto ADMIN$ or C:\Windows\Temp
+level: high

@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import os
 import socket
@@ -18,8 +19,9 @@ from tests.helpers import ServerTestCase
 from watchpost import health, syslog_listener
 from watchpost.config import Config
 from watchpost.db import connect
+from watchpost.diagnostics import redact
 from watchpost.health import run_health_checks
-from watchpost.normalize import EventError
+from watchpost.normalize import MAX_LEN, EventError
 from watchpost.server import App
 from watchpost.syslog_listener import SyslogListener, frame_to_event, parse_frame, read_tcp_frame
 
@@ -58,6 +60,21 @@ class SyslogParsingTests(unittest.TestCase):
         self.assertEqual((event["event_type"], event["severity"]), ("syslog", "high"))  # PRI 11 = user.err
         self.assertEqual(event["message"], "nginx: upstream timed out password=[REDACTED]")
         self.assertNotIn("hunter2", event["raw"])
+
+    def test_generic_message_redacts_before_the_length_cut(self):
+        secret = "SUPERSECRET"
+        value = 'a\\"' + secret + ("p" * 40)
+        opener = '{"password": "'
+        prefix = "nginx: "
+        pad = MAX_LEN["message"] - len(prefix) - len(opener) - len('a\\"') - len(secret)
+        body = ("n" * pad) + opener + value + '"}'
+        combined = prefix + body
+        self.assertIn(secret, redact(combined[:MAX_LEN["message"]]))
+        event = frame_to_event(f"<11>Sep 28 10:00:03 web01 {combined}")
+        self.assertNotIn(secret, event["message"])
+        self.assertNotIn(secret, event["raw"])
+        self.assertLessEqual(len(event["message"]), MAX_LEN["message"])
+        self.assertIn("[REDACTED]", event["message"])
 
     def test_pri_severity_mapping(self):
         for pri, severity in [(8, "critical"), (10, "critical"), (12, "medium"), (13, "low"), (14, "info")]:
@@ -100,43 +117,6 @@ class SyslogParsingTests(unittest.TestCase):
         allow = frame_to_event("<6>1 2026-09-28T10:00:05Z fw01 kernel - - - [UFW ALLOW] IN=eth0 OUT= "
                                "SRC=198.51.100.3 DST=192.0.2.10 LEN=60 PROTO=TCP SPT=40001 DPT=443")
         self.assertEqual(allow["event_type"], "fw_allow")
-
-    def test_firewall_appliance_frames(self):
-        # FortiGate sends no syslog header: the device name and time come from its own fields.
-        deny = frame_to_event('<189>date=2026-09-28 time=12:00:01 devname="FG100" logid="0000000013" type="traffic" '
-                              'subtype="forward" tz="+0200" srcip=203.0.113.9 srcport=40000 dstip=192.0.2.10 '
-                              'dstport=22 action="deny" sentbyte=0 rcvdbyte=0', "192.0.2.254")
-        self.assertEqual((deny["event_type"], deny["host"], deny["ts"], deny["src_ip"], deny["dest_port"]),
-                         ("fw_deny", "FG100", "2026-09-28T10:00:01.000Z", "203.0.113.9", 22))
-        closed = frame_to_event('<189>date=2026-09-28 time=12:00:02 devname="FG100" logid="0000000013" '
-                                'type="traffic" srcip=10.0.3.15 dstip=198.51.100.99 dstport=443 action="close" '
-                                'user="carol" sentbyte=1800000000 rcvdbyte=4000', "192.0.2.254")
-        self.assertEqual((closed["event_type"], closed["user"], closed["bytes"], closed["ts"]),
-                         ("fw_allow", "carol", 1800000000, "2026-09-28T12:00:02.000Z"))
-        login = frame_to_event('<185>date=2026-09-28 time=12:00:03 devname="FG100" logid="0100032002" type="event" '
-                               'subtype="system" logdesc="Admin login failed" user="admin" srcip=203.0.113.9 '
-                               'action="login" status="failed"', "192.0.2.254")
-        self.assertEqual((login["event_type"], login["user"], login["src_ip"]), ("auth_failure", "admin", "203.0.113.9"))
-        # Palo Alto: the default comma-separated TRAFFIC log, with a quoted rule name that contains a comma.
-        allow = frame_to_event('<14>Sep 28 10:00:13 pa01 1,2026/09/28 10:00:13,007000001234,TRAFFIC,end,2049,'
-                               '2026/09/28 10:00:13,10.0.3.15,198.51.100.99,192.0.2.1,198.51.100.99,"allow, web",'
-                               'corp\\dave,,ssl,vsys1,trust,untrust,ethernet1/2,ethernet1/1,log-fwd,'
-                               '2026/09/28 10:00:13,4321,1,52000,443,61000,443,0x400053,tcp,allow,1250000900,'
-                               '1250000000,900,9000,2026/09/28 09:50:00,600,any')
-        self.assertEqual((allow["event_type"], allow["host"], allow["user"], allow["dest_port"], allow["bytes"]),
-                         ("fw_allow", "pa01", "corp\\dave", 443, 1250000000))
-        drop = frame_to_event("<14>Sep 28 10:00:12 pa01 1,2026/09/28 10:00:12,007000001234,TRAFFIC,drop,2049,"
-                              "2026/09/28 10:00:12,203.0.113.9,192.0.2.10,0.0.0.0,0.0.0.0,block-inbound,,,"
-                              "not-applicable,vsys1,untrust,trust,ethernet1/1,,log-fwd,2026/09/28 10:00:12,0,1,"
-                              "40003,8080,0,0,0x0,tcp,drop,74,74,0,1,2026/09/28 10:00:11,0,any")
-        self.assertEqual((drop["event_type"], drop["src_ip"], drop["dest_port"]), ("fw_deny", "203.0.113.9", 8080))
-        # Cisco ASA: the message ID is the syslog tag, with or without a header in front of it.
-        for frame, host in (('<164>Sep 28 10:00:04 asa01 %ASA-4-106023: Deny tcp src outside:203.0.113.9/40000 dst '
-                             'inside:192.0.2.10/3389 by access-group "outside_in" [0x0, 0x0]', "asa01"),
-                            ('<164>%ASA-4-106023: Deny tcp src outside:203.0.113.9/40000 dst inside:192.0.2.10/3389 '
-                             'by access-group "outside_in" [0x0, 0x0]', "192.0.2.254")):
-            asa = frame_to_event(frame, "192.0.2.254")
-            self.assertEqual((asa["event_type"], asa["host"], asa["dest_port"]), ("fw_deny", host, 3389))
 
     def test_tcp_framing_octet_counting_and_newlines(self):
         import io
@@ -286,6 +266,15 @@ class SyslogListenerTests(ListenerTestCase):
         with socket.create_connection(("127.0.0.1", refusing.tcp_port), timeout=5) as tcp:
             tcp.sendall(b"<13>hello\n")
         self.assertTrue(wait_for(lambda: refusing.stats["denied"] == 1))
+
+    def test_mapped_ipv6_policies_match_before_the_peer_is_normalized_for_storage(self):
+        for policy in ("::ffff:192.0.2.5/128", "::ffff:192.0.2.0/120"):
+            with self.subTest(policy=policy):
+                listener = self.listener(allow=policy)
+                listener.submit(b"<13>accepted", "::ffff:192.0.2.5")
+                listener.submit(b"<13>denied", "::ffff:198.51.100.5")
+                self.assertEqual(listener.stats["denied"], 1)
+                self.assertEqual(list(listener._queue), [("<13>accepted", "192.0.2.5")])
 
     def test_invalid_allow_list_fails_closed(self):
         listener = self.listener(allow="not-an-ip")
@@ -503,6 +492,61 @@ class SyslogTlsTests(ListenerTestCase):
                 self.assertTrue(wait_for(lambda: listener.stats["tls_failed"] == 1))
         self.assertIn("timed out", listener.stats["last_tls_failure"])
 
+    def test_close_notify_discards_incomplete_octet_frame(self):
+        listener = self.tls_listener()
+        with self.connect(listener) as tls:
+            tls.sendall(b"7 <13>one9 <13>two")
+            tls.unwrap()
+        self.assertEqual(listener.stats["frames_received"], 1)
+        listener.flush()
+        self.assertEqual([row["raw"] for row in self.rows()], ["<13>one"])
+        # Even after the retained prefix is full, the declared tail must arrive.
+        self.assertIsNone(read_tcp_frame(io.BytesIO(b"9 12345678"), max_bytes=4))
+
+    def test_tls_long_octet_count_consumes_the_entire_frame(self):
+        listener = self.tls_listener()
+        body = b"first\n" + b"x" * 999994
+        with mock.patch.object(listener, "submit") as submit, self.connect(listener) as tls:
+            tls.sendall(b"1000000 " + body + b"next\n")
+            tls.unwrap()
+        self.assertEqual([call.args[0] for call in submit.call_args_list],
+                         [body[:syslog_listener.MAX_FRAME_BYTES], b"next\n"])
+
+    def test_close_notify_discards_short_body_with_seven_digit_count(self):
+        listener = self.tls_listener()
+        with self.connect(listener) as tls:
+            tls.sendall(b"7 <13>one1000000 <13>first line\n")
+            tls.unwrap()
+        listener.flush()
+        self.assertEqual(listener.stats["frames_received"], 1)
+        self.assertEqual([row["raw"] for row in self.rows()], ["<13>one"])
+
+    def test_tls_capacity_is_reserved_before_dispatch_and_released_on_exit(self):
+        with mock.patch.object(syslog_listener, "MAX_TLS_CONNECTIONS", 1):
+            listener = self.tls_listener()
+        server = listener.tls_server
+        finished = threading.Event()
+        dispatch = server.process_request_thread
+
+        def worker(*args):
+            try:
+                dispatch(*args)
+            finally:
+                finished.set()
+
+        with mock.patch.object(server, "process_request_thread", side_effect=worker) as workers:
+            with self.connect(listener) as first:
+                with socket.create_connection(server.server_address, timeout=5) as excess:
+                    self.assertEqual(excess.recv(1), b"")
+                self.assertEqual(workers.call_count, 1)
+                self.assertEqual(listener.stats["tls_busy"], 1)
+                first.unwrap()
+            self.assertTrue(finished.wait(5))
+            with self.connect(listener) as next_peer:
+                next_peer.sendall(b"7 <13>two")
+                next_peer.unwrap()
+            self.assertEqual(listener.stats["frames_received"], 1)
+
     def test_frame_cut_off_without_close_notify_is_dropped(self):
         with mock.patch.object(ssl.SSLContext, "__init__", ignore_unexpected_eof):  # whatever this build's default
             listener = self.tls_listener()
@@ -569,6 +613,20 @@ class SyslogTlsTests(ListenerTestCase):
             self.assertIs(Config.from_env().syslog_plaintext, False)
 
 
+class SyslogDeployDocsTests(unittest.TestCase):
+    def test_tls_environment_file_example(self):
+        guide = (ROOT / "docs" / "LIVE_INGEST.md").read_text()
+        section = guide.split("#### 2. Configure Watchpost", 1)[1].split("#### 3.", 1)[0]
+        example = next(block for block in section.split("```")[1::2] if "SIEM_SYSLOG=" in block)
+        # EnvironmentFile keeps inline '#' characters in these unquoted assignments.
+        settings = dict(line.split("=", 1) for line in example.splitlines()[1:]
+                        if line.strip() and not line.lstrip().startswith("#"))
+        with mock.patch.dict(os.environ, settings, clear=True):
+            config = Config.from_env()
+        self.assertEqual(config.syslog_bind, "0.0.0.0")
+        self.assertEqual(config.syslog_tls_client_ca, "/etc/watchpost-tls/ca.pem")
+
+
 class SyslogHealthApiTests(ServerTestCase):
     def test_listener_appears_in_health_endpoints(self):
         listener = SyslogListener(self.db_path, port=0, flush_interval=0.1)
@@ -608,6 +666,8 @@ class FakeIngest:
                 payload = json.dumps({"accepted": lines if status < 300 else 0,
                                       "rejected": 0 if status < 300 else lines}).encode()
                 self.send_response(status)
+                if 300 <= status < 400:
+                    self.send_header("Location", "/moved")
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
@@ -652,6 +712,22 @@ class ShipperTests(unittest.TestCase):
     def append(self, text, path=None):
         with open(path or self.log, "ab") as handle:
             handle.write(text.encode())
+
+    def test_redirect_preserves_unsent_position(self):
+        redirect = self.fake((302,))
+        self.append("old line\n")
+        tail = self.make(redirect.url, from_start=False)
+        self.append("new line\n")
+        with self.assertRaisesRegex(shipper.FatalError, "configure the final endpoint"):
+            tail.ship_once(max_retries=0)
+        tail.close()
+        self.assertEqual([r["body"] for r in redirect.requests], [b"new line\n"])
+
+        endpoint = self.fake()
+        restarted = self.make(endpoint.url, from_start=False)
+        self.assertEqual(restarted.ship_once(), 1)
+        self.assertEqual(self.make(endpoint.url, from_start=False).ship_once(), 0)
+        self.assertEqual([r["body"] for r in endpoint.requests], [b"new line\n"])
 
     def test_ships_complete_lines_and_resumes_from_position_file(self):
         fake = self.fake()

@@ -219,7 +219,7 @@ class ChangeEvidenceTests(ServerTestCase):
         first = analyst.post("/api/rules/brute_force_ip/proposals",
                              {"params": {"ignore_ips": ["10.0.50.5"]}, "reason": "authorized scanner"})[1]
         second = analyst.post("/api/rules/brute_force_ip/proposals",
-                              {"params": {"threshold": 12}, "reason": "slightly less noise"})[1]
+                              {"params": {"threshold": 41}, "reason": "above the forty-attempt fixture"})[1]
         self.assertEqual(second["evaluation"]["before"]["fp"], 2)
         self.assertEqual(self.approve(admin, first)[0], 200)
 
@@ -237,10 +237,19 @@ class ChangeEvidenceTests(ServerTestCase):
         # Resending the digest the reviewer first saw is refused again: only the evidence now stored applies.
         self.assertEqual(self.approve(admin, second)[0], 409)
         self.assertNotEqual(change["evidence_digest"], second["evidence_digest"])
-        status, reviewed, _ = self.approve(admin, change)
-        self.assertEqual((status, reviewed["status"]), (200, "approved"))
+        # Threshold 41 drops the forty-attempt brute_force fixture. The fresh digest is not enough on its own.
+        status, refused, _ = self.approve(admin, change)
+        self.assertEqual(status, 400)
+        self.assertIn("brute_force", refused["error"])
+        self.assertIn("acknowledge_detection_loss", refused["error"])
+        self.assertNotIn("dns_exfil", refused["error"])
+        self.assertEqual(change["evaluation"]["after"]["missed"], ["brute_force"])
+        self.assertEqual((rule()["version"], rule()["params"]["threshold"]), (2, 10))
+        admin2 = self.second_admin()
+        status, reviewed, _ = self.approve(admin2, change, acknowledge_detection_loss=True)
+        self.assertEqual((status, reviewed["status"], reviewed["reviewed_by"]), (200, "approved", "admin2"))
         self.assertEqual(reviewed["evaluation"], change["evaluation"])
-        self.assertEqual((rule()["version"], rule()["params"]["threshold"]), (3, 12))
+        self.assertEqual((rule()["version"], rule()["params"]["threshold"]), (3, 41))
 
     def test_stale_exception_evidence_is_refreshed_then_applies_on_the_second_approve(self):
         analyst, admin = self.client("analyst"), self.client("admin")
@@ -314,7 +323,7 @@ class ChangeEvidenceTests(ServerTestCase):
                          [(alert["id"], "investigating -> resolved (false_positive)")])
         # The same key proposed by someone who touched nothing shows none.
         impact = self.exception(self.second_admin())[1]["evaluation"]["live_impact"]
-        self.assertEqual(impact["proposer_verdict_changes"], {"count": 0, "recent": []})
+        self.assertEqual(impact["proposer_verdict_changes"], {"count": 0, "recent": [], "omitted": 0})
 
     def ignore(self, client, *ips, rule="brute_force_ip"):
         return client.post(f"/api/rules/{rule}/proposals",
@@ -424,12 +433,16 @@ class ChangeEvidenceTests(ServerTestCase):
         self.assertEqual(status, 201, data)
         alert = analyst.get("/api/alerts?rule_id=brute_force_ip&status=open")[1][0]
         analyst.post(f"/api/alerts/{alert['id']}/status", {"status": "resolved", "disposition": "true_positive"})
-        # Python lowercases the non-ASCII capital, so the rule would skip these events for either spelling.
-        for names in (["\u00e1dmin"], ["\u00c1DMIN"], ["someone", "\u00e1dmin", "\u00c1dmin"]):
+        # ASCII case still hides the confirmed alert. ádmin is not Ádmin.
+        for names in (["\u00c1DMIN"], ["someone", "\u00e1dmin", "\u00c1dmin"]):
             with self.subTest(names=names):
                 status, data, _ = self.propose(analyst, "brute_force_ip", ignore_users=names)
                 self.assertEqual(status, 400, data)
                 self.assertIn("true positive", data["error"])
+        status, change, _ = self.propose(analyst, "brute_force_ip", ignore_users=["\u00e1dmin"])
+        self.assertEqual(status, 201, change)
+        self.assertEqual([(x["param"], x["value"]) for x in change["evaluation"]["ignore_additions"]],
+                         [("ignore_users", "\u00e1dmin")])
         # Spellings that fold to one name are one addition, not two.
         change = self.propose(analyst, "brute_force_ip", ignore_users=["Bob", "bob", "BOB"])[1]
         self.assertEqual([(x["param"], x["value"]) for x in change["evaluation"]["ignore_additions"]],

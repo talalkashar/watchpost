@@ -1,6 +1,7 @@
 import sqlite3
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import quote
 
 from tests.helpers import ServerTestCase
@@ -50,7 +51,7 @@ class StatsTests(unittest.TestCase):
         self.assertEqual(data["kind"], "stats")
         self.assertEqual(data["columns"], ["src_ip", "count"])
         self.assertEqual(data["rows"], [["10.0.0.5", 4], ["203.0.113.45", 2], ["10.0.0.6", 1]])
-        self.assertFalse(data["truncated"])
+        self.assertEqual((data["truncated"], data["groups_omitted"]), (False, 0))
         self.assertEqual(data["query"], "event_type:auth_failure | stats count by src_ip")
         self.assertEqual(data["filter"], "event_type:auth_failure")
         self.assertEqual([t["text"] for t in data["terms"]], ["event_type = auth_failure"])
@@ -64,6 +65,7 @@ class StatsTests(unittest.TestCase):
         self.assertEqual(self.run_q("event_type:auth_failure | stats count by src_ip,host")["rows"], data["rows"])
         total = self.run_q("| stats count")
         self.assertEqual((total["columns"], total["rows"]), (["count"], [[len(EVENTS)]]))
+        self.assertEqual((total["truncated"], total["groups_omitted"]), (False, 0))
 
     def test_dc_and_count_distinct(self):
         data = self.run_q("| stats count, dc(user) by src_ip")
@@ -89,9 +91,33 @@ class StatsTests(unittest.TestCase):
         conn = memory_db(rows)
         self.addCleanup(conn.close)
         data = hunt.run(conn, {"q": "| stats count by src_ip"}, now=NOW)
-        self.assertEqual((len(data["rows"]), data["truncated"]), (1000, True))
+        self.assertEqual((len(data["rows"]), data["truncated"], data["groups_omitted"]), (1000, True, 3))
         data = hunt.run(conn, {"q": "src_ip:10.9.0.* | stats count by src_ip"}, now=NOW)
-        self.assertEqual((len(data["rows"]), data["truncated"]), (250, False))
+        self.assertEqual((len(data["rows"]), data["truncated"], data["groups_omitted"]), (250, False, 0))
+
+    def test_groups_omitted_names_the_group_past_the_cap(self):
+        # One event per account, so the order is the folded name. The last name is the one left out.
+        # An event with no account is not a group and is not omitted.
+        rows = [("2026-10-07T09:00:00.000Z", "auth_failure", f"user-{n:04d}", "203.0.113.10", "web01", None, "d")
+                for n in range(1001)]
+        rows.append(("2026-10-07T09:00:00.000Z", "auth_failure", None, "203.0.113.10", "web01", None, "blank"))
+        conn = memory_db(rows)
+        self.addCleanup(conn.close)
+        data = hunt.run(conn, {"q": "| stats count by user"}, now=NOW)
+        self.assertEqual(len(data["rows"]), 1000)
+        self.assertEqual((data["truncated"], data["groups_omitted"]), (True, 1))
+        self.assertEqual(data["rows"][0], ["user-0000", 1])
+        self.assertEqual(data["rows"][-1], ["user-0999", 1])
+        self.assertNotIn("user-1000", [row[0] for row in data["rows"]])
+        exact = memory_db(rows[:1000])
+        self.addCleanup(exact.close)
+        fitted = hunt.run(exact, {"q": "| stats count by user"}, now=NOW)
+        self.assertEqual((len(fitted["rows"]), fitted["truncated"], fitted["groups_omitted"]), (1000, False, 0))
+        self.assertEqual(fitted["rows"][-1], ["user-0999", 1])
+        empty = self.run_q("user:nobody | stats count by src_ip")
+        self.assertEqual((empty["rows"], empty["truncated"], empty["groups_omitted"]), ([], False, 0))
+        text = (Path(__file__).resolve().parent.parent / "docs" / "REFERENCE.md").read_text()
+        self.assertIn("`groups_omitted` is how many groups were past that cap", text)
 
 
 class TopTests(unittest.TestCase):
@@ -108,13 +134,15 @@ class TopTests(unittest.TestCase):
         self.assertEqual(data["columns"], ["src_ip", "count", "percent"])
         # 7 matched events: 4, 2 and 1 of them.
         self.assertEqual(data["rows"], [["10.0.0.5", 4, 57.14], ["203.0.113.45", 2, 28.57], ["10.0.0.6", 1, 14.29]])
-        self.assertFalse(data["truncated"])
+        self.assertEqual((data["truncated"], data["groups_omitted"]), (False, 0))
 
     def test_top_n(self):
         data = self.run_q("event_type:auth_failure | top 2 src_ip")
         self.assertEqual([r[0] for r in data["rows"]], ["10.0.0.5", "203.0.113.45"])
-        self.assertTrue(data["truncated"])
-        self.assertEqual(self.run_q("| top 100 user")["rows"][0], ["alice", 5, 55.56])
+        self.assertEqual((data["truncated"], data["groups_omitted"]), (True, 1))
+        wide = self.run_q("| top 100 user")
+        self.assertEqual(wide["rows"][0], ["alice", 5, 55.56])
+        self.assertEqual((wide["truncated"], wide["groups_omitted"]), (False, 0))
         for bad in ["| top 0 user", "| top 101 user", "| top", "| top 5", "| top user host", "| top -1 user"]:
             with self.subTest(bad=bad), self.assertRaises(hunt.HuntError) as ctx:
                 self.run_q(bad)
@@ -122,7 +150,62 @@ class TopTests(unittest.TestCase):
 
     def test_top_on_no_matches(self):
         data = self.run_q("user:nobody | top src_ip")
-        self.assertEqual((data["rows"], data["truncated"]), ([], False))
+        self.assertEqual((data["rows"], data["truncated"], data["groups_omitted"], data["total"], data["missing"]),
+                         ([], False, 0, 0, 0))
+
+    def test_top_names_total_and_events_missing_the_field(self):
+        # One stored event has no source IP. Percents stay shares of every match, so they sum under 100.
+        data = self.run_q("| top src_ip")
+        self.assertEqual((data["total"], data["missing"]), (len(EVENTS), 1))
+        self.assertEqual(data["rows"], [["10.0.0.5", 4, 44.44], ["203.0.113.45", 2, 22.22],
+                                        ["10.0.0.6", 1, 11.11], ["198.51.100.7", 1, 11.11]])
+        self.assertEqual(round(sum(row[2] for row in data["rows"]), 2), 88.88)
+        # A filter where every match has the field: missing is 0 and the percents sum to 100.
+        complete = self.run_q("event_type:auth_failure | top src_ip")
+        self.assertEqual((complete["total"], complete["missing"]), (7, 0))
+        self.assertEqual(round(sum(row[2] for row in complete["rows"]), 2), 100.0)
+        # A short top still reports the full match count. Shown percents are not renormalized.
+        short = self.run_q("event_type:auth_failure | top 2 src_ip")
+        self.assertEqual((short["total"], short["missing"], short["truncated"], short["groups_omitted"]),
+                         (7, 0, True, 1))
+        self.assertEqual([row[2] for row in short["rows"]], [57.14, 28.57])
+        # Every match lacks the field: no groups, and missing equals total.
+        empty_field = self.run_q("event_type:process_start | top user")
+        self.assertEqual((empty_field["rows"], empty_field["total"], empty_field["missing"],
+                          empty_field["groups_omitted"], empty_field["truncated"]), ([], 1, 1, 0, False))
+
+    def test_groups_omitted_names_the_values_past_the_cap(self):
+        # Fifty hosts, one event each. A top of 10 keeps the first ten names and leaves out forty.
+        # A blank host is not a group and is not omitted. Percents stay shares of every match.
+        rows = [(f"2026-10-07T09:00:{n % 60:02d}.000Z", "auth_failure", "alice", "203.0.113.10",
+                 f"h{n:02d}", None, "d") for n in range(50)]
+        rows.append(("2026-10-07T09:00:00.000Z", "auth_failure", None, "203.0.113.10", None, None, "blank"))
+        conn = memory_db(rows)
+        self.addCleanup(conn.close)
+        data = hunt.run(conn, {"q": "| top 10 host"}, now=NOW)
+        self.assertEqual(len(data["rows"]), 10)
+        self.assertEqual((data["truncated"], data["groups_omitted"]), (True, 40))
+        self.assertEqual([row[0] for row in data["rows"]], [f"h{n:02d}" for n in range(10)])
+        self.assertNotIn("h49", [row[0] for row in data["rows"]])
+        self.assertEqual((data["total"], data["missing"]), (51, 1))
+        self.assertEqual([row[2] for row in data["rows"]], [round(100 / 51, 2)] * 10)
+        default = hunt.run(conn, {"q": "| top host"}, now=NOW)
+        self.assertEqual((len(default["rows"]), default["truncated"], default["groups_omitted"],
+                          default["total"], default["missing"]), (10, True, 40, 51, 1))
+        exact = memory_db(rows[:10])
+        self.addCleanup(exact.close)
+        fitted = hunt.run(exact, {"q": "| top 10 host"}, now=NOW)
+        self.assertEqual((len(fitted["rows"]), fitted["truncated"], fitted["groups_omitted"]), (10, False, 0))
+        self.assertEqual(fitted["rows"][-1][0], "h09")
+        empty = self.run_q("user:nobody | top src_ip")
+        self.assertEqual((empty["rows"], empty["truncated"], empty["groups_omitted"]), ([], False, 0))
+        with self.assertRaises(hunt.HuntError) as ctx:
+            hunt.run(conn, {"q": "| top 101 host"}, now=NOW)
+        self.assertIn("100", str(ctx.exception))
+        text = (Path(__file__).resolve().parent.parent / "docs" / "REFERENCE.md").read_text()
+        self.assertIn("`groups_omitted` is how many groups were past N", text)
+        api = (Path(__file__).resolve().parent.parent / "docs" / "API.md").read_text()
+        self.assertIn("`groups_omitted`, how many groups were past N", api)
 
 
 class TimechartTests(unittest.TestCase):
@@ -201,6 +284,82 @@ class TimechartTests(unittest.TestCase):
         self.assertEqual(self.run_q("user:nobody | timechart span=1h")["rows"], [])
 
 
+class TimechartSeriesOmittedTests(unittest.TestCase):
+    """A timechart by-field keeps five series. series_omitted counts the rest. other and the buckets stay."""
+
+    def chart(self, rows, text):
+        conn = memory_db(rows)
+        self.addCleanup(conn.close)
+        return hunt.run(conn, {"q": text}, now=NOW)
+
+    def test_series_past_five_stay_in_other_and_are_counted(self):
+        # Equal counts sort by the host name, so h1–h5 are drawn and h6 and h7 are the two left out.
+        # A blank host is not a series. It still lands in other, and the bucket total stays 8.
+        rows = [("2026-10-07T10:00:00.000Z", "auth_failure", "u", "203.0.113.10", f"h{n}", None, "m")
+                for n in range(1, 8)]
+        rows.append(("2026-10-07T10:30:00.000Z", "auth_failure", "u", "203.0.113.10", None, None, "blank"))
+        data = self.chart(rows, "| timechart span=1h by host")
+        self.assertEqual(data["columns"], ["_time", "h1", "h2", "h3", "h4", "h5", "other"])
+        self.assertEqual(data["rows"], [["2026-10-07T10:00:00.000Z", 1, 1, 1, 1, 1, 3]])
+        self.assertEqual((data["series_omitted"], data["truncated"]), (2, False))
+        self.assertNotIn("h6", data["columns"])
+        self.assertNotIn("h7", data["columns"])
+        exact = [("2026-10-07T10:00:00.000Z", "auth_failure", "u", "203.0.113.10", f"h{n}", None, "m")
+                 for n in range(1, 6)]
+        fitted = self.chart(exact, "| timechart span=1h by host")
+        self.assertEqual(fitted["columns"], ["_time", "h1", "h2", "h3", "h4", "h5"])
+        self.assertEqual(fitted["rows"], [["2026-10-07T10:00:00.000Z", 1, 1, 1, 1, 1]])
+        self.assertEqual((fitted["series_omitted"], fitted["truncated"]), (0, False))
+        blank = exact + [("2026-10-07T10:30:00.000Z", "auth_failure", "u", "203.0.113.10", None, None, "blank")]
+        with_blank = self.chart(blank, "| timechart span=1h by host")
+        self.assertEqual(with_blank["columns"], ["_time", "h1", "h2", "h3", "h4", "h5", "other"])
+        self.assertEqual(with_blank["rows"], [["2026-10-07T10:00:00.000Z", 1, 1, 1, 1, 1, 1]])
+        self.assertEqual(with_blank["series_omitted"], 0)
+
+    def test_a_chart_that_draws_every_series_returns_zero(self):
+        one = self.chart(EVENTS, "user:alice | timechart span=1h by user")
+        self.assertEqual(one["columns"], ["_time", "alice"])
+        self.assertNotIn("other", one["columns"])
+        self.assertEqual((one["series_omitted"], one["truncated"]), (0, False))
+        plain = self.chart(EVENTS, "event_type:auth_failure | timechart span=1h count")
+        self.assertEqual(plain["columns"], ["_time", "count"])
+        self.assertEqual((plain["series_omitted"], plain["truncated"]), (0, False))
+        self.assertEqual(plain["rows"], [["2026-10-07T08:00:00.000Z", 2], ["2026-10-07T09:00:00.000Z", 0],
+                                         ["2026-10-07T10:00:00.000Z", 1], ["2026-10-07T11:00:00.000Z", 4]])
+        empty = self.chart(EVENTS, "user:nobody | timechart span=1h")
+        self.assertEqual((empty["rows"], empty["series_omitted"], empty["truncated"]), ([], 0, False))
+        zeros = self.chart(EVENTS, "user:nobody last:1h | timechart span=15m by host")
+        self.assertGreater(len(zeros["rows"]), 0)
+        self.assertEqual(zeros["columns"], ["_time"])
+        self.assertTrue(all(row[1:] == [] for row in zeros["rows"]))
+        self.assertEqual((zeros["series_omitted"], zeros["truncated"]), (0, False))
+
+    def test_user_fold_counts_one_series_and_leaves_the_accented_pair_apart(self):
+        # alice, Alice, and ALICE are one series. ÉRIN and érin stay two, so six series and one omitted.
+        # A blank user is not that omitted series. It still adds to other.
+        rows = [
+            ("2026-10-07T10:00:00.000Z", "auth_failure", "alice", "203.0.113.10", "web01", None, "a"),
+            ("2026-10-07T10:05:00.000Z", "auth_failure", "Alice", "203.0.113.10", "web01", None, "b"),
+            ("2026-10-07T10:10:00.000Z", "auth_failure", "ALICE", "203.0.113.10", "web01", None, "c"),
+            ("2026-10-07T10:15:00.000Z", "auth_failure", "ÉRIN", "203.0.113.10", "web01", None, "d"),
+            ("2026-10-07T10:20:00.000Z", "auth_failure", "érin", "203.0.113.10", "web01", None, "e"),
+            ("2026-10-07T10:25:00.000Z", "auth_failure", "u1", "203.0.113.10", "web01", None, "f"),
+            ("2026-10-07T10:30:00.000Z", "auth_failure", "u2", "203.0.113.10", "web01", None, "g"),
+            ("2026-10-07T10:35:00.000Z", "auth_failure", "u3", "203.0.113.10", "web01", None, "h"),
+            ("2026-10-07T10:40:00.000Z", "auth_failure", None, "203.0.113.10", "web01", None, "blank"),
+        ]
+        data = self.chart(rows, "| timechart span=1h by user")
+        self.assertEqual(data["columns"], ["_time", "alice", "u1", "u2", "u3", "Érin", "other"])
+        self.assertNotIn("Alice", data["columns"])
+        self.assertNotIn("érin", data["columns"])
+        self.assertEqual(data["rows"], [["2026-10-07T10:00:00.000Z", 3, 1, 1, 1, 1, 2]])
+        self.assertEqual((data["series_omitted"], data["truncated"]), (1, False))
+        text = (Path(__file__).resolve().parent.parent / "docs" / "REFERENCE.md").read_text()
+        api = (Path(__file__).resolve().parent.parent / "docs" / "API.md").read_text()
+        self.assertIn("`series_omitted` is how many distinct non-null series were past those 5", text)
+        self.assertIn("series_omitted", api)
+
+
 class RefusalTests(unittest.TestCase):
     def setUp(self):
         self.conn = memory_db()
@@ -246,7 +405,8 @@ class RefusalTests(unittest.TestCase):
 
     def test_injection_attempts_in_values_are_bound(self):
         data = hunt.run(self.conn, {"q": "user:\"x' OR 1=1 --\" | stats count by user"}, now=NOW)
-        self.assertEqual(data["rows"], [["x' OR 1=1 --", 1]])
+        # The value stays bound (one account, not every row). The group label folds ASCII case.
+        self.assertEqual(data["rows"], [["x' or 1=1 --", 1]])
         data = hunt.run(self.conn, {"q": "user:\"a' UNION SELECT 1 --\" | top user"}, now=NOW)
         self.assertEqual(data["rows"], [])
 
@@ -279,6 +439,78 @@ class PipeParsingTests(unittest.TestCase):
         self.assertEqual(data["total"], 5)
 
 
+class UserGroupCaseTests(unittest.TestCase):
+    """stats, top, and timechart fold account spellings; other fields stay exact."""
+
+    ROWS = [
+        ("2026-10-07T10:00:00.000Z", "auth_failure", "alice", "10.0.0.5", "web01", 22, "a"),
+        ("2026-10-07T10:30:00.000Z", "auth_failure", "Alice", "10.0.0.5", "WEB01", 22, "b"),
+        ("2026-10-07T11:00:00.000Z", "auth_failure", "ALICE", "10.0.0.5", "web01", 22, "c"),
+        ("2026-10-07T11:10:00.000Z", "auth_failure", "bob", "10.0.0.8", "db01", 22, "d"),
+        ("2026-10-07T11:20:00.000Z", "auth_failure", "Bob", "10.0.0.8", "db01", 22, "e"),
+        ("2026-10-07T11:40:00.000Z", "process_start", None, None, "web01", None, "no user"),
+        ("2026-10-07T11:45:00.000Z", "auth_failure", "Érin", "10.0.0.9", "mail01", 22, "accent"),
+        ("2026-10-07T11:50:00.000Z", "auth_failure", "érin", "10.0.0.9", "mail01", 22, "accent"),
+    ]
+
+    def setUp(self):
+        self.conn = memory_db(self.ROWS)
+        self.addCleanup(self.conn.close)
+
+    def run_q(self, text):
+        return hunt.run(self.conn, {"q": text}, now=NOW)
+
+    def test_stats_top_and_timechart_fold_user_only(self):
+        self.assertEqual(self.run_q("| stats count by user")["rows"],
+                         [["alice", 3], ["bob", 2], ["Érin", 1], ["érin", 1]])
+        self.assertEqual(self.run_q("| stats count by user, host")["rows"],
+                         [["alice", "web01", 2], ["bob", "db01", 2], ["alice", "WEB01", 1],
+                          ["Érin", "mail01", 1], ["érin", "mail01", 1]])
+        self.assertEqual(self.run_q("| stats count by host")["rows"],
+                         [["web01", 3], ["db01", 2], ["mail01", 2], ["WEB01", 1]])
+        # dc(user) counts the account, not each spelling. dc(host) still sees WEB01.
+        self.assertEqual(self.run_q("| stats dc(user)")["rows"], [[4]])
+        self.assertEqual(self.run_q("| stats count, dc(user) by src_ip")["rows"],
+                         [["10.0.0.5", 3, 1], ["10.0.0.8", 2, 1], ["10.0.0.9", 2, 2]])
+        self.assertEqual(self.run_q("| stats dc(host)")["rows"], [[4]])
+        top = self.run_q("| top user")
+        self.assertEqual(top["rows"], [["alice", 3, 37.5], ["bob", 2, 25.0],
+                                       ["Érin", 1, 12.5], ["érin", 1, 12.5]])
+        # The event with no account is missing, not its own group. 3/8 is still 37.5.
+        self.assertEqual((top["total"], top["missing"]), (len(self.ROWS), 1))
+        self.assertNotIn("Alice", [row[0] for row in top["rows"]])
+        chart = self.run_q("| timechart span=1h by user")
+        self.assertEqual(chart["columns"], ["_time", "alice", "bob", "Érin", "érin", "other"])
+        self.assertEqual(chart["rows"], [
+            ["2026-10-07T10:00:00.000Z", 2, 0, 0, 0, 0],
+            ["2026-10-07T11:00:00.000Z", 1, 2, 1, 1, 1],
+        ])
+
+    def test_user_group_sql_folds_with_lower(self):
+        statements = []
+        self.conn.set_trace_callback(statements.append)
+        self.run_q("| stats count by user")
+        self.run_q("| top user")
+        self.run_q("| timechart span=1h by user")
+        self.run_q("| stats dc(user)")
+        self.conn.set_trace_callback(None)
+        grouped = [s for s in statements if "GROUP BY" in s.upper()]
+        self.assertTrue(grouped)
+        self.assertTrue(all("lower(user)" in s for s in grouped))
+        statements.clear()
+        self.conn.set_trace_callback(statements.append)
+        self.run_q("| stats count by host")
+        self.conn.set_trace_callback(None)
+        host_sql = " ".join(s for s in statements if "GROUP BY" in s.upper())
+        self.assertIn("GROUP BY host", host_sql)
+        self.assertNotIn("lower(", host_sql)
+
+    def test_reference_says_user_groups_fold(self):
+        text = (Path(__file__).resolve().parent.parent / "docs" / "REFERENCE.md").read_text()
+        self.assertIn("Accounts fold ASCII case", text)
+        self.assertNotIn("lists `Alice` and `alice` separately", text)
+
+
 class IndexTests(unittest.TestCase):
     def test_stats_by_src_ip_reads_the_src_ip_index(self):
         conn = memory_db()
@@ -307,7 +539,42 @@ class HuntStatsApiTests(ServerTestCase):
         self.assertEqual((data["kind"], data["rows"][0][0]), ("top", "10.0.0.5"))
         status, data, _ = viewer.get("/api/hunt?q=" + quote("| stats count by user, host"))
         self.assertEqual((status, data["kind"]), (200, "stats"))
+        self.assertEqual((data["truncated"], data["groups_omitted"]), (False, 0))
+        status, plain, _ = viewer.get("/api/hunt?q=" + quote("| stats count"))
+        self.assertEqual((status, plain["groups_omitted"], plain["truncated"]), (200, 0, False))
+        status, chart, _ = viewer.get("/api/hunt?q=" + quote("| timechart span=1h count"))
+        self.assertEqual((status, chart["series_omitted"], chart["truncated"]), (200, 0, False))
         self.assertEqual(viewer.post("/api/hunt/saved", {"name": "v", "query": "| top user"})[0], 403)
+
+    def test_timechart_series_omitted_on_the_api(self):
+        db = sqlite3.connect(self.db_path)
+        with db:
+            insert(db, [("2026-10-07T10:00:00.000Z", "auth_failure", "u", "203.0.113.10", f"h{n}", None, "m")
+                        for n in range(1, 8)])
+        db.close()
+        status, data, _ = self.client("viewer").get(
+            "/api/hunt?q=" + quote("host:h* | timechart span=1h by host"))
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["columns"], ["_time", "h1", "h2", "h3", "h4", "h5", "other"])
+        self.assertEqual((data["series_omitted"], data["truncated"]), (2, False))
+        self.assertEqual(sum(data["rows"][0][1:]), 7)
+
+    def test_top_groups_omitted_on_the_api(self):
+        db = sqlite3.connect(self.db_path)
+        with db:
+            insert(db, [(f"2026-10-07T09:00:{n % 60:02d}.000Z", "auth_failure", "alice", "203.0.113.10",
+                         f"h{n:02d}", None, "d") for n in range(50)])
+        db.close()
+        status, data, _ = self.client("viewer").get("/api/hunt?q=" + quote("host:h* | top 10 host"))
+        self.assertEqual(status, 200, data)
+        self.assertEqual((data["kind"], len(data["rows"]), data["truncated"], data["groups_omitted"]),
+                         ("top", 10, True, 40))
+        self.assertEqual((data["total"], data["missing"]), (50, 0))
+        self.assertEqual(data["rows"][0][0], "h00")
+        self.assertNotIn("h49", [row[0] for row in data["rows"]])
+        status, fitted, _ = self.client("viewer").get("/api/hunt?q=" + quote("user:nobody | top src_ip"))
+        self.assertEqual((status, fitted["groups_omitted"], fitted["truncated"], fitted["total"], fitted["missing"]),
+                         (200, 0, False, 0, 0))
 
     def test_bad_stage_is_a_400(self):
         status, data, _ = self.client("viewer").get("/api/hunt?q=" + quote("| stats count by message"))

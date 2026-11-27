@@ -1,0 +1,41 @@
+# A cloud or SaaS account was created from outside the private ranges. In-office provisioning
+# of the same action is excluded. Ship account-creation audits as event_type cloud_iam_change
+# (CloudTrail CreateUser on iam.amazonaws.com already lands that way).
+title: Cloud Account Created From External Network
+id: c48a2d90-1f6b-4e37-9c85-d0a7b3e51674
+status: experimental
+description: |
+  An account-creation audit (AWS CreateUser, Google Workspace CREATE_USER, Okta
+  user.lifecycle.create, Microsoft 365 "Add user.", or Azure AD "Invite external user")
+  stored as cloud_iam_change, from an address outside the private ranges. A missing
+  source address is not treated as internal. Each match is one event; Watchpost groups
+  them per source IP.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1136/003/
+tags:
+  - attack.persistence
+  - attack.t1136.003
+logsource:
+  category: iam
+  product: saas
+detection:
+  created:
+    event.action: cloud_iam_change
+    message|contains:
+      - CreateUser
+      - user.lifecycle.create
+      - CREATE_USER
+      - Add user.
+      - Invite external user
+  internal:
+    source.ip|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+  condition: created and not internal
+falsepositives:
+  - A joiner workflow run by an administrator from a home network
+level: high

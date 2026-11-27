@@ -1,0 +1,51 @@
+# Object or file collection from cloud storage, seen from a public address. In-office
+# reads of the same objects are excluded. Ship file-download audits as event_type
+# cloud_data_access (CloudTrail GetObject and CopyObject already land that way).
+title: Cloud Storage Download From Public Address
+id: e6a1c8d4-3b72-4f05-8e19-7c2d5a90b6e8
+status: experimental
+description: |
+  A cloud storage read stored as cloud_data_access, from an address outside the private
+  ranges. The message names S3 GetObject or CopyObject, or a Microsoft 365 FileDownloaded
+  or FileSyncDownloadedFull. A missing source address is not treated as internal. Each
+  match is one event; Watchpost groups them per source IP.
+  Most object reads from a public address are routine, so this rule is level low and has two
+  allowlists to tune before you enable it: filter_known_egress (your egress ranges) and
+  filter_trusted_principal (service accounts that read storage from the internet by design).
+  Both ship with placeholder values that match nothing real.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1530/
+tags:
+  - attack.collection
+  - attack.t1530
+logsource:
+  category: cloud
+  product: saas
+detection:
+  download:
+    event.action: cloud_data_access
+    message|contains:
+      - GetObject
+      - CopyObject
+      - FileDownloaded
+      - FileSyncDownloadedFull
+  internal:
+    source.ip|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+  filter_known_egress:
+    # Placeholder: replace 192.0.2.0/24 (TEST-NET-1, never routed) with your office, VPN, and CI egress ranges.
+    source.ip|cidr:
+      - 192.0.2.0/24
+  filter_trusted_principal:
+    # Placeholder: replace with the CI, backup, and sync principals that download from public addresses.
+    user.name:
+      - replace-with-trusted-principal
+  condition: download and not internal and not 1 of filter_*
+falsepositives:
+  - A remote employee or a CI runner on a public address downloading an object they own; add the runner's egress range or principal to the filter_ selections
+level: low

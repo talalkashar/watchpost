@@ -7,9 +7,21 @@
 
 The filter is matched in Python over the event dicts the engine already scans (engine.RULE_EVENT_FIELDS),
 with the hunt's SQL semantics: same fields and value checks, a trailing `*` on an unquoted value is a prefix
-match, message terms are "contains", NOT keeps events missing the field, and comparisons fold case the way
-SQLite does (ASCII only): user equality, every prefix match and message contains ignore ASCII case; other
-equality is exact. tests/test_search_rules.py cross-checks this matcher against hunt.compile_query in SQL.
+match, message terms are "contains", NOT keeps events missing the field, and a bytes term uses the
+same >=, >, <=, < or = comparison as the hunt. Comparisons fold case the way SQLite does
+(ASCII only): user, host, source, outcome, and batch_id equality, every prefix match and message contains ignore ASCII case.
+`event_type` and `severity` fold ASCII case and bind the catalog spelling (`Auth_Failure` is `auth_failure`).
+`synthetic:` is `0`, `1`, `true`, or `false`, folded on ASCII letters only (not `str.lower()`).
+`TRUE` is `true`. `truİe`, `trüe`, and `yes` are refused with the same error as a hunt.
+A labeled sample stores that flag as the integer 0 or 1 the events table uses (those words, JSON
+true/false, or the integers). A sample address that is one complete IP, and an event type that
+matches the catalog by ASCII case, are stored in the ingest form the matcher compares.
+Other equality is exact. Grouping by user folds ASCII letters only, the same fold as the user: filter,
+so Alice and alice share a key and ÉRIN stays apart from érin. Grouping by host, source, outcome,
+event_type, and severity stays the stored spelling.
+`src_ip`, `dest_ip`, and `ip` equality use the address form ingest stores;
+a prefix stays the typed text. tests/test_search_rules.py cross-checks this matcher against
+hunt.compile_query in SQL.
 
 Hunt fields the engine does not load (outcome, severity, batch_id) are refused, and so are time terms: the
 window replaces them. The rule's params are the compiled definition; only `threshold` and `window_seconds`
@@ -27,6 +39,7 @@ from datetime import timedelta
 from . import attack
 from . import hunt
 from . import sigma
+from .queries import QueryError, canonical_ip, catalog_name, synthetic_flag
 from .db import iso, parse_iso
 from .normalize import EventError, parse_timestamp
 
@@ -44,7 +57,7 @@ DEFINITION_KEYS = {"name", "group_by", "threshold", "window_minutes", "severity"
 NOT_LOADED = ("outcome", "severity", "batch_id")
 TIME_FIELDS = ("last", "since", "until")
 GROUP_BY = [f for f in hunt.GROUPABLE if f not in NOT_LOADED and f != "synthetic"]
-SAMPLE_FIELDS = sigma.SAMPLE_FIELDS | {"source", "threat"}  # threat: what threat_intel.tag() sets on stored events
+SAMPLE_FIELDS = sigma.SAMPLE_FIELDS | {"source", "synthetic", "threat"}
 SAMPLE_BASE = "2024-01-01T00:00:00.000Z"  # sample events without a ts are one second apart from here
 
 _ASCII_FOLD = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
@@ -113,20 +126,33 @@ def _predicate(term):
     if kind == "port":
         port = int(value)
         return lambda e: e.get("dest_port") == port
+    if kind == "bytes":
+        op, number = hunt.bytes_bound(value)
+        return lambda e, op=op, number=number: hunt.bytes_matches(e.get("bytes"), op, number)
     if kind == "flag":
-        flag = hunt.FLAGS[value.lower()]
+        # ASCII letters only, the same fold as the hunt and event search. Not str.lower().
+        flag = synthetic_flag(value)
         return lambda e: e.get("synthetic") == flag
     if kind == "ip":
         if prefix is not None:
             p = _fold(prefix)
             return lambda e: _starts(e.get("src_ip"), p) or _starts(e.get("dest_ip"), p)
-        return lambda e: e.get("src_ip") == value or e.get("dest_ip") == value
+        address = canonical_ip(value, field)
+        return lambda e: e.get("src_ip") == address or e.get("dest_ip") == address
     if prefix is not None:
         p = _fold(prefix)
         return lambda e: _starts(e.get(column), p)
-    if field == "user":  # COLLATE NOCASE
+    if field in ("src_ip", "dest_ip"):
+        address = canonical_ip(value, field)
+        return lambda e: e.get(column) == address
+    if kind == "enum":
+        # Catalog spelling, same bound value as hunt SQL. A stored lookalike stays unmatched.
+        name = catalog_name(value, hunt.ENUMS[field])
+        return lambda e: e.get(column) == name
+    # COLLATE NOCASE, ASCII only. Grouping by source, outcome, and batch_id stays exact.
+    if field in ("user", "host", "source", "outcome", "batch_id"):
         folded = _fold(value)
-        return lambda e: isinstance(e.get("user"), str) and _fold(e["user"]) == folded
+        return lambda e: isinstance(e.get(column), str) and _fold(e[column]) == folded
     return lambda e: e.get(column) == value
 
 
@@ -239,9 +265,9 @@ def run(events, params):
     for e in events:
         key = e.get(column)
         if key is not None and key != "" and match(e):
-            # Accounts group case-insensitively, as the user: filter matches them (and entities.py keys them):
-            # otherwise "alice", "Alice" and "ALICE" would each stay under the threshold.
-            groups[str(key).lower() if params["group_by"] == "user" else str(key)].append(e)
+            # Accounts group with the ASCII fold the user: filter uses. Alice and alice share a key;
+            # ÉRIN and érin stay two keys. Other fields stay the stored spelling.
+            groups[_fold(str(key)) if params["group_by"] == "user" else str(key)].append(e)
     findings = []
     for key, group in groups.items():
         group.sort(key=lambda e: (rules_mod._epoch(e), e["id"]))
@@ -261,13 +287,75 @@ def run(events, params):
 
 # --- Labeled sample --------------------------------------------------------------------------
 
+def _synthetic_text(value):
+    """A string Sigma's sample check accepts for a synthetic flag.
+
+    None and strings stay as written (`synthetic_flag` checks the words later). JSON true/false and the
+    integers 0 and 1 are that flag: bool is a subclass of int, and ingest accepts them the same way.
+    """
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return "1" if value else "0"
+    raise QueryError("synthetic must be 0, 1, true or false")
+
+
+def _sigma_sample(sample):
+    """Copy events whose synthetic flag is an integer, so Sigma's string check can see the word."""
+    if not isinstance(sample, dict):
+        return sample
+    out = {}
+    for side, events in sample.items():
+        if not isinstance(events, list):
+            out[side] = events
+            continue
+        copied = []
+        for n, event in enumerate(events):
+            if isinstance(event, dict) and "synthetic" in event and not isinstance(event.get("synthetic"), str):
+                try:
+                    text = _synthetic_text(event["synthetic"])
+                except QueryError as exc:
+                    raise SearchRuleError(f"sample.{side}[{n}].synthetic: {exc}") from None
+                event = {**event, "synthetic": text}
+            copied.append(event)
+        out[side] = copied
+    return out
+
+
+def _stored_sample_event(event, event_types):
+    """Rewrite one validated sample event into the forms a stored event has.
+
+    The matcher compares synthetic to 0 or 1, an IP to the ingest address, and event_type to the catalog
+    spelling. A sample that keeps the hunt's typed text would not match the query that uses that text.
+    An address that is not complete, and an event type that is not a catalog name, stay as written.
+    A synthetic value that is not one of the four flag words is refused.
+    """
+    if "synthetic" in event and event["synthetic"] is not None:
+        event["synthetic"] = synthetic_flag(event["synthetic"])
+    for field in ("src_ip", "dest_ip"):
+        value = event.get(field)
+        if isinstance(value, str):
+            try:
+                event[field] = canonical_ip(value.strip(), field)
+            except QueryError:
+                pass
+    event_type = event.get("event_type")
+    if isinstance(event_type, str):
+        name = catalog_name(event_type.strip(), event_types)
+        if name is not None:
+            event["event_type"] = name
+    return event
+
+
 def validate_sample(sample):
-    """Sigma's sample shape and checks (sigma.validate_sample), plus `source`, and every `ts` parsed. Events
-    without a ts get one: one second apart, in list order."""
+    """Sigma's sample shape and checks (sigma.validate_sample), plus `source` and `synthetic`, and every
+    `ts` parsed. Events without a ts get one: one second apart, in list order. Synthetic, complete IPs,
+    and catalog event types are stored in the form detection compares."""
     try:
-        out = sigma.validate_sample(sample, SAMPLE_FIELDS)
+        out = sigma.validate_sample(_sigma_sample(sample), SAMPLE_FIELDS)
     except sigma.SigmaError as exc:
         raise SearchRuleError(str(exc))
+    event_types = hunt.ENUMS["event_type"]
     for side in ("malicious", "benign"):
         for n, e in enumerate(out[side]):
             if e.get("ts") is not None:
@@ -275,6 +363,10 @@ def validate_sample(sample):
                     e["ts"] = parse_timestamp(e["ts"])
                 except EventError as exc:
                     raise SearchRuleError(f"sample.{side}[{n}].ts: {exc}")
+            try:
+                _stored_sample_event(e, event_types)
+            except QueryError as exc:
+                raise SearchRuleError(f"sample.{side}[{n}].synthetic: {exc}") from None
     return out
 
 

@@ -1,0 +1,65 @@
+# Successful apiserver audit event whose username is an AWS IAM principal or a GCP service account.
+# In-cluster calls use private source addresses and are excluded.
+title: Kubernetes API Call By External Cloud Principal
+id: 8f1a6c24-0d5e-4b73-9c28-6a4e1f7d2b50
+status: experimental
+description: |
+  A successful Kubernetes API audit event (HTTP 200 or 201) whose username is an
+  AWS IAM principal or a Google service account, from a source address outside the
+  private ranges. That is a cloud account being used against the cluster from the
+  internet. Each matching event is evidence; Watchpost groups them per source IP.
+  Engineers and CI often reach a managed cluster from public addresses. Tune
+  filter_trusted_principal (role ARNs or service accounts expected to call the API) and
+  filter_known_egress (your egress ranges). Both ship with placeholders that match nothing real.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1078/004/
+  - https://kubernetes.io/docs/tasks/debug/debug-cluster/audit/
+tags:
+  - attack.initial_access
+  - attack.t1078.004
+logsource:
+  category: application
+  product: kubernetes
+  service: audit
+detection:
+  audit:
+    message|contains: audit.k8s.io
+  allowed:
+    message|contains:
+      - '"code":200'
+      - '"code": 200'
+      - '"code":201'
+      - '"code": 201'
+  cloud_principal:
+    message|contains:
+      - '"username":"arn:aws:'
+      - '"username": "arn:aws:'
+      - .iam.gserviceaccount.com"
+  internal:
+    SourceIp|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+  filter_trusted_principal:
+    # Placeholder: replace with the principals allowed to call the API from outside. Keep each entry
+    # anchored to the username key and its quotes (compact and spaced JSON), so the same text in a
+    # request URI or object does not suppress the alert. Assumed roles end at the role name plus '/'.
+    # Limit: a request object that carries its own "username" key with a trusted value still matches
+    # this filter. Keep the list short, or leave it empty and rely on filter_known_egress.
+    message|contains:
+      - '"username":"arn:aws:sts::000000000000:assumed-role/replace-with-trusted-role/'
+      - '"username": "arn:aws:sts::000000000000:assumed-role/replace-with-trusted-role/'
+      - '"username":"replace-with-trusted-sa@example.iam.gserviceaccount.com"'
+      - '"username": "replace-with-trusted-sa@example.iam.gserviceaccount.com"'
+  filter_known_egress:
+    # Placeholder: replace 192.0.2.0/24 (TEST-NET-1, never routed) with your office, VPN, and CI egress ranges.
+    SourceIp|cidr:
+      - 192.0.2.0/24
+  condition: audit and allowed and cloud_principal and not internal and not 1 of filter_*
+falsepositives:
+  - An administrator running kubectl from a home or hotel network with a cloud role
+  - An IPv6 client inside the cluster, which this private list does not cover
+level: high

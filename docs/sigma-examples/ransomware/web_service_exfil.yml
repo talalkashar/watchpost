@@ -1,0 +1,38 @@
+# Double extortion: copy files to Mega before encryption. ATT&CK T1567 (web service).
+# rclone remote "mega:" and the Mega sync client are the usual tools. message holds the command line.
+title: Ransomware Web Service Exfiltration
+id: 9e2a6d44-1c70-4b83-a519-6f0d8c3e2a71
+status: experimental
+description: |
+  A process start that uploads through Mega: rclone aimed at a mega: remote or mega.nz, or the
+  megasync / megacmd client. A local rclone copy, or a browser opening mega.nz, does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1567/
+  - https://www.cisa.gov/stopransomware
+tags:
+  - attack.exfiltration
+  - attack.t1567
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  process:
+    event.action: process_start
+  web_mega_remote:
+    message|contains|all:
+      - rclone
+      - 'mega:'
+  web_mega_site:
+    message|contains|all:
+      - rclone
+      - mega.nz
+  web_client:
+    message|contains:
+      - megasync
+      - megacmd
+  condition: process and 1 of web_*
+falsepositives:
+  - An administrator who deliberately syncs a folder to a Mega account
+level: high

@@ -128,8 +128,11 @@ const r2 = (v) => Math.round(v * 10) / 10;
 
 // Static layer: graticule, faint coastlines, land dots. Returns an SVG string.
 function baseMap(w, h, { step = 2.4 } = {}) {
-  let out = `<svg xmlns="http://www.w3.org/2000/svg" class="worldmap" width="${r2(w)}" height="${r2(h)}" viewBox="0 0 ${r2(w)} ${r2(h)}" role="img" aria-label="Attacker map (synthetic geo)">`;
-  out += `<g class="graticule">`;
+  let out = `<svg xmlns="http://www.w3.org/2000/svg" class="worldmap" width="${r2(w)}" height="${r2(h)}" viewBox="0 0 ${r2(w)} ${r2(h)}" role="img" aria-label="Attacker map">`;
+  // Keep city labels readable when a bright arc or land dot passes underneath.
+  out += `<defs><filter id="map-label-plate" x="-5%" y="-5%" width="110%" height="110%" color-interpolation-filters="sRGB">
+    <feFlood flood-color="#191919" flood-opacity=".88"/><feComposite in="SourceGraphic" operator="over"/>
+  </filter></defs><g class="graticule">`;
   for (let lon = -150; lon < 180; lon += 30) {
     const [x] = project(lon, 0, w, h);
     out += `<line x1="${r2(x)}" x2="${r2(x)}" y1="0" y2="${r2(h)}"/>`;

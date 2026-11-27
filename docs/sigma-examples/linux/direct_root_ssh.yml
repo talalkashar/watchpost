@@ -1,0 +1,43 @@
+# Root SSH accepted from a private or local address (T1078.003). External root SSH is a
+# different example. sshd does not store a destination port; the line still contains " ssh2".
+title: Linux Direct Root SSH On Private Address
+id: 7f3a1c90-2b64-4e17-9d08-a11c0e100002
+status: experimental
+description: |
+  sshd accepted a root login from a private or local address. Root SSH from an
+  external address stays quiet here. The account field and the "for root" phrase
+  must both match, so a failed root guess does not fire. Each matching event is
+  evidence; Watchpost groups findings by source address.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1078/003/
+tags:
+  - attack.initial_access
+  - attack.t1078.003
+logsource:
+  product: linux
+  service: sshd
+detection:
+  selection:
+    event.action: auth_success
+    user.name: root
+    message|contains:
+      - 'Accepted password for root '
+      - 'Accepted publickey for root '
+      - 'Accepted keyboard-interactive/pam for root '
+  ssh_line:
+    message|contains: ' ssh2'
+  private:
+    SourceIp|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+      - '::1/128'
+      - fc00::/7
+      - fe80::/10
+  condition: selection and ssh_line and private
+falsepositives:
+  - A break-glass root login from a jump host on the private network
+level: high

@@ -1,0 +1,45 @@
+# Firewall allow of an interactive admin port from outside the private ranges.
+# A deny is not this rule: the allow is what exposes the service.
+# Written for Watchpost's Sigma subset (docs/REFERENCE.md, "Sigma rule import").
+title: Remote Admin Port Allowed From Internet
+id: ff1d8ba5-5b71-47a8-b380-cc413460b0ae
+status: experimental
+description: |
+  A firewall allow to SSH (22), Telnet (23), RDP (3389), or VNC (5900) from an address
+  that is not private or local. An allow with no source address does not match, because
+  it cannot be placed on the internet. Each matching event is evidence; Watchpost groups
+  them per source IP.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1133/
+tags:
+  - attack.initial_access
+  - attack.t1133
+logsource:
+  category: firewall
+  product: linux
+detection:
+  allowed:
+    event.action: fw_allow
+    DestinationPort:
+      - 22
+      - 23
+      - 3389
+      - 5900
+  internal:
+    SourceIp|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+      - '::1/128'
+      - fc00::/7
+      - fe80::/10
+  missing_source:
+    SourceIp: null
+  condition: allowed and not internal and not missing_source
+falsepositives:
+  - A jump box intentionally published to the internet
+  - Carrier-grade NAT (100.64.0.0/10), which is not in the private list
+level: high
