@@ -178,6 +178,20 @@ async function main() {
     await admin.page.click("text=Load demo data");
     await admin.page.waitForSelector("text=Alerts created", { timeout: 60000 });
     ok("demo data loaded");
+    // A fresh document must keep the flat map out of view until the globe is ready.
+    const firstLoad = await admin.ctx.newPage();
+    let releaseOrbit;
+    const orbitGate = new Promise((resolve) => { releaseOrbit = resolve; });
+    await firstLoad.route("**/orbit.js", async (route) => { await orbitGate; await route.continue(); });
+    const orbitRequested = firstLoad.waitForRequest("**/orbit.js");
+    await firstLoad.goto(BASE, { waitUntil: "domcontentloaded" });
+    await orbitRequested;
+    const flatMap = firstLoad.locator("#map svg.worldmap");
+    await flatMap.waitFor({ state: "attached" });
+    check(!await flatMap.isVisible(), "flat map stays hidden while the globe module is pending");
+    releaseOrbit();
+    await firstLoad.locator("canvas.orbit-surface").waitFor({ state: "visible" });
+    await firstLoad.close();
     await admin.page.goto(BASE + "#dashboard");
     for (const width of [1101, 1180, 1280, 1440, 1920]) {
       await admin.page.setViewportSize({ width, height: 900 });

@@ -1,11 +1,11 @@
 "use strict";
 
-// The flat view is available immediately. Only an intersecting card in globe
-// mode imports the renderer and imagery. Each dashboard mount owns one controller.
+// Each dashboard mount owns one controller. Only an intersecting card in globe
+// mode imports the renderer and imagery.
 class AttackMapView {
   constructor() {
     this.motion = matchMedia("(prefers-reduced-motion: reduce)");
-    this.wantGlobe = !this.motion.matches;
+    this.wantGlobe = true;
     this.active = false;
     this.rows = [];
     this.selected = null;
@@ -92,7 +92,6 @@ class AttackMapView {
 
   async load() {
     this.loading = true;
-    this.stage.dataset.loading = "true";
     const signal = this.life.signal;
     let gl, handedOff = false;
     try {
@@ -138,10 +137,10 @@ class AttackMapView {
   refreshMode() {
     const allowed = !this.failed;
     this.active = !!(this.orbit && this.wantGlobe && allowed);
-    this.card.dataset.mode = this.active ? "3d" : "2d";
-    this.stage.dataset.loading = String(!this.active && this.wantGlobe && !this.failed && !!this.loading);
-    this.flatButton.setAttribute("aria-pressed", String(!this.active));
-    this.globeButton.setAttribute("aria-pressed", String(this.active));
+    const flat = !this.wantGlobe || !allowed;
+    this.card.dataset.mode = flat ? "2d" : (this.active ? "3d" : "loading");
+    this.flatButton.setAttribute("aria-pressed", String(flat));
+    this.globeButton.setAttribute("aria-pressed", String(!flat));
     this.globeButton.disabled = !allowed;
     this.globeButton.title = this.failed ? "3D view unavailable on this device" : "Orbital globe";
     this.motionButton.hidden = !this.active || this.motion.matches;
