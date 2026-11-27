@@ -89,7 +89,7 @@ function audit(minTap) {
 }
 
 async function login(browser, user, pw, width) {
-  const ctx = await browser.newContext({ viewport: { width, height: width === 320 ? 568 : width === 390 ? 844 : 900 } });
+  const ctx = await browser.newContext({ viewport: { width, height: width === 320 ? 568 : width === 390 ? 844 : 900 }, hasTouch: width < 761 });
   const page = await ctx.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
@@ -114,6 +114,35 @@ async function show(page, hash) {
 async function auditView(page, label, width) {
   const problems = await page.evaluate(audit, width <= 400 ? 44 : 0);
   check(!problems.length, `${width}px ${label}${problems.length ? `: ${problems.join("; ")}` : ""}`);
+}
+
+async function checkGraphIncident(page, width, incidentId) {
+  const hosts = ["us-east-1", "us-west-2", "eu-west-1"].map((region) => `payments-api-${region}.platform.example.com`);
+  const label = `Initial Access → Credential Access → Lateral Movement: ${hosts.join(", ")}`;
+  await page.route("**/api/graph", (route) => route.fulfill({ json: {
+    nodes: [{ id: 0, type: "incident", ref: incidentId, severity: "critical", label }], edges: [],
+  } }), { times: 1 });
+  await show(page, "graph");
+  const phone = width < 761;
+  if (phone) await page.locator(".graph-key summary").click();
+  await page.getByRole("searchbox", { name: "Find a node" }).fill(hosts[0]);
+  await page.locator(".graph-results button").click();
+  await page.waitForFunction(() => document.querySelector(".graph-tip")?.style.top);
+  if (phone) {
+    const button = page.getByRole("button", { name: "Investigate", exact: true });
+    const fits = await button.evaluate((el) => {
+      const b = el.getBoundingClientRect(), stage = el.closest(".graph-stage").getBoundingClientRect();
+      return b.height >= 44 && b.top >= stage.top && b.bottom <= stage.bottom
+        && b.left >= stage.left && b.right <= stage.right;
+    });
+    check(fits, `${width}px wrapped graph title leaves the full Investigate button in the stage`);
+    if (!fits) return;
+    await button.tap();
+  } else {
+    await page.locator(".graph-canvas").press("Enter");
+  }
+  await page.getByRole("heading", { level: 1, name: new RegExp(`^Incident #${incidentId}:`) }).waitFor();
+  ok(`${width}px selected graph incident opens its details`);
 }
 
 // SVG font-size is in user units. Include the screen transform to catch a
@@ -251,6 +280,7 @@ async function main() {
         await page.waitForTimeout(500);
         check(await page.isHidden("#nav") && page.url().endsWith("#alerts"), "choosing a view closes the menu");
       }
+      await checkGraphIncident(page, width, incidentId);
       for (const v of views) {
         await show(page, v);
         await auditView(page, `#${v}`, width);

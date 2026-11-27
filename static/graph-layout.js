@@ -1,5 +1,5 @@
 // Start related nodes in the same part of the field, then relax the real links.
-export function seedLayout(nodes, edges) {
+export function seedLayout(nodes, edges, aspect = 1) {
   const incidents = nodes.filter(n => n.type === "incident");
   for (const [i, n] of nodes.entries()) {
     const a = i * 2.39996323, r = Math.sqrt(i) * 47;
@@ -8,7 +8,7 @@ export function seedLayout(nodes, edges) {
   const spread = Math.sqrt(nodes.length) * 66;
   for (const [i, n] of incidents.entries()) {
     const a = i * 2.39996323, r = spread * Math.sqrt((i + 0.5) / incidents.length);
-    n.homeX = n.x = r * Math.cos(a); n.homeY = n.y = r * Math.sin(a);
+    n.homeX = n.x = r * Math.cos(a) * Math.sqrt(aspect); n.homeY = n.y = r * Math.sin(a) / Math.sqrt(aspect);
   }
   for (const { type, a, b } of edges) {
     if (type === "membership") {
