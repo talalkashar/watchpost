@@ -35,6 +35,8 @@ jobs:
           python-version: "3.13"
           cache: pip
           cache-dependency-path: .github/workflows/tests.yml
+      - name: Graph camera bounds
+        run: node --test tests/graph-camera.test.mjs
       - name: Ruff
         run: pip install ruff==0.8.6 && ruff check .
   test:

@@ -1,4 +1,4 @@
-"use strict";
+import { fitFrame, limitCenter } from "./graph-camera.js";
 
 // An evidence graph is a snapshot. All geometry is local; ids and detail pivots come from the API.
 const Graph = (() => {
@@ -83,11 +83,12 @@ const Graph = (() => {
     graphLayout(nodes, edges);
     const shownTypes = new Set(Object.keys(types));
     let severity = "all", visible = [], links = [], selected = null, neighborhood = new Set();
-    let width = 0, height = 0, zoom = 1, sx = 1, sy = 1, cx = 0, cy = 0;
-    let frame = 0, observer, drag = null, holdTimer = 0;
+    let width = 0, height = 0, zoom = 1, scale = 1, bounds, cx = 0, cy = 0;
+    let frame = 0, observer, drag = null, holdTimer = 0, clickTimer = 0;
     const pointers = new Map(), controller = new AbortController(), signal = controller.signal;
     const mobile = matchMedia("(max-width: 760px)");
     const canvas = el("canvas", { class: "graph-canvas", tabindex: "0", role: "group",
+      "aria-description": "Shift and arrow keys pan. Double-click to fit.",
       "aria-label": "Investigation graph. Use the arrow keys to inspect nodes and Enter to open details." });
     const ctx = canvas.getContext("2d");
     const tip = el("div", { class: "graph-tip", hidden: true, role: "status" });
@@ -158,18 +159,19 @@ const Graph = (() => {
     }
 
     function fit() {
-      zoom = 1;
-      if (visible.length) {
-        const xs = visible.map((n) => n.x), ys = visible.map((n) => n.y);
-        const left = Math.min(...xs), right = Math.max(...xs), top = Math.min(...ys), bottom = Math.max(...ys);
-        cx = (left + right) / 2; cy = (top + bottom) / 2;
-        const padX = Math.min(72, width * 0.095), padY = Math.min(60, height * 0.09);
-        sx = (width - padX * 2) / Math.max(120, right - left);
-        sy = (height - padY * 2) / Math.max(120, bottom - top);
-        const base = Math.min(sx, sy);
-        sx = Math.min(sx, base * 1.9); sy = Math.min(sy, base * 1.9);
-      }
-      zoomText.textContent = "100%"; requestDraw();
+      bounds = fitFrame(visible, width, height); scale = bounds.scale;
+      cx = (bounds.left + bounds.right) / 2; cy = (bounds.top + bounds.bottom) / 2;
+      zoom = 1; zoomText.textContent = "100%"; requestDraw();
+    }
+
+    function constrain() {
+      const center = limitCenter(bounds, visible, width, height, zoom, cx, cy);
+      cx = center.x; cy = center.y;
+    }
+
+    function pan(dx, dy) {
+      cx -= dx / (scale * zoom); cy -= dy / (scale * zoom);
+      constrain(); requestDraw();
     }
 
     function resize() {
@@ -182,10 +184,10 @@ const Graph = (() => {
     }
 
     function zoomAt(x, y, factor) {
-      const next = clamp(zoom * factor, 0.25, 6);
-      cx += (x - width / 2) / sx * (1 / zoom - 1 / next);
-      cy += (y - height / 2) / sy * (1 / zoom - 1 / next);
-      zoom = next; zoomText.textContent = `${Math.round(zoom * 100)}%`; requestDraw();
+      const next = clamp(zoom * factor, 1, bounds.maxZoom);
+      cx += (x - width / 2) / scale * (1 / zoom - 1 / next);
+      cy += (y - height / 2) / scale * (1 / zoom - 1 / next);
+      zoom = next; constrain(); zoomText.textContent = `${Math.round(zoom * 100)}%`; requestDraw();
     }
 
     function select(n) {
@@ -226,8 +228,8 @@ const Graph = (() => {
       const density = clamp(Math.sqrt(width * height / Math.max(1, visible.length)) / 74, 0.58, 1);
       for (const n of visible) {
         const phase = time * 0.00038 + n.id * 1.81;
-        n.px = width / 2 + (n.x - cx) * sx * zoom + (moving ? 1.45 * Math.sin(phase) : 0);
-        n.py = height / 2 + (n.y - cy) * sy * zoom + (moving ? 1.45 * Math.cos(phase) : 0);
+        n.px = width / 2 + (n.x - cx) * scale * zoom + (moving ? 1.45 * Math.sin(phase) : 0);
+        n.py = height / 2 + (n.y - cy) * scale * zoom + (moving ? 1.45 * Math.cos(phase) : 0);
         n.r = ((n.type === "incident" ? 8 : 4) + Math.min(6, Math.sqrt(n.degree)) +
           (SEVERITY_RANK[n.severity] || 0) * 0.65) * density * clamp(Math.sqrt(zoom), 0.7, 1.55);
       }
@@ -342,7 +344,7 @@ const Graph = (() => {
       if (pointers.size === 2) {
         const next = pinch(), old = drag.pinch;
         if (old) {
-          cx -= (next.x - old.x) / (sx * zoom); cy -= (next.y - old.y) / (sy * zoom);
+          pan(next.x - old.x, next.y - old.y);
           zoomAt(next.x, next.y, next.distance / old.distance);
         }
         drag.pinch = next; return;
@@ -351,21 +353,33 @@ const Graph = (() => {
       if (!drag.moved && Math.hypot(p.x - drag.start.x, p.y - drag.start.y) < 4) return;
       clearTimeout(holdTimer); select(null);
       const from = drag.moved ? prev : drag.start;
-      const dx = (p.x - from.x) / (sx * zoom), dy = (p.y - from.y) / (sy * zoom);
       drag.moved = true;
-      if (drag.node) { drag.node.x += dx; drag.node.y += dy; }
-      else { cx -= dx; cy -= dy; }
-      requestDraw();
+      if (drag.node) {
+        const x = clamp(p.x, 0, width), y = clamp(p.y, 0, height);
+        drag.node.x = cx + (x - width / 2) / (scale * zoom);
+        drag.node.y = cy + (y - height / 2) / (scale * zoom);
+        requestDraw();
+      } else pan(p.x - from.x, p.y - from.y);
     });
     function release(ev) {
       if (!pointers.delete(ev.pointerId)) return;
       clearTimeout(holdTimer);
+      if (drag.node && drag.moved) {
+        const absoluteScale = scale * zoom;
+        bounds = fitFrame(visible, width, height); scale = bounds.scale;
+        zoom = clamp(absoluteScale / scale, 1, bounds.maxZoom);
+        zoomText.textContent = `${Math.round(zoom * 100)}%`; constrain();
+      }
       const clicked = ev.type === "pointerup" && !drag.moved && !drag.inspected && drag.node;
       drag = pointers.size ? { moved: true, pinch: pointers.size === 2 ? pinch() : null } : null;
-      if (clicked) detail(clicked); else requestDraw();
+      if (clicked) {
+        clearTimeout(clickTimer);
+        clickTimer = setTimeout(() => detail(clicked), 320);
+      } else requestDraw();
     }
     canvas.addEventListener("pointerup", release); canvas.addEventListener("pointercancel", release);
     canvas.addEventListener("lostpointercapture", release);
+    canvas.addEventListener("dblclick", () => { clearTimeout(clickTimer); select(null); fit(); });
     canvas.addEventListener("pointerleave", () => { if (!drag && !mobile.matches) select(null); });
     canvas.addEventListener("wheel", (ev) => {
       ev.preventDefault(); select(null);
@@ -376,6 +390,10 @@ const Graph = (() => {
       if (ev.key === "Enter" && selected) detail(selected);
       else if (ev.key === "Escape") select(null);
       else if (["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp"].includes(ev.key)) {
+        if (ev.shiftKey) {
+          pan(({ ArrowRight: -60, ArrowLeft: 60 })[ev.key] || 0, ({ ArrowDown: -60, ArrowUp: 60 })[ev.key] || 0);
+          ev.preventDefault(); return;
+        }
         const forward = ["ArrowRight", "ArrowDown"].includes(ev.key), i = visible.indexOf(selected);
         const next = visible[i < 0 ? 0 : (i + (forward ? 1 : -1) + visible.length) % visible.length];
         if (next.px < 20 || next.px > width - 20 || next.py < 20 || next.py > height - 20) fit();
@@ -388,7 +406,7 @@ const Graph = (() => {
     Motion.reduced.addEventListener("change", requestDraw, { signal });
     document.addEventListener("visibilitychange", requestDraw, { signal });
     observer = new ResizeObserver(resize); observer.observe(stage);
-    dispose = () => { controller.abort(); observer.disconnect(); clearTimeout(holdTimer); cancelAnimationFrame(frame); };
+    dispose = () => { controller.abort(); observer.disconnect(); clearTimeout(holdTimer); clearTimeout(clickTimer); cancelAnimationFrame(frame); };
     update(); resize();
   }
 
