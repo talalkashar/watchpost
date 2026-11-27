@@ -151,6 +151,18 @@ Then sign in as `admin`, open **Admin → Load synthetic demo data**.
 | `SIEM_LOGIN_RATE_BURST` / `SIEM_LOGIN_RATE_PER_MIN` | `10` / `10` | Token bucket for `POST /api/auth/login`, per client IP |
 | `SIEM_RATE_BURST` / `SIEM_RATE_PER_MIN` | `300` / `1200` | Token bucket for every other request (API and static), per client IP |
 | `SIEM_TRUST_PROXY` | `0` | `1` behind a local reverse proxy: on a loopback connection, the client IP is the last entry of the one `X-Forwarded-For` header. Two headers, or a value that is not an address, stay the peer |
+| `SIEM_THREAT_FEEDS` | unset (nothing is fetched) | Threat intelligence feeds to fetch: preset names and `name=https://...` pairs, comma-separated. See [Threat intelligence](#threat-intelligence) |
+| `SIEM_THREAT_FEED_MINUTES` | `360` | Minutes between fetches; at least 60 |
+| `SIEM_OTX_API_KEY` / `SIEM_OTX_DAYS` | unset / `30` | API key of an OTX account for the `otx` preset, and how many days of changed pulses to read |
+| `SIEM_RETENTION_HOT_DAYS` | unset (retention off, nothing deleted) | Days after arrival an event stays in the database. Setting it turns on [tiered retention](#tiered-retention-hot-warm-cold) |
+| `SIEM_RETENTION_WARM_DAYS` | unset (archives stay warm) | Days after arrival an archive file moves to cold storage |
+| `SIEM_RETENTION_TOTAL_DAYS` | unset (never deleted) | Days after arrival an archive file is deleted |
+| `SIEM_ARCHIVE_DIR` / `SIEM_COLD_DIR` | `archive` next to the database / `cold` inside it | Where warm and cold archive files live |
+| `SIEM_RETENTION_INTERVAL_MINUTES` | `60` | Minutes between retention runs |
+| `SIEM_PLAYBOOK_WEBHOOK_URL` | unset (nothing is sent) | Where response playbooks post notifications and action requests: `https://`, or `http://` to this machine. See [Response playbooks](#response-playbooks) |
+| `SIEM_PLAYBOOK_WEBHOOK_SECRET` | unset (unsigned) | Signs each webhook body: `X-Watchpost-Signature: sha256=<HMAC-SHA256>` |
+| `SIEM_PLAYBOOK_WEBHOOK_CAFILE` | unset | CA bundle for a webhook with a private certificate |
+| `SIEM_PLAYBOOK_WEBHOOK_SYNTHETIC` | `0` | `1` also sends alerts from synthetic data. Leave it off unless the receiver is a test endpoint |
 | `SIEM_AUDIT_KEY` | unset (unkeyed) | HMAC key for the audit log hash chain; see [Tamper-evident audit log](#tamper-evident-audit-log) |
 
 ### Public deployment
@@ -201,8 +213,13 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 | `watchpost/case_record.py` | Chronological incident case records combining evidence, membership, workflow transitions, assignments, and notes; renders JSON and Markdown. |
 | `watchpost/ecs.py` | Maps an event to Elastic Common Schema field names for export. |
 | `watchpost/syslog_listener.py` | Optional syslog receiver over UDP, TCP and TLS (RFC 3164, RFC 5424, RFC 6587 framing, RFC 5425 TLS with optional client certificates). Runs each line through the auth.log parser, falls back to a generic `syslog` event with severity from PRI, and batches into the engine every 2 seconds. Reports itself as the `syslog` health component. |
+| `watchpost/threat_intel.py` | Threat intelligence feeds: lists of hostile addresses and networks, imported by an admin or fetched from presets (Spamhaus DROP, Emerging Threats, CINS, blocklist.de, IPsum, Feodo, Tor exits, OTX) and other URLs. Tags events on arrival and again when a feed changes, raises alerts that touch a listed address, and refuses internal or over-broad entries. |
+| `watchpost/retention.py` | Tiered retention, off by default: writes each arrival day older than the hot period to a gzip JSON-lines file, verifies it, then deletes the rows (never alert evidence); moves files to a cold directory and deletes them at the end of retention; keeps a manifest with SHA-256 hashes; searches a warm day. |
+| `watchpost/playbooks.py` | Response playbooks: the built-in step lists, one per kind of alert; the automatic context and notification steps; step state per alert; response-action requests with their guard rails; and the outbox and delivery thread for the webhook. |
 | `scripts/shipper.py` | Stdlib-only file tailer for Linux boxes: batches new lines to `/api/ingest/upload` with an ingest token, with backoff, rotation handling, and a position file. |
 | `scripts/cloudtrail_collector.py` | Stdlib-only AWS CloudTrail collector: reads `LookupEvents` with a read-only identity (one assumed role per account, any number of regions), signs requests with Signature Version 4, dedupes across its polling overlap, and posts the records to `/api/ingest` with an ingest token. |
+| `scripts/wef_collector.py` | Stdlib-only, experimental Windows Event Forwarding collector: an HTTPS endpoint with mutual TLS that Windows' built-in forwarder pushes events to (WS-Management, source-initiated subscription). Hands each host one subscription, acknowledges a batch only after `/api/ingest` accepted it, keeps one bookmark per host, and reads SLDC-compressed deliveries. Tested against a simulated sender, not against Windows. |
+| `scripts/wec_forwarder.ps1` | Experimental PowerShell forwarder for a server running the Windows Event Collector service: reads its *ForwardedEvents* log from the last record sent and posts the events to `/api/ingest`, with retries and a position file. For Windows PowerShell 5.1 or newer. Tested off Windows only, with `tests/wec_forwarder_check.ps1`. |
 | `watchpost/simulate.py` | Labeled synthetic scenarios and a CLI that sends only to loopback unless you explicitly allow otherwise. |
 | `watchpost/report.py` | Incident and alert reports: one model (summary, timeline of the first 200 events plus `timeline_omitted`, entities, alerts with evidence, ATT&CK techniques by tactic with evidence level, notes, recommended actions) rendered as Markdown or PDF. |
 | `watchpost/pdfwriter.py` | Minimal hand-written PDF 1.4 writer (Helvetica, wrapping, tables, page breaks, xref). |
@@ -210,7 +227,7 @@ Caddy (Let's Encrypt, for a domain) or nginx (self-signed, for a bare IP) in fro
 
 ### Normalized event schema
 
-`id, ts (UTC ISO-8601), ingested_at, source, host, event_type, outcome, severity, user, src_ip, dest_ip, message, raw (redacted, truncated), synthetic, batch_id`
+`id, ts (UTC ISO-8601), ingested_at, source, host, event_type, outcome, severity, user, src_ip, dest_ip, message, raw (redacted, truncated), synthetic, batch_id, threat (set by Watchpost from the threat intelligence feeds, never by the sender)`
 
 `event_type` is one of `auth_failure, auth_success, account_lockout, user_created, privilege_use, process_start, network_connection, file_access, other`, plus (2.0) `web_request, web_scan, web_error, fw_deny, fw_allow, vpn_login, cloud_api_call, cloud_iam_change, cloud_data_access, privilege_escalation`, and `syslog` (a line received by the syslog listener that no parser recognized). Events also carry `dest_port` and `bytes` when the source has them.
 
@@ -266,6 +283,24 @@ The scenarios are synthetic, so "validated" means a rule detected the project's 
 
 After each detection run, `watchpost/correlate.py` groups related alerts into incidents: alerts whose evidence shares a source IP, account, or host within 30 minutes. An incident needs two related alerts or one critical alert, lists its kill-chain stages (ATT&CK tactics in order), and is raised one severity level when it spans three or more tactics. Account and host values fold ASCII letters only, the same fold as entity pages (`WEB01` and `web01` are one host `web01`; `ÉRIN` and `érin` stay two accounts, and `Érin-host` and `érin-host` stay two hosts). Source IPs stay the stored address. Reruns change nothing; new alerts join an open incident.
 
+**Correlation rules.** On top of that grouping, `correlate.PATTERNS` names five shapes that matter more than their parts:
+
+| Rule | Stages, in order | Same across the stages | Severity at least |
+|---|---|---|---|
+| Scan, then attack, from one source | Reconnaissance or Discovery, then Credential Access or Initial Access | source address | high |
+| Password attack, then a suspicious login | Credential Access, then Initial Access | source address or account | critical |
+| Suspicious login, then privilege escalation | Initial Access, then Privilege Escalation or Persistence | account | high |
+| Suspicious login, then data leaving | Initial Access or Privilege Escalation, then Collection or Exfiltration | account | critical |
+| Logging impaired around other activity | Defense Impairment and any other tactic, in either order | account | critical |
+
+- **Written over tactics, not rule names.** An alert fits a stage when the rule that raised it maps to one of the stage's ATT&CK tactics. So the rules also apply to imported Sigma rules and promoted searches that carry techniques. An alert from a rule with no technique never fits.
+- **A longer window.** The stages may be up to 24 hours apart, because an intrusion rarely fits in 30 minutes. Alerts that complete a rule are put in one incident even when the 30-minute grouping would keep them apart.
+- **The same actor, never just the same host.** What must match across the stages is the source address or the account. A host is a place: unrelated things happen on one host all day, and linking on it over 24 hours glues separate scenarios of the demo dataset into one incident.
+- **Not through a crowd.** An alert that names more than three accounts (a password spray, say) does not tie any one of them to a later stage. The source address still does.
+- **What a match does.** The incident lists the rule and the alerts that complete it, on its page and in its report, and its severity is raised to at least the rule's. Nothing else changes: an incident still needs two alerts or one critical alert, and two existing incidents are still never merged.
+
+These are five hand-written shapes, not a correlation language. They cannot be edited from the interface, and they see only alerts, so a stage no rule detects is a stage they miss.
+
 Every rule except `log_source_silent` accepts `ignore_ips` and `ignore_users`. `ignore_users` and `privileged_users` fold ASCII letters only, the same fold as entity keys: `Alice`, `alice`, and `ALICE` are one account, and `érin` does not match `ÉRIN`. `josé` still matches `josé`. Sanctioned service names and logging actions still fold the whole string. The review gate uses those same helpers. The engine merges overlapping findings into one open alert instead of creating duplicates, and a rescan never re-alerts on evidence already attached to an alert.
 
 An analyst can also propose a **rule suppression window** for a planned operational period. It pauses every
@@ -273,6 +308,128 @@ finding from one rule between explicit start and expiry times (at most 30 days),
 which labeled attacks will be missed and approval by a different admin requires explicit detection-loss
 acknowledgement. Detection runs count findings skipped by an active window. Upcoming, active, expired and
 manually ended windows remain visible under Rules & review; ending one early is an audited admin action.
+
+### Threat intelligence
+
+A threat intelligence feed is a named list of IP addresses and networks someone has reason to call hostile. `watchpost/threat_intel.py` keeps the feeds and marks what touches them.
+
+**Where a feed comes from**
+
+- **Imported by an admin:** paste a list under **Admin > Threat intelligence**, or post it to `POST /api/threat-intel/feeds/{name}`. One address or network per line; a note may follow `#`, `;` or a comma.
+- **A preset:** a well-known open feed, turned on by name. `SIEM_THREAT_FEEDS=spamhaus_drop,et_compromised,ipsum` fetches those three.
+- **Any other URL:** `SIEM_THREAT_FEEDS=mylist=https://intel.example.internal/bad.txt`.
+
+Nothing is fetched unless `SIEM_THREAT_FEEDS` names it. URL feeds are fetched every `SIEM_THREAT_FEED_MINUTES` (default 360, minimum 60), and never more than once an hour whatever happens, including a restart or an admin pressing the button. Only HTTPS is accepted, redirects are not followed, and a download is capped at 8 MB.
+
+**The presets.** No feed's data is in this repository: it holds synthetic data only, and a list of hostile addresses is stale within days. Each preset was fetched once and read with the parser, and its publisher's terms were read, on 2026-11-10. The table says what those pages said then. Whether you may use a feed where you work is between you and its publisher, so read the terms.
+
+| Name | What it lists | Terms as read on 2026-11-10 |
+|---|---|---|
+| `spamhaus_drop` | Spamhaus DROP: networks hijacked or leased by spam and cybercrime operations. Data from The Spamhaus Project | Free to download and use, with credit to The Spamhaus Project; at most one automated download an hour. [Fair use policy](https://www.spamhaus.org/blocklists/drop-fair-use-policy/) |
+| `et_compromised` | Emerging Threats (Proofpoint): hosts seen attacking others | The file states no licence (the open ruleset it belongs to is BSD-licensed); at most one download an hour. [Download instructions](https://rules.emergingthreats.net/OPEN_download_instructions.html) |
+| `cins_army` | CINS Army (Sentinel IPS): up to 15,000 addresses with a very poor reputation | No formal licence; the publisher says to use it "in any way you see fit". [Publisher](https://cinsscore.com/#list) |
+| `blocklist_de` | blocklist.de: addresses that attacked its reporting servers in the last 48 hours | No formal licence; offered as is, at your own risk. [Publisher](https://www.blocklist.de/en/export.html) |
+| `ipsum` | IPsum level 3: addresses on three or more of some thirty public blocklists | The Unlicense; the lists it aggregates keep their own terms. [Repository](https://github.com/stamparm/ipsum) |
+| `feodo` | abuse.ch Feodo Tracker: botnet command-and-control servers. Almost empty at present, after takedowns | CC0. [Terms](https://abuse.ch/terms-of-use/) |
+| `tor_exits` | Tor exit relays. Context, not a verdict: a login through Tor is worth a look, not proof of anything | No licence stated for the file. [Tor Project](https://support.torproject.org/abuse/ban-tor/) |
+| `otx` | AlienVault (LevelBlue) OTX: the addresses in the pulses your OTX account subscribes to, changed in the last `SIEM_OTX_DAYS` days (default 30) | **Free for non-commercial use only.** Needs a free account and its API key in `SIEM_OTX_API_KEY`. [OTX terms](https://www.levelblue.com/legal/otx-eula-terms) |
+
+For OTX, create an account, subscribe to the pulses or authors you trust, and copy the API key from your OTX settings into `SIEM_OTX_API_KEY`. The collector reads `GET /api/v1/pulses/subscribed` with the key in the `X-OTX-API-KEY` header, follows the paging on the same host only, and keeps the `IPv4`, `IPv6` and `CIDR` indicators with the pulse's name as the note. It is tested against a stand-in for the OTX API, written from the official OTX Python SDK. It has not been run against OTX itself: that needs an account.
+
+**What a feed does**
+
+- **Tags events as they arrive.** If an event's source or destination address is listed, its `threat` field names the feed and the entry's note (`spamhaus_drop: SBL256894`). The tag shows wherever events do, is kept when the event is archived, and cannot be set by whoever sent the event.
+- **Tags the past too.** When a feed changes, stored events are tagged again, so an address listed today also marks what it did last week.
+- **Raises alerts.** An alert whose evidence carries a tag goes up one severity level, and its severity note says which feed.
+- **Is searchable.** The hunt `threat:*` finds every tagged event; `threat:spamhaus*` those of one feed.
+- **Becomes a detection if you want one.** Save the hunt `threat:*` and promote it to a rule (see [Saved searches as detections](#saved-searches-as-detections)). It then goes through the same review as any other rule, which is why no rule is built in for it.
+
+**What a feed may not do.** A line that names an internal address, or a network broader than a /16 (IPv4) or a /32 (IPv6), is refused, counted and reported; the rest of the feed is used. Otherwise one bad line could mark the whole office as hostile. With today's Spamhaus DROP, that refuses 9 of its 1,763 networks.
+
+Limits:
+
+- Addresses and networks only. No domains, URLs or file hashes.
+- A listed address is a reason to look, not a verdict. Open lists carry stale entries, shared hosting and cloud addresses that have changed hands.
+- A URL feed that cannot be fetched keeps its last good copy and shows the error. Entries have no expiry of their own: they leave when the feed drops them.
+- The fetcher starts from `main.py`, like the other background services.
+- With more than 200,000 distinct addresses in stored events, a changed feed tags only new events.
+- Spamhaus says its text file will be replaced by a JSON one at some point. The preset reads the text file.
+
+### Tiered retention (hot, warm, cold)
+
+By default Watchpost keeps every event in the database and deletes nothing. Setting `SIEM_RETENTION_HOT_DAYS` turns on tiered retention (`watchpost/retention.py`):
+
+| Tier | Where | What you can do with it | Leaves when |
+|---|---|---|---|
+| **Hot** | the `events` table | Everything: search, hunting, detection, dashboards | `SIEM_RETENTION_HOT_DAYS` after arrival |
+| **Warm** | one gzip file of JSON lines per day, in `SIEM_ARCHIVE_DIR` | Search one day at a time from the Events view or the API. A linear scan, so slower | `SIEM_RETENTION_WARM_DAYS` after arrival (unset: stays warm) |
+| **Cold** | the same files, in `SIEM_COLD_DIR` | Listed and verified. An admin brings a day back to warm for a week to search it | `SIEM_RETENTION_TOTAL_DAYS` after arrival (unset: never) |
+| **Deleted** | nowhere | The manifest row and the audit entry remain: the day, how many events, the file's hash, and when it was disposed of | |
+
+For example, PCI DSS requirement 10.5.1 asks for twelve months of audit log history with the most recent three months immediately available. `SIEM_RETENTION_HOT_DAYS=90` and `SIEM_RETENTION_TOTAL_DAYS=365` express that shape. The setting does not make a deployment compliant with anything: that also depends on what is logged, who can reach the files, and how the storage is protected.
+
+How it behaves:
+
+- **Age counts from arrival.** A day is the UTC day Watchpost received the events (`ingested_at`), not the timestamp inside them. Nothing leaves a tier sooner than the configured time after it arrived, whatever clock the sender had. Old data that is back-filled is kept longer, never shorter.
+- **Nothing is deleted before it is safely elsewhere.** A day's file is written, read back and counted, and recorded in the manifest. Only then are its rows deleted, in small transactions so ingestion is not held up. A move to cold copies the file, checks the copy's hash, then removes the original. A step that fails is reported and tried again on the next run; the events stay where they were.
+- **Integrity.** Each file's SHA-256 is stored in the manifest (table `archives`) and written to the audit log (`archive_created`, `archive_moved_to_cold`, `archive_deleted`). Because the audit log is a hash chain, swapping a file later is detectable. **Admin > Retention > Verify files** recomputes every hash.
+- **Alert evidence stays.** Events that are evidence of an alert are written to the archive like the rest but are not deleted from the database, so alerts and incidents keep their evidence however old they are.
+- **Detection is not starved.** The hot period is never shorter than the longest history an enabled rule reads (about nine days with the default rules), whatever `SIEM_RETENTION_HOT_DAYS` says. The Retention card shows the period in force.
+- **Synthetic data keeps its label.** Each archived event carries its `synthetic` flag, and the manifest counts the synthetic events per day.
+- **When it runs.** Hourly from `main.py` (`SIEM_RETENTION_INTERVAL_MINUTES`), and on demand with **Run now**. One run at a time. The `retention` health component turns `degraded` when a run had errors or a file fails verification.
+
+Limits:
+
+- The archive files are not encrypted, and the cold directory is only as separate as you make it. Point `SIEM_COLD_DIR` at other storage, and protect both directories like the database.
+- Archive search reads one day at a time and has no index. Viewers cannot use it: the files hold real names and addresses, and viewer masking covers database responses only.
+- Deleted rows free space inside the SQLite file for reuse. The file itself does not shrink until you run `VACUUM` with the server stopped.
+- Everything else that reads events (backtests, entity pages, the dashboard) sees the hot tier only.
+- Alerts, incidents, notes and the audit log are not subject to retention. They stay.
+
+### Response playbooks
+
+Every alert gets a playbook: an ordered list of steps for that kind of alert, from triage to the verdict. `watchpost/playbooks.py` holds seven of them (password attack, suspected account compromise, scanning, possible data theft, cloud account change, log source went quiet, and a general one for imported Sigma rules and promoted searches). Each built-in rule maps to one. The alert page shows the steps and their state.
+
+A step is one of three kinds:
+
+| Kind | Who does it | What happens |
+|---|---|---|
+| automatic | Watchpost, when the alert is created | **Gather context** counts earlier alerts for the same subject in the last 30 days and how they were resolved. **Notify the response channel** posts the alert's summary to the webhook |
+| manual | an analyst, outside Watchpost | The analyst marks it done, or skipped with a reason. It can be reopened |
+| action | your own automation | **Block the source address**, **Disable the account**, **Isolate the host**. The analyst picks a target and gives a reason; Watchpost posts the request to the webhook |
+
+**Watchpost never carries out a response action.** It holds no firewall, directory or endpoint credentials. A request is a signed JSON message to a URL you configure, and what happens there is yours to build and to answer for. On an action step, "done" means the request was delivered, not that the address is blocked.
+
+The guard rails:
+
+- **Off until configured.** Nothing leaves Watchpost unless `SIEM_PLAYBOOK_WEBHOOK_URL` is set. Without it, notify and action steps are recorded as "not sent". The URL must be `https://`, or `http://` to the same machine; the server refuses to start on any other value.
+- **Synthetic alerts stay home.** Alerts from synthetic data are never sent, unless `SIEM_PLAYBOOK_WEBHOOK_SYNTHETIC=1`. The demo dataset cannot trigger your automation by accident.
+- **Targets come from the evidence.** An action can only name an address, account or host that appears in the alert's own events. `block_ip` takes addresses outside the internal ranges only: an internal source that misbehaves is a host to isolate.
+- **A person decides.** Only the automatic context and notification run by themselves. Every response action needs an analyst, a reason, and an unresolved alert, and is written to the audit log as `playbook_action_requested` with the target and the reason.
+- **The summary, not the events.** A webhook body carries the alert's id, rule, title, severity, group, times and event count. It never carries the events.
+- **Reviewed switch.** The setting `playbook_automation` (default 1) turns the automatic steps off. Like the other security settings, a change needs a second admin.
+
+**Webhook messages.** Each is a `POST` with `Content-Type: application/json`, an `X-Watchpost-Delivery` id, and, when `SIEM_PLAYBOOK_WEBHOOK_SECRET` is set, `X-Watchpost-Signature: sha256=<HMAC-SHA256 of the body>`. Verify the signature before acting on a message.
+
+```json
+{"type": "response_action", "action": "block_ip", "target": "203.0.113.45",
+ "wanted": "block this address at the network edge",
+ "requested_by": "analyst", "reason": "Password guessing",
+ "alert": {"id": 12, "rule_id": "brute_force_ip", "title": "...", "severity": "high", "status": "open",
+           "group_key": "203.0.113.45", "first_seen": "...", "last_seen": "...", "event_count": 12, "synthetic": false},
+ "playbook": {"id": "credential_attack", "name": "Password attack"},
+ "created_at": "2026-11-10T21:21:26.000Z", "watchpost_version": "..."}
+```
+
+A notification has `"type": "alert"` and no action fields. Messages wait in the `playbook_outbox` table and are sent by a separate thread, so detection never waits on the network. A delivery that does not get a 2xx answer is retried after 5 s, 30 s, 2 min and 10 min, then marked failed; the step shows it. Redirects are not followed. `GET /api/playbooks` shows how many deliveries are pending, sent and failed.
+
+Limits:
+
+- The playbooks are built in. They cannot be edited from the interface, and they are short general guidance for a lab, not an incident response plan for your organization.
+- Watchpost does not learn whether your automation did what was asked. There is no callback.
+- Playbooks belong to alerts. An incident shows its alerts; it has no playbook of its own.
+- The delivery thread starts from `main.py`. A server started another way records requests and does not send them.
+- An alert created before this feature has no playbook until an analyst starts one from the alert page.
 
 ### Incident case timeline
 
@@ -551,7 +708,7 @@ Send `{"value": 0}` the same way to turn it off. A viewer with masking on gets `
 | `since:` / `until:` | `since:2026-10-01 until:2026-10-02T06:00Z` | ISO times, UTC unless an offset is given |
 | `bytes:opN` | `bytes:>=1000000` | Byte count on the event. `op` is `>=`, `>`, `<=`, `<` or `=`, and `N` is an integer from 0 to 1000000000000000. The number is a bound parameter. Events with no byte count do not match. Any other `bytes:` value is an error that lists those operators. |
 
-Fields: `user`, `host`, `source`, `outcome`, `src_ip`, `dest_ip`, `ip` (source or destination), `batch_id`, `event_type`, `severity`, `dest_port`, `bytes` (a comparison, not an exact token), `synthetic` (`0`, `1`, `true`, or `false`; ASCII case folds, so `TRUE` is `true` and `False` is `false`; `truİe`, `trüe`, and `yes` are 400 `synthetic must be 0, 1, true or false`; grouping by `synthetic` stays the stored 0 or 1), `message`. An unknown field is an error that lists these. `src_ip`, `dest_ip`, and `ip` equality bind the address ingest stores, so `2001:DB8::1` matches `2001:db8::1`. A trailing `*` stays a text prefix and is not parsed as an address. Any other value is 400. Queries are capped at 500 characters and 20 terms, and results page and sort like event search (newest first, up to 1000 per page). `offset` above 10000 is 400 naming that maximum, on a plain hunt and on a pipeline stage. Walk newer events with `since_id` on `GET /api/events`.
+Fields: `user`, `host`, `source`, `outcome`, `src_ip`, `dest_ip`, `ip` (source or destination), `batch_id`, `event_type`, `severity`, `dest_port`, `bytes` (a comparison, not an exact token), `synthetic` (`0`, `1`, `true`, or `false`; ASCII case folds, so `TRUE` is `true` and `False` is `false`; `truİe`, `trüe`, and `yes` are 400 `synthetic must be 0, 1, true or false`; grouping by `synthetic` stays the stored 0 or 1), `threat` (feed names and notes), `message`. An unknown field is an error that lists these. `src_ip`, `dest_ip`, and `ip` equality bind the address ingest stores, so `2001:DB8::1` matches `2001:db8::1`. A trailing `*` stays a text prefix and is not parsed as an address. Any other value is 400. Queries are capped at 500 characters and 20 terms, and results page and sort like event search (newest first, up to 1000 per page). `offset` above 10000 is 400 naming that maximum, on a plain hunt and on a pipeline stage. Walk newer events with `since_id` on `GET /api/events`.
 
 ```
 user:alice event_type:auth_failure NOT src_ip:10.0.0.5 host:web* "invalid password" last:24h
@@ -770,6 +927,8 @@ labs/siem/
 ├── scripts/ui_check.js headless browser check: every view at 1440px and 390px, labels, keyboard triage
 ├── scripts/shipper.py  log file shipper for Linux boxes (stdlib only)
 ├── scripts/cloudtrail_collector.py AWS CloudTrail collector for a read-only identity (stdlib only)
+├── scripts/wef_collector.py Windows Event Forwarding collector, agentless, experimental (stdlib only)
+├── scripts/wec_forwarder.ps1 forwarder for a Windows Event Collector server, experimental (PowerShell)
 ├── tests/              unittest suite
 ├── docs/API.md         API reference
 ├── docs/LIVE_INGEST.md syslog listener, rsyslog forwarding, and the file shipper

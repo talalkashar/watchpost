@@ -43,6 +43,10 @@ def _incident(row):
     item = row_to_dict(row)
     item["entities"] = _json_field(item.get("entities"), dict, {})
     item["stages"] = _json_field(item.get("stages"), list, [])
+    item["patterns"] = [
+        {**match, **{key: correlate.PATTERN_INFO[match["id"]][key] for key in ("name", "description", "severity")}}
+        for match in _json_field(item.get("patterns"), list, [])
+        if isinstance(match, dict) and isinstance(match.get("id"), str) and match["id"] in correlate.PATTERN_INFO]
     return item
 
 

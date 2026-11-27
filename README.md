@@ -18,12 +18,15 @@ Watchpost is a SIEM in the Python standard library. It ingests logs, runs explai
 
 ## What it does
 
-- **Ingests** JSON, CSV, Linux `auth.log`, Windows Security events, nginx and Apache access logs, firewall and VPN logs, and cloud audit logs. Input is a file upload, an authenticated API, a syslog listener, `scripts/shipper.py`, or the read-only CloudTrail collector. Normalization writes one schema.
+- **Ingests** JSON, CSV, Linux `auth.log`, Windows Security events, nginx and Apache access logs, firewall and VPN logs, and cloud audit logs. Input is a file upload, an authenticated API, a syslog listener, `scripts/shipper.py`, the read-only CloudTrail collector, or the experimental Windows Event Forwarding collector. Normalization writes one schema.
 - **Detects** with fifteen built-in rules. Each rule is a pure function. Each alert stores a plain-English explanation and the event ids behind it. The rules are listed under [Detections](#detections).
 - **Maps to MITRE ATT&CK.** Today's catalog is the 20 techniques in `watchpost/attack.py`, not the full matrix. A technique is validated only when an enabled rule detects a labeled synthetic scenario tagged with that technique. That grade is not a claim about real traffic. The other grades are mapped, disabled, and gap.
-- **Correlates** alerts that share an IP, account, or host into incidents with kill-chain stages. An incident exports a case record as JSON or Markdown, and a report as Markdown or PDF.
+- **Correlates** alerts that share an IP, account, or host into incidents with kill-chain stages. Five multi-stage rules also link related alerts up to a day apart. An incident exports a case record as JSON or Markdown, and a report as Markdown or PDF.
 - **Graphs the evidence.** Open **Graph** to follow a detection to its hosts, accounts, source IPs, and incident. Gold arcs connect alerts in the same incident that share evidence entities within 30 minutes. [See the investigation graph](docs/screenshots/07-investigation-graph.jpg).
 - **Hunts** with one line: `field:value`, `NOT`, `last:7d`, and one of `| stats`, `| top`, or `| timechart`. The compiler uses a field whitelist and bound values. A saved search can be promoted to a detection.
+- **Responds** with a playbook for every alert: automatic context, steps an analyst checks off, and response actions (block an address, disable an account, isolate a host) that are sent as signed requests to a webhook you configure. Watchpost never carries out an action itself.
+- **Uses threat intelligence:** lists of hostile addresses, pasted in or fetched from open feeds you turn on by name (Spamhaus DROP, Emerging Threats, CINS Army, blocklist.de, IPsum, abuse.ch Feodo, Tor exits, AlienVault OTX with your own key). Events that touch a listed address are tagged and searchable, and alerts on them are raised. No feed data is bundled, and nothing is fetched until you ask.
+- **Retains** in tiers when asked to: recent events in the database, older ones in verified compressed files, the oldest in a cold directory, deleted at the end of a period you set. Off by default; nothing is deleted before its archive has been written and checked.
 - **Tunes** from analyst feedback. The proposal is backtested on stored events. A second person approves it. Rules export and import as versioned JSON. A subset of Sigma imports.
 - **Secures itself** with PBKDF2 password hashes, lockout, server-side sessions, TOTP, and CSRF protection. The audit log is a hash chain. `viewer_masking` defaults to off (`0` in `watchpost/improve.py`). When a reviewed change sets it to `1`, only the `viewer` role sees pseudonyms (`user-` and `internal-`, eight hex digits) for known usernames and internal IPs. Analyst and admin responses are not masked. Public IPs, host names, and the signed-in viewer's own name stay visible.
 
@@ -94,7 +97,7 @@ CI runs the suite on Python 3.11 through 3.14.
 |---|---|
 | [Reference](docs/REFERENCE.md) | Every feature, the architecture, configuration, performance numbers and limits |
 | [API](docs/API.md) | HTTP API reference |
-| [Live ingestion](docs/LIVE_INGEST.md) | Syslog listener (plaintext and TLS), rsyslog forwarding, the file shipper, and the CloudTrail collector |
+| [Live ingestion](docs/LIVE_INGEST.md) | Syslog listener (plaintext and TLS), rsyslog forwarding, the file shipper, the CloudTrail collector, experimental Windows Event Forwarding, and the experimental WEC forwarder |
 | [Threat model](docs/THREAT-MODEL.md) | What it protects, what it assumes, and what it does not cover |
 | [Deployment](deploy/README.md) | Debian 12 kit: hardened systemd service behind Caddy or nginx |
 | [Changelog](CHANGELOG.md) | What changed in each release |
