@@ -12,6 +12,7 @@ DIGITS = 6
 STEP_SECONDS = 30
 DRIFT_STEPS = 1  # accept the previous and the next step too (clock skew, slow typing)
 ISSUER = "Watchpost"
+_MAX_COUNTER = 2**64 - 1  # RFC 4226 counter is an unsigned 64-bit integer
 
 
 def now():
@@ -25,7 +26,8 @@ def generate_secret():
 
 
 def decode_secret(secret):
-    secret = secret.strip().replace(" ", "").upper()
+    # Grouped secrets use spaces, newlines, or other Unicode whitespace. None of that is base32.
+    secret = "".join(secret.split()).upper()
     return base64.b32decode(secret + "=" * (-len(secret) % 8))
 
 
@@ -49,20 +51,48 @@ def verify(secret, code, last_step=None, timestamp=None):
 
     A step at or before `last_step` (the last one accepted for the account) is refused, so a code
     cannot be replayed, and neither can an older code once a newer one has been used.
+    A bad code, secret, or timestamp returns None. It does not raise.
     """
     if not isinstance(code, str):
         return None
-    code = code.strip().replace(" ", "")
-    if len(code) != DIGITS or not code.isdigit():
+    code = "".join(code.split())
+    # `isdigit` is true for Arabic-Indic and fullwidth digits. compare_digest then raises
+    # TypeError on the non-ASCII string, which became a 500 on the sign-in routes.
+    if len(code) != DIGITS or not code.isascii() or not code.isdigit():
         return None
-    key = decode_secret(secret)
-    current = step_at(now() if timestamp is None else timestamp)
+    try:
+        key = decode_secret(secret)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    # An empty key is not a secret: its code is public. Refuse it.
+    if not key:
+        return None
+    try:
+        current = step_at(now() if timestamp is None else timestamp)
+    except (ArithmeticError, TypeError, ValueError):
+        return None
+    # Drift can step off either end of the unsigned counter range. struct.pack('>Q') raises
+    # there, including for every check during the first 30 seconds of the Unix epoch.
+    first = current - DRIFT_STEPS
+    last = current + DRIFT_STEPS
+    if last < 0 or first > _MAX_COUNTER:
+        return None
+    if first < 0:
+        first = 0
+    if last > _MAX_COUNTER:
+        last = _MAX_COUNTER
     matched = None
-    for step in range(current - DRIFT_STEPS, current + DRIFT_STEPS + 1):
+    for step in range(first, last + 1):
         if hmac.compare_digest(hotp(key, step), code) and matched is None:
             matched = step
-    if matched is None or (last_step is not None and matched <= last_step):
+    if matched is None:
         return None
+    if last_step is not None:
+        try:
+            if matched <= last_step:
+                return None
+        except TypeError:
+            return None
     return matched
 
 

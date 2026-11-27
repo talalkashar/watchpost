@@ -17,11 +17,15 @@ A `|` starts the stage only at the start of a word; inside a quoted value or an 
 """
 
 import re
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from .db import audit, iso, now_iso, transaction, utcnow
-from .normalize import EVENT_TYPES, SEVERITIES, EventError, parse_timestamp
-from .queries import QueryError, _escape_like, page_events
+from .normalize import EVENT_TYPES, MAX_BYTES, SEVERITIES, EventError, parse_timestamp
+from .queries import (
+    QueryError, _escape_like, canonical_ip, catalog_name, event_offset, page_events,
+    synthetic_flag,
+)
 
 # Same 400/404/409 handling in the server as every other query error.
 HuntError = QueryError
@@ -36,13 +40,21 @@ FIELDS = {
     "outcome": ("text", "outcome"), "src_ip": ("text", "src_ip"), "dest_ip": ("text", "dest_ip"),
     "batch_id": ("text", "batch_id"), "ip": ("ip", None),
     "event_type": ("enum", "event_type"), "severity": ("enum", "severity"),
-    "dest_port": ("port", "dest_port"), "synthetic": ("flag", "synthetic"), "message": ("message", "message"),
+    "dest_port": ("port", "dest_port"), "bytes": ("bytes", "bytes"),
+    "synthetic": ("flag", "synthetic"), "message": ("message", "message"),
     "last": ("time", None), "since": ("time", None), "until": ("time", None),
 }
 ENUMS = {"event_type": sorted(EVENT_TYPES), "severity": SEVERITIES}
+# Same four words as queries.synthetic_flag. ASCII letters only. Not str.lower().
 FLAGS = {"1": 1, "true": 1, "0": 0, "false": 0}
 LAST_UNITS = {"m": 1, "h": 60, "d": 1440}
 LAST_MAX_MINUTES = 365 * 1440
+# ASCII letters only. 24H is 24h. 24İ is not a unit. Not str.lower().
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+# bytes:>=N (and >, <=, <, =). The operator is chosen from this tuple; the integer is a bound parameter.
+BYTES_OPS = (">=", ">", "<=", "<", "=")
+_BYTES_CMP = re.compile(r"(>=|<=|>|<|=)(0|[1-9]\d*)\Z")
 
 _FIELD = re.compile(r"([A-Za-z_]+):")
 _LAST = re.compile(r"(\d{1,6})([mhd])")
@@ -146,7 +158,49 @@ def _value(text, pos, field):
     return value, quoted, pos
 
 
-def _term_sql(term, now):
+def _digit_int(value):
+    """int(value) when it is a digit string, else None.
+
+    str.isdigit() is also true for non-decimal digits such as ², and int()
+    rejects those. A bad port or top N must stay a hunt error.
+    """
+    if isinstance(value, str) and value.isdigit():
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def bytes_bound(value):
+    """(operator, integer) for a bytes term. The operator is one of >=, >, <=, <, =."""
+    match = _BYTES_CMP.fullmatch(value) if isinstance(value, str) else None
+    number = int(match.group(2)) if match else None
+    if number is None or number > MAX_BYTES:
+        raise HuntError(
+            "bytes must be one of >=, >, <=, < or = followed by an integer from 0 to "
+            f"{MAX_BYTES}, such as bytes:>=1000000")
+    return match.group(1), number
+
+
+def bytes_matches(count, op, number):
+    """True when a stored byte count satisfies one comparison. A missing count does not match."""
+    if op not in BYTES_OPS:
+        raise HuntError("bytes must be one of >=, >, <=, < or =")
+    if isinstance(count, bool) or not isinstance(count, int):
+        return False
+    if op == ">=":
+        return count >= number
+    if op == ">":
+        return count > number
+    if op == "<=":
+        return count <= number
+    if op == "<":
+        return count < number
+    return count == number
+
+
+def _term_sql(term, now, resolved_ips=()):
     """(sql, args, text) for one term. Column names come from FIELDS, values only from args."""
     field, value = term["field"], term["value"]
     kind, column = FIELDS[field]
@@ -155,7 +209,10 @@ def _term_sql(term, now):
         if term["negate"]:
             raise HuntError(f"{field} cannot be negated")
         if field == "last":
-            match = _LAST.fullmatch(value)
+            # ASCII letters only. 24H is 24 hours. 24İ, a bare number, and a window
+            # past 365 days stay the error below.
+            folded = value.translate(_ASCII_FOLD) if isinstance(value, str) else ""
+            match = _LAST.fullmatch(folded)
             minutes = int(match.group(1)) * LAST_UNITS[match.group(2)] if match else 0
             if not 1 <= minutes <= LAST_MAX_MINUTES:
                 raise HuntError("last must be a number with m, h or d, such as 15m, 24h or 7d (at most 365d)")
@@ -171,36 +228,52 @@ def _term_sql(term, now):
         text = prefix if prefix else value  # a trailing * on a word adds nothing to "contains"
         return "message LIKE ? ESCAPE '\\'", ["%" + _escape_like(text) + "%"], f'message contains "{text}"'
     if kind == "port":
-        if not value.isdigit() or int(value) > 65535:
+        port = _digit_int(value)
+        if port is None or port > 65535:
             raise HuntError("dest_port must be an integer between 0 and 65535")
-        return "dest_port = ?", [int(value)], f"dest_port = {int(value)}"
+        return "dest_port = ?", [port], f"dest_port = {port}"
+    if kind == "bytes":
+        op, number = bytes_bound(value)
+        return f"{column} {op} ?", [number], f"{field} {op} {number}"
     if kind == "flag":
-        if value.lower() not in FLAGS:
-            raise HuntError("synthetic must be 0, 1, true or false")
-        return "synthetic = ?", [FLAGS[value.lower()]], f"synthetic = {FLAGS[value.lower()]}"
+        # ASCII letters only, the same fold as event search. Not str.lower().
+        # TRUE is true. truİe, trüe, and yes stay the named error.
+        flag = synthetic_flag(value)
+        return "synthetic = ?", [flag], f"synthetic = {flag}"
     if kind == "ip":
         if prefix is not None:
+            # A prefix stays the typed text. It is not parsed as an address.
             pattern = _escape_like(prefix) + "%"
             return ("(src_ip LIKE ? ESCAPE '\\' OR dest_ip LIKE ? ESCAPE '\\')", [pattern, pattern],
                     f"src_ip or dest_ip starts with {prefix}")
-        return "(src_ip = ? OR dest_ip = ?)", [value, value], f"src_ip or dest_ip = {value}"
+        address = value if value in resolved_ips else canonical_ip(value, field)
+        return "(src_ip = ? OR dest_ip = ?)", [address, address], f"src_ip or dest_ip = {address}"
     if prefix is not None:
         return f"{column} LIKE ? ESCAPE '\\'", [_escape_like(prefix) + "%"], f"{field} starts with {prefix}"
-    if kind == "enum" and value not in ENUMS[field]:
-        raise HuntError(f"{field} must be one of {', '.join(ENUMS[field])}")
-    # Same matching as the Events filter: user names compare case-insensitively.
-    collate = " COLLATE NOCASE" if field == "user" else ""
+    if field in ("src_ip", "dest_ip"):
+        address = value if value in resolved_ips else canonical_ip(value, field)
+        return f"{column} = ?", [address], f"{field} = {address}"
+    if kind == "enum":
+        # Fold ASCII case and bind the catalog spelling. Grouping by the field stays exact.
+        name = catalog_name(value, ENUMS[field])
+        if name is None:
+            raise HuntError(f"{field} must be one of {', '.join(ENUMS[field])}")
+        return f"{column} = ?", [name], f"{field} = {name}"
+    # Same matching as the Events filter: account, host, source, outcome, and batch_id
+    # compare case-insensitively (ASCII, like SQLite NOCASE). Grouping by source, outcome,
+    # and batch_id stays exact.
+    collate = " COLLATE NOCASE" if field in ("user", "host", "source", "outcome", "batch_id") else ""
     return f"{column} = ?{collate}", [value], f"{field} = {value}"
 
 
-def _compile(text, now=None):
+def _compile(text, now=None, resolved_ips=()):
     """(compiled terms, parsed pipeline stage or None)."""
     now = now or utcnow()
     terms, stage = _parse(text)
     stage = parse_stage(stage) if stage is not None else None
     compiled = []
     for term in terms:
-        sql, args, label = _term_sql(term, now)
+        sql, args, label = _term_sql(term, now, resolved_ips)
         if term["negate"]:
             # NOT of a NULL comparison is NULL, which would also drop events missing the field: keep them.
             sql, label = f"NOT COALESCE(({sql}), 0)", "NOT " + label
@@ -221,10 +294,12 @@ def explain(text, now=None):
     return [echo for _, _, echo in _compile(text, now)[0]]
 
 
-def run(conn, params, now=None):
+def run(conn, params, now=None, *, resolved_ips=()):
     text = params.get("q") or ""
     now = now or utcnow()
-    compiled, stage = _compile(text, now)
+    compiled, stage = _compile(text, now, resolved_ips)
+    # A pipeline stage does not page, but the same cap still applies so a huge offset is never a scan.
+    event_offset(params)
     where, args = [sql for sql, _, _ in compiled], [a for _, args, _ in compiled for a in args]
     terms = [echo for _, _, echo in compiled]
     if stage is None:
@@ -239,6 +314,10 @@ def run(conn, params, now=None):
     else:
         result = _timechart(conn, where, args, stage, _window(compiled, now))
     result.update(kind=stage["command"], terms=terms, query=text, filter=_parse_filter_text(text))
+    if stage["command"] == "timechart":
+        note = _timechart_note(text, result["span"], result["rows"])
+        if note is not None:
+            result["note"] = note
     return result
 
 
@@ -262,7 +341,21 @@ def _group_field(name):
         raise HuntError(f"{field} is a time filter, not a field; use timechart to count events over time")
     if kind == "ip":
         raise HuntError("ip means src_ip or dest_ip; group by src_ip or dest_ip instead")
+    if kind == "bytes":
+        raise HuntError("bytes is compared with >=, >, <=, < or =, not grouped; "
+                        f"group by one of {', '.join(GROUPABLE)}")
     return field, column
+
+
+def _group_expr(field, column):
+    """SQL for one grouped or distinct value. The column name comes from FIELDS.
+
+    Accounts fold ASCII case, matching `user:` (COLLATE NOCASE) and saved-search promotion.
+    The label is the lowercase name, so Alice and alice are one group. Other fields stay exact.
+    """
+    if field == "user":
+        return f"lower({column})"
+    return column
 
 
 def _by_fields(tokens, limit):
@@ -296,14 +389,14 @@ def parse_stage(text):
             if token == ",":
                 continue
             if token.lower() == "count":
-                aggregates.append(("count", None))
+                aggregates.append(("count", None, None))
                 continue
             match = _AGGREGATE.fullmatch(token)
             if not match:
                 raise HuntError(f"unknown aggregate {token!r}; stats supports count and dc(<field>)"
                                 " (also written count(distinct <field>))")
             field, column = _group_field(match.group(1) or match.group(2))
-            aggregates.append((f"dc({field})", column))
+            aggregates.append((f"dc({field})", field, column))
         if not aggregates:
             raise HuntError("stats needs an aggregate: count or dc(<field>), e.g. | stats count by src_ip")
         if len(aggregates) > MAX_AGGREGATES or len(set(aggregates)) != len(aggregates):
@@ -314,8 +407,8 @@ def parse_stage(text):
         words = [t for t in rest if t != ","]
         limit = TOP_DEFAULT
         if len(words) == 2 and words[0].isdigit():
-            limit = int(words[0])
-            if not 1 <= limit <= TOP_MAX:
+            limit = _digit_int(words[0])
+            if limit is None or not 1 <= limit <= TOP_MAX:
                 raise HuntError(f"top N must be between 1 and {TOP_MAX}")
             words = words[1:]
         if len(words) != 1 or words[0].isdigit():
@@ -344,30 +437,62 @@ def _where(where, extra=()):
     return (" WHERE " + " AND ".join(clause)) if clause else ""
 
 
+def _aggregate_sql(field, column):
+    if column is None:
+        return "COUNT(*)"
+    return f"COUNT(DISTINCT {_group_expr(field, column)})"
+
+
 def _stats(conn, where, args, stage):
+    """One row per group, largest first, at most MAX_GROUPS rows.
+
+    `groups_omitted` is how many groups were past that cap (0 when the list fits, including a
+    stats with no `by`). `truncated` is true exactly when that count is not 0. Events with no
+    value in a `by` field are not groups. The row order stays count, then the group values.
+    """
     by = stage["by"]
-    columns = [c for _, c in by]
-    selects = columns + ["COUNT(*)" if column is None else f"COUNT(DISTINCT {column})"
-                         for _, column in stage["aggregates"]]
-    sql = f"SELECT {', '.join(selects)} FROM events{_where(where, [f'{c} IS NOT NULL' for c in columns])}"
+    exprs = [_group_expr(f, c) for f, c in by]
+    selects = exprs + [_aggregate_sql(field, column) for _, field, column in stage["aggregates"]]
+    # NULL stays on the stored column. lower(NULL) is NULL, and the column can use an index.
+    sql = f"SELECT {', '.join(selects)} FROM events{_where(where, [f'{c} IS NOT NULL' for _, c in by])}"
     if by:
+        # Count every group, then read only the capped page. The page query stays last so a plan
+        # check still sees the grouped SELECT.
+        grouped = f"SELECT 1 FROM events{_where(where, [f'{c} IS NOT NULL' for _, c in by])} GROUP BY {', '.join(exprs)}"
+        total = conn.execute(f"SELECT COUNT(*) FROM ({grouped})", args).fetchone()[0]
         order = [f"{len(by) + 1} DESC"] + [str(n + 1) for n in range(len(by))]
-        sql += f" GROUP BY {', '.join(columns)} ORDER BY {', '.join(order)} LIMIT ?"
-        rows = [list(r) for r in conn.execute(sql, args + [MAX_GROUPS + 1])]
+        sql += f" GROUP BY {', '.join(exprs)} ORDER BY {', '.join(order)} LIMIT ?"
+        rows = [list(r) for r in conn.execute(sql, args + [MAX_GROUPS])]
+        omitted = total - len(rows)
     else:
         rows = [list(conn.execute(sql, args).fetchone())]
-    return {"columns": [f for f, _ in by] + [name for name, _ in stage["aggregates"]],
-            "rows": rows[:MAX_GROUPS], "truncated": len(rows) > MAX_GROUPS}
+        omitted = 0
+    return {"columns": [f for f, _ in by] + [name for name, _, _ in stage["aggregates"]],
+            "rows": rows, "truncated": omitted != 0, "groups_omitted": omitted}
 
 
 def _top(conn, where, args, stage):
+    """The N most common values. Percents are shares of every matched event, including ones with no value.
+
+    `total` is that match count. `missing` is how many of them have no value in the grouped field, which
+    is why the shown percents can sum under 100 even when `truncated` is false. `groups_omitted` is how
+    many groups were past N (0 when the list fits). `truncated` is true exactly when that count is not 0.
+    Events with no value in the field are not groups. The column is from FIELDS.
+    """
     (field, column), = stage["by"]
-    total = conn.execute(f"SELECT COUNT(*) FROM events{_where(where)}", args).fetchone()[0]
-    rows = conn.execute(f"SELECT {column}, COUNT(*) FROM events{_where(where, [f'{column} IS NOT NULL'])}"
-                        f" GROUP BY {column} ORDER BY 2 DESC, 1 LIMIT ?", args + [stage["limit"] + 1]).fetchall()
+    expr = _group_expr(field, column)
+    total, missing = conn.execute(
+        f"SELECT COUNT(*), COALESCE(SUM({column} IS NULL), 0) FROM events{_where(where)}", args).fetchone()
+    present = f"{column} IS NOT NULL"
+    # Count every group, then read only the capped page. A limit+1 fetch cannot name the leftover.
+    grouped = f"SELECT 1 FROM events{_where(where, [present])} GROUP BY {expr}"
+    groups = conn.execute(f"SELECT COUNT(*) FROM ({grouped})", args).fetchone()[0]
+    rows = conn.execute(f"SELECT {expr}, COUNT(*) FROM events{_where(where, [present])}"
+                        f" GROUP BY {expr} ORDER BY 2 DESC, 1 LIMIT ?", args + [stage["limit"]]).fetchall()
+    omitted = groups - len(rows)
     return {"columns": [field, "count", "percent"],
-            "rows": [[value, count, round(100 * count / total, 2)] for value, count in rows[:stage["limit"]]],
-            "truncated": len(rows) > stage["limit"]}
+            "rows": [[value, count, round(100 * count / total, 2)] for value, count in rows],
+            "truncated": omitted != 0, "groups_omitted": omitted, "total": total, "missing": missing}
 
 
 def _window(compiled, now):
@@ -388,7 +513,13 @@ def _epoch(ts):
 
 
 def _timechart(conn, where, args, stage, window):
-    """Counts per span bucket, every bucket in range filled (0 when empty), refused past MAX_BUCKETS."""
+    """Counts per span bucket, every bucket in range filled (0 when empty), refused past MAX_BUCKETS.
+
+    With `by`, the MAX_SERIES largest non-null series are columns. `series_omitted` is how many
+    distinct non-null series were past that cap (0 when every series is drawn, including a chart
+    with no `by`). Events with no value in the field are not a series. The rest stay in `other`.
+    `truncated` stays false, and the filled buckets do not change.
+    """
     span = SPANS[stage["span"]]
     start, end = window
     if start is None or end is None:
@@ -397,20 +528,27 @@ def _timechart(conn, where, args, stage, window):
     by = stage["by"]
     columns = ["_time"] + ([] if by else ["count"])
     if start is None or end is None or start > end:
-        return {"columns": columns, "rows": [], "truncated": False}
+        return {"columns": columns, "rows": [], "truncated": False, "span": stage["span"],
+                "series_omitted": 0}
     first, last = _epoch(start) // span * span, _epoch(end) // span * span
     buckets = (last - first) // span + 1
     if buckets > MAX_BUCKETS:
         raise HuntError(f"timechart span={stage['span']} needs {buckets:,} buckets here, and at most "
                         f"{MAX_BUCKETS} are drawn; narrow the time range (last:, since:, until:) or use a wider span")
     series = []
+    omitted = 0
     if by:
-        (_, column), = by
+        (field, column), = by
+        expr = _group_expr(field, column)
+        present = f"{column} IS NOT NULL"
+        grouped = f"SELECT 1 FROM events{_where(where, [present])} GROUP BY {expr}"
+        total = conn.execute(f"SELECT COUNT(*) FROM ({grouped})", args).fetchone()[0]
         series = [r[0] for r in conn.execute(
-            f"SELECT {column} FROM events{_where(where, [f'{column} IS NOT NULL'])}"
-            f" GROUP BY {column} ORDER BY COUNT(*) DESC, 1 LIMIT ?", args + [MAX_SERIES])]
+            f"SELECT {expr} FROM events{_where(where, [present])}"
+            f" GROUP BY {expr} ORDER BY COUNT(*) DESC, 1 LIMIT ?", args + [MAX_SERIES])]
+        omitted = total - len(series)
         marks = ", ".join("?" for _ in series) or "NULL"
-        sql = (f"SELECT {_BUCKET} AS bucket, CASE WHEN {column} IN ({marks}) THEN {column} END AS series, COUNT(*)"
+        sql = (f"SELECT {_BUCKET} AS bucket, CASE WHEN {expr} IN ({marks}) THEN {expr} END AS series, COUNT(*)"
                f" FROM events{_where(where)} GROUP BY bucket, series LIMIT ?")
         params = [span, span] + series + args + [MAX_BUCKETS * (MAX_SERIES + 1)]
     else:
@@ -428,7 +566,23 @@ def _timechart(conn, where, args, stage, window):
         keys = series + ([None] if has_other else [])
     rows = [[iso(datetime.fromtimestamp(t, timezone.utc))] + [counts.get((t, k), 0) for k in keys]
             for t in range(first, last + 1, span)]
-    return {"columns": columns, "rows": rows, "truncated": False}
+    return {"columns": columns, "rows": rows, "truncated": False, "span": stage["span"],
+            "series_omitted": omitted}
+
+
+def _timechart_note(query, span, rows):
+    """Sentence when a timechart has no rows or every bucket count is 0. A hit returns None.
+
+    The rows stay as they are (an all-zero window is still the filled buckets). The note names
+    the query and the span, the same sentence the hunt page shows instead of an empty chart.
+    """
+    for row in rows:
+        if any(row[1:]):
+            return None
+    text = query.strip() if isinstance(query, str) else ""
+    if span not in SPANS or not text:
+        return "No matching events."
+    return f"No events match {text} in {span} buckets."
 
 
 # --- Saved searches ----------------------------------------------------------------------
@@ -446,9 +600,33 @@ def _text(value, name, limit, required=False):
     return value
 
 
-def list_saved(conn):
-    return [dict(r) for r in conn.execute(
-        "SELECT id, name, query, description, owner, created_at FROM saved_searches ORDER BY name COLLATE NOCASE")]
+# Saved searches returned by GET /api/hunt/saved. The rest are X-Watchpost-Omitted.
+SAVED_LIST_LIMIT = 100
+
+
+def list_saved(conn, limit=SAVED_LIST_LIMIT):
+    """Saved searches in name COLLATE NOCASE order, and how many the limit left out.
+
+    The second value is 0 when the list fits. Callers that return the bare array
+    send that count as X-Watchpost-Omitted. Names are unique under COLLATE NOCASE,
+    so two spellings of one name are not two rows.
+    """
+    total = conn.execute("SELECT COUNT(*) FROM saved_searches").fetchone()[0]
+    rows = conn.execute(
+        "SELECT id, name, query, description, owner, created_at FROM saved_searches"
+        " ORDER BY name COLLATE NOCASE LIMIT ?", (limit,)).fetchall()
+    return [dict(r) for r in rows], total - len(rows)
+
+
+def _stored_saved_name(conn, name):
+    """The saved spelling of `name`. The unique index is COLLATE NOCASE, so `Dup` and `dup` are one row."""
+    row = conn.execute(
+        "SELECT name FROM saved_searches WHERE name = ? COLLATE NOCASE", (name,)).fetchone()
+    return None if row is None else row["name"]
+
+
+def _name_taken(stored):
+    raise HuntError(f"a saved search named {stored!r} already exists", 409)
 
 
 def save_search(conn, data, actor):
@@ -460,10 +638,16 @@ def save_search(conn, data, actor):
     compile_query(query)  # a saved search must run (this checks a pipeline stage too)
     description = _text(data.get("description"), "description", DESCRIPTION_MAX)
     with transaction(conn):
-        if conn.execute("SELECT 1 FROM saved_searches WHERE name = ?", (name,)).fetchone():
-            raise HuntError(f"a saved search named {name!r} already exists", 409)
-        cur = conn.execute("INSERT INTO saved_searches(name, query, description, owner, created_at)"
-                           " VALUES (?, ?, ?, ?, ?)", (name, query, description, actor, now_iso()))
+        stored = _stored_saved_name(conn, name)
+        if stored is not None:
+            _name_taken(stored)
+        try:
+            cur = conn.execute("INSERT INTO saved_searches(name, query, description, owner, created_at)"
+                               " VALUES (?, ?, ?, ?, ?)", (name, query, description, actor, now_iso()))
+        except sqlite3.IntegrityError:
+            # A concurrent insert can pass the lookup and still hit UNIQUE COLLATE NOCASE.
+            stored = _stored_saved_name(conn, name)
+            _name_taken(stored if stored is not None else name)
         audit(conn, actor, "saved_search_created", name, {"id": cur.lastrowid, "query": query})
     return dict(conn.execute("SELECT id, name, query, description, owner, created_at FROM saved_searches"
                              " WHERE id = ?", (cur.lastrowid,)).fetchone())

@@ -1,0 +1,32 @@
+# DNS-tunnel tool names on port 53. The element name "iodine" is not a token; iodined (the server) is.
+title: DNS Tunnel Tool On Port 53
+id: e14c7a93-6b02-4d58-8f7e-3a9c1b05d6e4
+status: experimental
+description: |
+  A network connection or a firewall allow for destination port 53 whose message names
+  dnscat, dns2tcp, or the iodined server. A normal DNS query on port 53 does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1048/
+tags:
+  - attack.exfiltration
+  - attack.t1048
+logsource:
+  category: dns
+  product: zeek
+detection:
+  dns:
+    event.action:
+      - network_connection
+      - fw_allow
+    destination.port: 53
+  tool:
+    message|contains:
+      - dnscat
+      - dns2tcp
+      - iodined
+  condition: dns and tool
+falsepositives:
+  - A security lab resolving a name that contains a dnscat or dns2tcp label
+level: high

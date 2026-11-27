@@ -1,0 +1,34 @@
+# Log4Shell payload in the request line, raw or URL-encoded. The encoded form is what combined
+# access logs keep; Watchpost does not decode the message before matching.
+title: Log4Shell JNDI Exploit Probe
+id: 52d9b8e0-1f47-4c36-a8e5-9b0c6d3f71a2
+status: experimental
+description: |
+  A web request, scan, or error whose message contains a Log4j JNDI lookup, either as
+  ${jndi: / the ${${::-j} bypass, or as the URL-encoded %24%7bjndi: form.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1190/
+tags:
+  - attack.initial_access
+  - attack.t1190
+logsource:
+  category: webserver
+  product: nginx
+detection:
+  web:
+    event.action:
+      - web_request
+      - web_scan
+      - web_error
+  jndi:
+    message|contains:
+      - '${jndi:'
+      - '${${::-j}'
+      - '%24%7bjndi:'
+      - '%24%7Bjndi:'
+  condition: web and jndi
+falsepositives:
+  - A page or query string that quotes the JNDI payload while discussing the vulnerability
+level: critical

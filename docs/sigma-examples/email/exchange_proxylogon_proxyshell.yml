@@ -1,0 +1,52 @@
+# Exchange SSRF exploits, written for Watchpost's Sigma subset. Logsource is not a filter.
+# Field names are ECS (event.action) plus the message text of the request line.
+title: Exchange ProxyLogon Or ProxyShell SSRF
+id: 36d3674b-2637-457a-b5ec-98338f8b0281
+status: experimental
+description: |
+  A request that carries the ProxyLogon cookie SSRF (CVE-2021-26855) or the ProxyShell and
+  ProxyNotShell autodiscover SSRF (CVE-2021-34473, CVE-2022-41040). ProxyLogon is an /ecp/ request
+  with the X-BEResource cookie. ProxyShell and ProxyNotShell place @host in front of a backend path
+  on /autodiscover/autodiscover.json, toward /mapi/emsmdb, /powershell, or /ews/exchange.asmx,
+  sometimes with the X-Rps-CAT header. A normal Autodiscover query such as Email=user@domain does
+  not include those backend paths.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1190/
+  - https://msrc.microsoft.com/update-guide/vulnerability/CVE-2021-26855
+  - https://msrc.microsoft.com/update-guide/vulnerability/CVE-2021-34473
+  - https://msrc.microsoft.com/update-guide/vulnerability/CVE-2022-41040
+tags:
+  - attack.initial_access
+  - attack.t1190
+logsource:
+  category: webserver
+  product: exchange
+detection:
+  proxylogon:
+    event.action:
+      - web_request
+      - web_error
+      - web_scan
+    message|contains|all:
+      - '/ecp/'
+      - 'X-BEResource'
+  shell_path:
+    event.action:
+      - web_request
+      - web_error
+      - web_scan
+    message|contains|all:
+      - '/autodiscover/autodiscover.json'
+      - '@'
+  shell_backend:
+    message|contains:
+      - '/mapi/emsmdb'
+      - '/powershell'
+      - '/ews/exchange.asmx'
+      - 'X-Rps-CAT'
+  condition: proxylogon or (shell_path and shell_backend)
+falsepositives:
+  - A penetration test that replays the public exploit URLs
+level: critical

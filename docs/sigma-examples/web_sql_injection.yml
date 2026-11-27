@@ -1,0 +1,46 @@
+# SQL injection markers in a web path or query, in the forms an access log actually stores.
+# The path is not URL-decoded, so space, plus, and %20 between UNION and SELECT are separate.
+# Written for Watchpost's Sigma subset (docs/REFERENCE.md, "Sigma rule import").
+title: Web Request SQL Injection
+id: ba07a3fa-bb6e-4c33-9393-2138c3ea9701
+status: experimental
+description: |
+  A web request whose message contains UNION SELECT (raw, plus-joined, or percent-encoded),
+  information_schema, or an "or 1=1" tautology. Words "union" and "select" separated by
+  other characters do not match. Each matching event is evidence; Watchpost groups them
+  per source IP.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1190/
+tags:
+  - attack.initial_access
+  - attack.t1190
+logsource:
+  category: webserver
+  product: linux
+detection:
+  web:
+    event.action:
+      - web_request
+      - web_scan
+      - web_error
+  injection:
+    message|contains:
+      - 'union select'
+      - 'union%20select'
+      - 'union+select'
+      - 'union all select'
+      - 'union%20all%20select'
+      - 'union+all+select'
+      - information_schema
+      - 'or 1=1'
+      - 'or%201=1'
+      - 'or+1=1'
+      - 'or%201%3d1'
+      - 'or+1%3d1'
+  condition: web and injection
+falsepositives:
+  - A page or query that contains the substring "or 1=1" inside a longer token such as "or 1=10"
+  - Documentation that prints an injection string in a query parameter
+level: high

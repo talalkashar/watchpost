@@ -1,0 +1,44 @@
+# A successful S3 object read or copy from outside the private ranges.
+# The bucket name is not in the normalized message. A denied read appends " (errorCode)".
+# GetSecretValue is a data event and is not object storage. A service-name source address
+# is stored with no IP and does not match.
+title: Cloud Storage Read From an External Address
+id: 1d4a8c06-3f73-4b9e-95d8-0e6a3c5b1f22
+status: experimental
+description: |
+  GetObject, SelectObjectContent, or CopyObject with no errorCode, from an address outside
+  the private ranges, including documentation IPv6. An internal IPv6 address, a service-origin
+  call with no IP, and a denied read do not match. The bucket name is not stored on the message.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1530/
+tags:
+  - attack.collection
+  - attack.t1530
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    event.action: cloud_data_access
+    message:
+      - GetObject on s3.amazonaws.com
+      - SelectObjectContent on s3.amazonaws.com
+      - CopyObject on s3.amazonaws.com
+  internal:
+    source.ip|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+      - 169.254.0.0/16
+      - '::1/128'
+      - fc00::/7
+      - fe80::/10
+  missing_ip:
+    source.ip: null
+  condition: selection and not internal and not missing_ip
+falsepositives:
+  - A person or a build system reading a bucket from a public address
+level: medium

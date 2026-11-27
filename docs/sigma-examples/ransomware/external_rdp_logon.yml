@@ -1,0 +1,39 @@
+# Successful RDP from outside the private ranges. Ransomware crews enter through exposed RDP
+# (ATT&CK T1133) before they stage and encrypt. Watchpost Sigma subset: see docs/REFERENCE.md.
+title: Ransomware Entry via External RDP
+id: 7c4e1a90-2b6d-4f58-9c31-0a8e5d2b7f14
+status: experimental
+description: |
+  A successful logon to TCP 3389 from an address outside the private, link-local, and loopback ranges.
+  Each match is one accepted RDP session. Internal administration does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1133/
+  - https://www.cisa.gov/stopransomware
+tags:
+  - attack.initial_access
+  - attack.t1133
+logsource:
+  category: authentication
+  product: windows
+  service: security
+detection:
+  logon:
+    event.action: auth_success
+    DestinationPort: 3389
+    SourceIp: '*'
+  internal:
+    SourceIp|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+      - 169.254.0.0/16
+      - '::1/128'
+      - 'fc00::/7'
+      - 'fe80::/10'
+  condition: logon and not internal
+falsepositives:
+  - An administrator signing in to RDP from a home or hotel network
+level: high

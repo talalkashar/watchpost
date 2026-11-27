@@ -54,6 +54,9 @@ class AlertReportTests(unittest.TestCase):
                          {"Initial Access": ["T1078"], "Credential Access": ["T1110"]})
         self.assertEqual(list(m["techniques_by_tactic"]), ["Initial Access", "Credential Access"])
         self.assertEqual({t["name"] for t in m["alerts"][0]["techniques"]}, {"Valid Accounts", "Brute Force"})
+        graded = {row["id"]: row["level"] for row in incidents.coverage(self.conn)["techniques"]}
+        for technique in m["alerts"][0]["techniques"]:
+            self.assertEqual(technique["level"], graded[technique["id"]])
         self.assertEqual([a["technique"] for a in m["actions"][:3]], ["T1078", "T1078", "T1110"])
         self.assertEqual(m["actions"][-1]["action"], report.FALLBACK_ACTIONS[-1])
 
@@ -67,6 +70,9 @@ class AlertReportTests(unittest.TestCase):
         # Log- and analyst-supplied text cannot break tables or inject HTML.
         self.assertIn("Reset dave's password \\| checked \\<VPN\\> logs.", text)
         self.assertNotIn("<VPN>", text)
+        self.assertIn(report.LEVEL_NOTE, text)
+        self.assertIn("T1078 Valid Accounts (validated)", text)
+        self.assertIn("T1110 Brute Force (validated)", text)
 
     def test_pdf(self):
         m = report.build_from_alert(self.conn, self.id)
@@ -77,6 +83,12 @@ class AlertReportTests(unittest.TestCase):
         self.assertIn(m["title"], text)
         self.assertIn("SYNTHETIC DATA", text)
         self.assertIn("Recommended actions", text)
+        flat = " ".join(text.split())
+        self.assertIn("mapped means an enabled rule names it and is not proof.", flat)
+        lines = text.splitlines()
+        index = lines.index("T1078")
+        self.assertEqual(lines[index + 1], "Valid Accounts")
+        self.assertEqual(lines[index + 2], "validated")
         self.assertIn(f"Page 1 of {len(pdf.pages())}", text)
 
     def test_long_report_paginates(self):
@@ -124,7 +136,7 @@ class IncidentReportTests(unittest.TestCase):
         self.assertEqual([a["id"] for a in m["alerts"]], [a["id"] for a in i["alerts"]])
         self.assertIn(self.exfil, [a["id"] for a in m["alerts"]])
         self.assertTrue(m["synthetic"])
-        self.assertEqual(m["stages"], ["Initial Access", "Persistence", "Defense Evasion", "Collection",
+        self.assertEqual(m["stages"], ["Initial Access", "Persistence", "Defense Impairment", "Collection",
                                        "Exfiltration"])
         self.assertTrue(m["escalated"])
         self.assertIn("svc-deploy-tmp", m["entities"]["users"])
@@ -142,19 +154,29 @@ class IncidentReportTests(unittest.TestCase):
                          {g["tactic"]: [t["id"] for t in g["techniques"]] for g in self.incident["techniques_by_tactic"]})
         self.assertEqual([t["id"] for t in by_tactic["Exfiltration"]], ["T1048"])
         self.assertEqual(by_tactic["Exfiltration"][0]["alert_ids"], [self.exfil])
+        self.assertEqual(by_tactic["Exfiltration"][0]["level"], "mapped")
         self.assertEqual(by_tactic["Collection"][0]["name"], "Data from Cloud Storage")
+        graded = {row["id"]: row["level"] for row in incidents.coverage(self.conn)["techniques"]}
+        for items in by_tactic.values():
+            for technique in items:
+                self.assertEqual(technique["level"], graded[technique["id"]])
+        for alert in m["alerts"]:
+            for technique in alert["techniques"]:
+                self.assertEqual(technique["level"], graded[technique["id"]])
         mapped = {a["technique"] for a in m["actions"] if a["technique"]}
-        self.assertTrue({"T1078.004", "T1098.001", "T1562.008", "T1530", "T1048"} <= mapped)
+        self.assertTrue({"T1078.004", "T1098.001", "T1685.002", "T1530", "T1048"} <= mapped)
 
     def test_markdown(self):
         text = report.to_markdown(report.build(self.conn, self.id))
         self.assertTrue(text.startswith("# Incident report: Initial Access"))
         for expected in ("SYNTHETIC DATA", f"- **Incident:** #{self.id}",
-                         "**Kill-chain stages:** Initial Access -> Persistence -> Defense Evasion -> Collection"
+                         "**Kill-chain stages:** Initial Access -> Persistence -> Defense Impairment -> Collection"
                          " -> Exfiltration"
                          " (escalated: 3 or more tactics)",
-                         f"- **Exfiltration:** T1048 Exfiltration Over Alternative Protocol (alert #{self.exfil})",
-                         "- **Collection:** T1530 Data from Cloud Storage", "### Alert #", "**T1048:**"):
+                         f"- **Exfiltration:** T1048 Exfiltration Over Alternative Protocol (mapped) (alert #{self.exfil})",
+                         "- **Collection:** T1530 Data from Cloud Storage", "### Alert #", "**T1048:**",
+                         "T1048 Exfiltration Over Alternative Protocol (mapped)",
+                         "mapped means an enabled rule names it and is not proof."):
             self.assertIn(expected, text)
         # Tactic lines appear in kill-chain order.
         positions = [text.index(f"- **{t}:**") for t in self.incident["stages"]]
@@ -169,6 +191,11 @@ class IncidentReportTests(unittest.TestCase):
         for expected in ("SYNTHETIC DATA", "MITRE ATT&CK techniques", "T1048", "Exfiltration Over Alternative",
                          f"#{self.exfil}", "escalated: 3 or more tactics", "Recommended actions"):
             self.assertIn(expected, " ".join(text.split()))  # five stages wrap the stage line
+        self.assertIn("mapped means an enabled rule names it and is not proof.", " ".join(text.split()))
+        lines = text.splitlines()
+        index = lines.index("T1048")
+        self.assertEqual(lines[index + 1], "Exfiltration Over Alternative Protocol")
+        self.assertEqual(lines[index + 2], "mapped")
         self.assertIn(f"Page 1 of {len(pdf.pages())}", text)
 
     def test_status_change_and_alert_notes_flow_through(self):
@@ -197,6 +224,20 @@ class IncidentReportTests(unittest.TestCase):
         with self.assertRaises(report.ReportError) as ctx:
             report.build(self.conn, 999999)
         self.assertEqual((ctx.exception.status, str(ctx.exception)), (404, "incident not found"))
+
+    def test_unknown_or_bad_level_stays_mapped(self):
+        self.assertEqual(report.evidence_level({}, "T1048"), "mapped")
+        self.assertEqual(report.evidence_level({"T1048": "proved"}, "T1048"), "mapped")
+        self.assertEqual(report.evidence_level({"T1078": "validated"}, "T1078"), "validated")
+
+    def test_renderer_labels_a_technique_that_has_no_stored_level(self):
+        model = report.build(self.conn, self.id)
+        model["techniques_by_tactic"]["Exfiltration"][0].pop("level")
+        text = report.to_markdown(model)
+        self.assertIn("T1048 Exfiltration Over Alternative Protocol (mapped)", text)
+        lines = ParsedPDF(report.to_pdf_bytes(model)).text().splitlines()
+        index = lines.index("T1048")
+        self.assertEqual(lines[index + 2], "mapped")
 
     def test_action_lookup_falls_back_to_parent_technique(self):
         rows = report.actions_for([{"id": "T1110.999", "name": "", "tactic": "Credential Access"}])

@@ -32,6 +32,8 @@ from datetime import datetime, timedelta, timezone
 from .db import audit, iso, now_iso, parse_iso, transaction, utcnow
 
 RULE_ID = "log_source_silent"
+# SQLite COLLATE NOCASE folds these letters only. Source and host keys use the same fold as entities.
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 
 CADENCE_WINDOW_SECONDS = 86400
 CADENCE_SAMPLE = 100
@@ -40,6 +42,9 @@ MIN_HISTORY_SECONDS = 2 * 3600
 LATE_MULTIPLIER, LATE_FLOOR_SECONDS = 3, 15 * 60
 SILENT_MULTIPLIER, SILENT_FLOOR_SECONDS = 6, 3600
 MAX_WINDOW_DAYS = 30  # a maintenance window always ends
+MAINTENANCE_ON_SOURCE = 5  # active windows named on one source row
+SOURCE_LIST_LIMIT = 100  # source rows on GET /api/sources/health
+MAINTENANCE_LIST_LIMIT = 100  # future maintenance windows on that response
 
 THRESHOLDS = {
     "cadence_window_seconds": CADENCE_WINDOW_SECONDS, "cadence_sample": CADENCE_SAMPLE, "min_gaps": MIN_GAPS,
@@ -136,16 +141,35 @@ def judge(times, first_seen, now, windows=()):
     return {**out, "status": "healthy", "reasons": [f"{summary}; late after {_human(base['late_after'])}"]}
 
 
+def _ascii_fold(value):
+    return value.translate(_ASCII_FOLD)
+
+
+def _window_covers(window, source, host):
+    """True when this window excuses the pair. A window with no host covers every host of the source.
+
+    ASCII case only, so a window for web01 covers WEB01. Érin-host does not cover érin-host.
+    """
+    if _ascii_fold(window["source"] or "") != _ascii_fold(source or ""):
+        return False
+    if window.get("host") is None:
+        return True
+    return _ascii_fold(window["host"]) == _ascii_fold(host or "")
+
+
 def _windows_for(windows, source, host):
-    return [(w["start"], w["end"]) for w in windows
-            if w["source"] == source and (w["host"] is None or w["host"] == host)]
+    return [(w["start"], w["end"]) for w in windows if _window_covers(w, source, host)]
 
 
 def _arrivals(events):
-    """Group events by (source, host) into sorted distinct arrivals, keeping the newest event of each."""
+    """Group events by (source, host) into sorted distinct arrivals, keeping the newest event of each.
+
+    The key folds ASCII case, so Demo/WEB01 and demo/web01 are one stream. A spelling change is not a
+    new source, and the old spelling is not a silence. Non-ASCII case stays exact.
+    """
     groups = {}
     for e in events:
-        key = (e.get("source") or "", e.get("host") or "")
+        key = (_ascii_fold(e.get("source") or ""), _ascii_fold(e.get("host") or ""))
         when = _epoch(e.get("ingested_at") or e["ts"])
         g = groups.setdefault(key, {"by_time": {}, "first_seen": when})
         if e.get("first_seen"):
@@ -162,15 +186,20 @@ def log_source_silent(events, params):
 
     Events are judged by arrival (`ingested_at`, or `ts` where events carry none, as in the noise lab).
     Each completed gap is judged against the cadence as of its start; with `params["now"]` (injected by the
-    engine and the noise lab, never stored) the current silence is judged too. The evidence is the last event
+    engine and the noise lab, never stored) the current silence is judged too. Arrivals later than that clock
+    are ignored, so a gap that has not finished is only the silence so far. The evidence is the last event
     before the silence, so one silence episode is one finding however often it is rescanned.
     `params["maintenance"]` lists windows ({source, host or None, start, end} as epochs) that excuse quiet time.
+    A window matches ASCII case, so a window for web01 covers WEB01.
     """
     now = _epoch(params["now"]) if params.get("now") else None
     windows = params.get("maintenance") or []
     findings = []
     for (source, host), g in _arrivals(events).items():
-        times = sorted(g["by_time"])
+        # An arrival after the clock has not happened. Judging that whole gap would alert on time still ahead.
+        times = sorted(t for t in g["by_time"] if now is None or t <= now)
+        if not times:
+            continue
         mine = _windows_for(windows, source, host)
         ends = [(i, times[i]) for i in range(1, len(times))]
         if now is not None and now > times[-1]:
@@ -184,7 +213,10 @@ def log_source_silent(events, params):
                 continue
             last = g["by_time"][times[i - 1]]
             resumed = i < len(times)
-            where = f"{source} on {host}" if host else f"{source} (no host)"
+            # The key is folded. The title still shows the source and host as logged.
+            logged_source = last.get("source") or source
+            logged_host = last.get("host") or ""
+            where = f"{logged_source} on {logged_host}" if logged_host else f"{logged_source} (no host)"
             findings.append({
                 "group_key": f"{source}|{host}",
                 "event_ids": [last["id"]],
@@ -213,6 +245,44 @@ def _pairs(conn, max_id=None, since=None):
     return [dict(r) for r in conn.execute(sql + " GROUP BY source, host", args)]
 
 
+def _folded_pairs(pairs):
+    """One row per stream. Spellings that differ only by ASCII case share a row.
+
+    The returned source and host are the folded spellings. A NULL host stays NULL.
+    Counts add. Arrival reads stay on each stored spelling (`members`) so they keep using
+    idx_events_source_host.
+    """
+    grouped = {}
+    for p in pairs:
+        source = _ascii_fold(p["source"] or "")
+        host = None if p["host"] is None else _ascii_fold(p["host"])
+        key = (source, host)
+        found = grouped.get(key)
+        if found is None:
+            grouped[key] = {"source": source, "host": host, "first_seen": p["first_seen"],
+                            "last_seen": p["last_seen"], "events_24h": p["events_24h"] or 0,
+                            "events": p["events"] or 0, "members": [(p["source"], p["host"])]}
+            continue
+        found["first_seen"] = min(found["first_seen"], p["first_seen"])
+        found["last_seen"] = max(found["last_seen"], p["last_seen"])
+        found["events_24h"] += p["events_24h"] or 0
+        found["events"] += p["events"] or 0
+        found["members"].append((p["source"], p["host"]))
+    return list(grouped.values())
+
+
+def _merged_arrivals(conn, members, max_id=None):
+    """Recent arrivals of every stored spelling of one stream, oldest first."""
+    by_time = {}
+    for source, host in members:
+        for row in _recent_arrivals(conn, source, host, max_id):
+            when = row["ingested_at"]
+            best = by_time.get(when)
+            if best is None or row["id"] > best["id"]:
+                by_time[when] = row
+    return [by_time[when] for when in sorted(by_time)]
+
+
 def _recent_arrivals(conn, source, host, max_id=None):
     """The newest CADENCE_SAMPLE + 2 distinct arrivals of one pair, oldest first, each with its newest event."""
     sql = ("SELECT ingested_at, MAX(id) AS id, ts, synthetic FROM events WHERE source = ? AND host IS ?"
@@ -235,8 +305,8 @@ def arrival_events(conn, max_id):
     return out
 
 
-def list_windows(conn):
-    now = now_iso()
+def list_windows(conn, now=None):
+    now = now or now_iso()
     rows = [dict(r) for r in conn.execute("SELECT * FROM maintenance_windows ORDER BY starts_at DESC, id DESC")]
     for w in rows:
         end = min(w["ends_at"], w["ended_at"]) if w["ended_at"] else w["ends_at"]
@@ -256,28 +326,47 @@ def clock_params(conn, params, now=None):
 
 
 def inventory(conn, now=None):
-    """GET /api/sources/health: every (source, host) with its status, cadence, last arrival, and reasons."""
+    """GET /api/sources/health: every (source, host) with its status, cadence, last arrival, and reasons.
+
+    ASCII case is one stream. Demo/WEB01 and demo/web01 share a row named demo/web01. Non-ASCII case stays
+    two rows. `maintenance` is the active windows that cover the row, at most MAINTENANCE_ON_SOURCE, in the
+    list order (starts_at descending, then id descending). `maintenance_omitted` is how many active windows
+    were past that cap (0 when the set fits, including none). Status still uses every window.
+
+    `sources` is the first SOURCE_LIST_LIMIT rows after silent, then source, then host. `sources_omitted`
+    is how many pairs were past that cap (0 when the inventory fits, including none). `summary` counts
+    every pair, including the ones left off the page. `maintenance_windows` is windows whose effective end
+    is still ahead of `now` and later than their start, at most MAINTENANCE_LIST_LIMIT, in starts_at
+    descending then id descending order. A window ended before it started covers no time, so it is left
+    out. `maintenance_windows_omitted` is how many of those were past that cap.
+    """
     now = now or now_iso()
     now_s = _epoch(now)
-    listed = list_windows(conn)
+    listed = list_windows(conn, now)
     windows = [{"source": w["source"], "host": w["host"], "start": _epoch(w["starts_at"]),
                 "end": _epoch(w["effective_end"])} for w in listed]
     rows = []
-    for p in _pairs(conn, since=iso_from(now_s - 86400)):
-        arrivals = _recent_arrivals(conn, p["source"], p["host"])
+    for p in _folded_pairs(_pairs(conn, since=iso_from(now_s - 86400))):
+        arrivals = _merged_arrivals(conn, p["members"])
         times = [_epoch(a["ingested_at"]) for a in arrivals]
-        verdict = judge(times, _epoch(p["first_seen"]), now_s, _windows_for(windows, p["source"], p["host"] or ""))
-        active = [w for w in listed if w["active"] and w["source"] == p["source"]
-                  and (w["host"] is None or w["host"] == p["host"])]
+        host = p["host"] or ""
+        verdict = judge(times, _epoch(p["first_seen"]), now_s, _windows_for(windows, p["source"], host))
+        active = [w for w in listed if w["active"] and _window_covers(w, p["source"], host)]
         rows.append({"source": p["source"], "host": p["host"], "first_seen": p["first_seen"],
                      "last_seen": p["last_seen"], "last_event_ts": arrivals[-1]["ts"], "events_24h": p["events_24h"],
                      "events": p["events"], "synthetic": all(a["synthetic"] for a in arrivals),
-                     "maintenance": active[0] if active else None, **verdict})
+                     "maintenance": active[:MAINTENANCE_ON_SOURCE],
+                     "maintenance_omitted": max(0, len(active) - MAINTENANCE_ON_SOURCE), **verdict})
     order = {"silent": 0, "late": 1, "healthy": 2, "learning": 3}
     rows.sort(key=lambda r: (order[r["status"]], r["source"], r["host"] or ""))
-    return {"checked_at": now, "thresholds": THRESHOLDS, "sources": rows,
+    # effective_end == starts_at means the window was ended before it began and excuses nothing.
+    future = [w for w in listed if w["effective_end"] > now and w["effective_end"] > w["starts_at"]]
+    return {"checked_at": now, "thresholds": THRESHOLDS,
+            "sources": rows[:SOURCE_LIST_LIMIT],
+            "sources_omitted": max(0, len(rows) - SOURCE_LIST_LIMIT),
             "summary": {s: sum(r["status"] == s for r in rows) for s in order},
-            "maintenance_windows": [w for w in listed if w["effective_end"] > now]}
+            "maintenance_windows": future[:MAINTENANCE_LIST_LIMIT],
+            "maintenance_windows_omitted": max(0, len(future) - MAINTENANCE_LIST_LIMIT)}
 
 
 # --- Maintenance windows (added through a reviewed change request; ended early by an admin) ------
@@ -312,12 +401,25 @@ def validate_window(source, payload, now=None):
 
 def add_window(conn, source, payload, reason, proposed_by, approved_by, change_request_id):
     host, start, end = validate_window(source, payload)
-    window_id = conn.execute(
-        "INSERT INTO maintenance_windows(source, host, starts_at, ends_at, reason, proposed_by, approved_by,"
-        " change_request_id, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-        (source, host, start, end, reason, proposed_by, approved_by, change_request_id, now_iso())).lastrowid
-    audit(conn, approved_by, "maintenance_window_added", source,
-          {"id": window_id, "host": host, "start": start, "end": end, "change_request": change_request_id})
+    # Begin only when the caller has not: an approval already holds BEGIN IMMEDIATE, and a nested one fails.
+    # On this connection an insert autocommits, so a failed audit would otherwise leave an unaudited window.
+    own = not conn.in_transaction
+    if own:
+        conn.execute("BEGIN IMMEDIATE")
+    try:
+        window_id = conn.execute(
+            "INSERT INTO maintenance_windows(source, host, starts_at, ends_at, reason, proposed_by, approved_by,"
+            " change_request_id, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (source, host, start, end, reason, proposed_by, approved_by, change_request_id, now_iso())).lastrowid
+        audit(conn, approved_by, "maintenance_window_added", source,
+              {"id": window_id, "host": host, "start": start, "end": end, "change_request": change_request_id})
+    except BaseException:
+        if own:
+            conn.execute("ROLLBACK")
+        raise
+    else:
+        if own:
+            conn.execute("COMMIT")
     return window_id
 
 

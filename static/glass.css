@@ -1,0 +1,73 @@
+/* The reflections are baked into a single static scene. Only window surfaces blur it. */
+:root {
+  --glass: #1c1c1e;
+  --glass-filter: none;
+  --glass-border: rgb(255 255 255 / .12);
+  --glass-top: rgb(255 255 255 / .16);
+  --glass-shadow: 0 14px 38px -14px rgb(0 0 0 / .55);
+}
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root {
+    --glass: rgba(28, 28, 30, .56);
+    --glass-filter: blur(32px) saturate(140%);
+  }
+}
+body { background: #080809; }
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: url("/chrome-scene.webp") center / cover no-repeat;
+  opacity: .78;
+}
+body.authed::before { opacity: .33; }
+body.authed .rail, .strip, dialog[open], .panel, .card, .login,
+body[data-view="incidents"] .bcol, body[data-view] .kpi {
+  background: var(--glass);
+  -webkit-backdrop-filter: var(--glass-filter);
+  backdrop-filter: var(--glass-filter);
+  border: 1px solid var(--glass-border);
+  border-top-color: var(--glass-top);
+  border-radius: 20px;
+  box-shadow: var(--glass-shadow);
+}
+dialog::backdrop { background: rgb(0 0 0 / .78); }
+.brand .logo, .login-brand .logo {
+  background: transparent;
+  border: 0;
+  padding: 1px;
+}
+nav button.active { background: rgb(255 255 255 / .09); }
+.view-name { font: 600 clamp(20px, 1.8vw, 26px)/1.2 var(--sans); letter-spacing: -.04em; }
+.view-bar { column-gap: 20px; }
+.ph h2 { font: 600 15px/1.2 var(--sans); letter-spacing: -.02em; text-transform: none; }
+.ph { min-height: 42px; }
+#p-timeline .ph, #p-attackers .ph { flex-wrap: wrap; gap: 4px 8px; }
+.map-side { background: #1a1a1d; border: 1px solid var(--glass-border); }
+.sev-critical:is(.pill, .sevtag), .sev-critical .sevtag { color: #ff8d84; }
+
+.login { width: min(420px, 100%); padding: clamp(26px, 4vw, 40px); }
+.login-brand { flex-direction: row; gap: 10px; margin-bottom: 20px; }
+.login-brand .logo { width: 30px; height: 30px; }
+.login-brand b { font-size: 14px; font-weight: 650; letter-spacing: .13em; text-transform: uppercase; }
+.login h1 { margin-bottom: 16px; text-align: left; font: 600 38px/1.12 var(--sans); letter-spacing: -.05em; color: var(--ink); }
+.login input { background: rgb(9 9 11 / .68); border-color: rgb(255 255 255 / .19); }
+.login-footer { border-top: 1px solid var(--glass-border); padding-top: 10px; }
+
+.login-footer p { margin: 0; color: var(--muted); font-size: 12px; }
+
+@media (min-width: 1367px) {
+  body.authed { --gutter: clamp(16px, 1.55vw, 26px); }
+}
+@media (min-width: 761px) {
+  .view-bar { margin-block: 4px 12px; }
+}
+@media (max-width: 760px) {
+  body::before { background-image: url("/chrome-scene-mobile.webp"); }
+}
+@media (prefers-reduced-transparency: reduce) {
+  :root { --glass: #1c1c1e; --glass-filter: none; }
+  body::before { content: none; }
+}

@@ -1,0 +1,32 @@
+# Firewall allow for RDP from outside the private ranges. Written for Watchpost's Sigma subset
+# (event.action, source.ip, destination.port). Logsource is informational; the rule sees every event.
+title: External Remote Desktop Session Allowed
+id: 6f0a1c24-8b37-4e15-9d62-1a4c7e90b3f8
+status: experimental
+description: |
+  A firewall allow for TCP/3389 from an address outside the RFC1918 and loopback ranges.
+  Internal RDP between workstations is expected. An allow from the internet is remote access.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1133/
+tags:
+  - attack.initial_access
+  - attack.t1133
+logsource:
+  category: firewall
+  product: firewall
+detection:
+  selection:
+    event.action: fw_allow
+    destination.port: 3389
+  internal:
+    source.ip|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+  condition: selection and not internal
+falsepositives:
+  - An approved jump host whose address is not in the private ranges
+level: high

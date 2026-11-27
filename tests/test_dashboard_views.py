@@ -1,7 +1,10 @@
-import unittest
 import sqlite3
+import unittest
 
 from tests.helpers import ServerTestCase
+from watchpost import dashboard_views
+from watchpost.dashboard_views import ViewError, _payload
+from watchpost.db import connect, init_schema
 
 
 class DashboardViewApiTests(ServerTestCase):
@@ -63,6 +66,37 @@ class DashboardViewApiTests(ServerTestCase):
             with self.subTest(body=body):
                 self.assertEqual(analyst.post("/api/dashboard/views", body)[0], 400)
 
+    def test_ascii_case_is_stored_as_the_catalog_spelling(self):
+        analyst = self.client("analyst")
+        body = self.payload("Night queue", "Private")
+        body["filters"] = {"severities": ["HIGH", "Low"]}
+        status, saved, _ = analyst.post("/api/dashboard/views", body)
+        self.assertEqual(status, 201, saved)
+        self.assertEqual(saved["visibility"], "private")
+        self.assertEqual(saved["filters"]["severities"], ["high", "low"])
+        listed = analyst.get("/api/dashboard/views")[1]
+        self.assertEqual(listed[0]["filters"]["severities"], ["high", "low"])
+        self.assertEqual(listed[0]["visibility"], "private")
+
+    def test_case_only_name_names_the_stored_row(self):
+        analyst, admin = self.client("analyst"), self.client("admin")
+        self.assertEqual(analyst.post("/api/dashboard/views", self.payload("dup"))[0], 201)
+        status, data, headers = analyst.post("/api/dashboard/views", self.payload("DUP"))
+        self.assertEqual(status, 409, data)
+        self.assertEqual(data["error"], "you already have a dashboard view named 'dup'")
+        self.assertNotIn("DUP", data["error"])
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        other = analyst.post("/api/dashboard/views", self.payload("other"))[1]
+        status, data, _ = analyst.post(f"/api/dashboard/views/{other['id']}", self.payload("Dup"))
+        self.assertEqual(status, 409, data)
+        self.assertEqual(data["error"], "you already have a dashboard view named 'dup'")
+        status, saved, _ = admin.post("/api/dashboard/views", self.payload("DUP"))
+        self.assertEqual(status, 201, saved)
+        self.assertEqual((saved["owner"], saved["name"]), ("admin", "DUP"))
+        status, renamed, _ = analyst.post(f"/api/dashboard/views/{other['id']}", self.payload("OTHER"))
+        self.assertEqual(status, 200, renamed)
+        self.assertEqual(renamed["name"], "OTHER")
+
     def test_existing_database_gains_the_table(self):
         with sqlite3.connect(self.db_path) as db:
             db.execute("DROP TABLE dashboard_views")
@@ -72,6 +106,114 @@ class DashboardViewApiTests(ServerTestCase):
         with sqlite3.connect(self.db_path) as db:
             self.assertEqual(db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0], "15")
             self.assertEqual(db.execute("SELECT COUNT(*) FROM dashboard_views").fetchone()[0], 0)
+
+
+class DashboardViewCaseTests(unittest.TestCase):
+    def body(self, visibility="private", severities=None, layout=None):
+        return {"name": "Queue", "visibility": visibility,
+                "filters": {"severities": ["high"] if severities is None else severities},
+                "layout": ["p-board"] if layout is None else layout}
+
+    def test_ascii_case_folds_onto_the_catalog_spelling(self):
+        name, visibility, filters, layout = _payload(
+            self.body("SHARED", ["Critical", "HIGH", "Medium", "low"]))
+        self.assertEqual((name, visibility), ("Queue", "shared"))
+        self.assertEqual(filters["severities"], ["critical", "high", "medium", "low"])
+        self.assertEqual(layout, ["p-board"])
+
+    def test_high_with_high_stays_a_duplicate_and_info_stays_out(self):
+        for severities in (["High", "high"], ["HIGH", "High"], ["info"], ["INFO"], ["Hıgh"]):
+            with self.subTest(severities=severities):
+                with self.assertRaises(ViewError) as caught:
+                    _payload(self.body(severities=severities))
+                self.assertEqual(str(caught.exception),
+                                 "severities must be a non-empty list of unique known severities")
+
+    def test_visibility_folds_ascii_only_and_panel_ids_stay_exact(self):
+        self.assertEqual(_payload(self.body("Private"))[1], "private")
+        for visibility in ("public", "Prıvate", "PRIVATE ", None, 1):
+            with self.subTest(visibility=visibility):
+                with self.assertRaises(ViewError) as caught:
+                    _payload(self.body(visibility))
+                self.assertEqual(str(caught.exception), "visibility must be private or shared")
+        for layout in (["P-board"], ["p-Board"], ["p-BOARD"]):
+            with self.subTest(layout=layout):
+                with self.assertRaises(ViewError) as caught:
+                    _payload(self.body(layout=layout))
+                self.assertEqual(str(caught.exception),
+                                 "layout must be a non-empty list of unique dashboard panels")
+
+
+class DashboardViewNameTests(unittest.TestCase):
+    """A name that differs only by case is this owner's stored row, answered 409, never a unique-constraint 500."""
+
+    def setUp(self):
+        self.conn = connect(":memory:")
+        init_schema(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def body(self, name):
+        return {"name": name, "visibility": "private",
+                "filters": {"severities": ["high"]}, "layout": ["p-board"]}
+
+    def test_case_only_difference_names_the_stored_row(self):
+        dashboard_views.save(self.conn, self.body("dup"), "analyst")
+        for variant in ("DUP", "dup"):
+            with self.subTest(variant=variant):
+                with self.assertRaises(ViewError) as caught:
+                    dashboard_views.save(self.conn, self.body(variant), "analyst")
+                self.assertEqual(caught.exception.status, 409)
+                self.assertEqual(str(caught.exception), "you already have a dashboard view named 'dup'")
+        self.assertEqual(
+            [row["name"] for row in self.conn.execute("SELECT name FROM dashboard_views")], ["dup"])
+
+    def test_another_owners_view_is_not_a_conflict(self):
+        dashboard_views.save(self.conn, self.body("dup"), "analyst")
+        saved = dashboard_views.save(self.conn, self.body("DUP"), "admin")
+        self.assertEqual((saved["owner"], saved["name"]), ("admin", "DUP"))
+        names = [(row["owner"], row["name"]) for row in self.conn.execute(
+            "SELECT owner, name FROM dashboard_views ORDER BY owner")]
+        self.assertEqual(names, [("admin", "DUP"), ("analyst", "dup")])
+
+    def test_renaming_onto_another_view_names_the_stored_row(self):
+        stored = dashboard_views.save(self.conn, self.body("dup"), "analyst")
+        other = dashboard_views.save(self.conn, self.body("other"), "analyst")
+        with self.assertRaises(ViewError) as caught:
+            dashboard_views.save(self.conn, self.body("DUP"), "analyst", other["id"])
+        self.assertEqual(caught.exception.status, 409)
+        self.assertEqual(str(caught.exception), "you already have a dashboard view named 'dup'")
+        self.assertEqual(self.conn.execute(
+            "SELECT name FROM dashboard_views WHERE id = ?", (other["id"],)).fetchone()["name"], "other")
+        folded = dashboard_views.save(self.conn, self.body("DUP"), "analyst", stored["id"])
+        self.assertEqual((folded["id"], folded["name"]), (stored["id"], "DUP"))
+
+    def test_unique_conflict_names_the_stored_row(self):
+        dashboard_views.save(self.conn, self.body("dup"), "analyst")
+        real = self.conn.execute
+        skipped = {"done": False}
+        lookup = "SELECT name FROM dashboard_views WHERE owner = ? AND name = ? COLLATE NOCASE"
+
+        def execute(sql, params=()):
+            # The lookup misses once, so the insert hits UNIQUE (owner, name COLLATE NOCASE).
+            if not skipped["done"] and sql == lookup:
+                skipped["done"] = True
+                return real("SELECT name FROM dashboard_views WHERE 0")
+            return real(sql, params)
+
+        self.conn.execute = execute
+        with self.assertRaises(ViewError) as caught:
+            dashboard_views.save(self.conn, self.body("DUP"), "analyst")
+        self.assertEqual(caught.exception.status, 409)
+        self.assertEqual(str(caught.exception), "you already have a dashboard view named 'dup'")
+        self.assertTrue(skipped["done"])
+        self.conn.execute = real
+        self.assertEqual(
+            [row["name"] for row in self.conn.execute("SELECT name FROM dashboard_views")], ["dup"])
+        created = self.conn.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'dashboard_view_created'").fetchone()[0]
+        self.assertEqual(created, 1)
 
 
 if __name__ == "__main__":

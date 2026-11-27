@@ -562,6 +562,13 @@ def build(scenario_names=None, seed=7, now=None):
 
 # --- CLI ---------------------------------------------------------------------------
 
+class NoIngestRedirect(urllib.request.HTTPRedirectHandler):
+    """Only send an authenticated batch to the operator's configured endpoint."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def _is_loopback(url):
     host = urllib.parse.urlparse(url).hostname or ""
     return host in ("127.0.0.1", "localhost", "::1")
@@ -601,9 +608,13 @@ def main(argv=None):
         parser.error("an ingest token is required (--token or SIEM_INGEST_TOKEN)")
     if urllib.parse.urlparse(args.url).scheme not in ("http", "https"):
         parser.error("--url must be an http(s) URL")
-    if not _is_loopback(args.url) and not args.allow_remote:
-        parser.error("refusing to send to a non-loopback URL without --allow-remote")
+    if not _is_loopback(args.url):
+        if not args.allow_remote:
+            parser.error("refusing to send to a non-loopback URL without --allow-remote")
+        if urllib.parse.urlparse(args.url).scheme != "https":
+            parser.error("a remote ingest endpoint requires HTTPS")
 
+    opener = urllib.request.build_opener(NoIngestRedirect)
     for name, events in batches.items():
         body = json.dumps({"source": f"demo:{name}", "synthetic": True, "events": events}).encode()
         request = urllib.request.Request(
@@ -611,7 +622,7 @@ def main(argv=None):
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
         )
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with opener.open(request, timeout=30) as response:
                 result = json.load(response)
         except urllib.error.HTTPError as exc:
             print(f"{name}: HTTP {exc.code} {exc.read().decode()[:200]}", file=sys.stderr)

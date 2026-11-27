@@ -1,0 +1,34 @@
+# CreateUser and CreateAccessKey requests without a recorded API error. The message is the whole
+# "<action> on <service>" line. A denial appends " (errorCode)" and does not match.
+# A login profile or a policy attachment is a different action.
+# Written for Watchpost's Sigma subset (docs/REFERENCE.md, "Sigma rule import").
+title: Cloud IAM User or Access Key Creation Requested
+id: c31342f9-c756-4868-b9ab-330ffa2c2c78
+status: experimental
+description: |
+  A cloud IAM request whose message is exactly "CreateUser on iam.amazonaws.com"
+  or "CreateAccessKey on iam.amazonaws.com". A denied call, a login profile, and a policy
+  attachment do not match. Each matching event is evidence; Watchpost groups them per source IP.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1136/003/
+  - https://attack.mitre.org/techniques/T1098/001/
+tags:
+  - attack.persistence
+  - attack.t1136.003
+  - attack.t1098.001
+logsource:
+  category: cloud
+  product: aws
+detection:
+  change:
+    event.action: cloud_iam_change
+  user_created:
+    message: 'CreateUser on iam.amazonaws.com'
+  key_created:
+    message: 'CreateAccessKey on iam.amazonaws.com'
+  condition: change and (user_created or key_created)
+falsepositives:
+  - A deployment pipeline that creates a user or an access key on a schedule
+level: high

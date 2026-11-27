@@ -1,0 +1,57 @@
+# curl, rsync, or scp of a login keychain to an address outside the private ranges.
+# login.keychain also matches login.keychain-db. No destination address does not match.
+title: macOS Keychain Upload to External Host
+id: 1f6a8c33-7b24-4d19-9e50-3c8a5b2d60e1
+status: experimental
+description: |
+  A curl, rsync, or scp command whose text names login.keychain, with a destination address
+  outside the private ranges (10/8, 172.16/12, 192.168/16, and loopback). A copy to a private
+  address, or a command with no destination address, does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1048/
+tags:
+  - attack.exfiltration
+  - attack.t1048
+logsource:
+  category: process_creation
+  product: macos
+detection:
+  exfil:
+    - event.action: process_start
+      message|contains|all:
+        - /curl
+        - login.keychain
+    - event.action: process_start
+      message|contains|all:
+        - 'curl '
+        - login.keychain
+    - event.action: process_start
+      message|contains|all:
+        - /rsync
+        - login.keychain
+    - event.action: process_start
+      message|contains|all:
+        - 'rsync '
+        - login.keychain
+    - event.action: process_start
+      message|contains|all:
+        - /scp
+        - login.keychain
+    - event.action: process_start
+      message|contains|all:
+        - 'scp '
+        - login.keychain
+  internal:
+    DestinationIp|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+  no_dest:
+    DestinationIp: null
+  condition: exfil and not internal and not no_dest
+falsepositives:
+  - An approved backup that copies a login keychain to an external address
+level: critical
