@@ -4,17 +4,51 @@ All bundled data is synthetic. PR numbers refer to https://github.com/talalkasha
 
 ## Unreleased
 
-### Live ingestion
+### Added
 
-- Syslog over TLS (RFC 5425), the first item of #8. With `SIEM_SYSLOG_TLS_CERT` and `SIEM_SYSLOG_TLS_KEY` the listener takes frames over TLS 1.2+ on TCP 6514, and with `SIEM_SYSLOG_TLS_CLIENT_CA` only from senders that present a certificate signed by that CA. TLS replaces the plaintext UDP/TCP listeners unless `SIEM_SYSLOG_PLAINTEXT=1`, and TLS settings that cannot be loaded stop the listener instead of falling back to plaintext. Standard library only; the tests generate their own throwaway certificates, so no key files are in the repository. The rsyslog setup in docs/LIVE_INGEST.md was run on Debian 12 and Ubuntu 22.04 and 24.04.
+- Syslog can receive TLS 1.2+ streams with optional client certificates. See [Live ingestion](docs/LIVE_INGEST.md#syslog-over-tls).
 
-- Firewalls over syslog, part of the second item of #8. Syslog lines from pfSense/OPNsense (`filterlog`), FortiGate, Cisco ASA/FTD and Palo Alto (`TRAFFIC`) become `fw_deny` and `fw_allow` events with source, destination and port, and firewall admin and VPN logins become `auth_failure` and `auth_success`. Lines in other formats stay generic `syslog` events. The parsers follow the published log formats and are tested on synthetic lines, not on the devices. New sample: `samples/firewall_syslog.log`.
+- The [investigation graph](docs/screenshots/07-investigation-graph.jpg) connects alerts, incidents, and evidence entities. Open **Graph** to filter by type or severity and follow a node to its case or entity page. The authenticated snapshot is available at `GET /api/graph`.
 
 - CloudTrail collection with a read-only account, part of the second item of #8. `scripts/cloudtrail_collector.py` (standard library only) reads CloudTrail `LookupEvents` across regions and, through one assumed read-only role per account, across accounts, and posts the events to the ingest API. It needs only `cloudtrail:LookupEvents`, which `SecurityAudit` and `ReadOnlyAccess` include. Request signing matches AWS's published Signature Version 4 examples; the collector is tested against a local stand-in for the AWS APIs, not against an AWS account.
 
 ### Fixed
 
-- Syslog listener: when one of its ports could be bound and another could not, the listener reported `failing` but shutdown then blocked forever. A transport that did bind is now released, and shutdown returns.
+- Dual-stack syslog listeners accept IPv4 senders covered by IPv4 or mapped IPv6 allow-list entries and store the fallback host as dotted IPv4.
+
+- A promoted saved search groups `user` with the ASCII fold the `user:` filter uses. `Alice`, `alice`, and `ALICE` stay one key. `ÉRIN` and `érin` stay two keys and no longer trip a threshold together. The finding key is the folded spelling. A host group stays the stored spelling, so `WEB01` and `web01` stay two groups.
+
+- Viewer masking folds usernames on ASCII letters only. `Alice` and `alice` stay one pseudonym. `ÉRIN` and `érin` stay two, and a viewer named `érin` no longer sees `ÉRIN` in clear. The 10,000-name cap still counts those as two and still fails closed. Public addresses stay visible and internal addresses stay masked.
+
+- With `SIEM_TRUST_PROXY=1`, the rate-limit client IP is the last entry of exactly one `X-Forwarded-For` header on a loopback connection. A second header is not used, so a client-supplied line cannot choose the key. A value that is not an address stays the peer address. One header `192.0.2.1, 203.0.113.7` still uses `203.0.113.7`.
+
+- Asset host matching folds ASCII letters only, the same fold as entity hosts. An asset named `Érin-host` no longer matches events on `érin-host`, so one host does not take the other's criticality. `WEB01` still matches `web01`. Addresses stay the form already stored.
+
+- Alert related timeline also matches the evidence host, case-insensitively for ASCII. An event on `web01` in the window is included when the evidence host is `WEB01`, even with a different user and source IP. `Érin-host` and `érin-host` stay apart. Source IP matches stay exact.
+
+- Event search and hunt match `outcome` case-insensitively (ASCII). `outcome:failure` and `GET /api/events?outcome=Failure` return a row stored as `failure`. A prefix already folded ASCII. Grouping by outcome stays exact. The lookup uses `idx_events_outcome_nocase`.
+
+- Event search and hunt match `source` case-insensitively (ASCII). `source:Demo` and `GET /api/events?source=demo` return a row stored as `demo`. A prefix already folded ASCII. Grouping by source stays exact. The lookup uses `idx_events_source_nocase`.
+
+- A missing static file (404) and a non-GET on a static path (405) send `Cache-Control: no-store`. A static file that exists stays `no-cache`.
+
+- Hunt and event search bind a complete IP in the form ingest stores, so `src_ip:2001:DB8::1` and `GET /api/events?ip=2001:DB8::1` match a row stored as `2001:db8::1`. A trailing `*` stays a text prefix. Anything that is neither a prefix nor one address is 400.
+
+- Alert related timeline matches `user` case-insensitively (ASCII, like event search). Evidence stored as `Alice` includes events stored as `alice`. Source IP matches stay exact.
+
+- Event search and hunt match `host` case-insensitively (ASCII, like the asset inventory). `WEB01` and `web01` are one host in `host=` and `host:`. Grouping by host stays exact. The lookup uses `idx_events_host_nocase`.
+
+- Hunt `timechart` returns `note` when there are no rows or every bucket count is 0, naming the query and the span. The rows stay as they are. A chart with a count above 0 omits `note`.
+
+- Hunt `stats`, `top`, and `timechart` group `user` case-insensitively, and `dc(user)` counts those spellings once. The group label is the lowercase account. Other fields still compare exactly.
+
+- Alert and incident Markdown and PDF reports list each ATT&CK technique with its evidence level. Mapped means a rule names the technique and is not proof; only validated is a labeled scenario.
+
+- Incident case Markdown lists each ATT&CK technique with its evidence level. Mapped means a rule names the technique and is not proof; only validated is a labeled scenario.
+
+- Coverage detail: each mapped-only technique states why it is not validated. With the default rules, T1190 is probed but never exploited, T1595.001 sweeps one host rather than IP blocks, and T1048 is cloud storage reads with no exfiltration channel.
+
+- Dashboard ATT&CK matrix: every catalog technique is drawn, empty tactics stay on the kill chain, and cells are colored by evidence level. A mapped technique is no longer painted as a gap, and Initial Access is no longer clipped at four rows.
 
 - Sigma import: unquoted values with a leading zero, such as the keyboard layout ID `00000429`, stay text instead of becoming the number 429, so `contains` matches the full identifier. Found by comparing the parser with PyYAML on all 3,164 SigmaHQ rules; every rule now parses identically. (#67)
 

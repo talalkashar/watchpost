@@ -1,0 +1,57 @@
+# nmap, masscan, zmap, or unicornscan executed on the host (T1046). The path is bounded
+# by an auditd exe quote or a sudo COMMAND= token. A web user-agent does not match.
+title: Linux Network Scanner Command Recorded
+id: 7f3a1c90-2b64-4e17-9d08-a11c0e100005
+status: experimental
+description: |
+  An x86-64 audit record shows a successful scanner execve, or sudo recorded
+  a scanner command requested as root. It does not show that a scan finished. A scanner name in
+  a web user agent, or in a note, does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1046/
+tags:
+  - attack.discovery
+  - attack.t1046
+logsource:
+  product: linux
+  category: process_creation
+detection:
+  audit:
+    event.action: process_start
+    message|contains:
+      - 'exe="/usr/bin/nmap"'
+      - 'exe="/usr/local/bin/nmap"'
+      - 'exe="/usr/bin/masscan"'
+      - 'exe="/usr/bin/zmap"'
+      - 'exe="/usr/bin/unicornscan"'
+  sudo_exact:
+    event.action: privilege_escalation
+    message|endswith:
+      - ' ; USER=root ; COMMAND=/usr/bin/nmap'
+      - ' ; USER=root ; COMMAND=/usr/local/bin/nmap'
+      - ' ; USER=root ; COMMAND=/usr/bin/masscan'
+      - ' ; USER=root ; COMMAND=/usr/bin/zmap'
+      - ' ; USER=root ; COMMAND=/usr/bin/unicornscan'
+  sudo_args:
+    event.action: privilege_escalation
+    message|contains:
+      - ' ; USER=root ; COMMAND=/usr/bin/nmap '
+      - ' ; USER=root ; COMMAND=/usr/local/bin/nmap '
+      - ' ; USER=root ; COMMAND=/usr/bin/masscan '
+      - ' ; USER=root ; COMMAND=/usr/bin/zmap '
+      - ' ; USER=root ; COMMAND=/usr/bin/unicornscan '
+  exec_record:
+    message|startswith: 'type=SYSCALL arch=c000003e '
+    message|contains: ' syscall=59 success=yes '
+  denied:
+    message|contains:
+      - ' is not in the sudoers file'
+      - ' : user NOT in sudoers'
+  root_invoker:
+    user.name: root
+  condition: (audit and exec_record) or ((sudo_exact or sudo_args) and not denied and not root_invoker)
+falsepositives:
+  - An administrator running nmap during a change window
+level: medium

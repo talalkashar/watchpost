@@ -1,8 +1,8 @@
 """Synthetic geolocation for demo IP ranges. Not a real geo lookup.
 
 Only the RFC 5737 documentation ranges and RFC 1918 private ranges are mapped, each to a
-fictional city at a fixed position. Anything else returns None ("unknown"): real addresses
-are never guessed.
+fictional city at a fixed position. An IPv4-mapped IPv6 address is that same IPv4 address.
+Anything else returns None ("unknown"): real addresses are never guessed.
 """
 
 import ipaddress
@@ -26,13 +26,26 @@ LABEL = "synthetic geo"
 _INTERNAL = [ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]
 
 
-def locate(ip):
-    """Return {"city", "lat", "lon", "synthetic": True} for a mapped address, else None."""
-    if not ip:
-        return None
+def _parse(ip):
+    """An address, or None. IPv4-mapped IPv6 (::ffff:0:0/96) is the embedded IPv4 address.
+
+    Ingest stores that form unchanged (`::ffff:10.0.0.1`), including a zone index. Whitespace
+    around a string is not part of the address.
+    """
+    if isinstance(ip, str):
+        ip = ip.strip()
     try:
         addr = ipaddress.ip_address(ip)
     except ValueError:
+        return None
+    mapped = getattr(addr, "ipv4_mapped", None)
+    return mapped if mapped is not None else addr
+
+
+def locate(ip):
+    """Return {"city", "lat", "lon", "synthetic": True} for a mapped address, else None."""
+    addr = _parse(ip)
+    if addr is None:
         return None
     for network, city, lat, lon in TABLE:
         if addr.version == network.version and addr in network:
@@ -42,9 +55,8 @@ def locate(ip):
 
 def is_internal(ip):
     """True for RFC 1918 addresses; the dashboard map draws those sites as the HQ target."""
-    try:
-        addr = ipaddress.ip_address(ip)
-    except ValueError:
+    addr = _parse(ip)
+    if addr is None:
         return False
     return any(addr.version == n.version and addr in n for n in _INTERNAL)
 

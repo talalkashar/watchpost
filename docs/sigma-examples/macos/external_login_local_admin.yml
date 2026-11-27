@@ -1,0 +1,41 @@
+# Successful SSH or Screen Sharing as a built-in admin name, from outside the private ranges.
+# Watchpost has no CommandLine field; the service name is matched on message.
+title: macOS External Login as Local Admin
+id: 3a9f6c21-1d74-4e58-b0a6-8c4e2f7d91ab
+status: experimental
+description: |
+  A successful sshd or screensharingd login for root, admin, or administrator from an address
+  outside the private ranges (10/8, 172.16/12, 192.168/16, and loopback). An event with no
+  source address does not match. Each matching event is evidence.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1078/003/
+tags:
+  - attack.initial_access
+  - attack.t1078.003
+logsource:
+  category: authentication
+  product: macos
+detection:
+  selection:
+    event.action: auth_success
+    user.name:
+      - root
+      - admin
+      - administrator
+    message|contains:
+      - sshd
+      - screensharingd
+  internal:
+    SourceIp|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+  no_source:
+    SourceIp: null
+  condition: selection and not internal and not no_source
+falsepositives:
+  - An administrator signing in from a home or hotel network
+level: high

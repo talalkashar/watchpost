@@ -1,0 +1,49 @@
+# A sudo command that would disable audit or syslog (T1685). The record is the command
+# that was requested. Restart and status are not in the list. A quoted command in a note
+# is not an escalation.
+title: Linux Logging Disable Command
+id: 7f3a1c90-2b64-4e17-9d08-a11c0e100007
+status: experimental
+description: |
+  A privilege_escalation line whose command would disable auditd, stop or disable
+  rsyslog, turn ufw logging off, or delete auth or audit logs. The sudo record
+  shows the command that was requested. It does not show that the service stopped
+  or that any log was removed. systemctl status and systemctl restart stay out.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1685/
+tags:
+  - attack.defense_evasion
+  - attack.t1685
+logsource:
+  product: linux
+  category: process_creation
+detection:
+  elevation:
+    event.action: privilege_escalation
+  disable:
+    message|endswith:
+      - ' ; USER=root ; COMMAND=/sbin/auditctl -e 0'
+      - ' ; USER=root ; COMMAND=/sbin/auditctl -D'
+      - ' ; USER=root ; COMMAND=/usr/bin/systemctl stop auditd'
+      - ' ; USER=root ; COMMAND=/usr/bin/systemctl stop rsyslog'
+      - ' ; USER=root ; COMMAND=/usr/bin/systemctl stop syslog.socket'
+      - ' ; USER=root ; COMMAND=/usr/bin/systemctl disable auditd'
+      - ' ; USER=root ; COMMAND=/usr/bin/systemctl disable rsyslog'
+      - ' ; USER=root ; COMMAND=/usr/sbin/service auditd stop'
+      - ' ; USER=root ; COMMAND=/usr/sbin/service rsyslog stop'
+      - ' ; USER=root ; COMMAND=/usr/sbin/ufw logging off'
+      - ' ; USER=root ; COMMAND=/usr/bin/rm -f /var/log/auth.log'
+      - ' ; USER=root ; COMMAND=/usr/bin/rm -rf /var/log/audit'
+      - ' ; USER=root ; COMMAND=/usr/bin/truncate -s 0 /var/log/*'
+  denied:
+    message|contains:
+      - ' is not in the sudoers file'
+      - ' : user NOT in sudoers'
+  root_invoker:
+    user.name: root
+  condition: elevation and disable and not denied and not root_invoker
+falsepositives:
+  - Maintenance that deliberately requests a stop of auditd or rsyslog
+level: high

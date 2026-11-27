@@ -126,16 +126,23 @@ def _exfiltration(rng):
                 bytes=50_000_000 + rng.randint(0, 1_000_000))
            for i in range(40)]
     out += [_rec(100 + i * 4, "exfiltration", "fw_allow", None, "10.0.0.10", host="fw01",
-                 message=f"[SYNTHETIC] firewall allow 10.0.0.10 -> {ATTACKER_VPN_IP}:443/tcp", dest_port=443,
-                 bytes=400_000_000)
+                 message=f"[SYNTHETIC] firewall allow 10.0.0.10 -> {ATTACKER_VPN_IP}:443/tcp",
+                 dest_port=443, dest_ip=ATTACKER_VPN_IP, bytes=400_000_000)
             for i in range(4)]
     return out
 
 
+def _speed(speed):
+    """Speed shared by build() and Runner.start(). Out of range raises before a run is marked running."""
+    value = float(speed)
+    if not (0.1 <= value <= 10_000):
+        raise ValueError("speed must be between 0.1 and 10000")
+    return value
+
+
 def build(seed=7, speed=1.0):
     """Ordered timeline of (offset_seconds, event, stage). Deterministic for a seed; `speed` only validates."""
-    if not (0.1 <= float(speed) <= 10_000):
-        raise ValueError("speed must be between 0.1 and 10000")
+    _speed(speed)
     rng = random.Random(seed)
     timeline = []
     for part in (_baseline, _recon, _credential_attack, _foothold, _escalation, _lateral_cloud, _exfiltration):
@@ -169,20 +176,24 @@ class Runner:
         health.register_check("storyline", self.health_check)
 
     def start(self, speed=1.0, seed=7, started_by="system"):
+        speed_f = _speed(speed)
+        seed_i = int(seed)
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return False
             self._stop.clear()
             self.status.update({"running": True, "stage": STAGES[0][0], "progress": 0.0, "events_sent": 0,
                                 "alerts_created": 0, "started_at": now_iso(), "finished_at": None,
-                                "error": None, "speed": float(speed), "seed": int(seed), "started_by": started_by})
-            self._thread = threading.Thread(target=self._run, args=(float(speed), int(seed), started_by),
+                                "error": None, "speed": speed_f, "seed": seed_i, "started_by": started_by})
+            self._thread = threading.Thread(target=self._run, args=(speed_f, seed_i, started_by),
                                             name="storyline", daemon=True)
             self._thread.start()
             return True
 
     def stop(self):
-        self._stop.set()
+        # Same lock as start() so a stop cannot land between clear() and the thread launch.
+        with self._lock:
+            self._stop.set()
 
     def join(self, timeout=None):
         if self._thread:
@@ -250,12 +261,24 @@ class Runner:
                 conn.close()
 
 
-def run_once_fast(open_conn, seed=7, speed=1000.0, started_by="test"):
-    """Convenience for tests and the smoke check: replay the whole storyline and wait for it."""
+def run_once_fast(open_conn, seed=7, speed=1000.0, started_by="test", timeout=120):
+    """Replay the whole storyline and wait. After `timeout` seconds the run is stopped.
+
+    The process-wide storyline health check is removed once this runner's thread has exited.
+    A timed-out replay used to unregister that check and return while the thread kept ingesting.
+    """
     runner = Runner(open_conn)
-    runner.start(speed=speed, seed=seed, started_by=started_by)
-    runner.join(timeout=120)
-    health.unregister_check("storyline", runner.health_check)
+    try:
+        runner.start(speed=speed, seed=seed, started_by=started_by)
+        runner.join(timeout)
+        thread = runner._thread
+        if thread is not None and thread.is_alive():
+            runner.stop()
+            runner.join(5)
+    finally:
+        thread = runner._thread
+        if thread is None or not thread.is_alive():
+            health.unregister_check("storyline", runner.health_check)
     return runner.snapshot()
 
 
@@ -265,6 +288,7 @@ class DemoLoop:
     def __init__(self, runner, minutes, speed=1.0):
         self.runner, self.minutes, self.speed = runner, minutes, speed
         self._stop = threading.Event()
+        self._lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, name="storyline-loop", daemon=True)
 
     def start(self):
@@ -272,12 +296,23 @@ class DemoLoop:
         return self
 
     def stop(self):
-        self._stop.set()
-        self.runner.stop()
+        # Hold this lock across the runner stop so _run cannot start a new replay in between.
+        with self._lock:
+            self._stop.set()
+            self.runner.stop()
 
     def _run(self):
+        if self.minutes <= 0:
+            return
         while not self._stop.is_set():
-            self.runner.start(speed=self.speed, seed=7, started_by="demo-loop")
+            with self._lock:
+                if self._stop.is_set():
+                    return
+                try:
+                    self.runner.start(speed=self.speed, seed=7, started_by="demo-loop")
+                except (TypeError, ValueError) as exc:
+                    self.runner.status["error"] = describe_exception(exc)
+                    self.runner.status["running"] = False
             self._stop.wait(self.minutes * 60)
 
 

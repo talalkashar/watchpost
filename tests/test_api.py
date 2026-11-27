@@ -263,6 +263,9 @@ class IncidentApiTests(ServerTestCase):
         self.assertEqual(incident["status"], "open")
         self.assertEqual(incident["stages"], ["Reconnaissance", "Initial Access", "Persistence",
                                               "Privilege Escalation"])
+        # Earliest kill-chain technique on the card: recon scanning, not the later privilege-escalation id.
+        self.assertEqual(incident["top_technique"], {
+            "id": "T1595.002", "name": "Active Scanning: Vulnerability Scanning", "tactic": "Reconnaissance"})
 
         status, detail, _ = analyst.get(f"/api/incidents/{incident['id']}")
         self.assertEqual(status, 200)
@@ -570,6 +573,39 @@ class ReportApiTests(ServerTestCase):
             self.assertIn(f"### Alert #{alert['id']}:", text)
         audit = self.client("admin").get("/api/audit")[1]
         self.assertEqual({a["target"] for a in audit if a["action"] == "report_downloaded"}, {f"incident:{iid}"})
+
+
+class ApiErrorCacheTests(ServerTestCase):
+    """A 4xx and the unhandled 500 are not cacheable: the body can repeat a request value."""
+
+    def test_client_error_is_not_stored_and_can_echo_the_query(self):
+        status, data, headers = self.client("viewer").get("/api/hunt?q=usr:needle-value")
+        self.assertEqual(status, 400)
+        self.assertIn("usr", data["error"])
+        self.assertEqual(headers["Cache-Control"], "no-store")
+
+        status, data, headers = self.client().get("/api/nope")
+        self.assertEqual((status, data["error"]), (404, "not found"))
+        self.assertEqual(headers["Cache-Control"], "no-store")
+
+        status, data, headers = self.client("analyst").post("/api/events", {})
+        self.assertEqual(status, 405)
+        self.assertEqual(data["error"], "method not allowed")
+        self.assertEqual(headers["Cache-Control"], "no-store")
+
+    def test_unhandled_error_is_not_stored(self):
+        admin = self.client("admin")
+        with sqlite3.connect(self.db_path) as db:
+            db.execute("INSERT INTO alerts(rule_id, rule_version, group_key, severity, title, explanation,"
+                       " first_seen, last_seen, event_count, created_at, updated_at) VALUES"
+                       " ('x',1,'k','low','t','e','2026-01-01','2026-01-01',0,'2026-01-01','2026-01-01')")
+            db.execute("DROP TABLE alert_notes")
+        status, data, headers = admin.post("/api/alerts/1/notes", {"body": "password=hunter2"})
+        self.assertEqual(status, 500)
+        self.assertEqual(data["error"], "internal error; it has been recorded on the Health page")
+        self.assertNotIn("hunter2", json.dumps(data))
+        self.assertEqual(headers["Cache-Control"], "no-store")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,12 +1,16 @@
 """Per-IP token-bucket rate limiting (Watchpost 2.0 / F)."""
 
+import socket
 import unittest
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 from tests.helpers import ADMIN_PW, ServerTestCase
 from watchpost.config import Config
 from watchpost.ratelimit import TokenBucketLimiter
+
+API = Path(__file__).resolve().parent.parent / "docs" / "API.md"
 
 
 class FakeClock:
@@ -73,6 +77,25 @@ class TokenBucketTests(unittest.TestCase):
         self.assertEqual((config.rate_limit_enabled, config.trust_proxy), (True, False))
 
 
+def exchange(port, payload):
+    sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+    sock.settimeout(5)
+    try:
+        sock.sendall(payload)
+        chunks = []
+        while True:
+            try:
+                data = sock.recv(65536)
+            except socket.timeout:
+                break
+            if not data:
+                break
+            chunks.append(data)
+        return b"".join(chunks)
+    finally:
+        sock.close()
+
+
 def raw_get(base, path, headers=None):
     req = urllib.request.Request(base + path, headers=headers or {})
     try:
@@ -136,6 +159,41 @@ class TrustedProxyRateLimitTests(ServerTestCase):
         self.assertEqual(raw_get(self.base, "/api/health", {"X-Forwarded-For": "203.0.113.8"})[0], 200)
         # A malformed header falls back to the peer address.
         self.assertEqual(raw_get(self.base, "/api/health", {"X-Forwarded-For": "not-an-ip"})[0], 200)
+
+    def test_two_forwarded_for_headers_use_the_peer(self):
+        port = self.server.server_address[1]
+
+        def status_for(header_lines):
+            raw = exchange(port, (
+                b"GET /api/health HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                + header_lines +
+                b"Connection: close\r\n"
+                b"\r\n"
+            ))
+            line = next(part for part in raw.split(b"\r\n") if part.startswith(b"HTTP/"))
+            return int(line.split()[1])
+
+        # Different pairs must share the peer bucket. The first header must not win.
+        self.assertEqual(status_for(
+            b"X-Forwarded-For: 198.51.100.9\r\n"
+            b"X-Forwarded-For: 203.0.113.9\r\n"
+        ), 200)
+        self.assertEqual(status_for(
+            b"X-Forwarded-For: 192.0.2.1\r\n"
+            b"X-Forwarded-For: 203.0.113.7\r\n"
+        ), 200)
+        self.assertEqual(status_for(
+            b"X-Forwarded-For: 198.51.100.1\r\n"
+            b"X-Forwarded-For: 203.0.113.50\r\n"
+        ), 429)
+        # One header still uses its last entry, a different bucket from the peer.
+        self.assertEqual(status_for(b"X-Forwarded-For: 192.0.2.1, 203.0.113.7\r\n"), 200)
+        # A value that is not an address stays on the exhausted peer bucket.
+        self.assertEqual(status_for(b"X-Forwarded-For: not-an-ip\r\n"), 429)
+        text = API.read_text()
+        self.assertIn("one `X-Forwarded-For` header", text)
+        self.assertIn("Two `X-Forwarded-For` headers", text)
 
 
 class RateLimitDisabledTests(ServerTestCase):

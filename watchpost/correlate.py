@@ -13,18 +13,63 @@ Rules of the grouping, so reruns are idempotent:
 """
 
 from collections import defaultdict
+from datetime import timezone
 
 from . import attack
 from .db import parse_iso
 
 DEFAULT_WINDOW_SECONDS = 1800
 ENTITY_TYPES = ("src_ip", "user", "host")
+# Account and host keys fold these letters only, the same fold as COLLATE NOCASE and entity pages.
+# str.lower() would also fold É, so ÉRIN and érin would share the key érin.
+LOWER_ENTITY_TYPES = frozenset({"user", "host"})
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 SEVERITY_ORDER = ["info", "low", "medium", "high", "critical"]
 ESCALATION_TACTICS = 3
 
 
-def _epoch(ts):
-    return parse_iso(ts).timestamp()
+def entity_key(kind, value):
+    """The correlation key for one entity value.
+
+    Accounts and hosts fold ASCII letters only. Erin, ERIN, and erin are one
+    account `erin`, and WEB01 and web01 are one host `web01`. ÉRIN and érin
+    stay apart, and so do Érin-host and érin-host. A source IP stays the stored
+    address.
+    """
+    text = str(value)
+    if kind in LOWER_ENTITY_TYPES:
+        return text.translate(_ASCII_FOLD)
+    return text
+
+
+def rule_summary(window_seconds=DEFAULT_WINDOW_SECONDS):
+    """One sentence for the incident page, beside the source IP, account, and host lists."""
+    minutes = window_seconds // 60
+    return (
+        "Alerts that share a source IP, account, or host within "
+        f"{minutes} minutes are grouped into this incident."
+    )
+
+
+def epoch_seconds(ts):
+    """Epoch seconds. A timestamp with no zone is UTC, matching parse_iso's callers."""
+    dt = parse_iso(ts)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _span(alert):
+    """Closed [start, end] in epoch seconds, plus the timestamp strings at those ends.
+
+    A reversed first/last still covers the time between them. The strings are the
+    alert's own values, so an ordered alert keeps the text it stored.
+    """
+    first, last = alert["first_seen"], alert["last_seen"]
+    start, end = epoch_seconds(first), epoch_seconds(last)
+    if end < start:
+        return end, start, last, first
+    return start, end, first, last
 
 
 def correlate(alerts, window_seconds=DEFAULT_WINDOW_SECONDS):
@@ -70,19 +115,20 @@ def correlate(alerts, window_seconds=DEFAULT_WINDOW_SECONDS):
         for other in ids[1:]:
             union(ids[0], other)
 
-    # Link alerts whose events carry the same entity close in time. Edges touching the oldest
-    # incident are applied first, so an alert that could join two incidents joins the older one.
+    # Link alerts whose events carry the same entity close in time. Unaffiliated alerts chain
+    # first, then edges that touch the oldest incident, so a new cluster that could join two
+    # incidents joins the older one. Two existing incidents are still never merged.
     by_entity = defaultdict(list)
     for a in alerts:
         if a.get("sightings"):
             for kind, value, ts in a["sightings"]:
-                t = _epoch(ts)
-                by_entity[(kind, str(value).lower())].append((t, t, a))
+                t = epoch_seconds(ts)
+                by_entity[(kind, entity_key(kind, value))].append((t, t, a))
         else:
-            start, end = _epoch(a["first_seen"]), _epoch(a["last_seen"])
+            start, end, _, _ = _span(a)
             for kind in ENTITY_TYPES:
                 for value in (a.get("entities") or {}).get(kind) or []:
-                    by_entity[(kind, str(value).lower())].append((start, end, a))
+                    by_entity[(kind, entity_key(kind, value))].append((start, end, a))
     never = float("inf")
     edges = set()
     for points in by_entity.values():
@@ -93,7 +139,11 @@ def correlate(alerts, window_seconds=DEFAULT_WINDOW_SECONDS):
                 if start - other_end > window_seconds:
                     del active[other_id]
                 elif other_id != a["id"]:
-                    rank = min(a.get("incident_id") or never, other.get("incident_id") or never)
+                    ia = a.get("incident_id")
+                    ib = other.get("incident_id")
+                    # (0, 0) sorts before every incident edge, so new alerts cluster before
+                    # either incident can claim one of them.
+                    rank = (0, 0) if not ia and not ib else (1, min(ia or never, ib or never))
                     edges.add((rank, min(a["id"], other_id), max(a["id"], other_id)))
             previous = active.get(a["id"], (end, a))[0]
             active[a["id"]] = (max(previous, end), a)
@@ -134,10 +184,13 @@ def summarize(alerts):
     escalated = len(stages) >= ESCALATION_TACTICS
     if escalated:
         severity = _bump(severity)
-    entities = {kind: sorted({str(v) if kind != "user" else str(v).lower()
+    entities = {kind: sorted({entity_key(kind, v)
                               for a in alerts for v in (a.get("entities") or {}).get(kind) or []})
                 for kind in ENTITY_TYPES}
     who = (entities["src_ip"] + entities["user"] + entities["host"])[:3]
+    spans = [_span(a) for a in alerts]
+    first_seen = min(spans, key=lambda s: (s[0], s[2]))[2]
+    last_seen = max(spans, key=lambda s: (s[1], s[3]))[3]
     if not stages:
         path = "Related alerts"
     elif len(stages) <= 3:
@@ -148,8 +201,8 @@ def summarize(alerts):
         "title": f"{path}: {', '.join(who)}" if who else path,
         "severity": severity,
         "escalated": escalated,
-        "first_seen": min(a["first_seen"] for a in alerts),
-        "last_seen": max(a["last_seen"] for a in alerts),
+        "first_seen": first_seen,
+        "last_seen": last_seen,
         "entities": entities,
         "stages": stages,
         "alert_count": len(alerts),

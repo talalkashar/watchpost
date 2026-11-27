@@ -10,26 +10,98 @@ import sqlite3
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, unquote_plus, urlparse
 
-from . import (__version__, assets, attack, auth, case_record, dashboard_views, ecs, engine, entities, geo, hunt, improve, incidents,
-               masking, portability, queries, report, search_rules, sigma, simulate, sources, storyline, stream,
+from . import (__version__, assets, attack, auth, case_record, dashboard_views, ecs, engine, entities, geo, graph, hunt, improve, incidents,
+               masking, portability, queries, report, search_rules, sigma, simulate, sources, static_assets, storyline, stream,
                triage)
 from . import backtest as backtest_mod
 from .ratelimit import TokenBucketLimiter
 from .config import Config
 from .db import audit, connect, init_schema, now_iso, row_to_dict, utcnow, verify_chain
 from .diagnostics import configure_logging, log, record_error
-from .health import STATIC_DIR, run_health_checks
+from .health import STATIC_DIR, HealthSnapshot, run_health_checks
 from .normalize import EventError, parse_payload, validate_source
 
 SESSION_COOKIE = "wp_session"
+# The request line is decoded as iso-8859-1, so this count is the query's wire bytes.
+# A longer string is refused before parse_qs. Field limits (a hunt query is 500 characters) still apply under it.
+MAX_QUERY_BYTES = 8192
+# Health details returns this many error_log rows, newest by id. The rest are recent_errors_omitted.
+RECENT_ERRORS_LIMIT = 20
+# Health details returns this many detection runs, newest by id. The rest are recent_detection_runs_omitted.
+RECENT_RUNS_LIMIT = 10
+# These stay bare arrays. The rows past the cap are X-Watchpost-Omitted.
+AUDIT_LIMIT = 200
+# Ingest batches, newest by created_at, then id. The same timestamp keeps the higher id.
+BATCH_LIMIT = 50
+# Change requests, newest by id. A status filter counts only that status.
+CHANGES_LIMIT = 100
+# Approved tuning exceptions, newest by id. `active` stays on each row.
+SUPPRESSIONS_LIMIT = 100
+# Approved rule-wide windows, newest by id. Each row keeps upcoming, active, expired, or ended.
+WINDOWS_LIMIT = 100
+# Evaluation history, newest by id.
+EVALUATIONS_LIMIT = 20
+# One rule's versions, newest by version. An unknown rule is an empty array.
+RULE_HISTORY_LIMIT = 50
+# The rules list, first by id. A Sigma rule on that page still includes its YAML.
+# The rest of the catalog is X-Watchpost-Omitted.
+RULES_LIMIT = 100
+OMITTED_HEADER = "X-Watchpost-Omitted"
 
 
 class ApiError(Exception):
     def __init__(self, status, message):
         super().__init__(message)
         self.status = status
+
+
+def query_params(raw):
+    """One value per query key. A repeated key is a 400 that names it.
+
+    A query longer than MAX_QUERY_BYTES is 414 before parse_qs. The hunt
+    check (500 characters) runs only after this returns.
+
+    parse_qs keeps every value, and taking the first would hide the rest
+    (severity=low&severity=critical would filter as low).
+    """
+    if len(raw) > MAX_QUERY_BYTES:
+        raise ApiError(414, f"query string exceeds {MAX_QUERY_BYTES} bytes")
+    pairs = parse_qs(raw)
+    for key, values in pairs.items():
+        if len(values) > 1:
+            raise ApiError(400, f"repeated query key '{key}'")
+    params = {key: values[0] for key, values in pairs.items()}
+    # parse_qs drops a blank value, so `synthetic=` never arrived and event
+    # search treated the filter as absent. Keep that one empty value. Two
+    # blanks are a repeated key. Scan the raw pieces so a query with no
+    # synthetic key still calls parse_qs once.
+    if "synthetic" not in params:
+        blank = _blank_synthetic(raw)
+        if blank is not None:
+            params["synthetic"] = blank
+    return params
+
+
+def _blank_synthetic(raw):
+    """`""` when a `synthetic` key was present and blank, else None.
+
+    Two blanks raise the same repeated-key 400 as two copies of any other
+    value. A non-blank value is already in the parsed params, so this is
+    only called when parse_qs dropped every copy.
+    """
+    found = False
+    for piece in raw.split("&"):
+        name, sep, value = piece.partition("=")
+        if unquote_plus(name) != "synthetic":
+            continue
+        if (unquote_plus(value) if sep else "") != "":
+            continue
+        if found:
+            raise ApiError(400, "repeated query key 'synthetic'")
+        found = True
+    return "" if found else None
 
 
 class Download:
@@ -64,6 +136,7 @@ class App:
             # cheap thing to repeat and get the tight bucket; rule proposals and approvals get their own.
             self.backtest_limiter = TokenBucketLimiter(BACKTEST_BURST, BACKTEST_PER_MINUTE)
             self.change_backtest_limiter = TokenBucketLimiter(CHANGE_BACKTEST_BURST, BACKTEST_PER_MINUTE)
+        self.health_snapshot = HealthSnapshot(self.conn, config.db_path)
         self.storyline = storyline.Runner(self.conn)
 
     def conn(self):
@@ -90,7 +163,7 @@ def route(method, pattern, role="viewer", csrf=True):
 def body_json(req):
     try:
         data = json.loads(req.body or b"{}")
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         raise ApiError(400, "request body must be valid JSON")
     if not isinstance(data, dict):
         raise ApiError(400, "request body must be a JSON object")
@@ -166,7 +239,10 @@ def mfa_disable(req):
 
 @route("GET", "/api/auth/sessions")
 def my_sessions(req):
-    return auth.list_sessions(req.conn, req.user["username"], req.user.get("sid"))
+    rows, omitted = auth.list_sessions(
+        req.conn, req.user["username"], req.user.get("sid"))
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", r"/api/auth/sessions/([0-9a-f]{16})/revoke", role="analyst")
@@ -176,20 +252,43 @@ def my_session_revoke(req, sid):
 
 @route("GET", "/api/health", role="public")
 def health_summary(req):
-    report = run_health_checks(lambda: connect(req.app.config.db_path), req.app.config.db_path)
+    report = req.app.health_snapshot.report()
     req.status = 503 if report["status"] == "failing" else 200
     # Public view: statuses only, no internal details.
     return {"status": report["status"], "version": __version__, "checked_at": report["checked_at"],
             "checks": {c["name"]: c["status"] for c in report["checks"]}}
 
 
+def _newest(conn, count_sql, rows_sql, limit):
+    """The newest `limit` rows, and how many the cap left out (0 when the table fits)."""
+    total = conn.execute(count_sql).fetchone()[0]
+    rows = [dict(r) for r in conn.execute(rows_sql, (limit,))]
+    return rows, total - len(rows)
+
+
+def _set_omitted(req, omitted):
+    """A bare-array response cannot grow a field. The count rides in this header."""
+    req.extra_headers[OMITTED_HEADER] = str(omitted)
+
+
 @route("GET", "/api/health/details")
 def health_details(req):
-    report = run_health_checks(lambda: connect(req.app.config.db_path), req.app.config.db_path)
-    report["recent_errors"] = [dict(r) for r in req.conn.execute(
-        "SELECT created_at, component, message, guidance FROM error_log ORDER BY id DESC LIMIT 20")]
-    report["recent_detection_runs"] = [dict(r) for r in req.conn.execute(
-        "SELECT * FROM detection_runs ORDER BY id DESC LIMIT 10")]
+    if req.user["role"] == "viewer":
+        report = req.app.health_snapshot.report()
+    else:
+        report = run_health_checks(req.app.conn, req.app.config.db_path)
+    errors, errors_omitted = _newest(
+        req.conn, "SELECT COUNT(*) FROM error_log",
+        "SELECT created_at, component, message, guidance FROM error_log ORDER BY id DESC LIMIT ?",
+        RECENT_ERRORS_LIMIT)
+    runs, runs_omitted = _newest(
+        req.conn, "SELECT COUNT(*) FROM detection_runs",
+        "SELECT * FROM detection_runs ORDER BY id DESC LIMIT ?",
+        RECENT_RUNS_LIMIT)
+    report["recent_errors"] = errors
+    report["recent_errors_omitted"] = errors_omitted
+    report["recent_detection_runs"] = runs
+    report["recent_detection_runs_omitted"] = runs_omitted
     return report
 
 
@@ -227,6 +326,50 @@ def detection_run(req):
 
 # Ingestion ---------------------------------------------------------------------------
 
+# ASCII letters only, the same fold as COLLATE NOCASE. Not str.lower().
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+# random.Random treats a bool as 0 or 1 and will hash a multi-megabyte int. A seed is a 64-bit integer.
+_SEED_MIN = -2**63
+_SEED_MAX = 2**63 - 1
+
+
+def _seed(value):
+    if isinstance(value, bool) or not isinstance(value, int) or not _SEED_MIN <= value <= _SEED_MAX:
+        raise ApiError(400, "seed must be an integer")
+    return value
+
+
+def _one_json_content_type(headers):
+    """Exactly one Content-Type whose media type is application/json.
+
+    Parameters such as charset are allowed. A substring match is not: text/plain
+    with a parameter that contains the letters json would pass the ingest gate.
+    """
+    values = headers.get_all("Content-Type")
+    if not values or len(values) != 1:
+        return False
+    media = values[0].split(";", 1)[0].strip().translate(_ASCII_FOLD)
+    return media == "application/json"
+
+
+def _synthetic_flag(value):
+    """One present synthetic flag: the hunt set, folded on ASCII letters.
+
+    JSON true/false and the integers 0 and 1 are those words. Any other
+    present value is 400. The caller treats an absent flag as not synthetic.
+    """
+    if isinstance(value, str):
+        folded = value.translate(_ASCII_FOLD)
+    elif isinstance(value, int) and value in (0, 1):
+        # bool is an int, so True is 1. str(True) is "True", then the ASCII fold.
+        folded = str(value).translate(_ASCII_FOLD)
+    else:
+        folded = None
+    if folded not in hunt.FLAGS:
+        raise ApiError(400, "synthetic must be 0, 1, true or false")
+    return bool(hunt.FLAGS[folded])
+
+
 def _ingest(req, text, fmt, source, synthetic, year=None):
     try:
         source = validate_source(source)
@@ -250,22 +393,26 @@ def _ingest(req, text, fmt, source, synthetic, year=None):
 
 @route("POST", "/api/ingest", role="ingest", csrf=True)
 def ingest_json(req):
-    """Body: a single event object, an array, or {"source": ..., "synthetic": bool, "events": [...]}."""
+    """Body: one event, an array, or {"source", "synthetic", "events"}.
+
+    synthetic, when present, is 0, 1, true, or false (ASCII case).
+    """
     try:
         data = json.loads(req.body or b"null")
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         raise ApiError(400, "request body must be valid JSON")
     source, synthetic = "api", False
     if isinstance(data, dict) and "events" in data:
         source = data.get("source") or source
-        synthetic = data.get("synthetic") is True
+        if "synthetic" in data:
+            synthetic = _synthetic_flag(data["synthetic"])
         data = data["events"]
     return _ingest(req, json.dumps(data), "json", source, synthetic)
 
 
 @route("POST", "/api/ingest/upload", role="ingest", csrf=True)
 def ingest_upload(req):
-    """Raw file body. Query: format=auto|json|jsonl|csv|authlog, source=name, synthetic=1, year=YYYY."""
+    """Raw file body. Query: format, source, synthetic=0|1|true|false, year=YYYY."""
     try:
         text = req.body.decode("utf-8")
     except UnicodeDecodeError:
@@ -276,13 +423,32 @@ def ingest_upload(req):
     if year is not None and not (year.isdigit() and 2000 <= int(year) <= 2100):
         raise ApiError(400, "year must be between 2000 and 2100")
     return _ingest(req, text, req.query.get("format", "auto"), req.query.get("source", "upload"),
-                   req.query.get("synthetic") == "1", int(year) if year else None)
+                   _upload_synthetic(req), int(year) if year else None)
+
+
+def _upload_synthetic(req):
+    """The upload query flag. A blank `synthetic=` is present, not absent.
+
+    parse_qs drops a blank value, so that key never reaches req.query.
+    """
+    if "synthetic" in req.query:
+        return _synthetic_flag(req.query["synthetic"])
+    values = parse_qs(urlparse(req.path).query, keep_blank_values=True).get("synthetic")
+    if not values:
+        return False
+    if len(values) > 1:
+        raise ApiError(400, "repeated query key 'synthetic'")
+    return _synthetic_flag(values[0])
 
 
 @route("GET", "/api/ingest/batches")
 def batches(req):
-    rows = req.conn.execute("SELECT * FROM ingest_batches ORDER BY created_at DESC LIMIT 50")
-    return [row_to_dict(r, ["errors"]) for r in rows]
+    total = req.conn.execute("SELECT COUNT(*) FROM ingest_batches").fetchone()[0]
+    rows = req.conn.execute(
+        "SELECT * FROM ingest_batches ORDER BY created_at DESC, id DESC LIMIT ?", (BATCH_LIMIT,))
+    shown = [row_to_dict(r, ["errors"]) for r in rows]
+    _set_omitted(req, total - len(shown))
+    return shown
 
 
 @route("POST", "/api/demo/load", role="admin")
@@ -291,9 +457,7 @@ def demo_load(req):
     existing = req.conn.execute("SELECT COUNT(*) FROM events WHERE synthetic = 1").fetchone()[0]
     if existing and not data.get("force"):
         raise ApiError(409, f"{existing} synthetic events already loaded; send force=true to add another copy")
-    seed = data.get("seed", 7)
-    if not isinstance(seed, int):
-        raise ApiError(400, "seed must be an integer")
+    seed = _seed(data.get("seed", 7))
     results = {}
     demo_assets = assets.seed_demo_assets(req.conn, req.user["username"])
     for name, events in simulate.build(seed=seed).items():
@@ -317,8 +481,7 @@ def demo_simulate(req):
     name, seed = data.get("scenario"), data.get("seed", 7)
     if name not in simulate.SCENARIOS:
         raise ApiError(400, f"scenario must be one of {', '.join(simulate.SCENARIOS)}")
-    if not isinstance(seed, int):
-        raise ApiError(400, "seed must be an integer")
+    seed = _seed(seed)
     events = simulate.build([name], seed=seed)[name]
     normalized, rejections = parse_payload(json.dumps(events), "json", f"demo:{name}")
     req.status = 201
@@ -333,8 +496,7 @@ def storyline_start(req):
     speed, seed = data.get("speed", 1.0), data.get("seed", 7)
     if not isinstance(speed, (int, float)) or isinstance(speed, bool) or not (0.1 <= speed <= 10000):
         raise ApiError(400, "speed must be a number between 0.1 and 10000")
-    if not isinstance(seed, int) or isinstance(seed, bool):
-        raise ApiError(400, "seed must be an integer")
+    seed = _seed(seed)
     if not req.app.storyline.start(speed=speed, seed=seed, started_by=req.user["username"]):
         raise ApiError(409, "a storyline is already running; stop it first")
     audit(req.conn, req.user["username"], "storyline_started", None, {"speed": speed, "seed": seed})
@@ -363,14 +525,21 @@ def events(req):
     return queries.search_events(req.conn, req.query)
 
 
+def _resolved_ips(req):
+    masker = getattr(req, "masker", None)
+    return masker.resolved_ips if masker is not None else ()
+
+
 @route("GET", "/api/hunt")
 def hunt_run(req):
-    return hunt.run(req.conn, req.query)
+    return hunt.run(req.conn, req.query, resolved_ips=_resolved_ips(req))
 
 
 @route("GET", "/api/hunt/saved")
 def hunt_saved(req):
-    return hunt.list_saved(req.conn)
+    rows, omitted = hunt.list_saved(req.conn)
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", "/api/hunt/saved", role="analyst")
@@ -449,7 +618,9 @@ def event_ecs(req, event_id):
 @route("GET", "/api/alerts")
 def alerts(req):
     now = utcnow()
-    return [{**a, "sla_breach": triage.pending_breaches(a, now)} for a in queries.list_alerts(req.conn, req.query)]
+    rows, omitted = queries.list_alerts(req.conn, req.query)
+    _set_omitted(req, omitted)
+    return [{**a, "sla_breach": triage.pending_breaches(a, now)} for a in rows]
 
 
 @route("GET", r"/api/alerts/(\d+)")
@@ -479,7 +650,9 @@ def alert_assign(req, alert_id):
 
 @route("GET", "/api/incidents")
 def incident_list(req):
-    return incidents.list_incidents(req.conn, req.query)
+    rows, omitted = incidents.list_incidents(req.conn, req.query)
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("GET", r"/api/incidents/(\d+)")
@@ -554,7 +727,9 @@ DASHBOARD_ENTITIES = 8
 
 @route("GET", "/api/dashboard/views")
 def dashboard_view_list(req):
-    return dashboard_views.list_views(req.conn, req.user["username"])
+    rows, omitted = dashboard_views.list_views(req.conn, req.user["username"])
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", "/api/dashboard/views", role="analyst")
@@ -575,8 +750,17 @@ def dashboard_view_delete(req, view_id):
 
 @route("GET", "/api/dashboard")
 def dashboard(req):
+    # The entity list already drops false positives. Keep that score, and say how many
+    # scored entities sit past the eight shown.
+    ranked = entities.list_entities(req.conn, {"limit": DASHBOARD_ENTITIES})
     return {**queries.dashboard(req.conn),
-            "risky_entities": entities.list_entities(req.conn, {"limit": DASHBOARD_ENTITIES})["entities"]}
+            "risky_entities": ranked["entities"],
+            "risky_entities_omitted": ranked["entities_omitted"]}
+
+
+@route("GET", "/api/graph")
+def investigation_graph(req):
+    return graph.snapshot(req.conn)
 
 
 @route("GET", "/api/entities")
@@ -588,7 +772,7 @@ def _entity_route(kind):
     # One literal route per kind; the value is percent-encoded in the path (it may hold dots, colons, pipes).
     @route("GET", rf"/api/entities/{kind}/([^/]+)")
     def entity_detail(req, value):
-        return entities.get_entity(req.conn, kind, unquote(value))
+        return entities.get_entity(req.conn, kind, unquote(value), resolved_ips=_resolved_ips(req))
 
 
 for _kind in entities.KINDS:
@@ -597,18 +781,31 @@ for _kind in entities.KINDS:
 
 @route("GET", "/api/geo")
 def geo_lookup(req):
-    """Positions from the synthetic geo table only. Addresses outside it come back null ("unknown")."""
-    ips = [ip.strip() for ip in req.query.get("ips", "").split(",") if ip.strip()]
-    if len(ips) > GEO_MAX_IPS:
-        raise ApiError(400, f"at most {GEO_MAX_IPS} ips per request")
-    for ip in ips:
+    """Positions from the synthetic geo table only. Addresses outside it come back null ("unknown").
+
+    The response key is the compressed form ipaddress uses, so 2001:DB8::1 and 2001:db8::1 are one key.
+    A repeated address counts once toward GEO_MAX_IPS.
+    """
+    keys = []
+    seen = set()
+    for raw in req.query.get("ips", "").split(","):
+        text = raw.strip()
+        if not text:
+            continue
         try:
-            ipaddress.ip_address(ip)
+            key = str(ipaddress.ip_address(text))
         except ValueError:
             raise ApiError(400, "ips must be a comma-separated list of IP addresses")
-    located = {ip: geo.locate(ip) for ip in ips}
-    return {"label": geo.LABEL,
-            "ips": {ip: ({**loc, "internal": geo.is_internal(ip)} if loc else None) for ip, loc in located.items()}}
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+    if len(keys) > GEO_MAX_IPS:
+        raise ApiError(400, f"at most {GEO_MAX_IPS} ips per request")
+    ips = {}
+    for key in keys:
+        loc = geo.locate(key)
+        ips[key] = {**loc, "internal": geo.is_internal(key)} if loc else None
+    return {"label": geo.LABEL, "ips": ips}
 
 
 class _StreamResponse:
@@ -627,13 +824,16 @@ def event_stream(req):
 
 @route("GET", "/api/rules")
 def rules(req):
+    catalog = engine.load_rules(req.conn, enabled_only=False)
+    shown = catalog[:RULES_LIMIT]
+    _set_omitted(req, len(catalog) - len(shown))
     perf = improve.rule_performance(req.conn)
-    latest = improve.list_evaluations(req.conn, limit=1)
+    latest, _eval_omitted = improve.list_evaluations(req.conn, limit=1)
     evaluation = latest[0]["results"]["rules"] if latest else {}
     return [{**r, "performance": perf.get(r["id"]), "evaluation": evaluation.get(r["id"]),
              **({"sigma": _sigma_detail(req.conn, r)} if sigma.is_sigma(r["id"]) else {}),
              **({"search": _search_detail(req.conn, r)} if search_rules.is_search(r["id"]) else {})}
-            for r in engine.load_rules(req.conn, enabled_only=False)]
+            for r in shown]
 
 
 def _search_detail(conn, rule):
@@ -660,8 +860,9 @@ def _sigma_detail(conn, rule):
 
 @route("GET", r"/api/rules/([a-z_]+)/history")
 def rule_history(req, rule_id):
-    rows = req.conn.execute("SELECT * FROM rule_history WHERE rule_id = ? ORDER BY version DESC", (rule_id,))
-    return [row_to_dict(r, ["params", "grouping"]) for r in rows]
+    rows, omitted = improve.list_rule_history(req.conn, rule_id, RULE_HISTORY_LIMIT)
+    _set_omitted(req, omitted)
+    return rows
 
 
 def _backtest_quota(req, limiter, cost=1):
@@ -807,7 +1008,9 @@ def suppression_propose(req, rule_id):
 
 @route("GET", "/api/suppressions")
 def suppressions(req):
-    return improve.list_suppressions(req.conn)
+    rows, omitted = improve.list_suppressions(req.conn, SUPPRESSIONS_LIMIT)
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", r"/api/rules/([a-z_]+)/suppression-windows", role="analyst")
@@ -821,7 +1024,9 @@ def rule_suppression_propose(req, rule_id):
 
 @route("GET", "/api/rule-suppression-windows")
 def rule_suppression_windows(req):
-    return improve.list_rule_suppression_windows(req.conn)
+    rows, omitted = improve.list_rule_suppression_windows(req.conn, WINDOWS_LIMIT)
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", r"/api/rule-suppression-windows/(\d+)/end", role="admin")
@@ -863,7 +1068,9 @@ def setting_propose(req, key):
 
 @route("GET", "/api/changes")
 def changes(req):
-    return improve.list_changes(req.conn, req.query.get("status"))
+    rows, omitted = improve.list_changes(req.conn, req.query.get("status"), CHANGES_LIMIT)
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", r"/api/changes/(\d+)/review", role="admin")
@@ -880,7 +1087,9 @@ def change_review(req, change_id):
 
 @route("GET", "/api/evaluations")
 def evaluations(req):
-    return improve.list_evaluations(req.conn)
+    rows, omitted = improve.list_evaluations(req.conn, EVALUATIONS_LIMIT)
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", "/api/evaluations", role="analyst")
@@ -893,9 +1102,11 @@ def evaluation_run(req):
 
 @route("GET", "/api/assets")
 def asset_list(req):
-    pending = [c for c in improve.list_changes(req.conn, "pending") if c["kind"] in improve.ASSET_KINDS]
-    return {"assets": assets.list_assets(req.conn), "criticalities": list(assets.CRITICALITIES),
-            "kinds": list(assets.KINDS), "data_tags": assets.DATA_TAGS, "pending": pending}
+    listed, assets_omitted = assets.list_assets_page(req.conn)
+    pending, pending_omitted = improve.list_changes(req.conn, "pending", kinds=improve.ASSET_KINDS)
+    return {"assets": listed, "criticalities": list(assets.CRITICALITIES),
+            "kinds": list(assets.KINDS), "data_tags": assets.DATA_TAGS, "pending": pending,
+            "pending_omitted": pending_omitted, "assets_omitted": assets_omitted}
 
 
 def _asset_saved(req, asset):
@@ -969,9 +1180,9 @@ def asset_propose(req, asset_id):
 
 @route("GET", "/api/tokens", role="admin")
 def tokens(req):
-    return [row_to_dict(r, json_fields=("capabilities",)) for r in req.conn.execute(
-        "SELECT id, name, prefix, created_by, created_at, last_used_at, revoked_at, role, capabilities, expires_at"
-        " FROM api_tokens ORDER BY id")]
+    rows, omitted = auth.list_api_tokens(req.conn)
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", "/api/tokens", role="admin")
@@ -996,7 +1207,12 @@ def token_revoke(req, token_id):
 
 @route("GET", "/api/sessions", role="admin")
 def sessions(req):
-    return auth.list_sessions(req.conn, req.query.get("user") or None, req.user.get("sid"))
+    # ?user= folds ASCII case. The signed-in list does not.
+    rows, omitted = auth.list_sessions(
+        req.conn, req.query.get("user") or None, req.user.get("sid"),
+        fold_user=bool(req.query.get("user")))
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("POST", r"/api/sessions/([0-9a-f]{16})/revoke", role="admin")
@@ -1004,14 +1220,19 @@ def session_revoke(req, sid):
     return auth.revoke_session(req.conn, sid, req.user["username"])
 
 
-@route("POST", r"/api/users/(\w{3,32})/mfa/reset", role="admin")
+@route("POST", r"/api/users/([^/]+)/mfa/reset", role="admin")
 def user_mfa_reset(req, username):
-    return auth.mfa_admin_reset(req.conn, username, req.user["username"])
+    # The path may be percent-encoded (Érin). Length and the ASCII fold are checked below.
+    return auth.mfa_admin_reset(req.conn, unquote(username), req.user["username"])
 
 
 @route("GET", "/api/audit", role="admin")
 def audit_log(req):
-    return [dict(r) for r in req.conn.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT 200")]
+    rows, omitted = _newest(
+        req.conn, "SELECT COUNT(*) FROM audit_log",
+        "SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", AUDIT_LIMIT)
+    _set_omitted(req, omitted)
+    return rows
 
 
 @route("GET", "/api/audit/verify", role="admin")
@@ -1026,12 +1247,18 @@ VIEWER_WRITES = (logout,)
 # --- Request handling --------------------------------------------------------------------
 
 SECURITY_HEADERS = {
-    "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+    # object-src, frame-src, worker-src, and script-src-attr are stricter than default-src.
+    # COOP and CORP keep this console from being embedded or opened cross-origin.
+    "Content-Security-Policy": "default-src 'self'; script-src 'self'; script-src-attr 'none'; "
+                               "style-src 'self'; img-src 'self' data:; connect-src 'self'; "
+                               "object-src 'none'; frame-src 'none'; worker-src 'none'; "
                                "frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
     "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
 }
 
 
@@ -1040,9 +1267,26 @@ class Handler(BaseHTTPRequestHandler):
     sys_version = ""
     app: App = None
 
+    def end_headers(self):
+        for key, value in SECURITY_HEADERS.items():
+            self.send_header(key, value)
+        if self.app.config.secure_cookies:
+            self.send_header("Strict-Transport-Security", "max-age=31536000")
+        super().end_headers()
+
+    def send_error(self, code, message=None, explain=None):
+        # The stdlib handles parser errors and unsupported methods before routing.
+        self.close_connection = True
+        self._send(code, {"error": self.responses.get(code, ("HTTP error",))[0]},
+                   extra_headers={"Cache-Control": "no-store", "Connection": "close"})
+
     def log_message(self, fmt, *args):
         # Path only (no query string, which may carry search terms).
-        log.info("%s %s %s", self.command, urlparse(self.path).path, args[1] if len(args) > 1 else "")
+        try:
+            path = urlparse(getattr(self, "path", "")).path
+        except ValueError:
+            path = "<invalid request target>"
+        log.info("%s %s %s", self.command, path, args[1] if len(args) > 1 else "")
 
     def do_GET(self):
         self._handle()
@@ -1050,28 +1294,112 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._handle()
 
+    def do_PUT(self):
+        self._method_not_routed()
+
+    def do_PATCH(self):
+        self._method_not_routed()
+
+    def do_DELETE(self):
+        self._method_not_routed()
+
+    def do_OPTIONS(self):
+        self._method_not_routed()
+
+    def do_TRACE(self):
+        self._method_not_routed()
+
+    def _method_not_routed(self):
+        """PUT, PATCH, DELETE, OPTIONS, and TRACE are not routes.
+
+        The base handler would answer 501 as HTML without the security headers.
+        A body is not read, so the connection closes.
+        """
+        parsed = urlparse(self.path)
+        if self._rate_limited(parsed.path):
+            return
+        self.close_connection = True
+        extra = {"Cache-Control": "no-store", "Connection": "close"}
+        if not parsed.path.startswith("/api/"):
+            self._send(405, {"error": "method not allowed"}, extra_headers=extra)
+            return
+        allowed = any(pattern.match(parsed.path) for _, pattern, _, _, _ in ROUTES)
+        if allowed:
+            self._send(405, {"error": "method not allowed"}, extra_headers=extra)
+        else:
+            self._send(404, {"error": "not found"}, extra_headers=extra)
+
+    def _unread_body_headers(self, extra=None):
+        """Close when a POST body is still on the socket.
+
+        A 413, 414, 404, or 405 can be decided before the body is read. Leaving
+        those bytes would desync the next request if the server spoke HTTP/1.1.
+        """
+        extra = dict(extra or {})
+        if getattr(self, "_body_pending", False):
+            self.close_connection = True
+            extra["Connection"] = "close"
+        return extra
+
     def _send(self, status, payload, content_type="application/json", extra_headers=None):
         body = payload if isinstance(payload, bytes) else json.dumps(payload, default=str).encode()
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        for key, value in SECURITY_HEADERS.items():
-            self.send_header(key, value)
         for key, value in (extra_headers or {}).items():
             self.send_header(key, value)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
 
+    def _content_length(self):
+        """The single Content-Length as an int, or an error string.
+
+        A POST is framed only by one header whose value is one token of ASCII
+        digits. Two headers, a comma list, or any other token is not a length:
+        the first header must not be trusted and the body must not be read.
+        """
+        if self.headers.get("Transfer-Encoding") is not None:
+            return "Transfer-Encoding is not supported"
+        lengths = self.headers.get_all("Content-Length") or []
+        if not lengths:
+            return "Content-Length is required"
+        token = lengths[0].strip()
+        if len(lengths) != 1 or not token.isascii() or not token.isdigit():
+            return "invalid Content-Length"
+        return int(token)
+
+    def _unframed_post_message(self):
+        """A POST body is framed only by one integer Content-Length.
+
+        Chunked encoding is not read. A missing length is not an empty body.
+        A second Content-Length, or a value that is not one ASCII integer
+        token, is not a length either. Any of these leaves unread bytes that
+        a keep-alive socket would take as the next request.
+        """
+        if self.command != "POST":
+            return None
+        length = self._content_length()
+        if isinstance(length, str):
+            return length
+        return None
+
+    def _reject_unframed_post(self):
+        message = self._unframed_post_message()
+        if message is None:
+            return False
+        self.close_connection = True
+        self._send(400, {"error": message},
+                   extra_headers={"Cache-Control": "no-store", "Connection": "close"})
+        return True
+
     def _read_body(self):
-        length = self.headers.get("Content-Length")
-        if length is None:
-            return b""
-        try:
-            length = int(length)
-        except ValueError:
-            raise ApiError(400, "invalid Content-Length")
-        if length < 0 or length > self.app.config.max_upload_bytes:
+        message = self._unframed_post_message()
+        if message is not None:
+            self.close_connection = True
+            raise ApiError(400, message)
+        length = self._content_length()
+        if length > self.app.config.max_upload_bytes:
             raise ApiError(413, f"request body exceeds {self.app.config.max_upload_bytes} bytes")
         return self.rfile.read(length)
 
@@ -1081,17 +1409,22 @@ class Handler(BaseHTTPRequestHandler):
         return morsel.value if morsel else None
 
     def _client_ip(self):
-        """The peer address, or with SIEM_TRUST_PROXY=1 and a loopback peer, the last X-Forwarded-For entry.
+        """The peer address, or the last entry of exactly one X-Forwarded-For header.
 
-        The last entry is the one the local proxy wrote itself; earlier entries are client-supplied.
+        With SIEM_TRUST_PROXY=1 and a loopback peer, one header is the line the local
+        proxy wrote. Its last comma-separated entry is the client. Two headers mean a
+        client-supplied line arrived as well, so neither is used. A value that is not
+        an address stays the peer address.
         """
         ip = self.client_address[0]
         if self.app.config.trust_proxy and ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
-            forwarded = self.headers.get("X-Forwarded-For", "").split(",")[-1].strip()
-            try:
-                return str(ipaddress.ip_address(forwarded))
-            except ValueError:
-                pass
+            forwarded = self.headers.get_all("X-Forwarded-For") or []
+            if len(forwarded) == 1:
+                candidate = forwarded[0].split(",")[-1].strip()
+                try:
+                    return str(ipaddress.ip_address(candidate))
+                except ValueError:
+                    pass
         return ip
 
     def _rate_limited(self, path):
@@ -1113,14 +1446,19 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if self._rate_limited(parsed.path):
             return
+        if self._reject_unframed_post():
+            return
+        # Set before routing so a 404, 405, or 414 still closes an unread POST body.
+        self._body_pending = self.command == "POST"
         if not parsed.path.startswith("/api/"):
             return self._static(parsed.path)
-        self.query = {k: v[0] for k, v in parse_qs(parsed.query).items()}
         self.status = 200
         self.set_cookie = None
+        self.extra_headers = {}
         self.conn = None
         self.masker = None
         try:
+            self.query = query_params(parsed.query)
             for method, pattern, fn, role, csrf in ROUTES:
                 match = pattern.match(parsed.path)
                 if match and method == self.command:
@@ -1130,14 +1468,20 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(405 if allowed else 404, "method not allowed" if allowed else "not found")
 
             self.body = self._read_body() if self.command == "POST" else b""
+            self._body_pending = False
             if self.command == "POST" and self.body and \
-                    fn not in (ingest_upload,) and "json" not in self.headers.get("Content-Type", ""):
+                    fn not in (ingest_upload,) and not _one_json_content_type(self.headers):
                 raise ApiError(415, "Content-Type must be application/json")
             self.conn = self.app.conn()
             self._authorize(role, csrf, fn)
             groups = match.groups()
             # The one masking choke point: a viewer's pseudonyms resolve on the way in (pivots), and every
             # response below (JSON, downloads, and the stream in _frame) is masked on the way out.
+            if fn is investigation_graph:
+                # Masking candidates, alert membership and evidence must see the same snapshot.
+                # Create the masking key first so the snapshot transaction stays read-only.
+                masking.key(self.conn)
+                self.conn.execute("BEGIN")
             self.masker = masking.for_user(self.conn, self.user)
             if self.masker is not None:
                 self.query = {k: self.masker.unmask(self.conn, v) for k, v in self.query.items()}
@@ -1146,30 +1490,43 @@ class Handler(BaseHTTPRequestHandler):
             if result is STREAM_RESPONSE:
                 return self._stream()
             headers = {"Cache-Control": "no-store"}
+            headers.update(self.extra_headers)
             if self.set_cookie is not None:
                 headers["Set-Cookie"] = self._cookie_header(self.set_cookie)
             if isinstance(result, Download):
                 headers["Content-Disposition"] = f'attachment; filename="{result.filename}"'
                 return self._send(self.status, self._download_body(result), result.content_type, headers)
             if self.masker is not None:
-                result = self.masker.mask(result)
+                result = graph.mask_snapshot(result, self.masker) if fn is investigation_graph else self.masker.mask(result)
             self._send(self.status, result, extra_headers=headers)
         except ApiError as exc:
             self._send_error(exc.status, str(exc))
         except (auth.AuthError, queries.QueryError, improve.ChangeError, assets.AssetError,
                 sources.WindowError, masking.Unavailable) as exc:
             self._send_error(getattr(exc, "status", 400), str(exc))
+        except OverflowError:
+            # A path id or JSON integer past SQLite's signed 64-bit range. Not a Health incident.
+            self._send_error(400, "integer is out of range")
         except Exception as exc:
+            if self.conn is not None and self.conn.in_transaction:
+                self.conn.execute("ROLLBACK")  # so the error record below commits
             record_error(self.conn, "api", exc, guidance=f"Unhandled error on {self.command} {parsed.path}")
-            self._send(500, {"error": "internal error; it has been recorded on the Health page"})
+            self._send(500, {"error": "internal error; it has been recorded on the Health page"},
+                       extra_headers=self._unread_body_headers({"Cache-Control": "no-store"}))
         finally:
             if self.conn is not None:
+                if self.conn.in_transaction:
+                    self.conn.execute("ROLLBACK")  # the graph snapshot is read-only; end it explicitly
                 self.conn.close()
 
     def _send_error(self, status, message):
-        """Errors echo request values, and a viewer's pivot has already resolved to the real value: mask them."""
+        """Errors echo request values, and a viewer's pivot has already resolved to the real value: mask them.
+
+        no-store matches a successful /api response so a shared cache cannot keep that echo.
+        """
         payload = {"error": message}
-        self._send(status, self.masker.mask(payload) if self.masker is not None else payload)
+        self._send(status, self.masker.mask(payload) if self.masker is not None else payload,
+                   extra_headers=self._unread_body_headers({"Cache-Control": "no-store"}))
 
     def _download_body(self, download):
         if download.render is not None:
@@ -1182,14 +1539,14 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(403, "this download is not available in the masked view")  # fail closed
         return self.masker.text(download.body.decode("utf-8")).encode("utf-8")
 
-    def _authorize(self, role, csrf, fn=None):
+    def _authorize(self, role, csrf, fn=None, *, record_token_use=True):
         self.session_token = self._session_token()
         self.user = None
         if role == "public":
             return
         header = self.headers.get("Authorization", "")
         if header.startswith("Bearer "):
-            self.user = auth.token_user(self.conn, header[7:].strip())
+            self.user = auth.token_user(self.conn, header[7:].strip(), record_use=record_token_use)
             if self.user is None:
                 raise ApiError(401, "invalid or revoked API token")
             mutation_capabilities = {
@@ -1229,17 +1586,16 @@ class Handler(BaseHTTPRequestHandler):
         try:
             sub = stream.BROKER.subscribe()
         except stream.TooManySubscribers:
-            return self._send(503, {"error": "too many live stream connections; retry later"})
+            return self._send(503, {"error": "too many live stream connections; retry later"},
+                              extra_headers={"Cache-Control": "no-store"})
         try:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Accel-Buffering", "no")
-            for key, value in SECURITY_HEADERS.items():
-                self.send_header(key, value)
             self.end_headers()
             self.close_connection = True
-            report = run_health_checks(lambda: connect(self.app.config.db_path), self.app.config.db_path)
+            report = self.app.health_snapshot.report()
             self._frame("hello", {"version": __version__, "user": self.user["username"],
                                   "heartbeat_seconds": stream.HEARTBEAT_SECONDS}, retry=3000)
             self._frame("health", {"partial": False, "status": report["status"], "checked_at": report["checked_at"],
@@ -1256,15 +1612,18 @@ class Handler(BaseHTTPRequestHandler):
             stream.BROKER.unsubscribe(sub)
 
     def _frame(self, kind, data, retry=None):
-        if self.user["role"] == "viewer":  # rebuilt per frame: the setting or the known usernames may have changed
-            conn = self.app.conn()
-            try:
-                masker = masking.for_user(conn, self.user)
-            except (sqlite3.Error, masking.Unavailable):
-                raise ConnectionAbortedError("masking unavailable; end the stream rather than send it unmasked")
-            finally:
-                conn.close()
+        # Each frame must honor expiry, revocation and the current masking policy.
+        try:
+            self.conn = self.app.conn()
+            self._authorize("viewer", False, event_stream, record_token_use=False)
+            masker = masking.for_user(self.conn, self.user)
             data = masker.mask(data) if masker else data
+        except (ApiError, sqlite3.Error, masking.Unavailable) as exc:
+            raise ConnectionAbortedError("stream authorization unavailable") from exc
+        finally:
+            if self.conn is not None:
+                self.conn.close()
+                self.conn = None
         payload = (f"retry: {retry}\n".encode() if retry else b"") + \
             stream.frame(kind, data, stream.BROKER.next_id())
         self.wfile.write(payload)
@@ -1281,16 +1640,35 @@ class Handler(BaseHTTPRequestHandler):
         return "; ".join(parts)
 
     def _static(self, path):
+        """A file that exists is no-cache. A missing path or a non-GET is no-store, like an API error."""
         if self.command != "GET":
-            return self._send(405, {"error": "method not allowed"})
+            return self._send(405, {"error": "method not allowed"},
+                              extra_headers=self._unread_body_headers({"Cache-Control": "no-store"}))
         name = "index.html" if path in ("", "/") else path.lstrip("/")
-        target = (STATIC_DIR / name).resolve()
-        if STATIC_DIR.resolve() not in target.parents or not target.is_file():
-            return self._send(404, b"not found", "text/plain")
-        ctype = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        names = static_assets.CONSOLE_STYLES if path == "/console.css" else (name,)
+        root = STATIC_DIR.resolve()
+        paths = tuple(static_assets.public_file(root, filename) for filename in names)
+        if None in paths:
+            return self._send(404, b"not found", "text/plain", {"Cache-Control": "no-store"})
+        ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        headers = {"Cache-Control": "no-cache"}
+        compress = False
         if ctype.startswith("text/") or ctype.endswith("javascript"):
             ctype += "; charset=utf-8"
-        self._send(200, target.read_bytes(), ctype, {"Cache-Control": "no-cache"})
+            headers["Vary"] = "Accept-Encoding"
+            compress = static_assets.accepts_gzip(self.headers.get("Accept-Encoding", ""))
+            if compress:
+                headers["Content-Encoding"] = "gzip"
+        body, etag = static_assets.representation(paths, compress)
+        headers["ETag"] = etag
+        validators = self.headers.get("If-None-Match", "")
+        if any(tag.strip().removeprefix("W/") in ("*", etag) for tag in validators.split(",")):
+            self.send_response(304)
+            for key, value in headers.items():
+                self.send_header(key, value)
+            self.end_headers()
+            return
+        self._send(200, body, ctype, headers)
 
 
 def make_server(config=None):

@@ -28,17 +28,17 @@ export SIEM_SYSLOG_PORT=5514      # UDP and TCP; ports below 1024 need root, so 
 | Variable | Default | Purpose |
 |---|---|---|
 | `SIEM_SYSLOG` | `0` | `1` starts the UDP and TCP listener from `main.py` |
-| `SIEM_SYSLOG_BIND` | `127.0.0.1` | Bind address. Use `::1` or `::` for IPv6 |
-| `SIEM_SYSLOG_PORT` | `5514` | Same port number for UDP and TCP |
-| `SIEM_SYSLOG_ALLOW` | empty (any sender) | Comma-separated IPs or CIDR networks allowed to send, e.g. `10.0.0.0/24,192.0.2.7`. Other senders are counted as `denied` and dropped. An invalid entry stops the listener from starting, so it fails closed |
 | `SIEM_SYSLOG_TLS_CERT` / `SIEM_SYSLOG_TLS_KEY` | unset | PEM certificate (with any intermediates) and its private key, without a passphrase. Setting both starts the TLS listener. See [Syslog over TLS](#syslog-over-tls) |
 | `SIEM_SYSLOG_TLS_PORT` | `6514` | TCP port for syslog over TLS |
 | `SIEM_SYSLOG_TLS_CLIENT_CA` | unset | PEM CA bundle. When set, a sender must present a certificate signed by it |
 | `SIEM_SYSLOG_PLAINTEXT` | `1` without TLS, `0` with it | Whether the plaintext UDP and TCP listeners run. TLS replaces them unless this is `1` |
+| `SIEM_SYSLOG_BIND` | `127.0.0.1` | Bind address. Use `::1` or `::` for IPv6 |
+| `SIEM_SYSLOG_PORT` | `5514` | Same port number for UDP and TCP |
+| `SIEM_SYSLOG_ALLOW` | empty (any sender) | Comma-separated IPs or CIDR networks allowed to send, e.g. `10.0.0.0/24,192.0.2.7`. Other senders are counted as `denied` and dropped. On a dual-stack listener a mapped sender can match either its IPv6 address or its IPv4 address. Its fallback host is stored as dotted IPv4. An invalid entry stops the listener from starting, so it fails closed |
 
 What the listener does with each message:
 
-1. It reads the frame. UDP takes one message per datagram. TCP accepts newline-terminated messages and RFC 6587 octet-counted messages (`LEN SP MSG`). TLS carries the TCP framing. Frames longer than 16 KB are truncated.
+1. It reads the frame. UDP takes one message per datagram. Plain TCP accepts LF- or NUL-terminated messages and RFC 6587 octet-counted messages (`LEN SP MSG`) with up to six length digits. A line beginning with seven or more digits, such as `20261126 backup complete`, keeps its LF or NUL framing. Frames longer than 16 KB are truncated.
 2. It parses PRI and the RFC 5424 or RFC 3164 header. A missing hostname falls back to the sender's IP, and a missing timestamp falls back to the receive time.
 3. It tries the auth.log parser first (sshd, sudo/su, useradd, auditd, UFW/iptables firewall, OpenVPN). A message that parser does not recognize is tried as an nginx/Apache combined access line, so `access_log syslog:server=127.0.0.1:5514 combined;` in nginx gives `web_request`/`web_scan`/`web_error` events with the host from the syslog header and the time from the access line. Lines neither parser recognizes become `event_type=syslog`. Their severity comes from PRI: emerg, alert, and crit map to `critical`, err to `high`, warning to `medium`, notice to `low`, and info and debug to `info`.
 4. Every 2 seconds, everything queued is handed to the engine as one batch. The batch source is `syslog` and the submitter is `syslog-listener`, so it shows up under **Ingest > Recent batches**.
@@ -120,7 +120,9 @@ Plain syslog has no authentication and no encryption. Pick one of these:
 
 ### Syslog over TLS
 
-With a certificate, the listener takes syslog over TLS ([RFC 5425](https://www.rfc-editor.org/rfc/rfc5425)) on TCP port 6514: the same messages and framing as plain TCP, inside TLS 1.2 or 1.3.
+Each listener admits up to 64 concurrent TLS connections, including handshakes. Excess connections close immediately and increment `tls_busy`. Senders should reconnect. An octet-counted frame is stored only after all declared bytes arrive. The TLS listener recognizes counts of up to nine digits. Records starting with ten or more digits, such as Unix timestamps, use LF or NUL framing.
+
+With a certificate, the listener takes syslog over TLS ([RFC 5425](https://www.rfc-editor.org/rfc/rfc5425)) on TCP port 6514 using TLS 1.2 or 1.3.
 
 | Setting | What it adds |
 |---|---|
@@ -176,10 +178,12 @@ Then set these (in `/etc/watchpost.env` for the deploy kit) and restart Watchpos
 
 ```bash
 SIEM_SYSLOG=1
-SIEM_SYSLOG_BIND=0.0.0.0                                 # reachable from other machines
+# Reachable from other machines
+SIEM_SYSLOG_BIND=0.0.0.0
 SIEM_SYSLOG_TLS_CERT=/etc/watchpost-tls/server.pem
 SIEM_SYSLOG_TLS_KEY=/etc/watchpost-tls/server.key
-SIEM_SYSLOG_TLS_CLIENT_CA=/etc/watchpost-tls/ca.pem      # leave out to take any sender, encrypted only
+# Leave out the client CA to take any sender over TLS.
+SIEM_SYSLOG_TLS_CLIENT_CA=/etc/watchpost-tls/ca.pem
 ```
 
 Open TCP 6514 to the senders and to nobody else, for example `sudo ufw allow from 10.0.0.12 to any port 6514 proto tcp`. The Health page then shows the `syslog` component as `listening on 0.0.0.0 (tls 6514, client certificates required)`.
@@ -255,29 +259,6 @@ An `auth_success` event for `alice` on host `web01` shows up under **Events** wi
 - UDP stays plaintext. There is no DTLS.
 - A connection that ends without a TLS `close_notify` may have been cut in transit, so a last message that was still incomplete is dropped, not stored. The complete messages before it are kept.
 - A connection that stays silent for 5 minutes is closed, as for plain TCP. rsyslog notices and reconnects before its next message. The listener sends no TLS session tickets and no `close_notify` of its own when it closes a silent connection: with either, rsyslog 8.2302 took the closed connection for a live one and lost the first message after every pause.
-
-### Firewalls over syslog
-
-Point a firewall's remote syslog at the listener and its traffic lines become `fw_deny` and `fw_allow` events with source, destination and port. Those are the events the port sweep and large data transfer rules read. Admin and VPN logins on the firewall become `auth_failure` and `auth_success`.
-
-| Firewall | What is read | Becomes |
-|---|---|---|
-| Linux UFW / iptables | `[UFW BLOCK]`, `[UFW ALLOW]` and the same prefixes from iptables `LOG` rules | `fw_deny`, `fw_allow` |
-| pfSense / OPNsense | `filterlog` lines, IPv4 and IPv6 (`block`, `reject`, `pass`) | `fw_deny`, `fw_allow` |
-| FortiGate | `type="traffic"` lines (`action` deny, accept, close and the like), with `sentbyte` as the byte count; `type="event"` admin logins | `fw_deny`, `fw_allow`, `auth_failure`, `auth_success` |
-| Cisco ASA / FTD | Denies 106001, 106006, 106007, 106015, 106023, 710003; ACL hits 106100; built connections 302013 and 302015; AAA 113004 and 113005; logins 605004 and 605005 | `fw_deny`, `fw_allow`, `auth_failure`, `auth_success` |
-| Palo Alto | `TRAFFIC` logs in the default comma-separated format, with bytes sent as the byte count | `fw_deny`, `fw_allow` |
-
-Any other line from these devices is stored as a generic `syslog` event, so nothing is dropped. FortiGate lines carry their own device name and time (`devname`, `date`, `time`, `tz`), and those are used instead of the sender's address and the receive time.
-
-On the firewall, turn on remote syslog and give it the Watchpost address and port. Use TCP, or TLS on port 6514 where the device offers it (FortiGate "reliable" mode with encryption, Cisco ASA `logging host ... secure`, Palo Alto transport SSL). pfSense and OPNsense send UDP unless a syslog-ng package is added. A firewall is another machine, so the choices under [Sending from another machine](#sending-from-another-machine) apply.
-
-Limits:
-
-- The parsers follow the vendors' published log formats and are tested on synthetic lines. They have not been run against the devices themselves.
-- Only the default log formats are read. A custom log format on the device will not match, and its lines stay generic `syslog` events.
-- Cisco connection teardown lines (302014, 302016) are not read, so Cisco events carry no byte counts. Palo Alto `THREAT` logs are not read.
-- `samples/firewall_syslog.log` has pfSense and Cisco lines to try by upload. FortiGate and Palo Alto lines have no syslog program tag, so they are read from the listener only.
 
 ### Time zones
 
@@ -436,7 +417,7 @@ Drop `--once` to keep polling, for example from a systemd unit like the shipper'
 ## Limits
 
 - Plain UDP and TCP syslog are unauthenticated and unencrypted. Use loopback, an SSH tunnel, an allow list and firewall, or TLS. The limits of the TLS listener are listed under [What TLS covers here, and what it does not](#what-tls-covers-here-and-what-it-does-not).
-- Every TCP or TLS connection gets its own thread, and there is no connection limit. Keep the ports reachable only by your senders.
+- Plain TCP has no connection limit. TLS admits at most 64 active connections per listener. Keep the ports reachable only by your senders.
 - UDP syslog loses messages silently when the network or Watchpost drops them. Prefer TCP with an rsyslog queue.
 - If storing a syslog batch fails (for example, the disk is full), its frames are lost. They are counted as `lost_on_failure`, and the health component turns `degraded`. rsyslog does not know about the loss, because the listener has already accepted the frames.
 - The shipper can lose lines in these cases:

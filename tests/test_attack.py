@@ -1,8 +1,10 @@
+import json
 import unittest
+from pathlib import Path
 
 from unittest import mock
 
-from watchpost import attack, engine, geo, improve, rules, simulate
+from watchpost import attack, engine, geo, improve, incidents, rules, sigma, simulate
 from watchpost.db import connect, init_schema, now_iso
 
 
@@ -24,9 +26,26 @@ class CatalogTests(unittest.TestCase):
 
     def test_tactic_order(self):
         names = [t["name"] for t in attack.tactics()]
-        self.assertEqual((names[0], names[-1], len(names)), ("Reconnaissance", "Impact", 14))
+        self.assertEqual((names[0], names[-1], len(names)), ("Reconnaissance", "Impact", 15))
+        priv = names.index("Privilege Escalation")
+        self.assertEqual(names[priv:priv + 4],
+                         ["Privilege Escalation", "Stealth", "Defense Impairment", "Credential Access"])
         self.assertEqual(attack.tactic_order(["Exfiltration", "Reconnaissance", "Credential Access", "Exfiltration"]),
                          ["Reconnaissance", "Credential Access", "Exfiltration"])
+
+    def test_revoked_ids_resolve_to_current_attack(self):
+        cloud = {
+            "id": "T1685.002",
+            "name": "Disable or Modify Tools: Disable or Modify Cloud Log",
+            "tactic": "Defense Impairment",
+        }
+        tools = {"id": "T1685", "name": "Disable or Modify Tools", "tactic": "Defense Impairment"}
+        self.assertEqual(attack.technique("T1562.008"), cloud)
+        self.assertEqual(attack.technique("T1685.002"), cloud)
+        self.assertEqual(attack.technique("T1562.006"), tools)
+        self.assertEqual(attack.technique("T1685"), tools)
+        self.assertNotIn("T1562.006", attack.TECHNIQUES)
+        self.assertNotIn("T1562.008", attack.TECHNIQUES)
 
     def test_coverage(self):
         rule_list = [{**r, "enabled": r["id"] != "web_scanner"} for r in rules.DEFAULT_RULES]
@@ -90,10 +109,20 @@ class EvidenceTests(unittest.TestCase):
         t = self.by_id["T1190"]
         self.assertEqual((t["level"], t["covered"], t["scenarios"]), ("mapped", False, []))
         self.assertEqual(t["rules"][0]["proves"], [])
+        self.assertNotIn("detected", t["rules"][0])
+        self.assertEqual(t["why"], "probe detects probe, which exercises T1595.002, not T1190.")
         self.assertEqual(self.by_id["T1046"]["level"], "mapped")  # maps it, detects nothing
+        self.assertEqual(self.by_id["T1046"]["why"], "sweep detects no labeled scenario.")
 
     def test_a_benign_scenario_never_validates(self):
-        self.assertEqual(self.by_id["T1567"]["level"], "mapped")
+        t = self.by_id["T1567"]
+        self.assertEqual(t["level"], "mapped")
+        self.assertEqual(t["why"], "upload fires only on benign scenario(s) (benign_twin), not a labeled attack.")
+
+    def test_only_mapped_techniques_carry_a_reason(self):
+        self.assertIsNone(self.by_id["T1110.001"]["why"])
+        self.assertIsNone(self.by_id["T1048"]["why"])  # disabled
+        self.assertIsNone(self.by_id["T1530"]["why"])  # gap
 
     def test_only_disabled_rules_is_disabled_even_when_the_rule_would_detect(self):
         t = self.by_id["T1048"]
@@ -136,10 +165,11 @@ class ScenarioTechniqueTests(unittest.TestCase):
                     self.assertEqual(tags, [])
                     continue
                 self.assertTrue(tags)
+                canonical = {attack.technique(t)["id"] for t in tags}
                 mapped = {t["id"] for rid in spec["expected"] for r in rules.DEFAULT_RULES if r["id"] == rid
                           for t in r["techniques"]}
                 # Every tag is a catalog technique that one of the scenario's expected rules maps to.
-                self.assertLessEqual(set(tags), mapped)
+                self.assertLessEqual(canonical, mapped)
 
     def test_default_rules_on_the_labeled_scenarios(self):
         conn = connect(":memory:")
@@ -149,16 +179,29 @@ class ScenarioTechniqueTests(unittest.TestCase):
         result = attack.evidence(attack.coverage(engine.load_rules(conn, enabled_only=False), {}),
                                  improve.noise_lab(conn)["rules"], simulate.SCENARIOS)
         levels = {t["id"]: t["level"] for t in result["techniques"]}
+        by_id = {t["id"]: t for t in result["techniques"]}
         # web_scan probes and injects but never exploits; exfiltration reads storage with no protocol shown.
         self.assertEqual({i for i, lvl in levels.items() if lvl != "validated"}, {"T1190", "T1048", "T1595.001"})
-        self.assertEqual(len(attack.TECHNIQUES), 20)  # milestone 5 added T1562.008, milestone 17 T1562.006
+        self.assertEqual(by_id["T1190"]["why"],
+                         "web_scanner detects web_scan, which probes and injects but never exploits.")
+        self.assertEqual(by_id["T1595.001"]["why"],
+                         "firewall_port_sweep detects port_sweep, which sweeps one host's ports "
+                         "and never scans IP blocks.")
+        self.assertEqual(by_id["T1048"]["why"],
+                         "data_exfil_volume detects exfiltration, which reads cloud storage "
+                         "and never shows an exfiltration channel.")
+        self.assertTrue(all(t["why"] is None for t in result["techniques"] if t["level"] != "mapped"))
+        layer = {t["techniqueID"]: t for t in attack.navigator_layer(result)["techniques"]}
+        self.assertIn(by_id["T1190"]["why"], layer["T1190"]["comment"])
+        self.assertNotIn("never exploits", layer["T1110"]["comment"])
+        self.assertEqual(len(attack.TECHNIQUES), 20)  # cloud-log and log-source rules, now T1685.002 and T1685
         self.assertEqual(result["summary"]["levels"],
                          {"validated": len(attack.TECHNIQUES) - 3, "mapped": 3, "disabled": 0, "gap": 0})
-        by_id = {t["id"]: t for t in result["techniques"]}
-        # Each milestone-5 rule proves its technique with its own scenario, not by borrowing another rule's.
-        self.assertEqual(by_id["T1562.008"]["scenarios"], ["logging_disabled"])
-        self.assertEqual({r["id"]: r["proves"] for r in by_id["T1562.008"]["rules"]},
+        # Each of those rules proves its technique with its own scenario, not by borrowing another rule's.
+        self.assertEqual(by_id["T1685.002"]["scenarios"], ["logging_disabled"])
+        self.assertEqual({r["id"]: r["proves"] for r in by_id["T1685.002"]["rules"]},
                          {"cloud_logging_disabled": ["logging_disabled"]})
+        self.assertEqual(by_id["T1685"]["scenarios"], ["log_source_stops"])
         proves = {r["id"]: r["proves"] for r in by_id["T1078.004"]["rules"]}
         self.assertEqual(proves["admin_action_from_new_source"], ["admin_new_source"])
         self.assertEqual(proves["cloud_iam_change_by_new_principal"], ["cloud_new_principal"])
@@ -218,6 +261,8 @@ class NavigatorLayerTests(unittest.TestCase):
         by_id = {t["techniqueID"]: t for t in self.layer({"brute_force_ip": 3, "success_after_failures": 2})["techniques"]}
         self.assertEqual(set(by_id), set(attack.TECHNIQUES))
         self.assertEqual((by_id["T1110.001"]["score"], by_id["T1110.001"]["tactic"]), (3, "credential-access"))
+        self.assertEqual(by_id["T1685"]["tactic"], "defense-impairment")
+        self.assertEqual(by_id["T1685.002"]["tactic"], "defense-impairment")
         self.assertEqual(by_id["T1110"]["score"], 2)
         self.assertEqual(by_id["T1046"]["score"], 0)
         self.assertTrue(by_id["T1110.001"]["comment"].startswith("Validated"))
@@ -228,9 +273,208 @@ class NavigatorLayerTests(unittest.TestCase):
         self.assertEqual(by_id["T1595.003"]["color"], attack.LEVEL_COLORS["disabled"])
         self.assertTrue(by_id["T1048"]["comment"].startswith("Mapped"))
         self.assertIn("not counted as covered", by_id["T1048"]["comment"].lower())
+        self.assertIn("never shows an exfiltration channel", by_id["T1048"]["comment"])
         for rule_id in ("success_after_failures", "impossible_geo_login", "privilege_escalation_after_login"):
             self.assertIn(rule_id, by_id["T1078"]["comment"])
         self.assertEqual(self.layer({})["gradient"]["maxValue"], 1)  # no alerts yet: still a valid range
+
+
+class CoverageDetailUiTests(unittest.TestCase):
+    def test_mapped_reason_is_on_the_detail_and_the_gap_list(self):
+        app = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text()
+        detail = app.split("function coverageDetail", 1)[1].split("\nasync function coverageView", 1)[0]
+        view = app.split("async function coverageView", 1)[1].split("\n// ---------- health", 1)[0]
+        self.assertIn('t.level === "mapped" && t.why', detail)
+        self.assertIn('class: "cov-why"', detail)
+        self.assertIn('t.level === "mapped" && t.why', view)
+        css = (Path(__file__).resolve().parent.parent / "static" / "style.css").read_text()
+        self.assertIn(".cov-why", css)
+        self.assertIn(".cov-gaps .cov-why", css)
+
+
+# Shape stored before the catalog moved T1562.008. The name and tactic are the old ones on purpose:
+# coverage must publish the catalog's, not these.
+_OLD_CLOUD_LOG = {
+    "id": "T1562.008",
+    "name": "Impair Defenses: Disable or Modify Cloud Logs",
+    "tactic": "Defense Evasion",
+}
+_NEW_CLOUD_LOG = {
+    "id": "T1685.002",
+    "name": "Disable or Modify Tools: Disable or Modify Cloud Log",
+    "tactic": "Defense Impairment",
+}
+
+
+def _sigma_source(title, message, tags):
+    tags_block = "tags:\n" + "".join(f"  - {tag}\n" for tag in tags) if tags else ""
+    return (
+        f"title: {title}\nstatus: test\n"
+        f"description: Imported before the catalog moved this technique.\n"
+        f"{tags_block}"
+        f"logsource:\n  category: cloud\n"
+        f"detection:\n  selection:\n    message: {message}\n  condition: selection\n"
+        f"level: high\n"
+    )
+
+
+def _passing_sample(message):
+    return {
+        "malicious": [{"message": message, "src_ip": "203.0.113.10", "ts": "2026-01-01T00:00:00Z"}],
+        "benign": [{"message": "ordinary cloud read", "src_ip": "203.0.113.11", "ts": "2026-01-01T00:00:01Z"}],
+    }
+
+
+class PersistedMappingTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = connect(":memory:")
+        self.addCleanup(self.conn.close)
+        init_schema(self.conn)
+        engine.seed_rules(self.conn)
+        improve._NOISE_LAB_CACHE.clear()
+        self.addCleanup(improve._NOISE_LAB_CACHE.clear)
+
+    def insert_sigma(self, title, message, techniques, enabled, hits, tags, sample=True):
+        """Compile a real Sigma rule, then overwrite techniques with the pre-upgrade JSON."""
+        source = _sigma_source(title, message, tags)
+        compiled = sigma.compile_rule(source)
+        now = now_iso()
+        self.conn.execute(
+            "INSERT INTO rules(id, name, description, severity, enabled, params, version, updated_at,"
+            " updated_by, techniques) VALUES (?,?,?,?,?,?,1,?,?,?)",
+            (compiled["rule_id"], compiled["title"], compiled["description"][:2000], compiled["severity"],
+             int(enabled), json.dumps(compiled["params"]), now, "tester",
+             None if techniques is None else json.dumps(techniques)))
+        self.conn.execute(
+            "INSERT INTO sigma_rules(rule_id, source, sha256, sigma_id, sample, imported_by, approved_by,"
+            " created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (compiled["rule_id"], source, compiled["sha256"], compiled["sigma_id"],
+             json.dumps(_passing_sample(message)) if sample else None, "tester", "tester", now))
+        for i in range(hits):
+            self.conn.execute(
+                "INSERT INTO alerts(rule_id, rule_version, group_key, severity, title, explanation,"
+                " first_seen, last_seen, event_count, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (compiled["rule_id"], 1, f"{compiled['rule_id']}-{i}", "low", "t", "e", now, now, 1, now, now))
+        return compiled["rule_id"]
+
+    def test_live_coverage_keeps_legacy_imported_mappings(self):
+        builtin = json.loads(self.conn.execute(
+            "SELECT techniques FROM rules WHERE id = 'cloud_logging_disabled'").fetchone()[0])
+        self.assertEqual([t["id"] for t in builtin], ["T1685.002"])
+        now = now_iso()
+        for i in range(2):
+            self.conn.execute(
+                "INSERT INTO alerts(rule_id, rule_version, group_key, severity, title, explanation,"
+                " first_seen, last_seen, event_count, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                ("cloud_logging_disabled", 1, f"cloud-{i}", "low", "t", "e", now, now, 1, now, now))
+        both = self.insert_sigma(
+            "Both Spellings Cloud Log", "both-spellings-cloud-log-marker",
+            [_OLD_CLOUD_LOG, _NEW_CLOUD_LOG], True, 5, ("attack.t1562.008", "attack.defense_evasion"))
+        disabled = self.insert_sigma(
+            "Disabled Cloud Log", "disabled-cloud-log-marker",
+            [_OLD_CLOUD_LOG], False, 4, ("attack.t1562.008",))
+        legacy = self.insert_sigma(
+            "Legacy Cloud Log Marker", "legacy-cloud-log-marker",
+            [_OLD_CLOUD_LOG, {"id": "T9999", "name": "Nope", "tactic": "Execution"},
+             {"id": "Defense Evasion", "name": "header", "tactic": "Defense Evasion"}],
+            True, 3, ("attack.t1562.008", "attack.defense_evasion"))
+        unknown = self.insert_sigma(
+            "Unknown Technique Marker", "unknown-technique-marker",
+            [{"id": "T9999", "name": "Nope", "tactic": "Execution"}],
+            True, 9, ("attack.t9999",))
+        missing = self.insert_sigma(
+            "Missing Mapping Marker", "missing-mapping-marker",
+            [{"tactic": "Defense Evasion"}], True, 8, ("attack.defense_evasion",), sample=False)
+        self.assertEqual((both, disabled, legacy, unknown, missing), (
+            "sigma_both_spellings_cloud_log", "sigma_disabled_cloud_log", "sigma_legacy_cloud_log_marker",
+            "sigma_unknown_technique_marker", "sigma_missing_mapping_marker"))
+        # seed_rules rewrites built-ins only. The imported row must still say T1562.008.
+        stored = json.loads(self.conn.execute(
+            "SELECT techniques FROM rules WHERE id = ?", (legacy,)).fetchone()[0])
+        self.assertEqual(stored[0]["id"], "T1562.008")
+
+        result = incidents.coverage(self.conn)
+        by_id = {t["id"]: t for t in result["techniques"]}
+        self.assertEqual(set(by_id), set(attack.TECHNIQUES))
+        cloud = by_id["T1685.002"]
+        self.assertEqual((cloud["id"], cloud["name"], cloud["tactic"]), (
+            "T1685.002", "Disable or Modify Tools: Disable or Modify Cloud Log", "Defense Impairment"))
+        self.assertEqual([r["id"] for r in cloud["rules"]], [
+            "cloud_logging_disabled", both, disabled, legacy])
+        self.assertEqual([r["hits"] for r in cloud["rules"]], [2, 5, 4, 3])
+        self.assertEqual([r["enabled"] for r in cloud["rules"]], [True, True, False, True])
+        self.assertEqual(cloud["hits"], 14)  # 5 once, not twice for the two spellings
+        self.assertEqual((cloud["level"], cloud["covered"]), ("validated", True))
+        self.assertEqual(cloud["scenarios"], [
+            "logging_disabled",
+            "sigma_sample:sigma_both_spellings_cloud_log",
+            "sigma_sample:sigma_legacy_cloud_log_marker",
+        ])
+        self.assertEqual({r["id"]: r["proves"] for r in cloud["rules"]}, {
+            "cloud_logging_disabled": ["logging_disabled"],
+            both: ["sigma_sample:sigma_both_spellings_cloud_log"],
+            disabled: [],
+            legacy: ["sigma_sample:sigma_legacy_cloud_log_marker"],
+        })
+        for technique in result["techniques"]:
+            ids = {r["id"] for r in technique["rules"]}
+            self.assertNotIn(unknown, ids)
+            self.assertNotIn(missing, ids)
+            self.assertNotIn("sigma_sample:" + unknown, technique["scenarios"])
+
+        # The stock fixtures stay mapped-only; the cloud read and the one-host sweep stay proved.
+        self.assertEqual(by_id["T1190"]["level"], "mapped")
+        self.assertEqual(by_id["T1190"]["scenarios"], [])
+        self.assertIn("never exploits", by_id["T1190"]["why"])
+        self.assertEqual((by_id["T1048"]["level"], by_id["T1048"]["scenarios"]), ("mapped", []))
+        self.assertIn("never shows an exfiltration channel", by_id["T1048"]["why"])
+        self.assertEqual((by_id["T1595.001"]["level"], by_id["T1595.001"]["scenarios"]), ("mapped", []))
+        self.assertIn("never scans IP blocks", by_id["T1595.001"]["why"])
+        self.assertEqual((by_id["T1530"]["level"], by_id["T1530"]["scenarios"]), ("validated", ["exfiltration"]))
+        self.assertEqual((by_id["T1046"]["level"], by_id["T1046"]["scenarios"]), ("validated", ["port_sweep"]))
+
+        layer = {t["techniqueID"]: t for t in attack.navigator_layer(result)["techniques"]}
+        self.assertNotIn("T1562.008", layer)
+        self.assertNotIn("T9999", layer)
+        row = layer["T1685.002"]
+        self.assertEqual((row["score"], row["tactic"]), (14, "defense-impairment"))
+        self.assertTrue(row["comment"].startswith("Validated"))
+        self.assertIn(
+            "Detected on synthetic scenario(s): logging_disabled, "
+            "sigma_sample:sigma_both_spellings_cloud_log, sigma_sample:sigma_legacy_cloud_log_marker.",
+            row["comment"])
+        self.assertIn(
+            "Rules: cloud_logging_disabled, sigma_both_spellings_cloud_log, "
+            "sigma_disabled_cloud_log (disabled), sigma_legacy_cloud_log_marker",
+            row["comment"])
+        self.assertNotIn(unknown, row["comment"])
+        self.assertNotIn(missing, row["comment"])
+
+    def test_stored_spellings_count_once_through_the_catalog(self):
+        imported = {
+            "id": "imported", "name": "Imported", "enabled": True,
+            "techniques": ["T1562.008", _NEW_CLOUD_LOG, "T9999", {"tactic": "Defense Evasion"},
+                           {"id": ""}, {"id": 1562}],
+        }
+        listed = [imported, imported,  # the same rule twice still counts once
+                  {"id": "lone", "name": "Lone", "enabled": 0, "techniques": "T1562.006"},
+                  {"id": "one", "name": "One", "enabled": True,
+                   "techniques": {"id": "T1562.008", "name": "stored", "tactic": "Defense Evasion"}},
+                  {"id": "blank", "name": "Blank", "enabled": True, "techniques": None},
+                  {"id": "junk", "name": "Junk", "enabled": True, "techniques": {"nope": True}}]
+        result = attack.coverage(listed, {"imported": 5, "lone": 7, "one": 1, "junk": 9})
+        by_id = {t["id"]: t for t in result["techniques"]}
+        self.assertEqual(set(by_id), set(attack.TECHNIQUES))
+        cloud = by_id["T1685.002"]
+        self.assertEqual([r["id"] for r in cloud["rules"]], ["imported", "one"])
+        self.assertEqual([r["hits"] for r in cloud["rules"]], [5, 1])
+        self.assertEqual(cloud["hits"], 6)
+        self.assertEqual(cloud["tactic"], "Defense Impairment")
+        self.assertNotEqual(cloud["name"], "stored")
+        tools = by_id["T1685"]
+        self.assertEqual([(r["id"], r["enabled"], r["hits"]) for r in tools["rules"]], [("lone", False, 7)])
+        self.assertEqual((tools["hits"], tools["covered"]), (7, False))
+        self.assertEqual(result["summary"]["with_hits"], 2)
 
 
 class GeoTests(unittest.TestCase):

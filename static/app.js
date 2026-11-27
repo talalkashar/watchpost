@@ -3,9 +3,46 @@
 // (via el()), never innerHTML. The SOC dashboard and live stream live in dashboard.js; its
 // charts are SVG strings from charts.js/map.js with every text value escaped.
 
-const state = { user: null, csrf: null, view: "dashboard", alertId: null, keys: null, restore: null, focusSearch: false };
+const state = { user: null, csrf: null, view: "dashboard", viewId: null, keys: null, restore: null, focusSearch: false };
 const ROLE_RANK = { viewer: 1, analyst: 2, admin: 3 };
 const can = (role) => state.user && ROLE_RANK[state.user.role] >= ROLE_RANK[role];
+
+// The document is the scroll surface. Hash routes and in-page targets keep their destinations.
+history.scrollRestoration = "manual";
+window.addEventListener("load", () => {
+  const target = document.getElementById(location.hash.slice(1));
+  if (target) target.scrollIntoView(); else window.scrollTo(0, 0);
+});
+
+const Motion = {
+  reduced: window.matchMedia("(prefers-reduced-motion: reduce)"),
+  observer: null,
+  intro(node) {
+    if (!this.reduced.matches) node.classList.add("load-intro");
+  },
+  reveal(root) {
+    this.observer?.disconnect();
+    if (this.reduced.matches || !window.IntersectionObserver) return;
+    this.observer = new IntersectionObserver((entries, observer) => {
+      let stagger = 0;
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        entry.target.style.setProperty("--reveal-delay", `${(stagger++ % 3) * 75}ms`);
+        entry.target.classList.remove("reveal-pending");
+        observer.unobserve(entry.target);
+      }
+    }, { threshold: 0.05 });
+    const sections = root.querySelectorAll(":scope > .card, :scope > .grid > .card, :scope > .kpis > .kpi, :scope > .soc > .panel");
+    for (const section of sections) {
+      section.classList.add("scroll-reveal", "reveal-pending");
+      this.observer.observe(section);
+    }
+  },
+};
+Motion.reduced.addEventListener("change", () => {
+  Motion.observer?.disconnect();
+  document.querySelectorAll(".reveal-pending").forEach((node) => node.classList.remove("reveal-pending"));
+});
 
 // ---------- helpers ----------
 function el(tag, attrs = {}, ...children) {
@@ -25,10 +62,45 @@ function el(tag, attrs = {}, ...children) {
 }
 const $ = (sel) => document.querySelector(sel);
 const fmtTime = (ts) => (ts ? ts.replace("T", " ").replace(/\.\d+Z$/, "Z") : "—");
+// Clock over the date. A narrow time column then reads as a stamp instead of breaking in half.
+function stamp(ts) {
+  const s = fmtTime(ts);
+  const i = s.indexOf(" ");
+  if (i < 0) return s;
+  return el("time", { class: "stamp", datetime: ts }, el("b", {}, s.slice(i + 1)), el("small", {}, s.slice(0, i)));
+}
 const pill = (text, cls) => el("span", { class: `pill ${cls}` }, text);
 const sev = (s) => pill(s, `sev-${s}`);
+// Same order as watchpost.normalize.SEVERITIES. Asset weight only moves up.
+const SEVERITY_RANK = { info: 0, low: 1, medium: 2, high: 3, critical: 4 };
+
+// Title-row pair when asset weight lifts the rule severity. Null when the
+// alert was not raised (same level, missing base, unknown label, or a drop).
+function raisedSeverity(alert) {
+  const base = alert && alert.base_severity;
+  const raised = alert && alert.severity;
+  if (!base || !raised) return null;
+  const baseRank = SEVERITY_RANK[base];
+  const raisedRank = SEVERITY_RANK[raised];
+  if (baseRank === undefined || raisedRank === undefined || raisedRank <= baseRank) return null;
+  return { base, raised };
+}
+
+function alertHeaderSevs(alert) {
+  const lifted = raisedSeverity(alert);
+  if (!lifted) return sev(alert.severity);
+  return el("span", { class: "sev-raise", title: alert.severity_note || null },
+    el("span", { class: "sr-only" }, "Rule severity "),
+    sev(lifted.base),
+    el("span", { class: "sev-raise-label" }, "raised to"),
+    sev(lifted.raised));
+}
 const status = (s) => pill(s, `st-${s}`);
-const synth = (flag) => (flag ? pill("synthetic", "synthetic") : null);
+function eventMessage(event) {
+  const message = event.message ?? "";
+  if (!event.synthetic) return message;
+  return message.replace(/^\[SYNTHETIC\]\s*/, "").replace(/\[SYNTHETIC (scanner probe|uptime monitor)\]$/, "[$1]");
+}
 const pct = (v) => (v === null || v === undefined ? "—" : `${Math.round(v * 100)}%`);
 const technique = (t) => el("span", { class: "pill technique", title: `${t.name} (${t.tactic})` }, `${t.id} ${t.name}`);
 // Entity pages (user, src_ip, host). Values can hold dots, colons, pipes, or slashes, so they are
@@ -70,25 +142,53 @@ async function api(path, { method = "GET", body, raw, contentType, allow = [] } 
 }
 
 // Clickable rows are focusable and open with Enter or Space, so the mouse is never required.
-function table(headers, rows, onClick) {
+function table(headers, rows, onClick, wrapClass, emptyMessage) {
+  if (!rows.length && emptyMessage) return el("p", { class: "table-empty muted" }, emptyMessage);
   const onKey = (r) => (ev) => {
     if (ev.target !== ev.currentTarget || (ev.key !== "Enter" && ev.key !== " ")) return;
     ev.preventDefault();
-    onClick(r);
+    onClick(r, ev.currentTarget);
   };
-  return el("div", { class: "table-wrap" },
+  return el("div", { class: wrapClass ? `table-wrap ${wrapClass}` : "table-wrap" },
     el("table", {},
       el("thead", {}, el("tr", {}, headers.map((h) => el("th", { scope: "col" }, h)))),
       el("tbody", {}, rows.length ? rows.map((r) =>
-        el("tr", { class: [onClick ? "clickable" : "", r.cls || ""].join(" "), onclick: onClick ? () => onClick(r) : null,
+        el("tr", { class: [onClick ? "clickable" : "", r.cls || ""].join(" "), onclick: onClick ? (ev) => onClick(r, ev.currentTarget) : null,
           tabindex: onClick ? "0" : null, onkeydown: onClick ? onKey(r) : null, "data-id": onClick && r.id !== undefined ? r.id : null },
           r.cells.map((c) => (c && c.num !== undefined ? el("td", { class: "num" }, c.num) : el("td", {}, c)))))
         : el("tr", {}, el("td", { colspan: headers.length, class: "muted" }, "Nothing to show.")))));
 }
 
+// Only the newest panel read can commit. Live strip/stream reads have a separate lifetime.
+let viewRevision = 0;
+async function readView(view, read) {
+  if (!state.user || state.view !== view) return;
+  const revision = ++viewRevision;
+  try {
+    const data = await read();
+    if (revision === viewRevision) return data;
+  } catch (error) {
+    if (revision === viewRevision) throw error;
+  }
+}
+
+let graphModule;
+async function openGraph() {
+  // A late module fetch follows the same navigation guard as a late API read.
+  const graph = await readView("graph", () => import("./graph.js"));
+  if (graph) {
+    graphModule = graph;
+    await graph.open();
+  }
+}
+
 function render(...nodes) {
   const view = $("#view");
   view.replaceChildren(...nodes.flat().filter((n) => n !== null && n !== undefined && n !== false));
+  Motion.reveal(view);
+  const intro = view.querySelector(".view-bar, .page-head, h1");
+  if (intro) Motion.intro(intro);
+  if (location.hash === "#main") $("#main").scrollIntoView();
 }
 
 async function guarded(fn) {
@@ -98,26 +198,38 @@ async function guarded(fn) {
 // One <dialog> serves every modal: showModal() makes the page behind it inert (the browser traps focus)
 // and Esc closes it. This names it after its heading and hands focus back to the trigger on close.
 let modalReturn = null;
-function openModal() {
+function openModal(trigger = document.activeElement) {
   const m = $("#modal");
   const h = $("#modal-body").querySelector("h2");
   if (h) { h.id = "modal-title"; m.setAttribute("aria-labelledby", "modal-title"); } else m.removeAttribute("aria-labelledby");
-  if (!m.open) modalReturn = document.activeElement;
+  if (!m.open) modalReturn = trigger;
   m.showModal();
 }
 
 // ---------- auth ----------
 function showLogin() {
+  graphModule?.unmount();
+  viewRevision++;
+  state.focusSearch = false;
   state.user = null; state.csrf = null;
+  document.title = consoleTitle(false);
   Live.stop();
   document.body.classList.remove("authed");
   $("#login-view").hidden = false;
+  Motion.intro($("#login-view"));
   mfaStep(null);
   $("#rail").hidden = true; $("#strip").hidden = true; $("#who").hidden = true;
   render();
 }
 
 async function boot() {
+  const strip = $("#strip");
+  if (window.ResizeObserver) {
+    new ResizeObserver(() => {
+      if (strip.offsetHeight) document.body.style.setProperty("--strip-height", `${strip.offsetHeight}px`);
+    }).observe(strip);
+  }
+  $("#login-view").hidden = true;
   $("#login-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const f = new FormData(ev.target);
@@ -143,8 +255,16 @@ async function boot() {
     back.focus({ preventScroll: true });
   });
   document.addEventListener("keydown", onShortcut);
-  window.addEventListener("hashchange", () => route());
+  window.addEventListener("hashchange", () => {
+    const target = document.getElementById(location.hash.slice(1));
+    if (target) target.scrollIntoView(); else route();
+  });
   try { onLogin(await api("/api/auth/me")); } catch { showLogin(); }
+  const form = $("#login-form");
+  if (form.dataset.pendingSubmit) {
+    delete form.dataset.pendingSubmit;
+    if (!state.user) form.requestSubmit();
+  }
 }
 
 // Second sign-in step for an account with an authenticator app enrolled. The token from the password step is
@@ -184,7 +304,9 @@ function onLogin(data) {
   $("#login-view").hidden = true;
   document.body.classList.add("authed");
   $("#rail").hidden = false; $("#strip").hidden = false; $("#who").hidden = false;
-  $("#who-name").textContent = `${data.user.username} · ${data.user.role}${data.user.role === "viewer" ? " (read-only)" : ""}`;
+  const { username, role } = data.user;
+  const name = role === "viewer" && username === "viewer" ? "Viewer" : username;
+  $("#who-name").textContent = `${name} · ${role === "viewer" ? "read-only" : role}`;
   $("#masked-pill")?.remove();
   if (data.masked) $("#who-name").after(el("span", { class: "pill tag", id: "masked-pill", title: "Masked view: usernames and internal IP addresses are shown as consistent pseudonyms (user-…, internal-…). Public IPs are not masked. Filters and pivots on a pseudonym still work." }, "Masked view"));
   document.querySelectorAll("#nav [data-role]").forEach((b) => { b.hidden = !can(b.dataset.role); });
@@ -203,8 +325,11 @@ function setMenu(open) {
 
 function route() {
   if (!state.user) return;
-  const [view, id, ...rest] = (location.hash.slice(1) || "dashboard").split("/");
+  const [view, id, ...rest] = ((location.hash === "#main" ? "" : location.hash.slice(1)) || "dashboard").split("/");
+  viewRevision++;
+  if (view !== "hunt" || id) state.focusSearch = false;  // / requests focus on the plain Hunt route
   state.view = view;
+  state.viewId = id;
   document.body.dataset.view = view;
   state.keys = null;  // per-view shortcut keys; the view that owns them sets them again
   setMenu(false);
@@ -212,12 +337,22 @@ function route() {
     b.classList.toggle("active", b.dataset.view === view);
     if (b.dataset.view === view) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
   });
+  graphModule?.unmount();
   if (view !== "dashboard") Dash.unmount();
-  const views = { dashboard: socDashboard, incidents: () => (id ? incidentDetail(Number(id)) : incidentsView()),
+  const loading = el("p", { class: "muted", role: "status" }, "Loading…");
+  render(loading);
+  const views = { dashboard: socDashboard, graph: openGraph, incidents: () => id ? incidentDetail(Number(id)) : incidentList(),
     alerts: () => (id ? alertDetail(Number(id)) : alerts()), events, overview, ingest, rules: () => rules(id),
     noise: noiseLab, coverage: coverageView, health, admin, account, hunt: () => huntView(huntQueryFromHash([id, ...rest].join("/"))),
     entity: () => entityDetail(id, decodeURIComponent(rest.join("/"))) };
-  guarded(views[view] || socDashboard);
+  const load = views[view] || socDashboard;
+  guarded(async () => {
+    try { await load(); }
+    catch (error) {
+      if (loading.isConnected) render(el("p", { class: "error", role: "alert" }, error.message));
+      throw error;
+    }
+  });
 }
 
 async function refreshBanner() {
@@ -241,34 +376,36 @@ async function refreshBanner() {
 
 // ---------- metrics overview (the 1.0 dashboard) ----------
 async function overview() {
-  const [m, tri] = await Promise.all([api("/api/metrics"), api("/api/metrics/triage")]);
+  const result = await readView("overview", () => Promise.all([api("/api/metrics"), api("/api/metrics/triage")]));
+  if (!result) return;
+  const [m, tri] = result;
   const kpi = (v, l) => el("div", { class: "kpi" }, el("div", { class: "v" }, v ?? "—"), el("div", { class: "l" }, l));
   const hist = m.activity_last_24h_of_data;
   const max = Math.max(1, ...hist.map((h) => h.events));
   const bars = el("div", { class: "bars", role: "img", "aria-label": `Events per hour over 24 hours: ${hist.reduce((n, h) => n + h.events, 0)} events, ${hist.reduce((n, h) => n + h.failures, 0)} failed logins, busiest hour ${Math.max(0, ...hist.map((h) => h.events))} events` }, hist.map((h) =>
     el("div", { class: "b", title: `${fmtTime(h.hour)} — ${h.events} events, ${h.failures} failed logins` },
-      el("span", { class: "fail", style: { height: `${(h.failures / max) * 110}px` } }),
-      el("span", { class: "all", style: { height: `${((h.events - h.failures) / max) * 110}px` } }))));
-  const hbars = (rows, key) => {
+      el("span", { class: "fail", style: { height: `${(h.failures / max) * 164}px` } }),
+      el("span", { class: "all", style: { height: `${((h.events - h.failures) / max) * 164}px` } }))));
+  const hbars = (rows, key, stacked = false) => {
     const top = Math.max(1, ...rows.map((r) => r.count));
-    return rows.length ? rows.map((r) => el("div", { class: "hbar" }, el("span", { class: "mono" }, r[key]),
-      el("div", { class: "track" }, el("div", { class: "fill", style: { width: `${(r.count / top) * 100}%` } })),
+    const tone = key === "severity" ? (name) => ` sev-${name}` : () => "";
+    return rows.length ? rows.map((r) => el("div", { class: stacked ? "hbar named" : "hbar" }, el("span", { class: `mono${tone(r[key])}` }, r[key]),
+      el("div", { class: "track" }, el("div", { class: `fill${tone(r[key])}`, style: { width: `${(r.count / top) * 100}%` } })),
       el("span", { class: "num" }, r.count))) : el("p", { class: "muted" }, "No data yet.");
   };
   const empty = m.events_total === 0 ? el("div", { class: "card" },
     el("h2", {}, "No events yet"),
-    el("p", {}, "Load the labeled synthetic dataset (Admin → Demo data), upload a log file (Ingest), or POST to /api/ingest."),
+    el("p", {}, "Upload a log in Ingest, POST to /api/ingest, or load demo data in Admin."),
     can("admin") ? el("button", { onclick: () => go("admin") }, "Go to demo data") : null) : null;
 
   render(
     el("h1", {}, "Metrics overview"),
     empty,
     el("div", { class: "kpis" },
-      kpi(m.alerts_open, "Open alerts"), kpi(m.alerts_investigating, "Investigating"),
+      kpi(m.alerts_open, "Awaiting investigation"), kpi(m.alerts_investigating, "Investigating"),
       kpi(m.alerts_resolved, "Resolved"),
       kpi(m.mean_time_to_resolve_minutes === null ? "—" : `${m.mean_time_to_resolve_minutes}m`, "Mean time to resolve"),
-      kpi(m.events_total.toLocaleString(), "Events stored"),
-      kpi(m.synthetic_events.toLocaleString(), "of which synthetic")),
+      kpi(m.synthetic_events.toLocaleString(), "Synthetic events")),
     el("div", { class: "card" },
       el("div", { class: "row", style: { justifyContent: "space-between" } },
         el("h2", {}, "Activity — 24 hours ending at the newest event"),
@@ -279,7 +416,7 @@ async function overview() {
     el("div", { class: "grid" },
       el("div", { class: "card" }, el("h2", {}, "Open alerts by severity"),
         hbars(["critical", "high", "medium", "low"].map((s) => ({ severity: s, count: (m.alerts_by_severity.find((x) => x.severity === s) || {}).count || 0 })), "severity")),
-      el("div", { class: "card" }, el("h2", {}, "Alerts by rule (all time)"), hbars(m.alerts_by_rule, "rule_id")),
+      el("div", { class: "card" }, el("h2", {}, "Alerts by rule (all time)"), hbars(m.alerts_by_rule, "rule_id", true)),
       el("div", { class: "card" }, el("h2", {}, "Top failed-login sources"), hbars(m.top_failure_ips, "src_ip")),
       el("div", { class: "card" }, el("h2", {}, "Most targeted accounts"), hbars(m.top_failure_users, "user")),
       el("div", { class: "card" }, el("h2", {}, "Analyst verdicts"), hbars(m.dispositions, "disposition")),
@@ -293,8 +430,8 @@ async function overview() {
       el("div", { class: "card" }, el("h2", {}, "Open-alert aging"), hbars(m.open_alert_aging.buckets, "label"),
         el("p", { class: "muted" }, m.open_alert_aging.oldest_minutes === null ? "No open alerts." : `Oldest open alert has waited ${Math.round(m.open_alert_aging.oldest_minutes)} minutes.`))),
     triageCard(tri),
-    el("div", { class: "card" }, el("h2", {}, "Left out on purpose"),
-      el("p", { class: "muted" }, "The numbers above use the times this instance created and resolved each alert, and verdicts analysts recorded. These metrics are not shown because replayed synthetic timestamps would make them misleading:"),
+    el("div", { class: "card" }, el("h2", {}, "Unavailable metrics"),
+      el("p", { class: "muted" }, "Resolution times use local alert timestamps. False-positive rates use analyst verdicts."),
       el("ul", { class: "muted" }, m.omitted_metrics.map((o) => el("li", {}, el("code", {}, o.metric), `: ${o.reason}`)))),
   );
 }
@@ -306,9 +443,7 @@ function triageCard(t) {
   const rows = t.severities.filter((r) => r.count);
   const unknown = t.severities.reduce((n, r) => n + r.ack_unknown, 0);
   return el("div", { class: "card", id: "triage-metrics" },
-    el("div", { class: "row", style: { justifyContent: "space-between" } },
-      el("h2", {}, `Triage metrics — alerts created ${t.window === "all" ? "at any time" : `in the last ${t.window}`}`),
-      t.synthetic !== "none" ? pill(t.synthetic === "all" ? "synthetic" : `${t.synthetic_alerts} synthetic`, "synthetic") : null),
+    el("h2", { title: t.synthetic === "some" ? `${t.synthetic_alerts} synthetic alerts in this window` : null }, `Triage metrics — alerts created ${t.window === "all" ? "at any time" : `in the last ${t.window}`}`),
     table(["Severity", "Alerts", "Open", "MTTA mean / median / p90", "MTTR mean / median / p90", "SLA target (ack / resolve)", "Ack breaches", "Resolve breaches"],
       rows.map((r) => ({ cells: [sev(r.severity), { num: r.count }, { num: r.open }, { num: timeStats(r.mtta) }, { num: timeStats(r.mttr) },
         { num: `${minutes(r.sla.ack_target_minutes)} / ${minutes(r.sla.resolve_target_minutes)}` }, { num: r.sla.ack_breaches }, { num: r.sla.resolve_breaches }] }))),
@@ -321,41 +456,102 @@ const slaBadge = (list) => (list && list.length ? el("span", { class: "pill sev-
   `SLA: ${list.join(" + ")} overdue`) : null);
 
 // ---------- alerts ----------
+// First visit shows the working queue. "all" is an explicit clear so a reset does not fall back to the default.
+const ALERT_QUEUE_DEFAULT = "status=open&severity=critical,high";
+const ALERT_QUEUE_ALL = "all";
+const ALERT_STATUS_WORDS = {
+  open: "open",
+  investigating: "investigating",
+  resolved: "resolved",
+  "open,investigating": "active",
+};
+
+function alertQueueSaved() {
+  try { return sessionStorage.getItem("alertFilter"); } catch { return null; }
+}
+
+function storeAlertFilter(value) {
+  try { sessionStorage.setItem("alertFilter", value); } catch { /* ignore */ }
+}
+
+function alertQueueParams(saved) {
+  if (saved == null || saved === "") return new URLSearchParams(ALERT_QUEUE_DEFAULT);
+  if (saved === ALERT_QUEUE_ALL) return new URLSearchParams();
+  return new URLSearchParams(saved);
+}
+
+function alertQueueLabel(params) {
+  const status = params.get("status") || "";
+  const severity = params.get("severity") || "";
+  const rule = params.get("rule_id") || "";
+  if (!status && !severity && !rule) return "Showing all alerts";
+  if (status === "open" && severity === "critical,high" && !rule) return "Showing open critical and high";
+  const statusWord = ALERT_STATUS_WORDS[status] || status.split(",").filter(Boolean).join(", ");
+  const sevs = severity.split(",").map((part) => part.trim()).filter(Boolean);
+  const bits = [];
+  if (statusWord) bits.push(statusWord);
+  if (sevs.length) bits.push(sevs.join(", "));
+  if (rule) bits.push(`rule ${rule}`);
+  return `Showing ${bits.join(" ")}`;
+}
+
+function alertQueueCanReset(params) {
+  return Boolean(params.get("status") || params.get("severity") || params.get("rule_id"));
+}
+
 async function alerts() {
-  const params = new URLSearchParams(sessionStorage.getItem("alertFilter") || "status=open,investigating");
+  const params = alertQueueParams(alertQueueSaved());
+  const filterNote = el("p", { id: "alert-filter", class: "muted" }, alertQueueLabel(params));
+  if (alertQueueCanReset(params)) {
+    filterNote.append(el("button", { type: "button", id: "alert-filter-reset", class: "ghost" }, "Reset"));
+  }
   const form = el("form", { class: "row card" },
+    filterNote,
     el("label", {}, "Status", el("select", { name: "status" },
       [["open,investigating", "Active"], ["open", "Open"], ["investigating", "Investigating"], ["resolved", "Resolved"], ["", "All"]]
         .map(([v, t]) => el("option", { value: v, selected: params.get("status") === v || (!params.get("status") && v === "") }, t)))),
     el("label", {}, "Severity", el("select", { name: "severity" },
-      ["", "critical", "high", "medium", "low"].map((v) => el("option", { value: v, selected: params.get("severity") === v }, v || "Any")))),
+      [["critical,high", "Critical and high"], ["critical", "Critical"], ["high", "High"], ["medium", "Medium"], ["low", "Low"], ["", "Any"]]
+        .map(([v, t]) => el("option", { value: v, selected: (params.get("severity") || "") === v }, t)))),
     el("button", { type: "submit" }, "Filter"));
   form.addEventListener("submit", (ev) => {
     ev.preventDefault();
     const p = new URLSearchParams();
     for (const [k, v] of new FormData(form)) if (v) p.set(k, v);
-    try { sessionStorage.setItem("alertFilter", p.toString()); } catch { /* ignore */ }
+    storeAlertFilter(p.toString() || ALERT_QUEUE_ALL);
     guarded(alerts);
   });
-  const [list, incidents] = await Promise.all([api(`/api/alerts?${params}`), api("/api/incidents?status=open,investigating")]);
+  filterNote.querySelector("#alert-filter-reset")?.addEventListener("click", () => {
+    storeAlertFilter(ALERT_QUEUE_ALL);
+    guarded(alerts);
+  });
+  const result = await readView("alerts", () => Promise.all([api(`/api/alerts?${params}`), api("/api/incidents?status=open,investigating")]).catch((e) => e));
+  if (!result) return;
+  if (result instanceof Error) return render(el("h1", {}, "Alerts"), form, el("p", { class: "error", role: "alert" }, result.message));
+  const [list, incidents] = result;
   render(el("h1", {}, "Alerts"),
-    el("div", { class: "card" }, el("h2", {}, `Active incidents (${incidents.length})`),
-      el("p", { class: "muted" }, "Alerts that share a source IP, account, or host within 30 minutes are grouped into one incident. Severity rises one level when an incident spans three or more ATT&CK tactics."),
-      table(["Severity", "Incident", "Kill chain", "Alerts", "Status", "Last seen", ""],
-        incidents.map((i) => ({ id: i.id, cells: [sev(i.severity), i.title, i.stages.join(" → ") || "—", { num: i.alert_count },
-          status(i.status), fmtTime(i.last_seen), synth(i.synthetic)] })),
-        (r) => go("incidents", r.id))),
+    el("details", { class: "card active-incidents" }, el("summary", {}, `Active incidents (${incidents.length})`),
+      el("p", { class: "muted" }, "Alerts sharing an IP, account or host within 30 minutes form an incident. Three or more tactics raise its severity."),
+      table(["Severity", "Incident", "Kill chain", "Alerts", "Status", "Last seen"],
+        incidents.map((i) => ({ id: i.id, cells: [sev(i.severity), i.title,
+          i.stages.length ? el("span", { class: "stages" }, i.stages.map((t) => pill(t, "stage"))) : "—",
+          { num: i.alert_count }, status(i.status), stamp(i.last_seen)] })),
+        (r) => go("incidents", r.id), null, "No active incidents.")),
     form, el("div", { class: "card", "data-kbd-list": "alerts" }, table(
-    ["Severity", "Alert", "Rule", "Status", "Events", "Last seen", ""],
+    ["Severity", "Alert", "Rule", "Status", "Events", "Last seen"],
     list.map((a) => ({ id: a.id, cells: [sev(a.severity), a.title, el("code", {}, a.rule_id),
-      el("span", {}, status(a.status), a.disposition ? ` ${a.disposition.replace("_", " ")}` : "", a.sla_breach?.length ? " " : null, slaBadge(a.sla_breach)),
-      { num: a.event_count }, fmtTime(a.last_seen), synth(a.synthetic)] })),
-    (r) => go("alerts", r.id))));
+      el("span", { class: "cell-stack" }, status(a.status),
+        a.disposition ? el("span", { class: "disp" }, a.disposition.replace("_", " ")) : null, slaBadge(a.sla_breach)),
+      { num: a.event_count }, stamp(a.last_seen)] })),
+    (r) => go("alerts", r.id), null,
+    alertQueueCanReset(params) ? "No alerts match these filters." : "No alerts have been recorded.")));
   restoreSelection(`[data-kbd-list] tr[data-id="${state.restore}"]`);
 }
 
 async function alertDetail(id) {
-  const a = await api(`/api/alerts/${id}`);
+  if (Number(state.viewId) !== id) return;
+  const a = await readView("alerts", () => api(`/api/alerts/${id}`));
+  if (!a) return;
   // Triage keys (see keyboard section): Esc for everyone; a and r only for roles that may act.
   state.keys = state.view === "alerts" ? { Escape: () => { state.restore = id; go("alerts"); } } : null;
   if (state.keys && can("analyst") && a.status !== "resolved") {
@@ -385,7 +581,7 @@ async function alertDetail(id) {
     el("div", { class: "split" },
       el("div", {},
         el("div", { class: "card" },
-          el("div", { class: "row" }, sev(a.severity), status(a.status), synth(a.synthetic)),
+          el("div", { class: "row alert-head" }, alertHeaderSevs(a), status(a.status)),
           el("h1", { style: { marginTop: "8px" } }, a.title),
           el("div", { class: "explain" }, el("strong", {}, "Why this fired: "), a.explanation),
           el("p", { class: "muted" }, `Rule: ${a.rule?.name ?? a.rule_id} (v${a.rule_version}). ${a.rule?.description ?? ""}`),
@@ -395,11 +591,11 @@ async function alertDetail(id) {
           actions),
         el("div", { class: "card" }, el("h2", {}, `Evidence (${a.evidence.length} events)`),
           table(["Time", "Type", "User", "Source IP", "Host", "Message"],
-            a.evidence.map((e) => ({ cells: [fmtTime(e.ts), e.event_type, entityLink("user", e.user), el("code", {}, entityLink("src_ip", e.src_ip)), entityLink("host", e.host), e.message ?? ""] })))),
+            a.evidence.map((e) => ({ cells: [stamp(e.ts), e.event_type, entityLink("user", e.user), el("code", {}, entityLink("src_ip", e.src_ip)), entityLink("host", e.host), eventMessage(e)] })))),
         el("div", { class: "card" }, el("h2", {}, "Related timeline"),
           el("p", { class: "muted" }, "Every event involving these IPs or accounts from 30 minutes before to 30 minutes after. Highlighted rows are evidence."),
           table(["Time", "Type", "User", "Source IP", "Source", "Message"],
-            a.timeline.map((e) => ({ cls: e.is_evidence ? "evidence" : "", cells: [fmtTime(e.ts), e.event_type, entityLink("user", e.user), el("code", {}, entityLink("src_ip", e.src_ip)), e.source, e.message ?? ""] }))))),
+            a.timeline.map((e) => ({ cls: e.is_evidence ? "evidence" : "", cells: [stamp(e.ts), e.event_type, entityLink("user", e.user), el("code", {}, entityLink("src_ip", e.src_ip)), e.source, eventMessage(e)] }))))),
       el("div", {},
         el("div", { class: "card" }, el("h2", {}, "Details"), el("dl", { class: "kv" },
           ...[["Alert", `#${a.id}`], ["Group", a.group_key], ["First seen", fmtTime(a.first_seen)], ["Last seen", fmtTime(a.last_seen)],
@@ -421,9 +617,72 @@ function reportLinks(kind, id) {
     el("a", { class: "button", href: `/api/${kind}/${id}/report.md`, download: "" }, "Report (Markdown)"));
 }
 
+// Full Enterprise kill chain for one incident. `tactics` is [name, short] in kill-chain order
+// (dashboard.js TACTICS). Fired stages come from the incident; technique ids come from the
+// grouped rule metadata. A stage the catalog does not name is appended, not dropped.
+function incidentKillChain(tactics, incident) {
+  const names = tactics.map((pair) => pair[0]);
+  const seen = new Set(names);
+  for (const name of incident.stages || []) {
+    if (name && !seen.has(name)) {
+      seen.add(name);
+      names.push(name);
+    }
+  }
+  const byTactic = new Map();
+  for (const group of incident.techniques_by_tactic || []) {
+    const ids = [];
+    for (const t of group.techniques || []) {
+      const id = typeof t === "string" ? t : t && t.id;
+      if (id && !ids.includes(id)) ids.push(id);
+    }
+    byTactic.set(group.tactic, ids);
+  }
+  const fired = new Set(incident.stages || []);
+  return names.map((name) => ({ name, fired: fired.has(name), techniques: byTactic.get(name) || [] }));
+}
+
+function killChainList(incident) {
+  const stages = incidentKillChain(TACTICS, incident);
+  return el("div", { class: "killchain-wrap" },
+    el("ol", { class: "killchain", "aria-label": "ATT&CK kill chain. Filled stages fired in this incident. Dim stages were not observed." },
+      stages.map((s) => el("li", { class: s.fired ? "kc fired" : "kc quiet" },
+        el("span", { class: "kc-name" }, s.name),
+        el("span", { class: "sr-only" }, s.fired ? ", observed. " : ", not observed. "),
+        el("span", { class: "kc-ids" }, s.techniques.length ? s.techniques.join(" ") : "—")))),
+    el("p", { class: "muted kc-note" }, "Filled stages fired in this incident. Dim stages were not observed."));
+}
+
+// Plain correlation rule (correlate.rule_summary). The server sentence wins; the fallback matches
+// the default 30-minute window so the entity list is never unlabeled.
+function correlationRule(incident) {
+  const text = incident && typeof incident.correlation_rule === "string" ? incident.correlation_rule.trim() : "";
+  return text || "Alerts that share a source IP, account, or host within 30 minutes are grouped into this incident.";
+}
+
 // ---------- incidents ----------
+// The standalone board owns its panel read. The live dashboard shares the board components.
+async function incidentList() {
+  const result = await readView("incidents", async () => {
+    await Live.refreshIncidents();
+    const inc = Live.incidents;
+    const alerts = inc.state === "ok" ? [] : await api("/api/alerts?limit=200");
+    return { inc, alerts };
+  });
+  if (!result) return;
+  const { inc, alerts } = result;
+  render(
+    el("div", { class: "page-head" }, el("h1", {}, "Incidents"), inc.state === "ok" ? null : incidentFallbackChip(inc.state)),
+    inc.state !== "ok" ? el("p", { class: "muted" }, inc.state === "error" ? inc.error
+      : "Alerts become incidents once the correlation engine ships (GET /api/incidents). Until then this board groups alerts by status.") : null,
+    el("div", { class: "board big", "data-kbd-list": "incidents" }, ...incidentBoard(inc, alerts, 50)));
+  restoreSelection(`[data-kbd-list] a.bcard[href="#incidents/${state.restore}"]`);
+}
+
 async function incidentDetail(id) {
-  const i = await api(`/api/incidents/${id}`);
+  if (Number(state.viewId) !== id) return;
+  const i = await readView("incidents", () => api(`/api/incidents/${id}`));
+  if (!i) return;
   const setIncident = (body) => guarded(async () => { await api(`/api/incidents/${id}/status`, { method: "POST", body }); incidentDetail(id); });
   state.keys = state.view === "incidents" ? { Escape: () => { state.restore = id; go("incidents"); } } : null;
   if (state.keys && can("analyst") && i.status === "open") state.keys.a = () => setIncident({ status: "investigating" });
@@ -441,23 +700,27 @@ async function incidentDetail(id) {
     el("div", { class: "split" },
       el("div", {},
         el("div", { class: "card" },
-          el("div", { class: "row" }, sev(i.severity), status(i.status), synth(i.synthetic), i.escalated ? pill("escalated: 3+ tactics", "sev-critical") : null),
+          el("div", { class: "row" }, sev(i.severity), status(i.status), i.escalated ? pill("escalated: 3+ tactics", "sev-critical") : null),
           el("h1", { style: { marginTop: "8px" } }, `Incident #${i.id}: ${i.title}`),
-          el("div", { class: "row" }, i.stages.map((t, n) => el("span", {}, n ? "→ " : "", pill(t, "stage")))),
+          killChainList(i),
           actions),
         el("div", { class: "card" }, el("h2", {}, `Alert timeline (${i.alerts.length})`),
           table(["First seen", "Severity", "Alert", "Tactics", "Techniques", "Status"],
-            i.timeline.map((t) => ({ id: t.alert_id, cells: [fmtTime(t.ts), sev(t.severity), t.title, t.tactics.join(", "), t.techniques.join(", "), status(t.status)] })),
+            i.timeline.map((t) => ({ id: t.alert_id, cells: [stamp(t.ts), sev(t.severity), t.title, t.tactics.join(", "), t.techniques.join(", "), status(t.status)] })),
             (r) => go("alerts", r.id))),
         el("div", { class: "card" }, el("h2", {}, `Evidence (${i.events.length} events)`),
           table(["Time", "Type", "User", "Source IP", "Host", "Message"],
-            i.events.map((e) => ({ cells: [fmtTime(e.ts), e.event_type, entityLink("user", e.user), el("code", {}, entityLink("src_ip", e.src_ip)), entityLink("host", e.host), e.message ?? ""] }))))),
+            i.events.map((e) => ({ cells: [stamp(e.ts), e.event_type, entityLink("user", e.user), el("code", {}, entityLink("src_ip", e.src_ip)), entityLink("host", e.host), eventMessage(e)] }))))),
       el("div", {},
-        el("div", { class: "card" }, el("h2", {}, "Details"), el("dl", { class: "kv" },
-          ...[["Incident", `#${i.id}`], ["First seen", fmtTime(i.first_seen)], ["Last seen", fmtTime(i.last_seen)],
-            ["Source IPs", entityLinks("src_ip", i.entities.src_ip)], ["Accounts", entityLinks("user", i.entities.user)],
-            ["Hosts", entityLinks("host", i.entities.host)], ["Assignee", i.assignee ?? "—"], ["Resolved", fmtTime(i.resolved_at)]]
-            .flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]))),
+        el("div", { class: "card" }, el("h2", {}, "Details"),
+          el("dl", { class: "kv" },
+            ...[["Incident", `#${i.id}`], ["First seen", fmtTime(i.first_seen)], ["Last seen", fmtTime(i.last_seen)]]
+              .flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)])),
+          el("p", { class: "muted entity-rule", id: "correlation-rule" }, correlationRule(i)),
+          el("dl", { class: "kv" },
+            ...[["Source IPs", entityLinks("src_ip", i.entities.src_ip)], ["Accounts", entityLinks("user", i.entities.user)],
+              ["Hosts", entityLinks("host", i.entities.host)], ["Assignee", i.assignee ?? "—"], ["Resolved", fmtTime(i.resolved_at)]]
+              .flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]))),
         el("div", { class: "card" }, el("h2", {}, "Assets involved"),
           el("p", { class: "muted" }, "Inventoried systems reached by this incident. Alerts touching high or critical assets, or systems that process sensitive data, carry a raised severity."),
           assetChips(i.assets)),
@@ -466,22 +729,83 @@ async function incidentDetail(id) {
   );
 }
 
+// One bar per UTC day of this entity's stored events. Counts come from the server
+// (newest evidence event that names the entity), so the page only draws them.
+function entityAlertBars(series) {
+  const days = Array.isArray(series && series.days) ? series.days : [];
+  const bars = days.map((d) => ({
+    day: String(d.day || ""),
+    count: Math.max(0, Number(d.count) || 0),
+  })).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d.day));
+  const max = Math.max(1, ...bars.map((b) => b.count));
+  const total = bars.reduce((n, b) => n + b.count, 0);
+  const omitted = Math.max(0, Number(series && series.omitted) || 0);
+  const start = bars.length ? bars[0].day : "";
+  const end = bars.length ? bars[bars.length - 1].day : "";
+  const span = start === end ? start : `${start} to ${end}`;
+  const older = omitted
+    ? ` ${omitted} older ${omitted === 1 ? "alert is" : "alerts are"} outside this window.`
+    : "";
+  return {
+    empty: bars.length === 0,
+    label: bars.length
+      ? `Alerts by day, event time, ${span}: ${bars.map((b) => `${b.day} ${b.count}`).join(", ")}`
+      : "No stored events for this entity.",
+    note: bars.length
+      ? `${total} ${total === 1 ? "alert" : "alerts"} across ${bars.length} ${bars.length === 1 ? "day" : "days"}, ${span}.${older}`
+      : "No stored events for this entity.",
+    bars: bars.map((b) => ({ day: b.day, count: b.count, share: b.count / max })),
+  };
+}
+
+function entityDayChart(series) {
+  const model = entityAlertBars(series);
+  const head = [
+    el("h2", {}, "Alerts by day"),
+    el("p", { class: "muted" }, "Each alert counts on the UTC day of its newest stored event for this entity."),
+    el("p", { class: "muted", id: "entity-day-note" }, model.note),
+  ];
+  if (model.empty) return el("div", { id: "entity-days" }, head);
+  const W = 520, H = 84, labelH = 16, top = 4, n = model.bars.length;
+  const slot = W / n, inner = H - labelH - top;
+  const round = (v) => (Math.round(v * 100) / 100).toString();
+  const marks = model.bars.map((b, i) => {
+    const h = b.count ? Math.max(2, b.share * inner) : 1;
+    return svgEl("rect", {
+      class: b.count ? "f-accent" : "empty",
+      x: round(i * slot + 1), y: round(top + inner - h),
+      width: round(Math.max(1, slot - 2)), height: round(h),
+    }, svgEl("title", {}, `${b.day}: ${b.count}`));
+  });
+  const axis = [
+    svgEl("text", { class: "tick", x: 0, y: H - 2 }, model.bars[0].day.slice(5)),
+    n > 1 ? svgEl("text", { class: "tick", x: W, y: H - 2, "text-anchor": "end" }, model.bars[n - 1].day.slice(5)) : null,
+  ];
+  return el("div", { id: "entity-days" }, head,
+    svgEl("svg", {
+      class: "chart bars day-chart", viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": model.label,
+    }, marks, axis),
+    el("ul", { class: "sr-only" }, model.bars.map((b) => el("li", {}, `${b.day}: ${b.count}`))));
+}
+
 // ---------- entity page ----------
 async function entityDetail(kind, value) {
   if (!Object.hasOwn(ENTITY_KINDS, kind)) throw new Error("Unknown entity kind");
-  const e = await api(`/api/entities/${kind}/${encodeURIComponent(value)}`);
+  const e = await readView("entity", () => api(`/api/entities/${kind}/${encodeURIComponent(value)}`));
+  if (!e) return;
   const kpi = (v, l) => el("div", { class: "kpi" }, el("div", { class: "v" }, v ?? "—"), el("div", { class: "l" }, l));
   const counted = e.contributions.filter((c) => c.counted);
   const weights = Object.entries(e.severity_weights).map(([s, w]) => `${s} ${w}`).join(", ");
   render(
     el("p", {}, el("a", { href: "#dashboard" }, "← Dashboard")),
     el("div", { class: "card" },
-      el("div", { class: "row" }, pill(ENTITY_KINDS[e.kind], "stage"), synth(e.synthetic)),
+      el("div", { class: "row" }, pill(ENTITY_KINDS[e.kind], "stage")),
       el("h1", { style: { marginTop: "8px" } }, e.value),
       el("p", {}, huntLink(e.kind, e.value, `Hunt this ${ENTITY_KINDS[e.kind].toLowerCase()} (last 7 days)`)),
       el("div", { class: "kpis" },
         kpi(e.score, "Risk score"), kpi(counted.length, "Alerts counted"), kpi(e.incidents.length, "Incidents"),
-        kpi(e.event_count.toLocaleString(), "Events"), kpi(fmtTime(e.first_seen), "First seen"), kpi(fmtTime(e.last_seen), "Last seen"))),
+        kpi(e.event_count.toLocaleString(), "Events"), kpi(fmtTime(e.first_seen), "First seen"), kpi(fmtTime(e.last_seen), "Last seen")),
+      entityDayChart(e.alerts_by_day)),
     el("div", { class: "card" }, el("h2", {}, "Why this score"),
       el("p", { class: "muted" }, `Each alert whose evidence includes this ${ENTITY_KINDS[e.kind].toLowerCase()} adds its severity weight (${weights}), halved for every ${e.half_life_hours} hours between the alert and the newest event in the data (${fmtTime(e.anchor)}). Alerts closed as ${e.excluded_dispositions.map((d) => d.replace("_", " ")).join(" or ")} add nothing. The weights below sum to the score.`),
       table(["Alert", "Severity", "Status", "Last seen", "Base weight", "Age (h)", "Decay", "Weight"],
@@ -491,12 +815,13 @@ async function entityDetail(kind, value) {
           { num: c.base_weight }, { num: c.age_hours }, { num: c.decay }, { num: c.counted ? c.weight : "not counted" }] })),
         (r) => go("alerts", r.id))),
     el("div", { class: "card" }, el("h2", {}, `Incidents (${e.incidents.length})`),
-      table(["Severity", "Incident", "Alerts", "Status", "Last seen", ""],
-        e.incidents.map((i) => ({ id: i.id, cells: [sev(i.severity), i.title, { num: i.alert_count }, status(i.status), fmtTime(i.last_seen), synth(i.synthetic)] })),
+      table(["Severity", "Incident", "Alerts", "Status", "Last seen"],
+        e.incidents.map((i) => ({ id: i.id, cells: [sev(i.severity), i.title, { num: i.alert_count }, status(i.status), fmtTime(i.last_seen)] })),
         (r) => go("incidents", r.id))),
     el("div", { class: "card" }, el("h2", {}, `Recent events (latest ${e.recent_events.length} of ${e.event_count.toLocaleString()})`),
       table(["Time", "Severity", "Type", "User", "Source IP", "Host", "Source", "Message"],
-        e.recent_events.map((x) => ({ cells: [fmtTime(x.ts), sev(x.severity), x.event_type, entityLink("user", x.user), el("code", {}, entityLink("src_ip", x.src_ip)), entityLink("host", x.host), el("span", {}, x.source, " ", synth(x.synthetic)), x.message ?? ""] })))),
+        e.recent_events.map((x) => ({ cells: [stamp(x.ts), sev(x.severity), x.event_type, entityLink("user", x.user), el("code", {}, entityLink("src_ip", x.src_ip)), entityLink("host", x.host), x.source, eventMessage(x)] })),
+        null, "event-log")),
   );
 }
 
@@ -548,39 +873,58 @@ async function events(offset = 0) {
   form.addEventListener("submit", (ev) => {
     ev.preventDefault();
     const p = new URLSearchParams();
-    for (const [k, v] of new FormData(form)) if (v) p.set(k, v.trim());
+    for (const [k, v] of new FormData(form)) if (v.trim()) p.set(k, v.trim());
     try { sessionStorage.setItem("eventFilter", p.toString()); } catch { /* ignore */ }
     guarded(() => events(0));
   });
   const query = new URLSearchParams(saved);
   if (query.get("severity")) query.set("severity_mode", "min");
   query.set("limit", "100"); query.set("offset", String(offset));
-  let data;
-  try { data = await api(`/api/events?${query}`); }
-  catch (e) { render(el("h1", {}, "Event search"), form, el("p", { class: "error", role: "alert" }, e.message)); return; }
+  const data = await readView("events", () => api(`/api/events?${query}`).catch((e) => e));
+  if (!data) return;
+  if (data instanceof Error) return render(el("h1", {}, "Event search"), form, el("p", { class: "error", role: "alert" }, data.message));
   const pager = el("div", { class: "row" },
-    el("span", { class: "muted" }, `${data.total.toLocaleString()} matching events · showing ${data.total ? offset + 1 : 0}–${offset + data.events.length}`),
+    el("span", { class: "muted" }, `${data.total ? `${offset + 1}–${offset + data.events.length} of ` : ""}${data.total.toLocaleString()} events`),
     el("button", { class: "ghost", disabled: offset === 0, onclick: () => guarded(() => events(Math.max(0, offset - 100))) }, "Newer"),
     el("button", { class: "ghost", disabled: offset + 100 >= data.total, onclick: () => guarded(() => events(offset + 100)) }, "Older"));
   render(el("h1", {}, "Event search"), form, el("div", { class: "card" }, pager,
-    table(["Time", "Severity", "Type", "User", "Source IP", "Host", "Source", "Message"],
-      data.events.map((e) => ({ id: e.id, cells: [fmtTime(e.ts), sev(e.severity), e.event_type, e.user ?? "—", el("code", {}, e.src_ip ?? "—"), e.host ?? "—", el("span", {}, e.source, " ", synth(e.synthetic)), e.message ?? ""] })),
-      (r) => guarded(() => eventDialog(r.id)))));
+    eventResults(data, saved.size > 0)));
 }
 
-async function eventDialog(id) {
-  const e = await api(`/api/events/${id}`);
+function eventResults(data, filtered) {
+  const empty = data.total ? "No events on this page." : filtered ? "No events match this search." : "No events have been collected.";
+  return table(["Time", "Severity", "Type", "User", "Source IP", "Host", "Source", "Message"],
+    data.events.map((e) => ({ id: e.id, cells: [stamp(e.ts), sev(e.severity), e.event_type, e.user ?? "—",
+      el("code", {}, e.src_ip ?? "—"), el("span", { class: "event-host", title: e.host }, e.host ?? "—"), e.source,
+      el("div", {}, el("span", {}, eventMessage(e)), el("button", { type: "button", class: "event-details ghost",
+        "aria-haspopup": "dialog", "aria-label": `View details for event #${e.id}` }, "View details"))] })),
+    (r, row) => guarded(() => eventDialog(r.id, row)), "event-log event-results", empty);
+}
+
+let detailRevision = 0;
+async function eventDialog(id, row) {
+  const revision = ++detailRevision;
+  const view = viewRevision;
+  const current = () => revision === detailRevision && view === viewRevision && row.isConnected && !$("#modal").open;
+  let e;
+  try { e = await api(`/api/events/${id}`); }
+  catch (error) {
+    if (current()) throw error;
+    return;
+  }
+  if (!current()) return;
   $("#modal-body").replaceChildren(
     el("h2", {}, `Event #${e.id}`),
+    el("p", { class: "event-message" }, eventMessage(e)),
     el("dl", { class: "kv" }, ...["ts", "ingested_at", "source", "host", "event_type", "outcome", "severity", "user", "src_ip", "dest_ip", "batch_id"]
       .flatMap((k) => [el("dt", {}, k), el("dd", {}, e[k] ?? "—",
-        HUNT_PIVOTS.includes(k) && e[k] !== null ? [" ", huntLink(k, e[k], "Hunt", () => $("#modal").close())] : null)]), el("dt", {}, "synthetic"), el("dd", {}, e.synthetic ? "yes (demo data)" : "no")),
+        HUNT_PIVOTS.includes(k) && e[k] !== null ? [" ", huntLink(k, e[k], "Hunt", () => $("#modal").close())] : null)]), el("dt", {}, "synthetic"), el("dd", {}, e.synthetic ? "yes" : "no")),
     el("h3", {}, "Linked alerts"),
-    e.alerts.length ? e.alerts.map((a) => el("div", {}, el("a", { href: `#alerts/${a.id}`, onclick: () => $("#modal").close() }, `#${a.id} ${a.title}`), " ", status(a.status)))
+    e.alerts.length ? el("div", {}, e.alerts.map((a) => el("div", {}, el("a", { href: `#alerts/${a.id}`, onclick: () => $("#modal").close() }, `#${a.id} ${a.title}`), " ", status(a.status))))
       : el("p", { class: "muted" }, "None."),
     el("h3", {}, "Original record (secrets redacted)"), el("pre", {}, e.raw ?? ""),
     el("p", {}, el("button", { onclick: () => $("#modal").close() }, "Close")));
-  openModal();
+  openModal(row);
 }
 
 // ---------- hunt ----------
@@ -600,6 +944,13 @@ const HUNT_SYNTAX = [
   ["| timechart span=5m|15m|1h|6h|1d [count] [by f]", "last:24h | timechart span=1h by user", "Events per time bucket (at most 500 buckets); by keeps the top 5 plus other"],
 ];
 const HUNT_FIELDS = "user host source outcome src_ip dest_ip ip batch_id event_type severity dest_port synthetic message last since until";
+// Each query matches one labeled scenario in the synthetic demo. That dataset is dated on the previous
+// weekday, so last:7d still covers it. Clicking a link puts the query in the hash and runs it.
+const HUNT_EXAMPLES = [
+  ["Brute force", "event_type:auth_failure user:admin src_ip:203.0.113.45 synthetic:1 last:7d"],
+  ["Impossible travel", "user:erin source:demo:impossible_travel synthetic:1 last:7d"],
+  ["Large transfer", 'event_type:cloud_data_access user:svc-deploy-tmp "customer-exports" synthetic:1 last:7d'],
+];
 const huntHref = (q) => `#hunt/${encodeURIComponent(q)}`;
 const huntValue = (v) => (/^[^\s"\\]+$/.test(v) && !v.endsWith("*") ? v : `"${v.replace(/[\\"]/g, "\\$&")}"`);
 const huntLink = (field, value, label, onclick) => el("a", { href: huntHref(`${field}:${huntValue(String(value))} last:7d`),
@@ -622,6 +973,12 @@ async function huntView(query = "", offset = 0) {
       el("label", { style: { flex: "1 1 220px", minWidth: "0" } }, "Query", input),
       el("button", { type: "submit" }, "Hunt"),
       can("analyst") ? el("button", { type: "button", class: "ghost", onclick: () => saveHuntDialog(input.value.trim()) }, "Save search") : null),
+    el("div", { id: "hunt-examples" },
+      el("p", { class: "muted" }, "Example hunts"),
+      el("div", { class: "row" }, HUNT_EXAMPLES.map(([label, q]) => el("a", {
+        class: `button ghost hunt-example${query === q ? " active" : ""}`, href: huntHref(q),
+        title: q,
+      }, label)))),
     el("details", { style: { marginTop: "10px" } }, el("summary", { class: "muted" }, "Syntax"),
       el("p", { class: "muted" }, "Terms are ANDed; there is no OR. Fields: ", el("code", {}, HUNT_FIELDS), ". ip matches source or destination."),
       el("p", { class: "muted" }, "One ", el("code", {}, "|"), " stage may follow the filter to aggregate it (a | inside quotes is part of the value). ",
@@ -632,7 +989,9 @@ async function huntView(query = "", offset = 0) {
     openHunt(input.value.trim());
   });
   const params = new URLSearchParams({ q: query, limit: "100", offset: String(offset) });
-  const [saved, data] = await Promise.all([api("/api/hunt/saved"), api(`/api/hunt?${params}`).catch((e) => e)]);
+  const result = await readView("hunt", () => Promise.all([api("/api/hunt/saved"), api(`/api/hunt?${params}`).catch((e) => e)]));
+  if (!result) return;
+  const [saved, data] = result;
   const remove = (s) => confirm(`Delete saved search "${s.name}"?`) && guarded(async () => {
     await api(`/api/hunt/saved/${s.id}/delete`, { method: "POST" });
     toast("Saved search deleted");
@@ -645,27 +1004,26 @@ async function huntView(query = "", offset = 0) {
       el("code", {}, s.query), `${s.owner} · ${fmtTime(s.created_at)}`,
       el("span", { class: "row" },
         can("analyst") ? el("button", { class: "ghost", onclick: () => promoteDialog(s) }, "Promote to detection…") : null,
-        mayDelete(s) ? el("button", { class: "danger", onclick: () => remove(s) }, "Delete") : null)] }))));
+        mayDelete(s) ? el("button", { class: "danger", onclick: () => remove(s) }, "Delete") : null)] })), null, null, "No saved searches."));
+  function renderHunt(resultCard) {
+    render(el("h1", {}, "Hunt"), form, resultCard, savedCard);
+    if (state.focusSearch) { state.focusSearch = false; input.focus(); }
+  }
   if (data instanceof Error) {
-    render(el("h1", {}, "Hunt"), form, el("div", { class: "card" }, el("p", { class: "error", role: "alert" }, data.message)), savedCard);
+    renderHunt(el("div", { class: "card" }, el("p", { class: "error", role: "alert" }, data.message)));
     return;
   }
-  const parsed = el("div", { class: "row", style: { alignItems: "center" } }, el("span", { class: "muted" }, "Parsed as:"),
-    data.terms.length ? data.terms.map((t) => pill(t.text, "technique")) : el("span", { class: "muted" }, "no terms, so every event"));
+  const parsed = data.terms.length ? el("div", { class: "row", style: { alignItems: "center" } }, el("span", { class: "muted" }, "Parsed as:"),
+    data.terms.map((t) => pill(t.text, "technique"))) : null;
   if (data.kind) {
-    if (state.focusSearch) { state.focusSearch = false; queueMicrotask(() => input.focus()); }
-    render(el("h1", {}, "Hunt"), form, el("div", { class: "card", id: "hunt-agg" }, parsed, huntAggregate(data)), savedCard);
+    renderHunt(el("div", { class: "card", id: "hunt-agg" }, parsed, huntAggregate(data)));
     return;
   }
   const pager = el("div", { class: "row" },
-    el("span", { class: "muted" }, `${data.total.toLocaleString()} matching events · showing ${data.total ? offset + 1 : 0}–${offset + data.events.length}`),
+    el("span", { class: "muted" }, `${data.total ? `${offset + 1}–${offset + data.events.length} of ` : ""}${data.total.toLocaleString()} events`),
     el("button", { class: "ghost", disabled: offset === 0, onclick: () => guarded(() => huntView(query, Math.max(0, offset - 100))) }, "Newer"),
     el("button", { class: "ghost", disabled: offset + 100 >= data.total, onclick: () => guarded(() => huntView(query, offset + 100)) }, "Older"));
-  if (state.focusSearch) { state.focusSearch = false; queueMicrotask(() => input.focus()); }
-  render(el("h1", {}, "Hunt"), form, el("div", { class: "card" }, parsed, pager,
-    table(["Time", "Severity", "Type", "User", "Source IP", "Host", "Source", "Message"],
-      data.events.map((e) => ({ id: e.id, cells: [fmtTime(e.ts), sev(e.severity), e.event_type, e.user ?? "—", el("code", {}, e.src_ip ?? "—"), e.host ?? "—", el("span", {}, e.source, " ", synth(e.synthetic)), e.message ?? ""] })),
-      (r) => guarded(() => eventDialog(r.id)))), savedCard);
+  renderHunt(el("div", { class: "card" }, parsed, pager, eventResults(data, Boolean(query.trim()))));
 }
 
 // Pipeline results (| stats, | top, | timechart). Value cells pivot: they add field:value to the filter
@@ -692,9 +1050,22 @@ function svgEl(tag, attrs = {}, ...children) {
   return node;
 }
 
+// A timechart with no events is a blank box of zero bars. Name the query and the span instead.
+const HUNT_TIMECHART_SPANS = ["5m", "15m", "1h", "6h", "1d"];
+function huntTimechartEmpty(data) {
+  const rows = data && Array.isArray(data.rows) ? data.rows : [];
+  const hit = rows.some((row) => Array.isArray(row) && row.slice(1).some((n) => Number(n) > 0));
+  if (hit) return "";
+  const span = data && data.span;
+  const query = data && typeof data.query === "string" ? data.query.trim() : "";
+  if (!HUNT_TIMECHART_SPANS.includes(span) || !query) return "No matching events.";
+  return `No events match ${query} in ${span} buckets.`;
+}
+
 // Bars for one series, lines for several (by), and the same numbers as a table for screen readers and copying.
 function huntTimechart(data) {
-  if (!data.rows.length) return el("p", { class: "muted" }, "No matching events.");
+  const empty = huntTimechartEmpty(data);
+  if (empty) return el("p", { class: "muted", id: "hunt-timechart-empty", role: "status" }, empty);
   const series = data.columns.slice(1);
   const colors = ["--accent", "--high", "--low", "--med", "--synthetic", "--info"];
   const W = 760, H = 200, L = 44, B = 22, T = 8, n = data.rows.length;
@@ -746,8 +1117,9 @@ function saveHuntDialog(query) {
 
 // ---------- ingest ----------
 async function ingest() {
-  const batches = await api("/api/ingest/batches");
-  const scenarios = await api("/api/demo/scenarios");
+  const resultData = await readView("ingest", () => Promise.all([api("/api/ingest/batches"), api("/api/demo/scenarios")]));
+  if (!resultData) return;
+  const [batches, scenarios] = resultData;
   const result = el("div");
   const upload = el("form", { class: "card" },
     el("h2", {}, "Upload a log file"),
@@ -758,7 +1130,7 @@ async function ingest() {
       el("label", {}, "Year (BSD syslog)", el("input", { name: "year", type: "number", min: 2000, max: 2100, placeholder: "auto" })),
       el("label", { style: { flexDirection: "row", alignItems: "center" } }, el("input", { type: "checkbox", name: "synthetic", value: "1" }), "Mark as synthetic"),
       el("button", { type: "submit", disabled: !can("analyst") }, "Ingest")),
-    el("p", { class: "muted" }, "Samples live in samples/ (all synthetic). Max 5 MB per upload."),
+    el("p", { class: "muted" }, "Sample files are in samples/. Upload limit is 5 MB."),
     result);
   upload.addEventListener("submit", (ev) => {
     ev.preventDefault();
@@ -778,7 +1150,7 @@ async function ingest() {
 
   const sim = el("form", { class: "card" },
     el("h2", {}, "Replay an attack simulation"),
-    el("p", { class: "muted" }, "Writes labeled synthetic events (RFC 5737 documentation IPs) into this instance only. Nothing is sent to other systems."),
+    el("p", { class: "muted" }, "Replay writes events to this instance using RFC 5737 test addresses."),
     el("div", { class: "row" },
       el("label", {}, "Scenario", el("select", { name: "scenario" }, scenarios.map((s) => el("option", { value: s.name }, `${s.name} — ${s.malicious ? "malicious" : "benign"}`)))),
       el("button", { type: "submit", disabled: !can("analyst") }, "Replay")),
@@ -805,9 +1177,9 @@ async function ingest() {
       el("p", { class: "muted" }, "Responses: 201 all accepted · 207 partially accepted (see rejections) · 422 none accepted · 400 malformed · 401/403 auth. Full schema in docs/API.md.")),
     el("div", { class: "card" }, el("h2", {}, "Recent batches"),
       table(["Received", "Source", "Format", "Accepted", "Rejected", "Detection", "By", "Rejection reasons"],
-        batches.map((b) => ({ cells: [fmtTime(b.created_at), el("span", {}, b.source, " ", synth(b.synthetic)), b.format, { num: b.accepted }, { num: b.rejected },
+        batches.map((b) => ({ cells: [fmtTime(b.created_at), b.source, b.format, { num: b.accepted }, { num: b.rejected },
           pill(b.detection_status, { ok: "st-ok", recovered: "st-ok", failed: "st-failing" }[b.detection_status] || "st-degraded"),
-          b.submitted_by, b.errors.slice(0, 3).map((e) => `#${e.index}: ${e.reason}`).join("; ") + (b.errors.length > 3 ? ` (+${b.errors.length - 3} more)` : "")] })))),
+          b.submitted_by, b.errors.slice(0, 3).map((e) => `#${e.index}: ${e.reason}`).join("; ") + (b.errors.length > 3 ? ` (+${b.errors.length - 3} more)` : "")] })), null, null, "No ingestion batches have been recorded.")),
   );
 }
 
@@ -818,16 +1190,29 @@ function ingestSummary(r) {
     r.rejections?.length ? el("ul", {}, r.rejections.slice(0, 10).map((x) => el("li", {}, `Record ${x.index}: ${x.reason}`))) : null);
 }
 
+// Noise-lab word for a built-in rule. Imported Sigma rules and promoted searches are proved by
+// their own labeled sample, so they stay unmarked here. Unknown words are dropped.
+function ruleLabMark(rule, labRules) {
+  if (!rule || rule.sigma || rule.search || !Array.isArray(labRules)) return null;
+  const row = labRules.find((r) => r && r.rule_id === rule.id);
+  const verdict = row && row.verdict;
+  if (!["quiet", "noisy", "blind", "disabled", "untested"].includes(verdict)) return null;
+  return { verdict, summary: typeof row.summary === "string" ? row.summary : "" };
+}
+
 // ---------- rules ----------
 async function rules(focus) {
-  const [list, changes, settings, evals, exceptions, suppressionWindows] = await Promise.all([api("/api/rules"), api("/api/changes"), api("/api/settings"), api("/api/evaluations"), api("/api/suppressions"), api("/api/rule-suppression-windows")]);
+  const result = await readView("rules", () => Promise.all([api("/api/rules"), api("/api/changes"), api("/api/settings"), api("/api/evaluations"), api("/api/suppressions"), api("/api/rule-suppression-windows"), api("/api/noise-lab")]));
+  if (!result) return;
+  const [list, changes, settings, evals, exceptions, suppressionWindows, lab] = result;
   const pending = changes.filter((c) => c.status === "pending");
   const ruleCards = list.map((r) => {
     const p = r.performance || {};
     const ev = r.evaluation;
     return el("div", { class: "card", id: `rule-${r.id}`, tabindex: "-1" },
-      el("div", { class: "row", style: { justifyContent: "space-between" } },
-        el("h2", {}, r.name), el("span", {}, sev(r.severity), " ", r.enabled ? pill("enabled", "st-ok") : pill("disabled", "st-rejected"))),
+      el("div", { class: "row rule-head", style: { justifyContent: "space-between" } },
+        el("div", { class: "row rule-name" }, el("h2", {}, r.name), ruleLabPill(ruleLabMark(r, lab.rules))),
+        el("span", {}, sev(r.severity), " ", r.enabled ? pill("enabled", "st-ok") : pill("disabled", "st-rejected"))),
       el("p", { class: "muted" }, r.description),
       el("p", {}, el("strong", {}, "MITRE ATT&CK: "), techniques(r.techniques)),
       el("p", {}, el("strong", {}, "Alert grouping: "), r.grouping.length ? r.grouping.join(" + ") : "rule default",
@@ -877,8 +1262,8 @@ async function rules(focus) {
     el("h1", {}, "Detection rules"),
     el("div", { class: "card" },
       el("h2", {}, "How rules change"),
-      el("p", {}, "Rules are fixed thresholds you can read and test. No machine learning. Changes to rules or security settings, and asset inventory edits that could lower alert severity, are proposals until a ",
-        el("strong", {}, "different"), " admin approves them. Each proposal is scored against the labeled synthetic scenarios before review. Suggestions come from analyst verdicts: when at least two false positives share a cause, such as one IP or one account, Watchpost proposes an exclusion or a new threshold. It never applies the change itself."),
+      el("p", {}, "Rule and security changes, plus asset edits that could lower severity, require approval from a ",
+        el("strong", {}, "different"), " admin. Proposals are tested against labeled scenarios. Two false positives with a shared cause can trigger a suggested exclusion or threshold change."),
       el("div", { class: "row" },
         can("analyst") ? el("button", { onclick: () => guarded(async () => { const r = await api("/api/rules/suggestions", { method: "POST" }); toast(r.message); rules(); }) }, "Suggest improvements from feedback") : null,
         can("analyst") ? el("button", { class: "ghost", onclick: () => guarded(async () => { await api("/api/evaluations", { method: "POST" }); toast("Evaluation recorded"); rules(); }) }, "Run evaluation") : null,
@@ -980,9 +1365,8 @@ function backtestBlock(bt) {
     el("ul", { class: "bt-list" }, items.map(finding))) : null);
   return el("div", { class: "backtest" },
     el("h3", {}, "Backtest on stored events"),
-    bt.window ? el("p", { class: "muted" }, `${fmtTime(bt.window.start)} → ${fmtTime(bt.window.end)} (last ${bt.window_days} day(s) of stored event time), ${bt.events_scanned} events scanned`,
+    bt.window ? el("p", { class: "muted", title: bt.synthetic_events > 0 && bt.synthetic_events < bt.events_scanned ? `${bt.synthetic_events} synthetic events scanned` : null }, `${fmtTime(bt.window.start)} → ${fmtTime(bt.window.end)} (last ${bt.window_days} day(s) of stored event time), ${bt.events_scanned} events scanned`,
       bt.capped ? el("strong", {}, `; capped at ${bt.max_events} events, so the window starts later`) : null,
-      bt.synthetic !== "none" ? el("span", {}, ". ", pill(bt.synthetic === "all" ? "synthetic" : `${bt.synthetic_events} synthetic`, "synthetic")) : null,
       ". Replays stored events only; it cannot predict traffic that has not arrived.")
       : el("p", { class: "muted" }, "No stored events to replay."),
     !bt.running.proposed ? el("p", {}, el("strong", {}, "The change disables the rule: every finding is lost.")) : null,
@@ -1136,7 +1520,7 @@ const isSigmaChange = (c) => c.kind.startsWith("sigma_") || c.kind.startsWith("s
 const sampleLine = (s) => (s ? el("div", {}, pill(s.passes ? "sample passes" : "sample fails", s.passes ? "st-ok" : "st-rejected"), ` ${s.summary} (${s.malicious} malicious, ${s.benign} benign)`)
   : el("div", { class: "muted" }, "No labeled sample: the rule cannot be enabled and its ATT&CK mapping is not validated."));
 const sigmaPreview = (bt) => (bt && bt.window
-  ? el("div", { class: "muted" }, `On stored events ${fmtTime(bt.window.start)} → ${fmtTime(bt.window.end)}: ${bt.matched_events} of ${bt.events_scanned} event(s) match, ${bt.findings} finding(s)${bt.group_keys.length ? ` (${bt.group_keys.join(", ")})` : ""}${bt.synthetic_events ? `; ${bt.synthetic_events} of the scanned events are synthetic` : ""}.`)
+  ? el("div", { class: "muted", title: bt.synthetic_events > 0 && bt.synthetic_events < bt.events_scanned ? `${bt.synthetic_events} synthetic events scanned` : null }, `On stored events ${fmtTime(bt.window.start)} → ${fmtTime(bt.window.end)}: ${bt.matched_events} of ${bt.events_scanned} event(s) match, ${bt.findings} finding(s)${bt.group_keys.length ? ` (${bt.group_keys.join(", ")})` : ""}.`)
   : el("div", { class: "muted" }, "No stored events to preview against."));
 
 function sigmaEvidence(c) {
@@ -1415,26 +1799,96 @@ async function historyDialog(rule) {
 // ---------- noise lab ----------
 const VERDICT_CLASS = { quiet: "st-ok", noisy: "st-degraded", blind: "st-failing", disabled: "st-rejected", untested: "st-rejected" };
 
+function ruleLabPill(mark) {
+  if (!mark) return null;
+  return el("span", {
+    class: `pill rule-lab ${VERDICT_CLASS[mark.verdict] || "st-rejected"}`,
+    title: mark.summary || null,
+    "aria-label": `Noise lab ${mark.verdict}`,
+  }, mark.verdict);
+}
+
+// A rule id may break after an underscore when the column is narrow. The characters stay the id.
+function ruleId(id) {
+  const parts = String(id).split("_");
+  const children = [];
+  parts.forEach((part, i) => {
+    if (i) children.push("_", el("wbr"));
+    children.push(part);
+  });
+  return el("code", { class: "nr-id" }, children);
+}
+
+function tokenList(list) {
+  if (!list.length) return el("span", { class: "muted" }, "none");
+  return el("span", { class: "tokens" }, list.map((n) => el("code", {}, n)));
+}
+
+function noiseStat(cls, label, value) {
+  return el("div", { class: `nr-stat ${cls}` }, el("span", {}, label), el("b", {}, value));
+}
+
+// Three counts and a pass/fail word. Null when the payload has no strip, so the page still renders.
+function noiseStripFacts(strip) {
+  if (!strip || typeof strip.scenarios !== "number" || typeof strip.detected_attacks !== "number"
+      || typeof strip.false_positives !== "number") return null;
+  const pass = strip.verdict === "pass";
+  const detected = Number.isInteger(strip.attacks) && strip.attacks > 0
+    ? `${strip.detected_attacks} of ${strip.attacks}`
+    : String(strip.detected_attacks);
+  return {
+    verdict: pass ? "pass" : "fail",
+    scenarios: String(strip.scenarios),
+    detected,
+    falsePositives: String(strip.false_positives),
+    missed: Array.isArray(strip.missed) ? strip.missed : [],
+    fired: Array.isArray(strip.false_positive_scenarios) ? strip.false_positive_scenarios : [],
+  };
+}
+
+function noiseStripStat(label, value, title) {
+  return el("div", { class: "lab-fig", title: title || null }, el("b", {}, value), el("span", {}, label));
+}
+
+function noiseStrip(strip) {
+  const facts = noiseStripFacts(strip);
+  if (!facts) return null;
+  const pass = facts.verdict === "pass";
+  return el("div", { id: "noise-strip", class: `lab-strip ${pass ? "lab-pass" : "lab-fail"}`, role: "status" },
+    pill(facts.verdict, pass ? "st-ok" : "st-failing"),
+    noiseStripStat("Scenarios", facts.scenarios, "Scenarios in this run"),
+    noiseStripStat("Detected attacks", facts.detected,
+      facts.missed.length ? `Missed: ${facts.missed.join(", ")}` : "Every labeled attack was detected"),
+    noiseStripStat("False positives", facts.falsePositives,
+      facts.fired.length ? facts.fired.join(", ") : "No benign scenario fired"));
+}
+
 async function noiseLab() {
-  const lab = await api("/api/noise-lab");
-  const names = (list) => (list.length ? list.join(", ") : "none");
-  const rows = lab.rules.map((r) => ({ cells: [
-    el("span", {}, r.name, el("div", { class: "muted" }, el("code", {}, r.rule_id))),
-    pct(r.recall), pct(r.precision), names(r.lookalikes_tested),
-    names(r.lookalikes_fired.concat(r.other_benign_fired)),
-    { num: r.suppressed }, pill(r.verdict, VERDICT_CLASS[r.verdict] || "st-rejected"), r.summary] }));
+  const lab = await readView("noise", () => api("/api/noise-lab"));
+  if (!lab) return;
+  const rules = lab.rules.map((r) => el("article", { class: "nr" },
+    el("h3", {}, r.name),
+    ruleId(r.rule_id),
+    el("div", { class: "nr-field nr-tested" }, el("span", {}, "Look-alikes tested"), tokenList(r.lookalikes_tested)),
+    el("div", { class: "nr-field nr-fired" }, el("span", {}, "Benign scenarios that fired"), tokenList(r.lookalikes_fired.concat(r.other_benign_fired))),
+    noiseStat("nr-recall", "Recall", pct(r.recall)),
+    noiseStat("nr-precision", "Precision", pct(r.precision)),
+    noiseStat("nr-excepted", "Excepted", String(r.suppressed)),
+    pill(r.verdict, VERDICT_CLASS[r.verdict] || "st-rejected"),
+    el("p", { class: "nr-read" }, r.summary)));
   const lookalikes = lab.scenarios.filter((s) => s.lookalike_of);
   render(
     el("h1", {}, "Noise lab"),
+    noiseStrip(lab.strip),
     el("div", { class: "card" },
       el("h2", {}, "Where the rules get noisy"),
-      el("p", {}, `Every rule runs against every labeled synthetic scenario, each in isolation: the attacks it should catch and ${lab.summary.lookalikes} benign look-alikes written to resemble them. ${lab.summary.noisy} of ${lab.summary.rules} rules fire on benign activity. That is shown here, not tuned away: a rule is only changed when there is a principled fix that keeps its attack detected.`),
-      el("p", { class: "muted" }, "Recall is attacks caught out of attacks labeled. Precision is true detections out of everything the rule fired on, counted on these scenarios only: it says nothing about real traffic. Results use the current rule parameters and approved tuning exceptions (seed ", lab.seed, "). data_exfil_volume uses flat thresholds, so the nightly backup fires here until a tuning exception for the backup server is approved; only then is that one principal compared with its own history.")),
+      el("p", {}, `Each rule runs against the attacks and ${lab.summary.lookalikes} benign look-alikes in isolation. ${lab.summary.noisy} of ${lab.summary.rules} rules fire on benign activity.`),
+      el("p", { class: "muted" }, "Recall measures attacks caught. Precision measures the share of detections that are attacks. This run uses current rules and approved exceptions (seed ", lab.seed, "). data_exfil_volume uses flat thresholds, so the nightly backup fires here until a tuning exception for the backup server is approved; only then is that one principal compared with its own history.")),
     el("div", { class: "card" }, el("h2", {}, "Rules against their look-alikes"),
-      table(["Rule", "Recall", "Precision", "Look-alikes tested", "Benign scenarios that fired", "Excepted", "Verdict", "Reading"], rows)),
-    el("div", { class: "card" }, el("h2", {}, "The benign look-alikes"),
+      el("div", { class: "noise-rules" }, rules)),
+    el("div", { class: "card", id: "noise-scenarios" }, el("h2", {}, "The benign look-alikes"),
       table(["Scenario", "Written for", "What happens"], lookalikes.map((s) => ({ cells: [
-        el("span", {}, el("code", {}, s.name), " ", synth(true)), el("code", {}, s.lookalike_of), s.description] })))),
+        el("code", {}, s.name), el("code", {}, s.lookalike_of), s.description] })))),
   );
 }
 
@@ -1446,10 +1900,11 @@ function coverageDetail(t, meaning) {
   return el("div", {},
     el("h2", {}, `${t.id} ${t.name}`),
     el("p", {}, levelPill(t.level), " ", meaning[t.level]),
+    t.level === "mapped" && t.why ? el("p", { class: "cov-why" }, t.why) : null,
     el("p", { class: "muted" }, `Tactic: ${t.tactic}. ${t.hits} live alert(s) from the rules mapped here.`),
     el("h3", {}, "Proving scenarios"),
     t.scenarios.length
-      ? el("div", { class: "row" }, t.scenarios.map((n) => el("span", {}, el("code", {}, n), " ", synth(true))))
+      ? el("div", { class: "row" }, t.scenarios.map((n) => el("code", {}, n)))
       : el("p", { class: "muted" }, "None: no labeled attack scenario proves that a running rule detects this technique."),
     el("h3", {}, "Rules"),
     t.rules.length ? table(["Rule", "State", "Noise-lab verdict", "Benign scenarios that fired", "Proves", "Alerts"], t.rules.map((r) => ({ cells: [
@@ -1462,7 +1917,8 @@ function coverageDetail(t, meaning) {
 }
 
 async function coverageView() {
-  const cov = await api("/api/attack/coverage");
+  const cov = await readView("coverage", () => api("/api/attack/coverage"));
+  if (!cov) return;
   const lv = cov.summary.levels;
   const detail = el("div", { class: "card", "aria-live": "polite" },
     el("p", { class: "muted" }, "Select a technique to see its rules, their noise-lab verdicts, the scenarios that prove it, and its alerts."));
@@ -1471,41 +1927,52 @@ async function coverageView() {
     cells.forEach((b, id) => b.setAttribute("aria-pressed", String(id === t.id)));
     detail.replaceChildren(coverageDetail(t, cov.level_meaning));
   };
-  const columns = cov.tactics.map((tac) => {
+  const quiet = [];
+  const columns = [];
+  for (const tac of cov.tactics) {
     const list = cov.techniques.filter((t) => t.tactic === tac.name);
-    return el("div", { class: "cov-col", role: "group", "aria-label": `${tac.name}: ${list.length} technique(s)` },
+    // A tactic with nothing in the catalog is a blank column. Name it once under the grid.
+    if (!list.length) { quiet.push(tac.name); continue; }
+    columns.push(el("div", { class: "cov-col", role: "group", "aria-label": `${tac.name}: ${list.length} technique(s)` },
       el("div", { class: "cov-head" }, tac.name),
-      list.length ? list.map((t) => {
+      ...list.map((t) => {
         const b = el("button", { type: "button", class: `cov-cell lv-${t.level}`, "aria-pressed": "false",
           "aria-label": `${t.id} ${t.name}: ${LEVEL_WORD[t.level]}, ${t.hits} alert(s)`, onclick: () => show(t) },
           el("b", {}, t.id), el("span", {}, t.name.split(": ").pop()),
           el("small", {}, LEVEL_WORD[t.level], t.hits ? ` · ${t.hits} alerts` : ""));
         cells.set(t.id, b);
         return b;
-      }) : el("p", { class: "cov-empty muted" }, "No catalog technique"));
-  });
+      })));
+  }
   const order = { gap: 0, disabled: 1, mapped: 2 };
   const gaps = cov.techniques.filter((t) => t.level !== "validated").sort((a, b) => order[a.level] - order[b.level] || a.id.localeCompare(b.id));
   render(
     el("div", { class: "page-head" }, el("h1", {}, "ATT&CK coverage"),
       el("a", { href: "/api/attack/navigator.json", download: "watchpost-navigator-layer.json" }, "Export Navigator layer")),
     el("div", { class: "card" },
-      el("p", {}, `${lv.validated} of ${cov.summary.techniques} catalog techniques are validated. ${lv.mapped} are mapped by a rule with no labeled scenario proving it, ${lv.disabled} only by disabled rules, and ${lv.gap} by none. Only validated counts as covered.`),
-      el("p", { class: "muted" }, "Honesty note: the scenarios are synthetic, so validated means a rule detected the project's own labeled data, not real-world coverage. The catalog holds only techniques a Watchpost rule maps to, not all of ATT&CK."),
+      el("p", {}, `${lv.validated} of ${cov.summary.techniques} catalog techniques validated · ${lv.mapped} mapped only · ${lv.disabled} disabled · ${lv.gap} gaps`),
       el("div", { class: "legend", role: "list", "aria-label": "Levels" }, cov.levels.map((l) =>
         el("span", { role: "listitem" }, levelPill(l), " ", cov.level_meaning[l])))),
     el("div", { class: "card" }, el("h2", {}, "Tactics × techniques"),
+      quiet.length ? el("p", { class: "cov-quiet" }, `No catalog techniques: ${quiet.join(", ")}.`) : null,
       el("div", { class: "cov-scroll" }, el("div", { class: "cov-grid" }, columns))),
     detail,
     el("div", { class: "card" }, el("h2", {}, `Gaps: not validated (${gaps.length})`),
       gaps.length ? el("ul", { class: "cov-gaps" }, gaps.map((t) => el("li", {}, levelPill(t.level), " ",
         el("button", { type: "button", class: "ghost mini", onclick: () => { show(t); detail.scrollIntoView({ block: "nearest" }); } }, `${t.id} ${t.name}`),
+        t.level === "mapped" && t.why ? el("span", { class: "cov-why" }, t.why) : null,
         " ", el("span", { class: "muted" }, t.rules.length ? `Rules: ${t.rules.map((r) => r.id + (r.enabled ? "" : " (disabled)")).join(", ")}` : "No rule"))))
         : el("p", { class: "muted" }, "Every catalog technique is validated on the labeled scenarios.")),
   );
 }
 
 // ---------- health ----------
+// The server owns the sentence. A blank or non-string value draws nothing.
+function checkMeans(check) {
+  const text = typeof check?.means === "string" ? check.means.trim() : "";
+  return text;
+}
+
 // ---------- log source health ----------
 // GET /api/sources/health: per (source, host) status computed from arrival times against the wall clock.
 const SOURCE_STATUS = { healthy: "st-ok", late: "st-degraded", silent: "st-failing", learning: "st-pending" };
@@ -1518,26 +1985,29 @@ const durationText = (sec) => (sec === null || sec === undefined ? "—" : sec <
 const sourceHunt = (r) => `source:${huntValue(r.source)}${r.host ? ` host:${huntValue(r.host)}` : ""} last:7d`;
 
 function sourceHealthCard(s) {
-  if (!s) return el("div", { class: "card", id: "source-health" }, el("h2", {}, "Log source health"), el("p", { class: "muted" }, "Could not load source health."));
+  if (!s || s instanceof Error) return el("div", { class: "card", id: "source-health" }, el("h2", {}, "Log source health"),
+    el("p", { class: "error", role: "alert" }, s?.status === 403 ? s.message : "Could not load source health."));
   const t = s.thresholds;
   const where = (r) => `${r.source}${r.host ? ` on ${r.host}` : ""}`;
-  const rows = s.sources.map((r) => ({ cells: [
-    el("span", {}, el("code", {}, r.source), " ", synth(r.synthetic)),
+  const rows = s.sources.map((r) => {
+    const maint = Array.isArray(r.maintenance) ? r.maintenance[0] : r.maintenance;
+    return { cells: [
+    el("code", {}, r.source),
     r.host ?? el("span", { class: "muted" }, "(no host)"),
     el("span", { class: "row" }, el("span", { class: `pill ${SOURCE_STATUS[r.status]}` }, r.status),
-      r.maintenance ? el("span", { class: "pill st-pending", title: r.maintenance.reason }, `maintenance until ${fmtTime(r.maintenance.effective_end)}`) : null),
+      maint ? el("span", { class: "pill st-pending", title: maint.reason }, `maintenance until ${fmtTime(maint.effective_end)}`) : null),
     el("time", { datetime: r.last_seen, title: fmtTime(r.last_seen) }, agoText(r.last_seen)),
     durationText(r.cadence_seconds), { num: r.events_24h },
     el("span", {}, r.reasons.join("; "),
       r.status === "late" || r.status === "silent"
-        ? [" ", el("a", { href: huntHref(sourceHunt(r)), "aria-label": `Hunt its events: ${where(r)}` }, "Hunt its events")] : null)] }));
+        ? [" ", el("a", { href: huntHref(sourceHunt(r)), "aria-label": `Hunt its events: ${where(r)}` }, "Hunt its events")] : null)] }; });
   const card = el("div", { class: "card", id: "source-health" },
     el("h2", {}, "Log source health"),
     el("p", { class: "muted" }, `Each source and host, by when its events arrived (not their timestamps) against the clock now. Cadence is the median gap between arrivals. `
       + `Late: quiet over ${t.late_multiplier}x cadence, ${durationText(t.late_floor_seconds)}, and its longest recent gap. Silent: over ${t.silent_multiplier}x cadence, ${durationText(t.silent_floor_seconds)}, and twice that gap (rule log_source_silent alerts). `
       + `Learning: under ${t.min_gaps} gaps or ${durationText(t.min_history_seconds)} of history.`),
     el("p", {}, ["silent", "late", "healthy", "learning"].flatMap((k) => [el("span", { class: `pill ${SOURCE_STATUS[k]}` }, `${k} ${s.summary[k]}`), " "])),
-    table(["Source", "Host", "Status", "Last arrival", "Cadence", "Events 24h", "Why"], rows),
+    table(["Source", "Host", "Status", "Last arrival", "Cadence", "Events 24h", "Why"], rows, null, null, "No log sources have reported events."),
     s.maintenance_windows.length ? el("div", {}, el("h3", {}, "Maintenance windows"),
       table(["#", "Source", "Host", "Window", "Reason", "Approved by", ""], s.maintenance_windows.map((w) => ({ cells: [
         `#${w.id}`, el("code", {}, w.source), w.host ?? "every host", `${fmtTime(w.starts_at)} – ${fmtTime(w.effective_end)}${w.active ? " (active)" : ""}`, w.reason, w.approved_by,
@@ -1566,7 +2036,9 @@ function sourceHealthCard(s) {
 }
 
 async function health() {
-  const [h, srcs] = await Promise.all([api("/api/health/details"), api("/api/sources/health").catch(() => null)]);
+  const result = await readView("health", () => Promise.all([api("/api/health/details"), api("/api/sources/health").catch((e) => e)]));
+  if (!result) return;
+  const [h, srcs] = result;
   render(
     el("h1", {}, "System health"),
     el("div", { class: "card" },
@@ -1576,25 +2048,31 @@ async function health() {
           can("analyst") ? el("button", { onclick: () => guarded(async () => { const r = await api("/api/detection/run", { method: "POST" }); toast(`Detection ${r.status}: ${r.alerts_created} created, ${r.alerts_updated} updated${r.error ? ` — ${r.error}` : ""}`); health(); refreshBanner(); }) }, "Run detection (full scan)") : null,
           el("button", { class: "ghost", onclick: () => guarded(() => { refreshBanner(); return health(); }) }, "Re-check"))),
       el("p", { class: "muted" }, `Checked ${fmtTime(h.checked_at)}. Unauthenticated monitors can poll GET /api/health (statuses only; HTTP 503 when failing).`),
-      h.checks.map((c) => el("div", { class: "check" },
-        el("div", {}, el("strong", {}, c.name), el("div", {}, status(c.status)), el("div", { class: "muted" }, `${c.latency_ms} ms`)),
-        el("div", {}, el("div", {}, c.message),
-          c.guidance ? el("div", { class: "guidance" }, el("strong", {}, "What to do: "), c.guidance) : null,
-          el("details", {}, el("summary", { class: "muted" }, "details"), el("pre", {}, JSON.stringify(c.details, null, 2))))))),
+      h.checks.map((c) => {
+        const means = checkMeans(c);
+        return el("div", { class: "check" },
+          el("div", {}, el("strong", {}, c.name), el("div", {}, status(c.status)), el("div", { class: "muted" }, `${c.latency_ms} ms`)),
+          el("div", {}, el("div", {}, c.message),
+            c.guidance ? el("div", { class: "guidance" }, el("strong", {}, "What to do: "), c.guidance) : null,
+            el("details", {}, el("summary", { class: "muted" }, "details"), el("pre", {}, JSON.stringify(c.details, null, 2)))),
+          means ? el("p", { class: "check-means" }, means) : null);
+      })),
     sourceHealthCard(srcs),
     el("div", { class: "card" }, el("h2", {}, "Recent errors (redacted)"),
-      table(["When", "Component", "Error", "Guidance"], h.recent_errors.map((e) => ({ cells: [fmtTime(e.created_at), e.component, el("code", {}, e.message), e.guidance ?? ""] })))),
+      table(["When", "Component", "Error", "Guidance"], h.recent_errors.map((e) => ({ cells: [fmtTime(e.created_at), e.component, el("code", {}, e.message), e.guidance ?? ""] })), null, null, "No recent errors were recorded.")),
     el("div", { class: "card" }, el("h2", {}, "Recent detection runs"),
       table(["#", "Started", "Trigger", "Status", "Scanned", "Created", "Updated", "Suppressed", "Error"], h.recent_detection_runs.map((r) => ({ cells: [
         r.id, fmtTime(r.started_at), r.trigger, pill(r.status, r.status === "ok" ? "st-ok" : r.status === "failed" ? "st-failing" : "st-degraded"),
-        { num: r.events_scanned }, { num: r.alerts_created }, { num: r.alerts_updated }, { num: r.alerts_suppressed ?? 0 }, r.error ?? ""] })))),
+        { num: r.events_scanned }, { num: r.alerts_created }, { num: r.alerts_updated }, { num: r.alerts_suppressed ?? 0 }, r.error ?? ""] })), null, null, "No recent detection runs were recorded.")),
   );
 }
 
 // ---------- admin ----------
 async function admin() {
   if (!can("admin")) return render(el("p", {}, "Admins only."));
-  const [tokens, audit, inventory, chain, sessions] = await Promise.all([api("/api/tokens"), api("/api/audit"), api("/api/assets"), api("/api/audit/verify"), api("/api/sessions")]);
+  const result = await readView("admin", () => Promise.all([api("/api/tokens"), api("/api/audit"), api("/api/assets"), api("/api/audit/verify"), api("/api/sessions")]));
+  if (!result) return;
+  const [tokens, audit, inventory, chain, sessions] = result;
   const tokenOut = el("div");
   const tokenForm = el("form", { class: "row" },
     el("label", {}, "Token name", el("input", { name: "name", required: true, maxlength: 64, placeholder: "e.g. web01-forwarder" })),
@@ -1637,7 +2115,7 @@ async function admin() {
   render(
     el("h1", {}, "Administration"),
     el("div", { class: "card" }, el("h2", {}, "Demo data"),
-      el("p", {}, "Loads the labeled synthetic dataset: normal office activity, brute force, password spraying, a compromised account, an off-hours root login, and a noisy but authorized internal scanner. Events are dated on the most recent weekday, tagged ", el("code", {}, "demo:*"), ", and marked synthetic everywhere in the UI."),
+      el("p", {}, "Loads office activity and attack scenarios dated on the latest weekday. Filter by source ", el("code", {}, "demo:*"), "."),
       el("button", { onclick: () => guarded(async () => {
         let r;
         try { r = await api("/api/demo/load", { method: "POST", body: {} }); }
@@ -1651,7 +2129,7 @@ async function admin() {
         const fresh = assetsCard(await api("/api/assets"));
         inventoryCard.replaceWith(fresh);
         inventoryCard = fresh;
-      }) }, "Load synthetic demo data"), demoOut),
+      }) }, "Load demo data"), demoOut),
     storyCard(),
     inventoryCard,
     el("div", { class: "card" }, el("h2", {}, "Role-scoped API tokens"),
@@ -1660,7 +2138,7 @@ async function admin() {
         t.revoked_at ? pill("revoked", "st-rejected") : t.expires_at && new Date(t.expires_at) <= new Date() ? pill("expired", "st-rejected") : pill("active", "st-ok"),
         t.revoked_at ? "" : el("button", { class: "danger", onclick: () => confirm(`Revoke token "${t.name}"?`) && guarded(async () => { await api(`/api/tokens/${t.id}/revoke`, { method: "POST" }); admin(); }) }, "Revoke")] })))),
     el("div", { class: "card" }, el("h2", {}, "Sign-in sessions"),
-      el("p", { class: "muted" }, "Every active session. Revoking one signs that browser out at its next request. For someone who lost their authenticator app, reset their two-factor here: there are no recovery codes."),
+      el("p", { class: "muted" }, "Revoking a session signs that browser out on its next request. Reset two-factor access if someone loses their authenticator."),
       sessionsTable(sessions, "/api/sessions", admin, true), resetForm),
     el("div", { class: "card" }, el("h2", {}, "Audit log"), chainBadge(chain),
       table(["When", "Actor", "Action", "Target", "Detail"], audit.map((a) => ({ cells: [fmtTime(a.created_at), a.actor, a.action, a.target ?? "", el("code", {}, a.detail ?? "")] })))),
@@ -1676,14 +2154,18 @@ function sessionsTable(rows, base, redraw, showUser = false) {
     toast("Session revoked");
     redraw();
   });
-  return table([...(showUser ? ["User"] : []), "Started", "Last seen", "Expires", ""], rows.map((r) => ({ cells: [
-    ...(showUser ? [r.username] : []), fmtTime(r.created_at), fmtTime(r.last_seen_at), fmtTime(r.expires_at),
-    el("span", { class: "row" }, r.current ? pill("this browser", "st-ok") : null,
-      can("analyst") ? el("button", { class: "danger", "aria-label": `Revoke session started ${fmtTime(r.created_at)}${showUser ? ` for ${r.username}` : ""}`, onclick: () => revoke(r) }, "Revoke") : null)] })));
+  return table([...(showUser ? ["User"] : []), "Started", "Last seen", "Expires", el("span", { class: "sr-only" }, "Actions")],
+    rows.map((r) => ({ cls: r.current ? "is-current" : "", cells: [
+      ...(showUser ? [r.username] : []), stamp(r.created_at), stamp(r.last_seen_at), stamp(r.expires_at),
+      el("span", { class: "session-actions" }, r.current ? pill("this browser", "st-ok") : null,
+        can("analyst") ? el("button", { class: "danger", "aria-label": `Revoke session started ${fmtTime(r.created_at)}${showUser ? ` for ${r.username}` : ""}`, onclick: () => revoke(r) }, "Revoke") : null)] })),
+    null, showUser ? "sessions sessions-users" : "sessions");
 }
 
 async function account() {
-  const [mfa, sessions] = await Promise.all([api("/api/auth/mfa/status"), api("/api/auth/sessions")]);
+  const result = await readView("account", () => Promise.all([api("/api/auth/mfa/status"), api("/api/auth/sessions")]));
+  if (!result) return;
+  const [mfa, sessions] = result;
   const out = el("div");
   const codeForm = (label, action, onDone) => {
     const code = el("input", { name: "code", inputmode: "numeric", autocomplete: "one-time-code", pattern: "[0-9]{6}", maxlength: 6, required: true });
@@ -1761,7 +2243,7 @@ function assetsCard(inv) {
     el("div", { class: "row" }, el("button", { onclick: () => assetDialog(inv) }, "Add asset")),
     pending.filter((c) => c.kind === "asset_add").map(proposed),
     table(["Asset", "Kind", "Criticality", "Sensitive data", "Addresses", "Owner", "Updated", ""], inv.assets.map((a) => ({ cells: [
-      el("span", {}, el("strong", {}, a.name), a.synthetic ? el("span", {}, " ", synth(true)) : null, a.description ? el("div", { class: "muted" }, a.description) : null,
+      el("span", {}, el("strong", {}, a.name), a.description ? el("div", { class: "muted" }, a.synthetic ? a.description.replace(/ \(synthetic\)$/, "") : a.description) : null,
         pending.filter((c) => c.kind !== "asset_add" && c.target === String(a.id)).map(proposed)),
       a.kind, pill(a.criticality, `crit-${a.criticality}`),
       a.data_tags.length ? el("span", { class: "row" }, a.data_tags.map((t) => el("span", { class: "pill tag", title: inv.data_tags[t] || t }, t))) : el("span", { class: "muted" }, "—"),
@@ -1829,14 +2311,14 @@ function storyCard() {
   const render = (s) => {
     const stage = s.running ? `stage: ${s.stage} · ${Math.round((s.progress || 0) * 100)}%` : s.finished_at ? `last run finished ${fmtTime(s.finished_at)}` : "idle";
     out.replaceChildren(el("div", {}, `${s.running ? "Running" : "Idle"} — ${stage}`),
-      el("div", { class: "muted" }, `${s.events_sent ?? 0} synthetic events sent, ${s.alerts_created ?? 0} alerts raised${s.error ? ` · error: ${s.error}` : ""}`));
+      el("div", { class: "muted" }, `${s.events_sent ?? 0} events sent, ${s.alerts_created ?? 0} alerts raised${s.error ? ` · error: ${s.error}` : ""}`));
     if (s.running && !timer) timer = setInterval(poll, 2000);
     if (!s.running && timer) { clearInterval(timer); timer = null; refreshBanner(); }
   };
   const poll = () => api("/api/storyline/status").then(render).catch(() => {});
   poll();
-  return el("div", { class: "card" }, el("h2", {}, "Attack storyline (synthetic)"),
-    el("p", { class: "muted" }, "Replays a scripted six-stage intrusion — recon, credential attack, foothold, escalation, lateral movement, exfiltration — from RFC 5737 test addresses. Watch the SOC dashboard while it runs. Everything is labeled synthetic."),
+  return el("div", { class: "card" }, el("h2", {}, "Attack storyline"),
+    el("p", { class: "muted" }, "Follow recon, credential attack, foothold, escalation, lateral movement and exfiltration on the dashboard during replay."),
     el("div", { class: "row" }, speed,
       el("button", { onclick: () => guarded(async () => { render(await api("/api/storyline/start", { method: "POST", body: { speed: Number(speed.value) } })); }) }, "Start storyline"),
       el("button", { class: "danger", onclick: () => guarded(async () => { render(await api("/api/storyline/stop", { method: "POST" })); }) }, "Stop")),

@@ -1,0 +1,36 @@
+# SSRF toward instance metadata services. The access log shows the URL the app
+# was asked to fetch; it does not show the server-side connection itself.
+title: Web Request for Cloud Instance Metadata
+id: 2960ff5f-f61c-4a99-a73b-08a1322ab433
+status: experimental
+description: |
+  A web request that points at a cloud instance metadata address: the AWS and
+  Azure link-local service, the AWS IPv6 metadata address, GCP metadata, or the
+  Alibaba metadata service. The request target contains a URL for one of these services.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1190/
+  - https://cwe.mitre.org/data/definitions/918.html
+tags:
+  - attack.initial_access
+  - attack.t1190
+logsource:
+  category: webserver
+detection:
+  web:
+    event.action:
+      - web_request
+      - web_scan
+      - web_error
+  metadata:
+    message|contains:
+      - '://169.254.169.254/* -> ???'
+      - '://169.254.170.2/* -> ???'
+      - '://[fd00:ec2::254]/* -> ???'
+      - '://metadata.google.internal/* -> ???'
+      - '://100.100.100.200/* -> ???'
+  condition: web and metadata
+falsepositives:
+  - An application health check that intentionally proxies to its own metadata service
+level: high
