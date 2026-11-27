@@ -1,6 +1,7 @@
 /* The reflections are baked into a single static scene. Only window surfaces blur it. */
 :root {
   --glass: #1c1c1e;
+  --space: #080809;
   --glass-filter: none;
   --glass-border: rgb(255 255 255 / .12);
   --glass-top: rgb(255 255 255 / .16);
@@ -12,7 +13,7 @@
     --glass-filter: blur(32px) saturate(140%);
   }
 }
-body { background: #080809; }
+body { background: var(--space); }
 body::before {
   content: "";
   position: fixed;
@@ -23,7 +24,7 @@ body::before {
   opacity: .78;
 }
 body.authed::before { opacity: .33; }
-body.authed .rail, .strip, dialog[open], .panel, .card, .login,
+body.authed .rail, .strip, dialog[open], .panel, .card, .graph-workspace, .login,
 body[data-view="incidents"] .bcol, body[data-view] .kpi {
   background: var(--glass);
   -webkit-backdrop-filter: var(--glass-filter);
