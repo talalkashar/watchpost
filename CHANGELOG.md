@@ -10,6 +10,8 @@ All bundled data is synthetic. PR numbers refer to https://github.com/talalkasha
 
 - The [investigation graph](docs/screenshots/07-investigation-graph.jpg) connects alerts, incidents, and evidence entities. Open **Graph** to filter by type or severity and follow a node to its case or entity page. The authenticated snapshot is available at `GET /api/graph`.
 
+- CloudTrail collection with a read-only account, part of the second item of #8. `scripts/cloudtrail_collector.py` (standard library only) reads CloudTrail `LookupEvents` across regions and, through one assumed read-only role per account, across accounts, and posts the events to the ingest API. It needs only `cloudtrail:LookupEvents`, which `SecurityAudit` and `ReadOnlyAccess` include. Request signing matches AWS's published Signature Version 4 examples; the collector is tested against a local stand-in for the AWS APIs, not against an AWS account.
+
 ### Fixed
 
 - Dual-stack syslog listeners accept IPv4 senders covered by IPv4 or mapped IPv6 allow-list entries and store the fallback host as dotted IPv4.
