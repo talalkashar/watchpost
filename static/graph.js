@@ -287,7 +287,7 @@ const Graph = (() => {
     function draw(time) {
       frame = 0;
       if (!width || !height || !onScreen || document.hidden) return;
-      const dt = previous === null ? 0 : Math.min(50, time - previous);
+      const dt = previous === null ? 0 : time - previous;
       previous = time; elapsed += dt;
       const reduced = Motion.reduced.matches;
       if (!warmed) {
@@ -296,7 +296,7 @@ const Graph = (() => {
         refreshBounds();
       }
       if (stepsLeft && !reduced) {
-        stepClock += dt;
+        stepClock += Math.min(dt, 50);
         if (stepClock >= 1000 / 60) {
           const steps = Math.min(stepsLeft, Math.floor(stepClock / (1000 / 60)));
           for (let i = 0; i < steps; i++) stepLayout(visible, links);
