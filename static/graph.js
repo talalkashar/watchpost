@@ -51,6 +51,8 @@ const Graph = (() => {
     let lastTap = null, followingFit = true, flight = null, locked = null, batches = [], chains = [];
     const pointers = new Map(), controller = new AbortController(), signal = controller.signal;
     const mobile = matchMedia("(max-width: 760px)");
+    // Tablets and touch laptops are wider than the phone layout but still have no hover click.
+    const coarse = matchMedia("(hover: none), (pointer: coarse)");
     const canvas = el("canvas", { class: "graph-canvas", tabindex: "0", role: "group",
       "aria-description": "Shift and arrow keys pan. Drag a node to pin it. Double-click to unpin and fit. Space toggles a pin.",
       "aria-label": "Investigation graph. Use the arrow keys to inspect nodes and Enter to open details." });
@@ -198,7 +200,7 @@ const Graph = (() => {
       setZoom(next); constrain(); requestDraw();
     }
 
-    function select(n) {
+    function select(n, viaTouch = false) {
       if (n === selected) return;
       selected = n;
       neighborhood = new Set([n]);
@@ -216,7 +218,10 @@ const Graph = (() => {
           info.append(el("span", {}, `Cloud · ${types[root.type].name} #${root.ref}`));
         }
         tip.replaceChildren(info);
-        if (mobile.matches) tip.append(chip("Investigate", () => detail(n)));
+        // Phone layout is unchanged. Wider touch or coarse pointers get the same action, mice do not.
+        if (mobile.matches || coarse.matches || viaTouch) {
+          tip.append(chip("Investigate", () => detail(n), mobile.matches ? {} : { class: "graph-investigate" }));
+        }
       }
       prepareLinks();
       tip.hidden = !n;
@@ -404,8 +409,20 @@ const Graph = (() => {
       if (bloom > .93) drawLabels();
       if (selected) {
         const x = selected.px, y = selected.py, w = tip.offsetWidth, h = tip.offsetHeight;
-        tip.style.left = Math.max(5, Math.min(width - w - 5, x + 18)) + "px";
-        tip.style.top = clamp(y + h + 12 < height ? y + 12 : y - h - 12, 5, height - h - 5) + "px";
+        let left = Math.max(5, Math.min(width - w - 5, x + 18));
+        let top = clamp(y + h + 12 < height ? y + 12 : y - h - 12, 5, height - h - 5);
+        // The phone popover keeps its old anchor. The wider touch action is taller, so keep it off the node.
+        if (tip.querySelector(".graph-investigate")) {
+          const pad = selected.r + 8;
+          const hits = (l, t) => l < x + pad && l + w > x - pad && t < y + pad && t + h > y - pad;
+          if (hits(left, top)) {
+            const below = y + pad, above = y - pad - h;
+            if (below + h <= height - 5) top = below;
+            else if (above >= 5) top = above;
+          }
+        }
+        tip.style.left = left + "px";
+        tip.style.top = top + "px";
       }
       if (visible.length && motion.animate) requestDraw();
     }
@@ -483,7 +500,7 @@ const Graph = (() => {
       if (pointers.size === 1) {
         drag = { start: p, node: hit(p), moved: false };
         if (ev.pointerType === "touch" && drag.node) holdTimer = setTimeout(() => {
-          drag.inspected = true; select(drag.node);
+          drag.inspected = true; select(drag.node, true);
         }, 420);
       }
       if (pointers.size === 2) { lastTap = null; drag = { pinch: pinch(), moved: true }; }
@@ -527,7 +544,7 @@ const Graph = (() => {
         const p = point(ev);
         if (lastTap && n === lastTap.n && ev.timeStamp - lastTap.time < 400 &&
             Math.hypot(p.x - lastTap.x, p.y - lastTap.y) < 16) resetNode(n);
-        else { lastTap = { ...p, n, time: ev.timeStamp }; locked = n; select(n); }
+        else { lastTap = { ...p, n, time: ev.timeStamp }; locked = n; select(n, true); }
       } else if (tap && n) {
         select(n); clickTimer = setTimeout(() => detail(n), 400);
       } else { lastTap = null; requestDraw(); }
