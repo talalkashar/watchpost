@@ -5,7 +5,11 @@ body[data-view="graph"] .graph-head h1 { margin: 0; font-size: clamp(25px, 2.45v
 .graph-counts { display: flex; align-items: center; gap: 14px; white-space: nowrap; color: var(--ink-2); font: 12px var(--mono); }
 .graph-counts span + span { border-left: 1px solid var(--hair); padding-left: 14px; }
 .graph-counts b { color: var(--ink); }
-.graph-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 216px; align-items: stretch; overflow: clip; }
+.graph-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 216px; align-items: stretch; overflow: clip;
+  -webkit-backdrop-filter: none; backdrop-filter: none; }
+/* Only the translucent rail and footer expose the scene behind the card.
+   Blurring the opaque animated stage would repeat a full-canvas filter every frame. */
+.graph-key, .graph-footer { -webkit-backdrop-filter: var(--glass-filter); backdrop-filter: var(--glass-filter); }
 .graph-map { min-width: 0; display: flex; flex-direction: column; }
 .graph-stage { position: relative; isolation: isolate; overflow: hidden; flex: 1; min-height: clamp(430px, calc(100dvh - 264px), 860px);
   background: var(--space); }
