@@ -27,10 +27,11 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 
+from .firewall import ASA_TAG
 from . import engine, health
 from .db import connect, iso, now_iso, utcnow
 from .diagnostics import describe_exception, log, record_error, redact_cut
-from .normalize import (MAX_FUTURE, MAX_LEN, EventError, clean_text, normalize_authlog_line,
+from .normalize import (MAX_FUTURE, MAX_LEN, RFC5424_SD, EventError, clean_text, normalize_authlog_line,
                         normalize_weblog_line, stored_text)
 
 SOURCE = "syslog"
@@ -52,7 +53,7 @@ PRI_SEVERITY = {0: "critical", 1: "critical", 2: "critical", 3: "high",
 _PRI = re.compile(r"^<(\d*)>")
 _RFC5424 = re.compile(
     r"^1 (?P<ts>\S+) (?P<host>\S+) (?P<app>\S+) (?P<procid>\S+) (?P<msgid>\S+) "
-    r"(?P<sd>-|(?:\[(?:[^\]\\]|\\.)*\])+)(?: (?P<msg>.*))?$", re.S)
+    rf"{RFC5424_SD}(?: (?P<msg>.*))?$", re.S)
 # Optional Cisco sequence (`123: `), BSD timestamp with an optional year and fraction, or an ISO timestamp.
 _RFC3164 = re.compile(
     r"^(?:\d{1,5}:\s+)?"
@@ -234,6 +235,9 @@ def parse_frame(frame):
 
     match = _RFC3164.match(text)
     if not match:
+        tag = _TAG.match(text)
+        if tag and ASA_TAG.fullmatch(tag["app"]):
+            return _parsed(pri, tag["msg"], app=tag["app"])
         return _parsed(pri, text)
     host, rest = match["host"], match["rest"] or ""
     if host.endswith(":") or "[" in host:   # no HOSTNAME field: this is already the TAG
@@ -256,14 +260,16 @@ def frame_to_event(frame, peer_ip=None, now=None):
         frame = frame[:MAX_FRAME_BYTES]
     parsed = parse_frame(frame)
     host = parsed["host"] or peer_ip or "unknown"
-    app = _PROG_UNSAFE.sub("_", parsed["app"])[:48] if parsed["app"] else None
+    app = parsed["app"]
+    if app and not ASA_TAG.fullmatch(app):
+        app = _PROG_UNSAFE.sub("_", app)[:48]
     msg = parsed["msg"].replace("\r", " ").replace("\n", " ")
     # The auth.log parser only accepts a numeric pid. A string PROCID is valid RFC 5424;
     # splicing it into the tag makes normalize_authlog_line reject the whole frame.
     procid = parsed["procid"]
     if not (procid and procid.isdigit() and len(procid) <= _MAX_PROCID):
         procid = None
-    prog = (app or "syslog") + (f"[{procid}]" if procid else "")
+    prog = (app or "-") + (f"[{procid}]" if procid else "")
     # Rebuild an auth.log-style line so the existing parser (and its timestamp rules) does the work.
     try:
         line = f"{_timestamp_for_auth(parsed['ts'], now) or iso(now)} {host} {prog}: {msg}"

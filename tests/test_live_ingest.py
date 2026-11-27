@@ -21,7 +21,7 @@ from watchpost.config import Config
 from watchpost.db import connect
 from watchpost.diagnostics import redact
 from watchpost.health import run_health_checks
-from watchpost.normalize import MAX_LEN, EventError
+from watchpost.normalize import MAX_LEN, EventError, parse_payload
 from watchpost.server import App
 from watchpost.syslog_listener import SyslogListener, frame_to_event, parse_frame, read_tcp_frame
 
@@ -29,6 +29,12 @@ ROOT = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location("shipper", ROOT / "scripts" / "shipper.py")
 shipper = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(shipper)
+
+PAN_TRAFFIC = ('1,2026/09/28 10:00:13,007000001234,TRAFFIC,end,2049,'
+               '2026/09/28 10:00:13,10.0.3.15,198.51.100.99,192.0.2.1,198.51.100.99,"allow, web",'
+               'corp\\dave,,ssl,vsys1,trust,untrust,ethernet1/2,ethernet1/1,log-fwd,'
+               '2026/09/28 10:00:13,4321,1,52000,443,61000,443,0x400053,tcp,allow,1250000900,'
+               '1250000000,900,9000,2026/09/28 09:50:00,600,any')
 
 
 def wait_for(predicate, timeout=5.0):
@@ -117,6 +123,197 @@ class SyslogParsingTests(unittest.TestCase):
         allow = frame_to_event("<6>1 2026-09-28T10:00:05Z fw01 kernel - - - [UFW ALLOW] IN=eth0 OUT= "
                                "SRC=198.51.100.3 DST=192.0.2.10 LEN=60 PROTO=TCP SPT=40001 DPT=443")
         self.assertEqual(allow["event_type"], "fw_allow")
+
+    def test_fortigate_without_reliable_zone_keeps_the_envelope_time(self):
+        frame = ('<189>1 2026-09-28T08:15:00-04:00 relay FortiGate - - - date=2026-09-27 time=23:58:00 '
+                 'devname="FG100" logid="13" type="traffic" action="deny" srcip=192.0.2.2 dstip=192.0.2.3')
+        for zone in ("", ' tz="EST"', ' tz="+1260"', ' tz="+2400"', ' tz="-0000"'):
+            with self.subTest(zone=zone):
+                event = frame_to_event(frame + zone)
+                self.assertEqual((event["host"], event["event_type"], event["ts"]),
+                                 ("FG100", "fw_deny", "2026-09-28T12:15:00.000Z"))
+
+    def assert_firewall_event(self, frame, expected, ts=None):
+        now = datetime(2026, 9, 28, 15, 30, tzinfo=timezone.utc)
+        for path in ("live", "auto", "authlog"):
+            with self.subTest(path=path):
+                if path == "live":
+                    event = frame_to_event(frame, now=now)
+                else:
+                    events, rejected = parse_payload(frame, path, "upload", now=now)
+                    self.assertEqual(rejected, [])
+                    event, = events
+                self.assertEqual((event["event_type"], event["src_ip"], event["dest_ip"], event["dest_port"]),
+                                 expected)
+                if ts is not None:
+                    self.assertEqual(event["ts"], ts)
+
+    def test_cisco_icmp_deny_without_ports(self):
+        frame = ('<164>Sep 28 10:00:05 asa01 %ASA-4-106023: Deny icmp src outside:203.0.113.9 '
+                 'dst inside:192.0.2.10 (type 8, code 0) by access-group "outside_in" [0x0, 0x0]')
+        self.assert_firewall_event(frame, ("fw_deny", "203.0.113.9", "192.0.2.10", None))
+
+    def test_fortigate_multiple_structured_data_elements(self):
+        frame = ('<189>1 2026-09-28T12:15:00Z relay FortiGate - - '
+                 r'[origin ip="192.0.2.1"][timeQuality tzKnown="1" note="a\]b"] '
+                 'logid=13 type=traffic action=deny srcip=203.0.113.9 dstip=192.0.2.10 dstport=22')
+        self.assert_firewall_event(frame, ("fw_deny", "203.0.113.9", "192.0.2.10", 22), "2026-09-28T12:15:00.000Z")
+
+    def test_fortigate_failed_connection_is_a_network_connection(self):
+        frame = ('<189>1 2026-09-28T12:15:00Z relay FortiGate - - - logid=13 type=traffic '
+                 'action=ip-conn msg="Connection Failed" srcip=203.0.113.9 dstip=10.0.0.15 dstport=3389')
+        self.assert_firewall_event(frame, ("network_connection", "203.0.113.9", "10.0.0.15", 3389))
+
+    def test_fortigate_deny_preserves_endpoint_aliases(self):
+        frame = "<189>1 2026-09-28T12:15:00Z relay FortiGate - - - logid=13 type=traffic action=deny "
+        for fields in ("srcip=203.0.113.9 dst=10.0.0.15 dport=443", "src=203.0.113.9 dstip=10.0.0.15 dport=443",
+                       "srcip=203.0.113.9 dstip=10.0.0.15 dstport=443 src=192.0.2.1 dst=192.0.2.2 dport=80"):
+            with self.subTest(fields=fields):
+                self.assert_firewall_event(frame + fields, ("fw_deny", "203.0.113.9", "10.0.0.15", 443))
+
+    def test_fortigate_nil_timestamp_uses_receipt_time(self):
+        frame = ('<189>1 - relay FortiGate - - - date=2026-09-27 time=23:58:00 logid=13 type=traffic '
+                 'action=deny srcip=203.0.113.9 dstip=192.0.2.10 dstport=22')
+        self.assert_firewall_event(frame, ("fw_deny", "203.0.113.9", "192.0.2.10", 22), "2026-09-28T15:30:00.000Z")
+
+    def test_relayed_cisco_id_in_message_reaches_live_and_upload(self):
+        for device in ("ASA", "FTD"):
+            for app in ("-", device):
+                with self.subTest(device=device, app=app):
+                    frame = (f"<164>1 2026-09-28T11:00:00Z asa01 {app} - - - %{device}-4-106023: Deny tcp "
+                             "src outside:203.0.113.9/40000 dst inside:192.0.2.10/3389")
+                    self.assert_firewall_event(frame, ("fw_deny", "203.0.113.9", "192.0.2.10", 3389))
+
+    def test_relayed_filterlog_ipv6_with_tag_in_payload(self):
+        frame = ("<134>1 2026-09-28T11:00:00Z pf01 - - - - filterlog[5121]: "
+                 "9,,,1000000104,em1,match,pass,out,6,0x00,0x00000,64,udp,17,76,2001:db8::5,2001:db8::53,50000,53,76")
+        self.assert_firewall_event(frame, ("fw_allow", "2001:db8::5", "2001:db8::53", 53))
+
+    def test_rfc5424_bom_before_relayed_cisco_tag(self):
+        frame = ("<164>1 2026-09-28T11:00:00Z asa01 - - - - \ufeff%ASA-4-106023: Deny tcp "
+                 "src outside:203.0.113.9/40000 dst inside:192.0.2.10/3389")
+        for fmt in ("auto", "authlog"):
+            with self.subTest(fmt=fmt):
+                events, rejected = parse_payload(frame, fmt, "upload")
+                self.assertEqual(rejected, [])
+                event, = events
+                self.assertEqual((event["event_type"], event["src_ip"], event["dest_ip"], event["dest_port"]),
+                                 ("fw_deny", "203.0.113.9", "192.0.2.10", 3389))
+
+    def test_cisco_aaa_preserves_spaces_in_account_name(self):
+        frame = ("Sep 28 10:00:09 asa01 %ASA-6-113005: AAA user authentication Rejected : reason = AAA failure : "
+                 "server = 10.0.0.5 : user = Mary Smith : user IP = 203.0.113.9")
+        uploaded, rejected = parse_payload(frame, "auto", "upload")
+        self.assertEqual(rejected, [])
+        event, = uploaded
+        for path, parsed in (("live", frame_to_event(frame)), ("upload", event)):
+            with self.subTest(path=path):
+                self.assertEqual((parsed["event_type"], parsed["user"], parsed["src_ip"]),
+                                 ("auth_failure", "Mary Smith", "203.0.113.9"))
+
+    def test_bsd_palo_alto_traffic_without_app_on_upload(self):
+        frame = "<14>Sep 28 10:00:13 pa01 " + PAN_TRAFFIC
+        for fmt in ("auto", "authlog"):
+            with self.subTest(fmt=fmt):
+                events, rejected = parse_payload(frame, fmt, "upload")
+                self.assertEqual(rejected, [])
+                self.assertEqual(len(events), 1)
+                event = events[0]
+                self.assertEqual((event["event_type"], event["host"], event["src_ip"], event["dest_ip"],
+                                  event["dest_port"], event["bytes"]),
+                                 ("fw_allow", "pa01", "10.0.3.15", "198.51.100.99", 443, 1250000000))
+
+    def test_cisco_deny_preserves_ipv6_peers_on_live_and_upload(self):
+        for message in (
+            "%ASA-2-106001: Inbound TCP connection denied from 2001:db8::9/40001 to 2001:db8::10/23",
+            "%ASA-2-106001: Inbound TCP connection denied from outside:2001:db8::9/40001 to inside:2001:db8::10/23",
+            "%ASA-4-106023: Deny tcp src face:2001:db8::9/40001 dst cafe:2001:db8::10/23",
+        ):
+            frame = f"<164>Sep 28 10:00:05 asa01 {message}"
+            uploaded, rejected = parse_payload(frame, "auto", "upload")
+            self.assertEqual(rejected, [])
+            self.assertEqual(len(uploaded), 1)
+            for path, event in (("live", frame_to_event(frame)), ("upload", uploaded[0])):
+                with self.subTest(message=message, path=path):
+                    self.assertEqual((event["event_type"], event["src_ip"], event["dest_ip"], event["dest_port"]),
+                                     ("fw_deny", "2001:db8::9", "2001:db8::10", 23))
+
+    def test_palo_alto_traffic_respects_sender_and_record_start_on_live_and_upload(self):
+        for app, prefix, genuine in (("reporter", "archived example: ", False), ("reporter", "", False),
+                                     ("-", "archived example: ", False), ("-", "", True), ("PAN-OS", "", True)):
+            frame = f"<14>1 2026-09-28T11:00:00Z app01 {app} - - - {prefix}{PAN_TRAFFIC}"
+            uploaded, rejected = parse_payload(frame, "auto", "upload")
+            self.assertEqual(rejected, [])
+            self.assertEqual(len(uploaded), 1)
+            for generic, event in (("syslog", frame_to_event(frame)), ("other", uploaded[0])):
+                with self.subTest(app=app, prefix=prefix, path=generic):
+                    expected = ("fw_allow", "10.0.3.15", "198.51.100.99", 443, 1250000000) if genuine else (
+                        generic, None, None, None, None)
+                    self.assertEqual((event["event_type"], event["src_ip"], event["dest_ip"], event["dest_port"],
+                                      event["bytes"]), expected)
+                    self.assertEqual((event["host"], event["ts"]), ("app01", "2026-09-28T11:00:00.000Z"))
+
+    def test_fortigate_login_respects_syslog_sender_on_live_and_upload(self):
+        payload = ('date=2026-09-28 time=10:00:00 tz="+0000" devname="FG100" logid="0100032002" '
+                   'type="event" action="login" status="failed" user="admin" srcip=192.0.2.5')
+        for app, prefix in (("reporter", "archived example: "), ("reporter", ""), ("syslog", ""),
+                            ("-", "archived example: "), ("-", ""), ("FortiGate", "")):
+            frame = f"<13>1 2026-09-28T11:00:00Z app01 {app} - - - {prefix}{payload}"
+            uploaded, rejected = parse_payload(frame, "auto", "upload")
+            self.assertEqual(rejected, [])
+            self.assertEqual(len(uploaded), 1)
+            for generic, event in (("syslog", frame_to_event(frame)), ("other", uploaded[0])):
+                with self.subTest(app=app, prefix=prefix, generic=generic):
+                    expected = (generic, "app01", "2026-09-28T11:00:00.000Z", None, None)
+                    if app in ("-", "FortiGate") and not prefix:
+                        expected = ("auth_failure", "FG100", "2026-09-28T10:00:00.000Z", "admin", "192.0.2.5")
+                    self.assertEqual((event["event_type"], event["host"], event["ts"], event["user"], event["src_ip"]),
+                                     expected)
+
+    def test_ordinary_application_quoting_an_asa_message_stays_generic(self):
+        payload = "%ASA-4-106023: Deny tcp src outside:192.0.2.5/1234 dst inside:192.0.2.6/443"
+        for prefix in ("", "logged example: "):
+            frame = "<13>1 2026-09-28T10:00:00Z relay reporter - - - " + prefix + payload
+            self.assertEqual(frame_to_event(frame)["event_type"], "syslog")
+            for fmt in ("auto", "authlog"):
+                with self.subTest(prefix=prefix, fmt=fmt):
+                    events, rejected = parse_payload(frame, fmt, "upload")
+                    self.assertEqual(rejected, [])
+                    event, = events
+                    self.assertEqual(event["event_type"], "other")
+
+    def test_firewall_appliance_frames(self):
+        # FortiGate sends no syslog header: the device name and time come from its own fields.
+        deny = frame_to_event('<189>date=2026-09-28 time=12:00:01 devname="FG100" logid="0000000013" type="traffic" '
+                              'subtype="forward" tz="+0200" srcip=203.0.113.9 srcport=40000 dstip=192.0.2.10 '
+                              'dstport=22 action="deny" sentbyte=0 rcvdbyte=0', "192.0.2.254")
+        self.assertEqual((deny["event_type"], deny["host"], deny["ts"], deny["src_ip"], deny["dest_port"]),
+                         ("fw_deny", "FG100", "2026-09-28T10:00:01.000Z", "203.0.113.9", 22))
+        closed = frame_to_event('<189>date=2026-09-28 time=12:00:02 devname="FG100" logid="0000000013" '
+                                'type="traffic" tz="+0000" srcip=10.0.3.15 dstip=198.51.100.99 dstport=443 action="close" '
+                                'user="carol" sentbyte=1800000000 rcvdbyte=4000', "192.0.2.254")
+        self.assertEqual((closed["event_type"], closed["user"], closed["bytes"], closed["ts"]),
+                         ("fw_allow", "carol", 1800000000, "2026-09-28T12:00:02.000Z"))
+        login = frame_to_event('<185>date=2026-09-28 time=12:00:03 devname="FG100" logid="0100032002" type="event" '
+                               'subtype="system" logdesc="Admin login failed" user="admin" srcip=203.0.113.9 '
+                               'action="login" status="failed"', "192.0.2.254")
+        self.assertEqual((login["event_type"], login["user"], login["src_ip"]), ("auth_failure", "admin", "203.0.113.9"))
+        # Palo Alto: the default comma-separated TRAFFIC log, with a quoted rule name that contains a comma.
+        allow = frame_to_event("<14>Sep 28 10:00:13 pa01 " + PAN_TRAFFIC)
+        self.assertEqual((allow["event_type"], allow["host"], allow["user"], allow["dest_port"], allow["bytes"]),
+                         ("fw_allow", "pa01", "corp\\dave", 443, 1250000000))
+        drop = frame_to_event("<14>Sep 28 10:00:12 pa01 1,2026/09/28 10:00:12,007000001234,TRAFFIC,drop,2049,"
+                              "2026/09/28 10:00:12,203.0.113.9,192.0.2.10,0.0.0.0,0.0.0.0,block-inbound,,,"
+                              "not-applicable,vsys1,untrust,trust,ethernet1/1,,log-fwd,2026/09/28 10:00:12,0,1,"
+                              "40003,8080,0,0,0x0,tcp,drop,74,74,0,1,2026/09/28 10:00:11,0,any")
+        self.assertEqual((drop["event_type"], drop["src_ip"], drop["dest_port"]), ("fw_deny", "203.0.113.9", 8080))
+        # Cisco ASA: the message ID is the syslog tag, with or without a header in front of it.
+        for frame, host in (('<164>Sep 28 10:00:04 asa01 %ASA-4-106023: Deny tcp src outside:203.0.113.9/40000 dst '
+                             'inside:192.0.2.10/3389 by access-group "outside_in" [0x0, 0x0]', "asa01"),
+                            ('<164>%ASA-4-106023: Deny tcp src outside:203.0.113.9/40000 dst inside:192.0.2.10/3389 '
+                             'by access-group "outside_in" [0x0, 0x0]', "192.0.2.254")):
+            asa = frame_to_event(frame, "192.0.2.254")
+            self.assertEqual((asa["event_type"], asa["host"], asa["dest_port"]), ("fw_deny", host, 3389))
 
     def test_tcp_framing_octet_counting_and_newlines(self):
         import io
