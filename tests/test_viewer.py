@@ -17,7 +17,7 @@ from watchpost.db import connect, init_schema
 # The address is first so /api/entities/src_ip/{value} is one address (anything else is 400).
 # It is TEST-NET-2, the same documentation range the demo uses. A user or host of that
 # string is still an empty entity, which is 200.
-GROUP_SAMPLES = ["203.0.113.1", "1", "brute_force_ip", "login_lockout_threshold", "md", "0123456789abcdef"]
+GROUP_SAMPLES = ["203.0.113.1", "1", "brute_force_ip", "login_lockout_threshold", "md", "0123456789abcdef", "2026-01-01"]
 # Non-GET routes a viewer may call.
 VIEWER_POSTS = {"/api/auth/login", "/api/auth/mfa", "/api/auth/logout"}  # login steps are public
 
