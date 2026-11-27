@@ -325,6 +325,7 @@ const Graph = (() => {
     }
     canvas.addEventListener("pointerdown", (ev) => {
       if (ev.button !== 0) return;
+      canvas.classList.add("pointer-focus");
       canvas.setPointerCapture(ev.pointerId);
       const p = point(ev); pointers.set(ev.pointerId, p);
       clearTimeout(holdTimer);
@@ -386,6 +387,7 @@ const Graph = (() => {
       const p = point(ev); zoomAt(p.x, p.y, Math.exp(-clamp(ev.deltaY, -200, 200) * 0.0025));
     }, { passive: false });
     canvas.addEventListener("keydown", (ev) => {
+      canvas.classList.remove("pointer-focus");
       if (!visible.length) return;
       if (ev.key === "Enter" && selected) detail(selected);
       else if (ev.key === "Escape") select(null);
@@ -401,7 +403,7 @@ const Graph = (() => {
       } else return;
       ev.preventDefault();
     });
-    canvas.addEventListener("blur", () => select(null));
+    canvas.addEventListener("blur", () => { canvas.classList.remove("pointer-focus"); select(null); });
     mobile.addEventListener("change", () => { key.open = !mobile.matches; }, { signal });
     Motion.reduced.addEventListener("change", requestDraw, { signal });
     document.addEventListener("visibilitychange", requestDraw, { signal });

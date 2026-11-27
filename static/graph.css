@@ -13,6 +13,7 @@ body[data-view="graph"] .graph-head h1 { margin: 0; font-size: clamp(25px, 2.45v
 .graph-canvas.over-node { cursor: pointer; }
 .graph-canvas:active { cursor: grabbing; }
 .graph-canvas:focus-visible { outline-offset: -3px; }
+.graph-canvas.pointer-focus:focus { outline: none; }
 .graph-tip, .graph-empty { position: absolute; max-width: min(260px, 90%); padding: 11px 14px; color: var(--ink);
   background: var(--panel); border: 1px solid var(--line-3); border-radius: 10px; box-shadow: 0 6px 22px #0008; pointer-events: none; }
 .graph-tip { width: max-content; z-index: 1; overflow-wrap: anywhere; }
