@@ -1,12 +1,16 @@
 """Watchpost 3.0 detection quality: benign look-alikes, baseline-aware exfil, exceptions, shadow IT."""
 
 import json
+import re
+import shutil
 import sqlite3
+import subprocess
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from watchpost import engine, improve, queries, rules, simulate, storyline
-from watchpost.db import connect, init_schema, iso, utcnow
+from watchpost.db import connect, init_schema, iso, utcnow, verify_chain
 from watchpost.normalize import classify_web_request, parse_payload
 
 from .helpers import ServerTestCase
@@ -294,7 +298,8 @@ class EngineExfilExceptionTests(unittest.TestCase):
         self.allow(30)
         self.assertEqual(self.ingest(self.night(4))["alerts_created"], 1)   # no history yet
         self.assertEqual(self.ingest(self.night(3))["alerts_created"], 0)   # baseline keeps it quiet
-        sup = improve.list_suppressions(self.conn)[0]
+        rows, _omitted = improve.list_suppressions(self.conn)
+        sup = rows[0]
         revoked = improve.revoke_suppression(self.conn, sup["id"], "admin")
         self.assertEqual((revoked["active"], revoked["revoked_by"]), (False, "admin"))
         self.assertGreater(revoked["expires_at"], iso(utcnow() + timedelta(days=29)))  # expiry is left as history
@@ -516,12 +521,15 @@ class EngineSuppressionTests(unittest.TestCase):
         init_schema(conn)
         engine.seed_rules(conn)
         self.assertEqual(engine.run_detection(conn)["alerts_suppressed"], 0)
-        self.assertEqual(improve.list_suppressions(conn), [])
+        self.assertEqual(improve.list_suppressions(conn)[0], [])
 
     def test_3_0_suppressions_table_gains_the_revoke_columns(self):
         conn = connect(":memory:")
         self.addCleanup(conn.close)
         init_schema(conn)
+        # idx_suppressions_active is a partial index on revoked_at. SQLite will not drop that
+        # column while the index exists. A 3.0 database has neither the columns nor the index.
+        conn.execute("DROP INDEX IF EXISTS idx_suppressions_active")
         for column in ("revoked_at", "revoked_by"):
             conn.execute(f"ALTER TABLE suppressions DROP COLUMN {column}")
         conn.execute(
@@ -529,8 +537,21 @@ class EngineSuppressionTests(unittest.TestCase):
             " VALUES ('brute_force_ip', '10.0.50.5', 'scanner', ?, 'analyst', 'admin', ?)",
             (iso(utcnow() + timedelta(days=1)), iso(utcnow())))
         init_schema(conn)
+        init_schema(conn)
         self.assertEqual(engine.active_suppressions(conn), {("brute_force_ip", "10.0.50.5")})
-        self.assertIsNone(improve.list_suppressions(conn)[0]["revoked_at"])
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM suppressions").fetchone()[0], 1)
+        row = improve.list_suppressions(conn)[0][0]
+        self.assertTrue(row["active"])
+        self.assertIsNone(row["revoked_at"])
+        self.assertIsNone(row["revoked_by"])
+        self.assertIn("revoked_at", {r["name"] for r in conn.execute("PRAGMA table_info(suppressions)")})
+        self.assertIn(
+            "idx_suppressions_active",
+            {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")},
+        )
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM audit_log WHERE action = 'audit_chain_started'").fetchone()[0], 1)
+        self.assertTrue(verify_chain(conn)["ok"])
 
 
 class NoiseLabApiTests(ServerTestCase):
@@ -557,6 +578,14 @@ class NoiseLabApiTests(ServerTestCase):
         self.assertEqual(names["nightly_backup"]["lookalike_of"], "data_exfil_volume")
         self.assertEqual(lab["summary"], {"rules": len(rows), "noisy": sum(r["verdict"] == "noisy" for r in rows.values()),
                                           "lookalikes": sum("lookalike_of" in s for s in simulate.SCENARIOS.values())})
+        strip = lab["strip"]
+        self.assertEqual(strip, improve.lab_strip(lab["rules"], lab["scenarios"]))
+        self.assertEqual(strip["scenarios"], len(lab["scenarios"]))
+        self.assertEqual((strip["detected_attacks"], strip["attacks"], strip["missed"]),
+                         (strip["attacks"], strip["attacks"], []))
+        self.assertIn("nightly_backup", strip["false_positive_scenarios"])
+        self.assertGreater(strip["false_positives"], 0)
+        self.assertEqual(strip["verdict"], "fail")
 
     def test_an_approved_exception_shows_up_in_the_lab(self):
         analyst, admin = self.client("analyst"), self.client("admin")
@@ -588,8 +617,148 @@ class NoiseLabApiTests(ServerTestCase):
         self.assertEqual(admin.post(f"/api/changes/{change['id']}/review",
                                     {"decision": "approve", "evidence_digest": change["evidence_digest"],
                                      "acknowledge_detection_loss": True})[0], 200)
-        row = {r["rule_id"]: r for r in analyst.get("/api/noise-lab")[1]["rules"]}["web_scanner"]
+        lab = analyst.get("/api/noise-lab")[1]
+        row = {r["rule_id"]: r for r in lab["rules"]}["web_scanner"]
         self.assertEqual((row["enabled"], row["verdict"]), (False, "disabled"))
+        self.assertIn("web_scan", lab["strip"]["missed"])
+        self.assertLess(lab["strip"]["detected_attacks"], lab["strip"]["attacks"])
+        self.assertEqual(lab["strip"]["verdict"], "fail")
+
+
+def _row(rule_id, enabled=True, detected=(), lookalikes_fired=(), other=()):
+    return {"rule_id": rule_id, "enabled": enabled, "detected": list(detected),
+            "lookalikes_fired": list(lookalikes_fired), "other_benign_fired": list(other)}
+
+
+def _scenario(name, malicious, expected=()):
+    return {"name": name, "malicious": malicious, "expected_rules": list(expected)}
+
+
+class LabStripTests(unittest.TestCase):
+    def test_pass_is_every_attack_detected_and_no_benign_fire(self):
+        rows = [_row("brute_force_ip", detected=["brute_force"])]
+        scenarios = [
+            _scenario("brute_force", True, ["brute_force_ip"]),
+            _scenario("baseline", False),
+        ]
+        strip = improve.lab_strip(rows, scenarios)
+        self.assertEqual(strip, {
+            "verdict": "pass", "scenarios": 2, "attacks": 1, "detected_attacks": 1,
+            "false_positives": 0, "missed": [], "false_positive_scenarios": [],
+        })
+
+    def test_one_benign_scenario_is_one_false_positive_however_many_rules_fire(self):
+        rows = [
+            _row("brute_force_ip", detected=["brute_force"], lookalikes_fired=["noisy_scanner"]),
+            _row("account_repeated_failures", detected=["brute_force"], other=["noisy_scanner"]),
+        ]
+        scenarios = [
+            _scenario("brute_force", True, ["brute_force_ip", "account_repeated_failures"]),
+            _scenario("noisy_scanner", False),
+            _scenario("baseline", False),
+        ]
+        strip = improve.lab_strip(rows, scenarios)
+        self.assertEqual(strip["verdict"], "fail")
+        self.assertEqual(strip["detected_attacks"], 1)
+        self.assertEqual(strip["false_positives"], 1)
+        self.assertEqual(strip["false_positive_scenarios"], ["noisy_scanner"])
+
+    def test_a_disabled_or_missing_expected_rule_is_a_missed_attack(self):
+        scenarios = [_scenario("web_scan", True, ["web_scanner"]), _scenario("baseline", False)]
+        disabled = improve.lab_strip([_row("web_scanner", enabled=False, detected=["web_scan"])], scenarios)
+        self.assertEqual(disabled["missed"], ["web_scan"])
+        self.assertEqual(disabled["detected_attacks"], 0)
+        self.assertEqual(disabled["verdict"], "fail")
+        missing = improve.lab_strip([], scenarios)
+        self.assertEqual(missing["missed"], ["web_scan"])
+        self.assertEqual(missing["verdict"], "fail")
+
+    def test_a_disabled_rule_firing_on_a_lookalike_is_not_a_false_positive(self):
+        rows = [_row("web_scanner", enabled=False, lookalikes_fired=["uptime_monitor"])]
+        scenarios = [_scenario("web_scan", True, ["other_rule"]), _scenario("uptime_monitor", False)]
+        strip = improve.lab_strip(rows, scenarios)
+        self.assertEqual(strip["false_positives"], 0)
+        self.assertEqual(strip["false_positive_scenarios"], [])
+
+    def test_sample_names_outside_the_scenario_list_do_not_change_the_counts(self):
+        rows = [_row("sigma_custom", detected=["web_scan", "sigma_sample:sigma_custom"],
+                     lookalikes_fired=["sigma_sample:sigma_custom"])]
+        scenarios = [_scenario("web_scan", True, ["sigma_custom"]), _scenario("baseline", False)]
+        strip = improve.lab_strip(rows, scenarios)
+        self.assertEqual(strip["scenarios"], 2)
+        self.assertEqual(strip["detected_attacks"], 1)
+        self.assertEqual(strip["false_positives"], 0)
+        self.assertEqual(strip["verdict"], "pass")
+
+    def test_an_attack_with_no_expected_rule_is_not_detected(self):
+        strip = improve.lab_strip([], [_scenario("orphan", True)])
+        self.assertEqual(strip["detected_attacks"], 0)
+        self.assertEqual(strip["missed"], ["orphan"])
+        self.assertEqual(strip["verdict"], "fail")
+
+
+def function_body(source, name):
+    match = re.search(rf"^(?:async )?function {name}\(.*?^\}}$", source, re.S | re.M)
+    if not match:
+        raise AssertionError(f"function {name} not found")
+    return match.group(0)
+
+
+class NoiseStripUiTests(unittest.TestCase):
+    def setUp(self):
+        self.node = shutil.which("node")
+        if self.node is None:
+            self.skipTest("node is not installed")
+        self.app = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text()
+
+    def facts(self, strip):
+        script = function_body(self.app, "noiseStripFacts") + """
+const input = JSON.parse(require("fs").readFileSync(0, "utf8"));
+process.stdout.write(JSON.stringify(noiseStripFacts(input)));
+"""
+        out = subprocess.run([self.node, "-e", script], input=json.dumps(strip),
+                             capture_output=True, text=True, check=False)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_the_strip_names_scenarios_detected_attacks_and_false_positives(self):
+        self.assertEqual(self.facts({
+            "verdict": "fail", "scenarios": 29, "attacks": 14, "detected_attacks": 14,
+            "false_positives": 8, "missed": [], "false_positive_scenarios": ["nightly_backup"],
+        }), {
+            "verdict": "fail", "scenarios": "29", "detected": "14 of 14", "falsePositives": "8",
+            "missed": [], "fired": ["nightly_backup"],
+        })
+        self.assertEqual(self.facts({
+            "verdict": "pass", "scenarios": 2, "attacks": 1, "detected_attacks": 1, "false_positives": 0,
+        })["verdict"], "pass")
+        self.assertEqual(self.facts({
+            "verdict": "fail", "scenarios": 1, "attacks": 1, "detected_attacks": 0, "false_positives": 0,
+            "missed": ["web_scan"],
+        })["detected"], "0 of 1")
+
+    def test_a_missing_strip_does_not_invent_a_score(self):
+        for strip in (None, {}, {"scenarios": 1}, {"verdict": "pass"}):
+            with self.subTest(strip=strip):
+                self.assertIsNone(self.facts(strip))
+
+    def test_the_strip_is_above_the_scenario_list(self):
+        page = function_body(self.app, "noiseLab")
+        self.assertLess(page.index("noiseStrip(lab.strip)"), page.index("The benign look-alikes"))
+        self.assertLess(page.index('el("h1", {}, "Noise lab")'), page.index("noiseStrip(lab.strip)"))
+        self.assertIn('id: "noise-scenarios"', page)
+        strip = function_body(self.app, "noiseStrip")
+        self.assertIn('id: "noise-strip"', strip)
+        self.assertIn('role: "status"', strip)
+        self.assertIn("noiseStripFacts(strip)", strip)
+        for label in ("Scenarios", "Detected attacks", "False positives"):
+            self.assertIn(label, strip)
+        css = (Path(__file__).resolve().parent.parent / "static" / "views.css").read_text()
+        self.assertIn(".lab-strip", css)
+        self.assertIn(".lab-pass", css)
+        self.assertIn(".lab-fail", css)
+        self.assertIn("#noise-scenarios", css)
+        self.assertNotIn("#view > .card:nth-child(4)", css)
 
 
 if __name__ == "__main__":

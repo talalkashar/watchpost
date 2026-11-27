@@ -1,0 +1,51 @@
+# Direct requests for paths that a normal site does not publish.
+# Tokens are anchored so "/.environment" does not match "/.env", and "/.env.bak" still does.
+# Written for Watchpost's Sigma subset (docs/REFERENCE.md, "Sigma rule import").
+title: Web Sensitive Path Probe
+id: 1450c5b8-db7d-4bc2-8657-b842b231870e
+status: experimental
+description: |
+  A web request for .env, .git, wp-login.php, xmlrpc.php, phpmyadmin, .aws, actuator,
+  server-status, or a direct /etc/passwd, /etc/shadow, win.ini, or boot.ini path.
+  Each matching event is evidence; Watchpost groups them per source IP.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1595/003/
+tags:
+  - attack.reconnaissance
+  - attack.t1595.003
+logsource:
+  category: webserver
+  product: linux
+detection:
+  web:
+    event.action:
+      - web_request
+      - web_scan
+      - web_error
+  paths:
+    message|contains:
+      # A bare ? is a one-character wildcard, so the question mark is escaped.
+      - '/.env '
+      - '/.env\?'
+      - '/.env.'
+      - '/.git/'
+      - '/.git '
+      - '/wp-login.php'
+      - '/xmlrpc.php'
+      - /phpmyadmin
+      - '/.aws/'
+      - '/.aws '
+      - '/actuator/'
+      - '/actuator\?'
+      - /server-status
+      - /etc/passwd
+      - /etc/shadow
+      - /win.ini
+      - /boot.ini
+  condition: web and paths
+falsepositives:
+  - A published path that really does contain one of these tokens
+  - A vulnerability write-up served by the same host
+level: medium

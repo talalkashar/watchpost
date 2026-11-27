@@ -1,0 +1,34 @@
+# Windows Security 4624 logon type 10 (RemoteInteractive) is Remote Desktop. Watchpost has no EventID
+# field, so the type is read from the rendered message. Console logons (type 2) do not match.
+title: Windows Remote Interactive RDP Logon
+id: 53c421d9-06e1-4a73-8501-4a177756d217
+status: experimental
+description: |
+  A successful Windows logon of type 10, Remote Desktop, from an address other than the host itself.
+  A console logon (type 2) and a loopback session do not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1021/001/
+tags:
+  - attack.lateral_movement
+  - attack.t1021.001
+logsource:
+  category: authentication
+  product: windows
+  service: security
+detection:
+  selection:
+    event.action: auth_success
+    message|contains:
+      - 'Logon Type: 10'
+      - "Logon Type:\t\t10"
+      - 'LogonType">10<'
+      - RemoteInteractive
+  loopback:
+    SourceIp|cidr:
+      - 127.0.0.0/8
+  condition: selection and not loopback
+falsepositives:
+  - An administrator opening Remote Desktop from a jump host during a change
+level: medium

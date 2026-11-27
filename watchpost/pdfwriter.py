@@ -37,9 +37,23 @@ def clean(text):
     return "".join(out)
 
 
-def text_width(text, size, bold=False):
-    units = sum(_WIDTHS[ord(c) - 32] if 32 <= ord(c) < 127 else 556 for c in clean(text))
+def _glyph_units(char):
+    code = ord(char)
+    if 32 <= code < 127:
+        return _WIDTHS[code - 32]
+    return 556
+
+
+def _advance(units, size, bold=False):
+    """Width of `units` (1/1000 em) at `size` points. Same formula as text_width."""
     return units * size / 1000 * (1.07 if bold else 1.0)
+
+
+def text_width(text, size, bold=False):
+    if size <= 0:
+        return 0.0
+    units = sum(_glyph_units(c) for c in clean(text))
+    return _advance(units, size, bold)
 
 
 def _pdf_string(text):
@@ -54,37 +68,101 @@ def _pdf_string(text):
     return "(" + "".join(out) + ")"
 
 
+def _split_word(word, width, size, bold=False):
+    """Break an over-long word into pieces that fit. Always consumes one glyph."""
+    if size <= 0 or not word:
+        return [], word
+    prefixes = [0]
+    total = 0
+    for char in word:
+        total += _glyph_units(char)
+        prefixes.append(total)
+
+    def fits(units):
+        return _advance(units, size, bold) <= width
+
+    pieces = []
+    start = 0
+    count = len(word)
+    while start < count and not fits(prefixes[count] - prefixes[start]):
+        # A measure that cannot hold one glyph still has to move forward.
+        if width <= 0 or not fits(prefixes[start + 1] - prefixes[start]):
+            end = start + 1
+        else:
+            lo, hi = start + 1, count
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if fits(prefixes[mid] - prefixes[start]):
+                    lo = mid
+                else:
+                    hi = mid - 1
+            end = lo
+        pieces.append(word[start:end])
+        start = end
+    return pieces, word[start:]
+
+
 def wrap(text, width, size, bold=False):
     """Greedy word wrap; words longer than the line are split by character."""
     lines = []
-    for paragraph in str(text).split("\n"):
+    # CR, CRLF, and LF are all paragraph breaks. Leaving a CR in the line
+    # becomes a trailing space after clean() and can insert a blank line.
+    raw = str(text).replace("\r\n", "\n").replace("\r", "\n")
+    for paragraph in raw.split("\n"):
         paragraph = clean(paragraph)
         line = ""
+        emitted = False
         for word in paragraph.split(" "):
+            if word == "":
+                if line and width > 0 and text_width(line + " ", size, bold) <= width:
+                    line += " "
+                continue
             candidate = f"{line} {word}" if line else word
-            if text_width(candidate, size, bold) <= width:
+            if width > 0 and text_width(candidate, size, bold) <= width:
                 line = candidate
                 continue
             if line:
                 lines.append(line)
-            while text_width(word, size, bold) > width:
-                cut = len(word)
-                while cut > 1 and text_width(word[:cut], size, bold) > width:
-                    cut -= 1
-                lines.append(word[:cut])
-                word = word[cut:]
-            line = word
-        lines.append(line)
+                line = ""
+                emitted = True
+            if width > 0 and text_width(word, size, bold) <= width:
+                line = word
+                continue
+            pieces, rest = _split_word(word, width, size, bold)
+            if pieces:
+                lines.extend(pieces)
+                emitted = True
+            line = rest
+        # A word that was split already emitted its pieces; don't add a blank line.
+        if line or not emitted:
+            lines.append(line)
     return lines
 
 
 def truncate(text, width, size, bold=False):
     text = clean(text)
+    if width <= 0:
+        return ""
     if text_width(text, size, bold) <= width:
         return text
-    while text and text_width(text + "...", size, bold) > width:
+    ellipsis = "..."
+    if text_width(ellipsis, size, bold) > width:
+        ellipsis = ""
+    while text and text_width(text + ellipsis, size, bold) > width:
         text = text[:-1]
-    return text + "..."
+    return text + ellipsis
+
+
+def _fit_cells(cells, count):
+    """Keep every cell. Extras are joined onto the last column instead of dropped."""
+    if isinstance(cells, (list, tuple)):
+        seq = list(cells)
+    else:
+        seq = [cells]
+    if count > 0 and len(seq) > count:
+        merged = " ".join("" if cell is None else str(cell) for cell in seq[count - 1:])
+        seq = seq[:count - 1] + [merged]
+    return seq
 
 
 class Document:
@@ -103,6 +181,11 @@ class Document:
         return PAGE_W - 2 * MARGIN
 
     def new_page(self):
+        # A page with no operators yet is already blank. Reuse it so a spacer
+        # or a block taller than the sheet cannot leave an empty page behind.
+        if self.pages and not self.pages[-1]:
+            self.y = PAGE_H - MARGIN
+            return
         self.pages.append([])
         self.y = PAGE_H - MARGIN
 
@@ -123,9 +206,13 @@ class Document:
         self._op("%.3f %.3f %.3f rg %.2f %.2f %.2f %.2f re f 0 0 0 rg" % (*color, x, y, w, h))
 
     def space(self, points):
+        # Clamp instead of opening a page. The next real draw calls ensure()
+        # and breaks there; a trailing spacer must not mint a blank page.
+        if points <= 0:
+            return
         self.y -= points
         if self.y < MARGIN:
-            self.new_page()
+            self.y = MARGIN
 
     def text(self, text, size=10, bold=False, color=None, indent=0, leading=None):
         """Wrapped paragraph."""
@@ -136,7 +223,17 @@ class Document:
             self._text_at(MARGIN + indent, self.y + (leading - size) / 2, line, size, bold, color)
 
     def heading(self, text, size=14):
-        self.ensure(size * 2.4)  # keep a heading with at least one line after it
+        # Reserve the heading itself plus one following line. The old check
+        # only reserved size*2.4, which the heading then consumed, so the
+        # next paragraph landed on the next page.
+        leading = size * 1.3
+        lines = wrap(text, self.width, size, True)
+        follow = max(leading, 13)  # one body line (10pt leading is 13)
+        block = size * 0.5 + leading * max(len(lines), 1) + 2 + follow
+        usable = PAGE_H - 2 * MARGIN
+        if block > usable:
+            block = usable
+        self.ensure(block)
         self.space(size * 0.5)
         self.text(text, size=size, bold=True)
         self.space(2)
@@ -148,20 +245,59 @@ class Document:
         self.y -= 3
 
     def banner(self, text, fill=(0.98, 0.9, 0.6), size=10):
-        lines = wrap(text, self.width - 12, size, True)
-        height = len(lines) * size * 1.3 + 8
-        self.ensure(height)
+        if size <= 0:
+            return
+        line_h = size * 1.3
+        pad = 8
+        measure = self.width - 12
+        lines = wrap(text, measure if measure > 0 else 0, size, True) or [""]
+        height = len(lines) * line_h + pad
+        usable = PAGE_H - 2 * MARGIN
+        if height <= usable:
+            # Keep a banner that fits on one sheet as a single block.
+            self.ensure(height)
+            self._banner_chunk(lines, line_h, pad, fill, size)
+            return
+        index = 0
+        while index < len(lines):
+            if self.y - (line_h + pad) < MARGIN:
+                self.new_page()
+            room = int((self.y - MARGIN - pad) / line_h)
+            if room < 1:
+                room = 1
+            chunk = lines[index:index + room]
+            self._banner_chunk(chunk, line_h, pad, fill, size)
+            index += len(chunk)
+
+    def _banner_chunk(self, lines, line_h, pad, fill, size):
+        height = len(lines) * line_h + pad
         self.y -= height
         self._rect(MARGIN, self.y, self.width, height, fill)
         for i, line in enumerate(lines):
-            self._text_at(MARGIN + 6, self.y + height - 4 - (i + 1) * size * 1.3 + size * 0.3, line, size, True)
+            baseline = self.y + height - 4 - (i + 1) * line_h + size * 0.3
+            self._text_at(MARGIN + 6, baseline, line, size, True)
 
     def table(self, headers, rows, widths=None, size=8):
         """Rows are lists of cell strings; each cell is truncated to its column. Header repeats per page."""
-        widths = widths or [1] * len(headers)
-        scale = self.width / sum(widths)
-        cols = [w * scale for w in widths]
+        headers = list(headers or [])
+        rows = list(rows or [])
+        if not headers:
+            return
+        raw = list(widths) if widths else [1] * len(headers)
+        if not raw:
+            raw = [1] * len(headers)
+        # A zero or negative weight used to divide by zero, or collapse a
+        # column onto its neighbor. Treat those as a normal share.
+        fixed = []
+        for weight in raw:
+            if isinstance(weight, (int, float)) and not isinstance(weight, bool) and weight > 0:
+                fixed.append(float(weight))
+            else:
+                fixed.append(1.0)
+        scale = self.width / sum(fixed)
+        cols = [weight * scale for weight in fixed]
         row_h = size * 1.6
+        headers = _fit_cells(headers, len(cols))
 
         def draw_row(cells, bold, shade):
             self.ensure(row_h)
@@ -169,12 +305,12 @@ class Document:
             if shade:
                 self._rect(MARGIN, self.y, self.width, row_h, shade)
             x = MARGIN
-            for cell, w in zip(cells, cols):
-                self._text_at(x + 3, self.y + size * 0.45, truncate("" if cell is None else cell, w - 6, size, bold),
-                              size, bold)
-                x += w
+            for cell, col_w in zip(_fit_cells(cells, len(cols)), cols):
+                shown = truncate("" if cell is None else cell, col_w - 6, size, bold)
+                self._text_at(x + 3, self.y + size * 0.45, shown, size, bold)
+                x += col_w
 
-        self.ensure(row_h * 2)
+        self.ensure(row_h * (2 if rows else 1))
         draw_row(headers, True, (0.88, 0.9, 0.94))
         for i, row in enumerate(rows):
             if self.y - row_h < MARGIN:
@@ -191,8 +327,12 @@ class Document:
         for number, ops in enumerate(self.pages, 1):
             ops = list(ops)
             label = f"Page {number} of {total}"
-            ops.append(f"0.4 0.4 0.4 rg BT /F1 8 Tf {MARGIN} {FOOTER_Y} Td {_pdf_string(self.footer)} Tj ET")
-            ops.append(f"BT /F1 8 Tf {PAGE_W - MARGIN - text_width(label, 8):.2f} {FOOTER_Y} Td "
+            label_w = text_width(label, 8)
+            # Leave a gap so a long footer stops before the page number.
+            footer_w = self.width - label_w - 12
+            footer = truncate(self.footer, footer_w, 8) if self.footer else ""
+            ops.append(f"0.4 0.4 0.4 rg BT /F1 8 Tf {MARGIN} {FOOTER_Y} Td {_pdf_string(footer)} Tj ET")
+            ops.append(f"BT /F1 8 Tf {PAGE_W - MARGIN - label_w:.2f} {FOOTER_Y} Td "
                        f"{_pdf_string(label)} Tj ET 0 0 0 rg")
             streams.append("\n".join(ops).encode("latin-1"))
 

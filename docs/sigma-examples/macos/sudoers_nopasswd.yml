@@ -1,0 +1,28 @@
+# Passwordless sudo written onto the command line. Watchpost has no CommandLine field, so the
+# command text is matched on message. An interactive visudo (NOPASSWD only inside the file) does not match.
+title: macOS Sudoers NOPASSWD Grant
+id: 7c1e0a44-6b2d-4f8a-9c31-2a6e5d8b0f17
+status: experimental
+description: |
+  A process command that puts NOPASSWD into the sudoers file. /etc/sudoers also matches
+  /private/etc/sudoers and files under sudoers.d. Each matching event is evidence.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1548/003/
+tags:
+  - attack.privilege_escalation
+  - attack.t1548.003
+logsource:
+  category: process_creation
+  product: macos
+detection:
+  selection:
+    event.action: process_start
+    message|contains|all:
+      - /etc/sudoers
+      - NOPASSWD
+  condition: selection
+falsepositives:
+  - A management command that prints a sudoers fragment containing NOPASSWD
+level: high

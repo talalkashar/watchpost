@@ -125,6 +125,13 @@ class TailedFile:
         return {"inode": self.inode, "offset": self.offset} if self.inode is not None else None
 
 
+class NoIngestRedirect(urllib.request.HTTPRedirectHandler):
+    """Only send an authenticated batch to the operator's configured endpoint."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class Shipper:
     def __init__(self, url, token, files, state_path, batch_lines=500, batch_bytes=1024 * 1024,
                  year=None, from_start=False, cafile=None, timeout=30, sleep=time.sleep):
@@ -134,7 +141,8 @@ class Shipper:
         self.state_path = Path(state_path)
         self.batch_lines, self.batch_bytes, self.year = batch_lines, batch_bytes, year
         self.timeout, self.sleep = timeout, sleep
-        self.context = ssl.create_default_context(cafile=cafile) if url.startswith("https:") else None
+        context = ssl.create_default_context(cafile=cafile) if url.startswith("https:") else None
+        self.opener = urllib.request.build_opener(NoIngestRedirect, urllib.request.HTTPSHandler(context=context))
         state = self._load_state()
         self.files = [TailedFile(path, fmt, source, state, from_start) for path, fmt, source in files]
         self.stats = {"batches": 0, "lines": 0, "skipped_batches": 0, "retries": 0}
@@ -164,11 +172,13 @@ class Shipper:
             f"{self.url}/api/ingest/upload?{urllib.parse.urlencode(query)}", data=b"".join(lines),
             method="POST", headers={"Authorization": f"Bearer {self.token}", "Content-Type": "text/plain"})
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout, context=self.context) as resp:
+            with self.opener.open(request, timeout=self.timeout) as resp:
                 body = json.loads(resp.read() or b"null")
                 status = resp.status
         except urllib.error.HTTPError as exc:
             with exc:
+                if 300 <= exc.code < 400:
+                    raise FatalError("ingest URL redirected; configure the final endpoint") from exc
                 try:
                     body = json.loads(exc.read() or b"null")
                 except ValueError:
@@ -205,6 +215,10 @@ class Shipper:
         while True:
             try:
                 status = self.post(tailed, lines)
+            except FatalError:
+                # A first-time tail needs its batch start on disk before exiting.
+                self.save_state()
+                raise
             except (OSError, ValueError) as exc:  # URLError, timeouts, resets, bad JSON from a proxy
                 status, problem = None, f"{type(exc).__name__}: {getattr(exc, 'reason', exc)}"
             else:

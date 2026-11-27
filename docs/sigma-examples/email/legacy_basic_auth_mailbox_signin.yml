@@ -1,0 +1,55 @@
+# Stolen mailbox credentials are usually replayed with legacy basic authentication.
+# A modern sign-in on the same protocol does not match. Logsource is not a filter.
+title: Legacy Basic Auth Mailbox Sign-In
+id: e79c101e-03ca-48fd-a5fd-04fee5783b20
+status: experimental
+description: |
+  A mailbox protocol accepted legacy basic authentication from outside the private ranges.
+  Exchange Online records this as AuthType Basic, BasicAuth, or LegacyAuth on IMAP, POP, SMTP,
+  ActiveSync, MAPI, or Exchange Web Services. Microsoft disabled basic authentication for these
+  protocols because a stolen password is enough. A modern sign-in, a failed attempt, or the same
+  basic sign-in from a private address does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1078/004/
+  - https://learn.microsoft.com/exchange/clients-and-mobile-in-exchange-online/deprecation-of-basic-authentication-exchange-online
+tags:
+  - attack.initial_access
+  - attack.valid_accounts
+  - attack.t1078.004
+logsource:
+  category: authentication
+  product: m365
+detection:
+  success:
+    event.action: auth_success
+  legacy:
+    message|contains:
+      - 'AuthType: Basic'
+      - 'BasicAuth'
+      - 'basic authentication'
+      - 'LegacyAuth=true'
+      - 'AUTH LOGIN succeeded'
+      - 'AUTH PLAIN succeeded'
+  protocol:
+    message|contains:
+      - 'IMAP'
+      - 'POP3'
+      - 'SMTP'
+      - 'ActiveSync'
+      - 'Exchange Web Services'
+      - 'MAPI'
+  internal:
+    SourceIp|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+      - 'fc00::/7'
+      - 'fe80::/10'
+      - '::1/128'
+  condition: success and legacy and protocol and not internal
+falsepositives:
+  - A phone, copier, or scanner that still uses basic authentication from outside the network
+level: high

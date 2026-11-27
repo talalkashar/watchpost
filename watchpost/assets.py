@@ -19,9 +19,11 @@ admin approves; `plan_change` checks it against the inventory at proposal and ag
 import ipaddress
 import json
 import re
+from itertools import chain
 
 from .db import audit, now_iso, row_to_dict, transaction
 from .normalize import SEVERITIES
+from .queries import catalog_name
 
 CRITICALITIES = ("low", "medium", "high", "critical")
 KINDS = ("server", "workstation", "network", "cloud", "database", "other")
@@ -38,6 +40,9 @@ CRITICALITY_BOOST = {"low": 0, "medium": 0, "high": 1, "critical": 2}
 SENSITIVE_BOOST = 1
 MAX_BOOST = 2
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.:\-]{1,128}$")
+# SQLite COLLATE NOCASE and entity host keys fold these letters only. str.lower also
+# folds É, so an asset named Érin-host would match events on érin-host.
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 ASSET_COLUMNS = ("name", "kind", "criticality", "data_tags", "addresses", "owner", "description", "synthetic")
 
 # Fictional inventory for the synthetic demo data. Hosts match simulate.py and storyline.py.
@@ -81,13 +86,16 @@ def validate(data):
     name = str(data.get("name") or "").strip()
     if not _NAME_RE.match(name):
         raise AssetError("name must be 1-128 chars of letters, digits, _ . : -")
-    kind = data.get("kind") or "server"
-    if kind not in KINDS:
-        raise AssetError(f"kind must be one of {', '.join(KINDS)}")
-    criticality = data.get("criticality") or "medium"
-    if criticality not in CRITICALITIES:
-        raise AssetError(f"criticality must be one of {', '.join(CRITICALITIES)}")
-    tags = data.get("data_tags") or []
+    # ASCII case folds onto the catalog spelling. `Server` stores `server` and `High` stores `high`.
+    # A missing value stays the default. Spaces and `Hıgh` stay the existing error.
+    kind = _catalog_field(data.get("kind"), KINDS, "server",
+                          f"kind must be one of {', '.join(KINDS)}")
+    criticality = _catalog_field(data.get("criticality"), CRITICALITIES, "medium",
+                                 f"criticality must be one of {', '.join(CRITICALITIES)}")
+    # Missing is an empty list. false, 0, and {} must not wipe tags the way `or []` would.
+    tags = data.get("data_tags")
+    if tags is None:
+        tags = []
     if isinstance(tags, str):
         tags = [t for t in re.split(r"[,\s]+", tags) if t]
     if not isinstance(tags, list) or any(not isinstance(t, str) for t in tags):
@@ -96,7 +104,10 @@ def validate(data):
     unknown = [t for t in tags if t not in DATA_TAGS]
     if unknown:
         raise AssetError(f"unknown data tag(s) {', '.join(unknown)}; use {', '.join(sorted(DATA_TAGS))}")
-    addresses = data.get("addresses") or []
+    # Same for addresses: a falsy non-list is invalid, not "no addresses".
+    addresses = data.get("addresses")
+    if addresses is None:
+        addresses = []
     if isinstance(addresses, str):
         addresses = [a for a in re.split(r"[,\s]+", addresses) if a]
     if not isinstance(addresses, list) or len(addresses) > 32:
@@ -111,7 +122,7 @@ def validate(data):
     description = str(data.get("description") or "").strip()[:500] or None
     return {"name": name, "kind": kind, "criticality": criticality, "data_tags": tags,
             "addresses": sorted(set(clean)), "owner": owner, "description": description,
-            "synthetic": int(bool(data.get("synthetic")))}
+            "synthetic": _synthetic_flag(data.get("synthetic"))}
 
 
 # --- Review gate ------------------------------------------------------------------------------
@@ -134,7 +145,8 @@ def review_reasons(before, after, taken=frozenset()):
             reasons.append(f"lowers criticality from {before['criticality']} to {after['criticality']}")
         reasons += [f"removes sensitive-data tag {t}" for t in sorted(set(before["data_tags"]) - set(after["data_tags"]))]
         reasons += [f"removes address {a}" for a in sorted(set(before["addresses"]) - set(after["addresses"]))]
-        if after["name"].lower() != before["name"].lower():  # matching ignores case, so a re-case is no rename
+        # Matching folds ASCII letters only, so WEB01 to web01 is no rename. Érin-host to érin-host is.
+        if _host_key(after["name"]) != _host_key(before["name"]):
             reasons.append(f"renames {before['name']} to {after['name']}")
     old = set(before["addresses"]) if before else set()
     reasons += [f"claims address {a}, which another asset already has" for a in after["addresses"]
@@ -148,15 +160,59 @@ def _public(asset):
     return {k: asset[k] for k in ("id", "name", "kind", "criticality", "data_tags", "synthetic") if k in asset}
 
 
+def _catalog_field(value, names, default, message):
+    """A missing or empty value is `default`. Any other value must match one catalog spelling.
+
+    `Server` is `server`. A non-string, a value that is only spaces, and a non-ASCII
+    lookalike stay unset so the caller raises `message`. `false` and `0` are not empty:
+    storing them as the default would raise a low asset to medium with no such request.
+    """
+    if value is None or value == "":
+        return default
+    name = catalog_name(value, names)
+    if name is None:
+        raise AssetError(message)
+    return name
+
+
+def _synthetic_flag(value):
+    """0 or 1. Missing is 0. Booleans, 0, 1, and the words true/false are accepted.
+
+    The string "false" is 0. `bool("false")` is 1, which would mark a real asset as synthetic.
+    """
+    if value is None or value == "":
+        return 0
+    if isinstance(value, str):
+        folded = value.strip().translate(_ASCII_FOLD)
+        if folded in ("1", "true"):
+            return 1
+        if folded in ("0", "false"):
+            return 0
+        raise AssetError("synthetic must be 0, 1, true or false")
+    # True == 1 and False == 0, so this also accepts the JSON booleans the editor sends
+    # and the integers stored on the row (plan_change validates the merged asset).
+    if value is True or value == 1:
+        return 1
+    if value is False or value == 0:
+        return 0
+    raise AssetError("synthetic must be 0, 1, true or false")
+
+
+def _host_key(name):
+    """Host key for inventory matching. WEB01 is web01. Érin-host stays Érin-host."""
+    return name.translate(_ASCII_FOLD)
+
+
 def index(assets):
-    """Lookup tables for fast matching: lowercase host name -> asset, IP string -> every asset listing it.
+    """Lookup tables for fast matching: ASCII-folded host name -> asset, IP string -> every asset listing it.
 
     An address shared by several assets matches all of them, so inventory order (which a direct raise or
-    re-case can change) never decides which asset an alert keeps.
+    re-case can change) never decides which asset an alert keeps. The address key is the form already
+    stored (validate canonicalizes it). A different spelling of the same IP is not a second key.
     """
     by_name, by_ip = {}, {}
     for a in assets:
-        by_name[a["name"].lower()] = a
+        by_name[_host_key(a["name"])] = a
         for ip in a.get("addresses") or []:
             by_ip.setdefault(ip, []).append(a)
     return {"by_name": by_name, "by_ip": by_ip}
@@ -167,8 +223,8 @@ def match(idx, events):
     found = {}
     for e in events:
         host = e.get("host")
-        if host and host.lower() in idx["by_name"]:
-            a = idx["by_name"][host.lower()]
+        if host and _host_key(host) in idx["by_name"]:
+            a = idx["by_name"][_host_key(host)]
             found[a["name"]] = a
         for field in ("dest_ip", "src_ip"):
             ip = e.get(field)
@@ -217,10 +273,24 @@ def _row(row):
     return row_to_dict(row, ["data_tags", "addresses"])
 
 
+# GET /api/assets returns this many assets, most critical first, then name.
+# The rest are assets_omitted. Matching and review still read the full inventory.
+ASSET_LIST_LIMIT = 100
+_LIST_ORDER = (
+    " ORDER BY CASE criticality WHEN 'critical' THEN 0 WHEN 'high' THEN 1"
+    " WHEN 'medium' THEN 2 ELSE 3 END, name")
+
+
 def list_assets(conn):
-    return [_row(r) for r in conn.execute(
-        "SELECT * FROM assets ORDER BY CASE criticality WHEN 'critical' THEN 0 WHEN 'high' THEN 1"
-        " WHEN 'medium' THEN 2 ELSE 3 END, name")]
+    """Every asset, most critical first, then name. Matching and review need the full set."""
+    return [_row(r) for r in conn.execute("SELECT * FROM assets" + _LIST_ORDER)]
+
+
+def list_assets_page(conn, limit=ASSET_LIST_LIMIT):
+    """The first `limit` assets in list order, and how many were past that cap (0 when they fit)."""
+    total = conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
+    rows = [_row(r) for r in conn.execute("SELECT * FROM assets" + _LIST_ORDER + " LIMIT ?", (limit,))]
+    return rows, total - len(rows)
 
 
 def get_asset(conn, asset_id):
@@ -427,5 +497,5 @@ def _reweigh_open(conn, idx):
 def for_entities(conn, hosts, ips):
     """Assets behind an incident's hosts and addresses, for detail views and reports."""
     idx = load_index(conn)
-    events = [{"host": h} for h in hosts or []] + [{"dest_ip": ip} for ip in ips or []]
+    events = chain(({"host": h} for h in hosts or ()), ({"dest_ip": ip} for ip in ips or ()))
     return [_public(a) for a in match(idx, events)]

@@ -1,0 +1,41 @@
+# Update, patch, or delete of a configmap whose name is the apiserver audit policy.
+title: Kubernetes Audit Policy Modified Or Deleted
+id: 9a4b1d72-5e06-4f39-b2c8-7d3e0a6f1c45
+status: experimental
+description: |
+  A Kubernetes API audit event that updates, patches, or deletes a configmap named
+  audit-policy or kube-apiserver-audit. That is the cluster audit policy being
+  changed or removed. A get or list of the same object does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1562/008/
+  - https://kubernetes.io/docs/tasks/debug/debug-cluster/audit/
+tags:
+  - attack.defense_evasion
+  - attack.t1562.008
+logsource:
+  category: application
+  product: kubernetes
+  service: audit
+detection:
+  audit_config:
+    message|contains|all:
+      - audit.k8s.io
+      - configmaps
+  policy_name:
+    message|contains:
+      - audit-policy
+      - kube-apiserver-audit
+  mutating:
+    message|contains:
+      - '"verb":"update"'
+      - '"verb": "update"'
+      - '"verb":"patch"'
+      - '"verb": "patch"'
+      - '"verb":"delete"'
+      - '"verb": "delete"'
+  condition: audit_config and policy_name and mutating
+falsepositives:
+  - An administrator editing the audit policy on purpose during a logging change
+level: high

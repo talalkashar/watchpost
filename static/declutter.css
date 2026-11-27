@@ -1,0 +1,65 @@
+/* Declutter pass (loads last). One hairline per boundary, tinted chips instead of outlined boxes,
+   and red/amber only where a severity is critical or high. Nothing here hides a feature. */
+:root { --hair: rgb(255 255 255 / .065); --chip: rgb(255 255 255 / .055); }
+
+/* ---------- navigation: three labelled groups ---------- */
+.nav-group { margin: 12px 12px 4px; color: rgb(255 255 255 / .42); font: 600 10px/1.2 var(--sans);
+  letter-spacing: .09em; text-transform: uppercase; }
+.nav-set { display: contents; }
+.nav-set:first-child .nav-group { margin-top: 2px; }
+nav button { padding-block: 7px; }
+@media (max-width: 760px) {
+  .nav-group { grid-column: 1 / -1; margin: 8px 4px 0; }
+}
+
+/* ---------- panels: quieter headers, one hairline ---------- */
+.ph { border-bottom-color: var(--hair); }
+.ph > .muted, .ph > span, .ph > a { font-size: 12px; }
+.soc .ph h2 { font-size: 14.5px; }
+.view-bar .view-name { margin-right: 4px; }
+
+/* ---------- dashboard severity chips: tint, no outline ---------- */
+body[data-view="dashboard"] .sevtag { border-color: transparent; background: color-mix(in srgb, currentColor 14%, transparent); border-radius: 5px; padding: 0 5px; }
+body[data-view="dashboard"] .pill { border-color: transparent; background: color-mix(in srgb, currentColor 13%, transparent); }
+body[data-view="dashboard"] .tag { border-color: transparent; background: var(--chip); border-radius: 4px; }
+
+/* ---------- live stream: fewer rules, calmer rows ---------- */
+.feed-head { border-bottom-color: var(--hair); letter-spacing: .02em; }
+.fr { border-bottom-color: rgb(255 255 255 / .035); }
+.fr .fm { color: rgb(255 255 255 / .55); }
+
+/* ---------- ATT&CK matrix: heat stays neutral, a critical alert is a red outline only ---------- */
+.heat .cell.h0.crit { fill: rgb(255 255 255 / .035); } .heat .cell.h1.crit { fill: rgb(255 255 255 / .09); }
+.heat .cell.h2.crit { fill: rgb(255 255 255 / .15); } .heat .cell.h3.crit { fill: rgb(255 255 255 / .22); }
+.heat .cell.h4.crit { fill: rgb(255 255 255 / .3); } .heat .cell.h5.crit { fill: rgb(255 255 255 / .62); }
+.heat .cell:is(.h0, .h1, .h2, .h3, .h4, .h5).crit { stroke: rgb(var(--crit-rgb) / .62); }
+.heat-legend .swatch.crit { background: rgb(255 255 255 / .12); border-color: rgb(var(--crit-rgb) / .7); }
+
+/* ---------- incident board: one accent edge, softer card ---------- */
+.bcard { border-color: var(--hair); background: rgb(255 255 255 / .03); }
+.bcard:hover { border-color: rgb(255 255 255 / .16); }
+
+/* ---------- attack map card: metrics read as a quiet footer ---------- */
+.orbit-metrics > div { border-right-color: rgb(255 255 255 / .06); }
+.orbit-metrics dt { letter-spacing: .06em; color: #8ea3ab; }
+#map-side .ms-row { border-bottom-color: rgb(255 255 255 / .05); }
+.orbit-foot { border-top-color: rgb(255 255 255 / .06); }
+
+/* ---------- dashboard tables: readable rows ---------- */
+body[data-view="dashboard"] :is(th, td) { padding: 8px 10px; border-bottom-color: var(--hair); }
+body[data-view="dashboard"] th { font-size: 11px; letter-spacing: .03em; color: #a3a3ab; }
+body[data-view="dashboard"] tbody tr:hover { background: rgb(255 255 255 / .025); }
+
+/* ---------- empty and loading states ---------- */
+.orbit-empty, #dash-empty p { color: #a9b6bb; }
+.skel-bar { opacity: .7; }
+
+/* ---------- phone: tidy dashboard toolbar ---------- */
+@media (max-width: 760px) {
+  #dashboard-view-bar { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+  #dashboard-view-bar .view-name { grid-column: 1; }
+  #dashboard-view-bar > a:not(.chip) { grid-column: 2; grid-row: 1; justify-self: end; }
+  #dashboard-view-bar .view-controls { grid-column: 1 / -1; }
+  #dashboard-view-bar .view-save { grid-column: 1 / -1; margin: 0; }
+  #dashboard-view-bar .view-save:not([open]) summary { width: 100%; justify-content: center; }
+}

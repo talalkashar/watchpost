@@ -1,9 +1,12 @@
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from watchpost import rules
-from watchpost.db import iso
-from watchpost.improve import evaluate
+from watchpost.db import connect, init_schema, iso
+from watchpost.engine import RULE_EVENT_FIELDS, seed_rules
+from watchpost.improve import ChangeError, evaluate, propose_change
+from watchpost.normalize import normalize_record
 
 BASE = datetime(2026, 9, 15, 14, 0, tzinfo=timezone.utc)  # a Tuesday
 
@@ -47,9 +50,95 @@ class BruteForceTests(unittest.TestCase):
         self.assertEqual(rules.brute_force_ip(events, params("brute_force_ip", ignore_ips=["203.0.113.1"])), [])
         self.assertEqual(rules.brute_force_ip(events, params("brute_force_ip", ignore_users=["ADMIN"])), [])
 
+    def test_ignore_users_fold_ascii_case_only(self):
+        events = make([fail(i, user="Alice") for i in range(10)])
+        for entry in ("alice", "ALICE", "Alice"):
+            with self.subTest(entry=entry):
+                self.assertEqual(rules.list_entry("ignore_users", entry), "alice")
+                self.assertEqual(
+                    rules.brute_force_ip(events, params("brute_force_ip", ignore_users=[entry])), [])
+        self.assertTrue(rules.covers(
+            "ignore_users", {rules.list_entry("ignore_users", "Alice")}, {"user": "ALICE"}))
+        # É does not fold, so an érin entry leaves the ÉRIN burst in place.
+        accented = make([fail(i, user="ÉRIN") for i in range(10)])
+        self.assertEqual(len(rules.brute_force_ip(
+            accented, params("brute_force_ip", ignore_users=["érin"]))), 1)
+        self.assertEqual(rules.brute_force_ip(
+            accented, params("brute_force_ip", ignore_users=["ÉRIN"])), [])
+        self.assertFalse(rules.covers(
+            "ignore_users", {rules.list_entry("ignore_users", "érin")}, {"user": "ÉRIN"}))
+        jose = make([fail(i, user="josé") for i in range(10)])
+        self.assertEqual(rules.brute_force_ip(
+            jose, params("brute_force_ip", ignore_users=["josé"])), [])
+        self.assertTrue(rules.covers(
+            "ignore_users", {rules.list_entry("ignore_users", "josé")}, {"user": "josé"}))
+        # Those two lists are the only ones on the ASCII fold.
+        self.assertEqual(rules.list_entry("sanctioned_services", ".ÉXAMPLE.com"), "éxample.com")
+        self.assertEqual(rules.list_entry("logging_actions", "Éxport"), "éxport")
+        self.assertTrue(rules.covers(
+            "logging_actions", {rules.list_entry("logging_actions", "Éxport")},
+            {"message": "Éxport on cloudtrail.amazonaws.com"}))
+
+    def test_the_docs_name_the_ascii_fold(self):
+        text = (Path(__file__).resolve().parent.parent / "docs" / "REFERENCE.md").read_text()
+        self.assertIn("`Alice`, `alice`, and `ALICE` are one account", text)
+        self.assertIn("`érin` does not match `ÉRIN`", text)
+        self.assertIn("`josé` still matches `josé`", text)
+        self.assertIn("Sanctioned service names and logging actions still fold the whole string", text)
+
+    def test_ignore_ips_matches_stored_address_form(self):
+        # Ingest stores str(ipaddress.ip_address), so a mixed-case or expanded entry must still ignore.
+        events = make([fail(i, ip="2001:db8::1") for i in range(12)])
+        for entry in ("2001:DB8::1", "2001:0db8:0000:0000:0000:0000:0000:0001"):
+            with self.subTest(entry=entry):
+                self.assertEqual(rules.list_entry("ignore_ips", entry), "2001:db8::1")
+                self.assertEqual(
+                    rules.brute_force_ip(events, params("brute_force_ip", ignore_ips=[entry])), [])
+        self.assertEqual(len(rules.brute_force_ip(
+            events, params("brute_force_ip", ignore_ips=["2001:db8::2"]))), 1)
+        # An event that was not rewritten still matches the stored form.
+        self.assertTrue(rules.covers(
+            "ignore_ips", {rules.list_entry("ignore_ips", "2001:DB8::1")}, {"src_ip": "2001:DB8::1"}))
+
+    def test_ignore_ip_prefix_or_non_address_does_not_match(self):
+        event = {"src_ip": "2001:db8::1"}
+        for raw in ("2001:db8::/32", "2001:db8::1/128", "not-an-ip", ""):
+            with self.subTest(raw=raw):
+                entry = rules.list_entry("ignore_ips", raw)
+                self.assertEqual(entry, raw)
+                self.assertFalse(rules.covers("ignore_ips", {entry}, event))
+                self.assertFalse(rules.covers("ignore_ips", {entry}, {"src_ip": raw}))
+                self.assertFalse(rules.covers("ignore_ips", {entry}, {"src_ip": None}))
+        # A list that skipped validation does not raise, and the burst still alerts.
+        p = params("brute_force_ip")
+        p["ignore_ips"] = ["2001:DB8::/32", "not-an-ip"]
+        events = make([fail(i, ip="2001:db8::1") for i in range(10)])
+        self.assertEqual(len(rules.brute_force_ip(events, p)), 1)
+
     def test_unordered_input_and_missing_ip(self):
         events = [fail(i) for i in reversed(range(10))] + [{**fail(1), "src_ip": None}]
         self.assertEqual(len(rules.brute_force_ip(make(events), params("brute_force_ip"))), 1)
+
+    def test_targeted_accounts_fold_case(self):
+        # Alice (4) and alice (3) used to take two of the three named slots and drop carol.
+        events = make(
+            [fail(i, user="Alice") for i in range(4)]
+            + [fail(4 + i, user="alice") for i in range(3)]
+            + [fail(7 + i, user="bob") for i in range(2)]
+            + [fail(9, user="carol")]
+        )
+        found = rules.brute_force_ip(events, params("brute_force_ip"))
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "203.0.113.1")
+        self.assertEqual(found[0]["event_ids"], list(range(1, 11)))
+        self.assertIn("threshold of 10", found[0]["explanation"])
+        self.assertIn("Most targeted accounts: alice (7), bob (2), carol (1).", found[0]["explanation"])
+        self.assertNotIn("Alice", found[0]["explanation"])
+        # Nine events still miss the threshold. The fold does not count accounts.
+        short = make(
+            [fail(i, user="Alice") for i in range(5)] + [fail(5 + i, user="alice") for i in range(4)]
+        )
+        self.assertEqual(rules.brute_force_ip(short, params("brute_force_ip")), [])
 
 
 class OtherRuleTests(unittest.TestCase):
@@ -59,12 +148,68 @@ class OtherRuleTests(unittest.TestCase):
         same_user = make([fail(i * 30) for i in range(20)])
         self.assertEqual(rules.password_spray(same_user, params("password_spray")), [])
 
+    def test_password_spray_folds_account_case(self):
+        # One account written two ways does not meet a threshold of 2.
+        one = make([fail(0, user="Alice"), fail(30, user="alice")])
+        self.assertEqual(rules.password_spray(one, params("password_spray", distinct_users=2)), [])
+        # Five spellings of two accounts used to meet the default threshold of 5.
+        inflated = make([
+            fail(i * 20, user=name)
+            for i, name in enumerate(["Alice", "alice", "ALICE", "Bob", "bob"])
+        ])
+        self.assertEqual(rules.password_spray(inflated, params("password_spray")), [])
+        # Two accounts, each written twice, is one finding and the names are folded.
+        two = make([
+            fail(0, user="Alice"),
+            fail(10, user="alice"),
+            fail(20, user="Bob"),
+            fail(30, user="BOB"),
+        ])
+        found = rules.password_spray(two, params("password_spray", distinct_users=2))
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "203.0.113.1")
+        self.assertEqual(found[0]["event_ids"], [1, 2, 3, 4])
+        self.assertIn("2 accounts targeted", found[0]["title"])
+        self.assertIn("2 different accounts (alice, bob)", found[0]["explanation"])
+        self.assertNotIn("Alice", found[0]["explanation"])
+        self.assertNotIn("Bob", found[0]["explanation"])
+
     def test_account_repeated_failures_across_ips(self):
         events = make([fail(i * 10, ip=f"192.0.2.{i}") for i in range(8)])
         found = rules.account_repeated_failures(events, params("account_repeated_failures"))
         self.assertEqual(len(found), 1)
         self.assertIn("8 source IP", found[0]["explanation"])
         self.assertEqual(rules.brute_force_ip(events, params("brute_force_ip")), [])
+
+    def test_account_repeated_failures_merges_user_spellings(self):
+        p = params("account_repeated_failures")
+        # Four plus four: neither spelling reaches eight, so two groups stay quiet.
+        split = make(
+            [fail(i * 10, user="Alice", ip=f"192.0.2.{i}") for i in range(4)]
+            + [fail(40 + i * 10, user="alice", ip=f"198.51.100.{i}") for i in range(4)]
+        )
+        found = rules.account_repeated_failures(split, p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "alice")
+        self.assertEqual(found[0]["event_ids"], list(range(1, 9)))
+        self.assertIn("8 failed", found[0]["explanation"])
+        self.assertIn("8 source IP", found[0]["explanation"])
+        # A spelling that already meets the threshold still keeps the other spelling's failures.
+        both = make(
+            [fail(i * 10, user="Alice") for i in range(8)]
+            + [fail(80 + i * 10, user="alice") for i in range(2)]
+        )
+        found = rules.account_repeated_failures(both, p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "alice")
+        self.assertEqual(found[0]["event_ids"], list(range(1, 11)))
+        self.assertIn("10 failed", found[0]["explanation"])
+        # Seven across both spellings stays under the threshold.
+        short = make(
+            [fail(i, user="Alice") for i in range(4)]
+            + [fail(10 + i, user="alice") for i in range(3)]
+        )
+        self.assertEqual(rules.account_repeated_failures(short, p), [])
 
     def test_success_after_failures(self):
         p = params("success_after_failures")
@@ -79,6 +224,37 @@ class OtherRuleTests(unittest.TestCase):
         # A success *before* the failures is not "after failures".
         self.assertEqual(rules.success_after_failures(make([ok(0, user="d")] + [fail(10 + i, user="d") for i in range(5)]), p), [])
 
+    def test_success_after_failures_merges_user_spellings(self):
+        p = params("success_after_failures")
+        # Three plus two: neither spelling reaches five, so keeping one list misses the login.
+        split = make(
+            [fail(i * 10, user="Alice") for i in range(3)]
+            + [fail(30 + i * 10, user="alice") for i in range(2)]
+            + [ok(80, user="ALICE")]
+        )
+        found = rules.success_after_failures(split, p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "alice|203.0.113.1")
+        self.assertEqual(found[0]["event_ids"], [1, 2, 3, 4, 5, 6])
+        self.assertIn("5 failed", found[0]["explanation"])
+        # A spelling that already meets the threshold still keeps the other spelling's failures.
+        both = make(
+            [fail(i * 10, user="Alice") for i in range(5)]
+            + [fail(50 + i * 10, user="alice") for i in range(2)]
+            + [ok(80, user="Alice")]
+        )
+        found = rules.success_after_failures(both, p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["event_ids"], list(range(1, 9)))
+        self.assertIn("7 failed", found[0]["explanation"])
+        # Four across both spellings stays under the threshold.
+        short = make(
+            [fail(i, user="Alice") for i in range(2)]
+            + [fail(10 + i, user="alice") for i in range(2)]
+            + [ok(20, user="alice")]
+        )
+        self.assertEqual(rules.success_after_failures(short, p), [])
+
     def test_off_hours(self):
         p = params("off_hours_privileged_login")
         night = datetime(2026, 9, 15, 3, 0, tzinfo=timezone.utc)
@@ -87,6 +263,20 @@ class OtherRuleTests(unittest.TestCase):
         self.assertEqual(len(rules.off_hours_privileged_login(make([ok(0, "root", base=saturday)]), p)), 1)
         self.assertEqual(rules.off_hours_privileged_login(make([ok(0, "root")]), p), [])  # Tuesday 14:00
         self.assertEqual(rules.off_hours_privileged_login(make([ok(0, "alice", base=night)]), p), [])
+        # ROOT is the same account as root. The ASCII letters in ÉRIN fold, and érin stays apart.
+        folded = params("off_hours_privileged_login", privileged_users=["ROOT", "érin"])
+        self.assertEqual(rules.list_entry("privileged_users", "ROOT"), "root")
+        self.assertEqual(rules.list_entry("privileged_users", "ÉRIN"), "Érin")
+        self.assertEqual(len(rules.off_hours_privileged_login(make([ok(0, "root", base=night)]), folded)), 1)
+        self.assertEqual(len(rules.off_hours_privileged_login(make([ok(0, "érin", base=night)]), folded)), 1)
+        self.assertEqual(rules.off_hours_privileged_login(make([ok(0, "ÉRIN", base=night)]), folded), [])
+        same = params("off_hours_privileged_login", privileged_users=["ÉRIN"])
+        self.assertEqual(len(rules.off_hours_privileged_login(make([ok(0, "Érin", base=night)]), same)), 1)
+        self.assertEqual(rules.off_hours_privileged_login(make([ok(0, "érin", base=night)]), same), [])
+        self.assertTrue(rules.covers(
+            "privileged_users", {rules.list_entry("privileged_users", "josé")}, {"user": "josé"}))
+        self.assertFalse(rules.covers(
+            "privileged_users", {rules.list_entry("privileged_users", "érin")}, {"user": "ÉRIN"}))
 
 
 def ev(sec, event_type, user=None, ip="203.0.113.1", **extra):
@@ -160,6 +350,31 @@ class GeoLoginRuleTests(unittest.TestCase):
         self.assertEqual(rules.privilege_escalation_after_login(
             make(attack[:3] + [ev(400, "privilege_escalation", "frank", host="web01")]), p), [])
 
+    def test_privilege_escalation_folds_ascii_host(self):
+        p = params("privilege_escalation_after_login")
+
+        def attack(host, at=420):
+            rows = [ev(i * 20, "auth_failure", "frank", "192.0.2.140") for i in range(3)]
+            rows += [ev(60, "auth_success", "frank", "192.0.2.140"),
+                     ev(at, "privilege_escalation", "frank", "192.0.2.140", host=host)]
+            return rows
+
+        found = rules.privilege_escalation_after_login(make(attack("WEB01")), p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "frank|web01")
+        self.assertIn("WEB01", found[0]["title"])
+        # Two spellings of one host share the key, so detection updates one alert.
+        both = attack("WEB01") + [ev(500, "privilege_escalation", "frank", "192.0.2.140", host="web01")]
+        found = rules.privilege_escalation_after_login(make(both), p)
+        self.assertEqual([f["group_key"] for f in found], ["frank|web01", "frank|web01"])
+        self.assertEqual(found[0]["event_ids"][-1], 5)
+        self.assertEqual(found[1]["event_ids"][-1], 6)
+        # Non-ASCII case stays apart, the same fold entities use.
+        upper = rules.privilege_escalation_after_login(make(attack("Érin-host")), p)
+        lower = rules.privilege_escalation_after_login(make(attack("érin-host")), p)
+        self.assertEqual(upper[0]["group_key"], "frank|Érin-host")
+        self.assertEqual(lower[0]["group_key"], "frank|érin-host")
+
 
 class CloudRuleTests(unittest.TestCase):
     def test_iam_change_by_new_principal(self):
@@ -194,6 +409,37 @@ def trail(sec, action, user="svc-x", ip="203.0.113.9", event_type="cloud_api_cal
     return ev(sec, event_type, user, ip, message=f"[SYNTHETIC] {action} on cloudtrail.amazonaws.com{suffix}")
 
 
+_RULE_FIELDS = tuple(part.strip() for part in RULE_EVENT_FIELDS.split(","))
+
+
+def projected_cloudtrail(action, user="svc-x", ip="203.0.113.9", error=None, when="2026-09-15T14:00:00Z"):
+    """One raw CloudTrail record as detection sees it: normalized, then rule fields only."""
+    record = {
+        "eventTime": when,
+        "eventSource": "cloudtrail.amazonaws.com",
+        "eventName": action,
+        "sourceIPAddress": ip,
+        "userIdentity": {"type": "IAMUser", "userName": user},
+    }
+    if error:
+        record["errorCode"] = error
+    stored = normalize_record(record, "cloudtrail")
+    event = {field: stored.get(field) for field in _RULE_FIELDS}
+    event.pop("id", None)
+    return event
+
+
+def assert_logging_title(test, title, *, denied):
+    folded = title.lower()
+    test.assertIn("requested", folded)
+    for banned in ("disabled", "shutdown", "logging is off", "logging was off"):
+        test.assertNotIn(banned, folded, title)
+    if denied:
+        test.assertIn("denied", folded)
+    else:
+        test.assertNotIn("denied", folded)
+
+
 class CloudLoggingDisabledTests(unittest.TestCase):
     def test_stop_and_delete_trail_fire_once_per_principal(self):
         p = params("cloud_logging_disabled")
@@ -203,6 +449,8 @@ class CloudLoggingDisabledTests(unittest.TestCase):
         self.assertEqual(found[0]["event_ids"], [2, 3])  # DescribeTrails is reading, not disabling
         self.assertIn("StopLogging", found[0]["explanation"])
         self.assertIn("DeleteTrail", found[0]["explanation"])
+        assert_logging_title(self, found[0]["title"], denied=False)
+        self.assertIn("StopLogging, DeleteTrail", found[0]["title"])
 
     def test_changes_that_leave_logging_on_are_quiet(self):
         p = params("cloud_logging_disabled")
@@ -222,6 +470,8 @@ class CloudLoggingDisabledTests(unittest.TestCase):
         found = rules.cloud_logging_disabled(make([trail(0, "StopLogging", suffix=" (AccessDenied)")]),
                                              params("cloud_logging_disabled", logging_actions=["stoplogging"]))
         self.assertEqual(len(found), 1)
+        assert_logging_title(self, found[0]["title"], denied=True)
+        self.assertIn("did not change logging", found[0]["explanation"])
 
     def test_actions_list_window_and_ignore_lists(self):
         p = params("cloud_logging_disabled", logging_actions=["DeleteFlowLogs"])
@@ -240,6 +490,94 @@ class CloudLoggingDisabledTests(unittest.TestCase):
         entry = rules.list_entry("logging_actions", "StopLogging")
         self.assertTrue(rules.covers("logging_actions", {entry}, trail(0, "StopLogging", suffix=" (AccessDenied)")))
         self.assertFalse(rules.covers("logging_actions", {entry}, trail(0, "StartLogging")))
+
+    def test_projected_denied_success_and_maintenance(self):
+        p = params("cloud_logging_disabled")
+        denied_event = projected_cloudtrail("StopLogging", error="AccessDenied")
+        self.assertNotIn("outcome", denied_event)
+        self.assertIn("(AccessDenied)", denied_event["message"])
+        denied = rules.cloud_logging_disabled(make([denied_event]), p)
+        self.assertEqual(len(denied), 1)
+        assert_logging_title(self, denied[0]["title"], denied=True)
+        self.assertNotIn("disabled", denied[0]["title"].lower())
+
+        ok = rules.cloud_logging_disabled(make([
+            projected_cloudtrail("StopLogging", user="svc-deploy", when="2026-09-15T14:05:00Z"),
+        ]), p)
+        self.assertEqual(len(ok), 1)
+        self.assertEqual(ok[0]["group_key"], "svc-deploy")
+        assert_logging_title(self, ok[0]["title"], denied=False)
+        self.assertIn("not that logging is off", ok[0]["explanation"])
+
+        maintenance = [
+            projected_cloudtrail(action, when=f"2026-09-15T15:{minute:02d}:00Z")
+            for minute, action in enumerate(
+                ["CreateTrail", "UpdateTrail", "PutEventSelectors", "StartLogging",
+                 "GetTrailStatus", "DescribeTrails"])
+        ]
+        self.assertEqual(rules.cloud_logging_disabled(make(maintenance), p), [])
+
+        mixed = rules.cloud_logging_disabled(make([
+            trail(0, "StopLogging", suffix=" (AccessDenied)"),
+            trail(30, "DeleteTrail"),
+        ]), p)
+        self.assertEqual(len(mixed), 1)
+        assert_logging_title(self, mixed[0]["title"], denied=True)
+        self.assertIn("a denied call is included", mixed[0]["title"])
+
+    def test_stale_shutdown_titles_are_reported_and_left_in_place(self):
+        catalog = next(r for r in rules.DEFAULT_RULES if r["id"] == "cloud_logging_disabled")
+        self.assertEqual(catalog["id"], "cloud_logging_disabled")
+        self.assertEqual(catalog["name"], "Cloud audit logging stopped or deleted")
+        self.assertEqual(catalog["params"]["logging_actions"],
+                         ["StopLogging", "DeleteTrail", "DeleteFlowLogs"])
+
+        conn = connect(":memory:")
+        self.addCleanup(conn.close)
+        init_schema(conn)
+        seed_rules(conn)
+        stored = conn.execute(
+            "SELECT id, name, description, params, version FROM rules WHERE id = 'cloud_logging_disabled'"
+        ).fetchone()
+        before_rule = tuple(stored)
+        before_audit = conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+        stamp = "2026-09-15T14:00:00Z"
+        conn.execute(
+            "INSERT INTO alerts(rule_id, rule_version, group_key, severity, title, explanation,"
+            " first_seen, last_seen, event_count, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("cloud_logging_disabled", 1, "svc-x", "high",
+             "Cloud audit logging disabled by svc-x: StopLogging",
+             "old title", stamp, stamp, 1, stamp, stamp),
+        )
+        conn.execute(
+            "INSERT INTO alerts(rule_id, rule_version, group_key, severity, title, explanation,"
+            " first_seen, last_seen, event_count, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("cloud_logging_disabled", 1, "svc-y", "high",
+             "Cloud audit logging action requested by svc-y: DeleteTrail",
+             "current title", stamp, stamp, 1, stamp, stamp),
+        )
+        conn.execute(
+            "INSERT INTO alerts(rule_id, rule_version, group_key, severity, title, explanation,"
+            " first_seen, last_seen, event_count, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("brute_force_ip", 1, "203.0.113.1", "high",
+             "Account disabled after failures", "other rule", stamp, stamp, 1, stamp, stamp),
+        )
+        report = rules.stale_logging_display(conn)
+        self.assertEqual(report, [{
+            "id": 1,
+            "title": "Cloud audit logging disabled by svc-x: StopLogging",
+        }])
+        titles = [row["title"] for row in conn.execute("SELECT title FROM alerts ORDER BY id")]
+        self.assertEqual(titles, [
+            "Cloud audit logging disabled by svc-x: StopLogging",
+            "Cloud audit logging action requested by svc-y: DeleteTrail",
+            "Account disabled after failures",
+        ])
+        after_rule = tuple(conn.execute(
+            "SELECT id, name, description, params, version FROM rules WHERE id = 'cloud_logging_disabled'"
+        ).fetchone())
+        self.assertEqual(after_rule, before_rule)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0], before_audit)
 
 
 def priv(sec, user="kim", ip="10.0.1.33", event_type="cloud_iam_change", action="AttachUserPolicy"):
@@ -303,6 +641,316 @@ class AdminNewSourceTests(unittest.TestCase):
                     events, params("admin_action_from_new_source", **override)), [])
 
 
+class AccountAsciiFoldTests(unittest.TestCase):
+    """Account counts and finding keys use the ASCII fold, the same one as ignore_users.
+
+    Alice, alice, and ALICE stay one account. ÉRIN and érin stay two, so a spray of
+    only those two meets distinct_users 2. ÉRIN and Érin stay one account Érin and
+    stay quiet at that threshold.
+    """
+
+    def test_spray_keeps_accented_accounts_apart(self):
+        p = params("password_spray", distinct_users=2)
+        apart = make([fail(0, user="ÉRIN"), fail(30, user="érin")])
+        found = rules.password_spray(apart, p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "203.0.113.1")
+        self.assertIn("2 different accounts (Érin, érin)", found[0]["explanation"])
+        # The ASCII letters match, so this pair is one account and stays quiet.
+        same = make([fail(0, user="ÉRIN"), fail(30, user="Érin")])
+        self.assertEqual(rules.password_spray(same, p), [])
+        ascii_one = make([fail(0, user="Alice"), fail(10, user="alice"), fail(20, user="ALICE")])
+        self.assertEqual(rules.password_spray(ascii_one, p), [])
+        # The named accounts in a brute-force finding use the same spelling.
+        burst = make([fail(i, user="ÉRIN") for i in range(5)] + [fail(5 + i, user="érin") for i in range(5)])
+        named = rules.brute_force_ip(burst, params("brute_force_ip"))
+        self.assertIn("Most targeted accounts: Érin (5), érin (5).", named[0]["explanation"])
+
+    def test_repeated_failures_key_uses_the_folded_spelling(self):
+        p = params("account_repeated_failures")
+        merged = make(
+            [fail(i * 10, user="ÉRIN") for i in range(4)]
+            + [fail(40 + i * 10, user="Érin") for i in range(4)]
+        )
+        found = rules.account_repeated_failures(merged, p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "Érin")
+        self.assertEqual(found[0]["event_ids"], list(range(1, 9)))
+        split = make(
+            [fail(i * 10, user="ÉRIN") for i in range(4)]
+            + [fail(40 + i * 10, user="érin") for i in range(4)]
+        )
+        self.assertEqual(rules.account_repeated_failures(split, p), [])
+
+    def test_success_after_failures_looks_up_the_ascii_account(self):
+        p = params("success_after_failures")
+        failures = [fail(i * 10, user="ÉRIN") for i in range(3)] + [fail(30 + i * 10, user="Érin") for i in range(2)]
+        other = rules.success_after_failures(make(failures + [ok(80, user="érin")]), p)
+        self.assertEqual(other, [])
+        found = rules.success_after_failures(make(failures + [ok(80, user="ÉRIN")]), p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "Érin|203.0.113.1")
+        self.assertEqual(found[0]["event_ids"], list(range(1, 7)))
+        self.assertIn("ÉRIN", found[0]["title"])
+
+    def test_impossible_travel_keeps_accented_accounts_apart(self):
+        p = params("impossible_geo_login")
+        apart = make([
+            ev(0, "auth_success", "ÉRIN", "10.0.1.24"),
+            ev(25 * 60, "vpn_login", "érin", "203.0.113.150"),
+        ])
+        self.assertEqual(rules.impossible_geo_login(apart, p), [])
+        same = make([
+            ev(0, "auth_success", "ÉRIN", "10.0.1.24"),
+            ev(25 * 60, "vpn_login", "Érin", "203.0.113.150"),
+        ])
+        found = rules.impossible_geo_login(same, p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "Érin|10.0.1.24|203.0.113.150")
+
+    def test_privilege_escalation_looks_up_the_ascii_account(self):
+        p = params("privilege_escalation_after_login")
+
+        def attack(user, host="web01"):
+            rows = [ev(i * 20, "auth_failure", "ÉRIN", "192.0.2.140") for i in range(3)]
+            rows += [ev(60, "auth_success", "Érin", "192.0.2.140"),
+                     ev(420, "privilege_escalation", user, "192.0.2.140", host=host)]
+            return rows
+
+        self.assertEqual(rules.privilege_escalation_after_login(make(attack("érin")), p), [])
+        found = rules.privilege_escalation_after_login(make(attack("Érin")), p)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["group_key"], "Érin|web01")
+        self.assertIn("Érin", found[0]["title"])
+
+    def test_new_principal_history_is_per_ascii_account(self):
+        p = params("cloud_iam_change_by_new_principal")
+        prior = [ev(0, "cloud_api_call", "ÉRIN")]
+        other = rules.cloud_iam_change_by_new_principal(
+            make(prior + [ev(900, "cloud_iam_change", "érin")]), p)
+        self.assertEqual([f["group_key"] for f in other], ["érin"])
+        self.assertEqual(rules.cloud_iam_change_by_new_principal(
+            make(prior + [ev(900, "cloud_iam_change", "Érin")]), p), [])
+        alone = rules.cloud_iam_change_by_new_principal(make([ev(0, "cloud_iam_change", "ÉRIN")]), p)
+        self.assertEqual([f["group_key"] for f in alone], ["Érin"])
+
+    def test_admin_new_source_baseline_is_per_ascii_account(self):
+        p = params("admin_action_from_new_source")
+        history = [priv(-DAY * back, user="ÉRIN", ip="10.0.1.33") for back in (3, 2, 1)]
+        other = priv(0, user="érin", ip="198.51.100.77")
+        self.assertEqual(rules.admin_action_from_new_source(make(history + [other]), p), [])
+        same = priv(0, user="Érin", ip="198.51.100.77")
+        found = rules.admin_action_from_new_source(make(history + [same]), p)
+        self.assertEqual([f["group_key"] for f in found], ["Érin|198.51.100.77"])
+
+    def test_the_docs_name_the_account_fold(self):
+        text = (Path(__file__).resolve().parent.parent / "docs" / "REFERENCE.md").read_text()
+        self.assertIn("fold ASCII letters only, the same fold as `ignore_users`", text)
+        self.assertIn("`ÉRIN` and `érin` stay two accounts (`Érin` and `érin`)", text)
+
+
+def _gb(sec, user, ip="203.0.113.9"):
+    """1.2 GB as two cloud reads. One read alone stays under the 1 GB threshold."""
+    return [ev(sec, "cloud_data_access", user, ip, bytes=600_000_000),
+            ev(sec + 10, "cloud_data_access", user, ip, bytes=600_000_000)]
+
+
+class PrincipalAsciiFoldTests(unittest.TestCase):
+    """data_exfil_volume and cloud_logging_disabled key the account with the ASCII fold.
+
+    Alice, alice, and ALICE stay one principal and share one exfil baseline.
+    ÉRIN and érin stay two, so one account's history does not quiet the other.
+    An IP principal stays the stored address.
+    """
+
+    def test_exfil_keeps_accented_principals_apart(self):
+        p = params("data_exfil_volume")
+        half = rules.data_exfil_volume(make([
+            ev(0, "cloud_data_access", "Alice", bytes=600_000_000),
+            ev(10, "cloud_data_access", "alice", bytes=600_000_000),
+        ]), p)
+        self.assertEqual(len(half), 1)
+        self.assertEqual(half[0]["group_key"], "alice")
+        self.assertEqual(half[0]["event_ids"], [1, 2])
+        self.assertEqual(rules.data_exfil_volume(make([
+            ev(0, "cloud_data_access", "Alice", bytes=600_000_000),
+        ]), p), [])
+        apart = rules.data_exfil_volume(make([
+            ev(0, "cloud_data_access", "ÉRIN", bytes=600_000_000),
+            ev(10, "cloud_data_access", "érin", bytes=600_000_000),
+        ]), p)
+        self.assertEqual(apart, [])
+        both = rules.data_exfil_volume(make(_gb(0, "ÉRIN") + _gb(30, "érin")), p)
+        self.assertEqual(sorted(f["group_key"] for f in both), ["Érin", "érin"])
+        same = rules.data_exfil_volume(make(_gb(0, "ÉRIN") + _gb(30, "Érin")), p)
+        self.assertEqual([f["group_key"] for f in same], ["Érin"])
+        self.assertEqual(same[0]["event_ids"], [1, 2, 3, 4])
+
+    def test_exfil_baseline_is_per_ascii_principal(self):
+        # baseline_principals is engine-supplied; validate_params rejects it.
+        def excepted(*principals):
+            return {**params("data_exfil_volume"), "baseline_principals": list(principals)}
+
+        shared = excepted("alice")
+        found = rules.data_exfil_volume(make(_gb(-86400, "Alice") + _gb(0, "ALICE")), shared)
+        self.assertEqual([f["group_key"] for f in found], ["alice"])
+        self.assertEqual(found[0]["event_ids"], [1, 2])
+        self.assertIn("Baseline mode", found[0]["explanation"])
+        split = excepted("Érin")
+        found = rules.data_exfil_volume(make(_gb(-86400, "ÉRIN") + _gb(0, "érin")), split)
+        by_key = {f["group_key"]: f for f in found}
+        self.assertEqual(set(by_key), {"Érin", "érin"})
+        self.assertEqual(by_key["Érin"]["event_ids"], [1, 2])
+        self.assertIn("Baseline mode", by_key["Érin"]["explanation"])
+        self.assertEqual(by_key["érin"]["event_ids"], [3, 4])
+        self.assertIn("no approved tuning exception", by_key["érin"]["explanation"])
+
+    def test_exfil_ip_principal_stays_the_stored_address(self):
+        uploads = [ev(i * 60, "fw_allow", None, "2001:DB8::1", bytes=600_000_000) for i in range(2)]
+        found = rules.data_exfil_volume(make(uploads), params("data_exfil_volume"))
+        self.assertEqual([f["group_key"] for f in found], ["2001:DB8::1"])
+
+    def test_logging_disabled_keeps_accented_principals_apart(self):
+        p = params("cloud_logging_disabled")
+        merged = rules.cloud_logging_disabled(make([
+            trail(0, "StopLogging", user="Alice"),
+            trail(30, "DeleteTrail", user="ALICE"),
+        ]), p)
+        self.assertEqual([f["group_key"] for f in merged], ["alice"])
+        self.assertEqual(merged[0]["event_ids"], [1, 2])
+        apart = rules.cloud_logging_disabled(make([
+            trail(0, "StopLogging", user="ÉRIN"),
+            trail(30, "DeleteTrail", user="érin"),
+        ]), p)
+        self.assertEqual(sorted(f["group_key"] for f in apart), ["Érin", "érin"])
+        self.assertEqual(sorted(f["event_ids"] for f in apart), [[1], [2]])
+        same = rules.cloud_logging_disabled(make([
+            trail(0, "StopLogging", user="ÉRIN"),
+            trail(30, "DeleteTrail", user="Érin"),
+        ]), p)
+        self.assertEqual([f["group_key"] for f in same], ["Érin"])
+        self.assertEqual(same[0]["event_ids"], [1, 2])
+        found = rules.cloud_logging_disabled(
+            make([trail(0, "StopLogging", user=None, ip="2001:DB8::1")]), p)
+        self.assertEqual(found[0]["group_key"], "2001:DB8::1")
+
+    def test_the_docs_name_the_principal_fold(self):
+        text = (Path(__file__).resolve().parent.parent / "docs" / "REFERENCE.md").read_text()
+        self.assertIn("`data_exfil_volume`, `cloud_logging_disabled`, and `unsanctioned_cloud_service`", text)
+        self.assertIn("an exception for `Érin` does not quiet `érin`", text)
+        self.assertIn("`2001:DB8::1` is not folded", text)
+
+
+def _cloud(sec, user, service="personal-drive.example"):
+    return ev(sec, "cloud_data_access", user, "10.0.1.40", message=f"UploadFile on {service} (x)")
+
+
+class UnsanctionedAccountFoldTests(unittest.TestCase):
+    """unsanctioned_cloud_service keys the account with the ASCII fold.
+
+    Alice, alice, and ALICE stay one finding. ÉRIN and érin stay two findings on
+    the same service. Sanctioned-service matching still folds the whole name.
+    The title shows the account as logged.
+    """
+
+    def test_accented_accounts_stay_two_findings(self):
+        p = params("unsanctioned_cloud_service")
+        merged = rules.unsanctioned_cloud_service(make([
+            _cloud(0, "Alice"),
+            _cloud(30, "ALICE"),
+        ]), p)
+        self.assertEqual([f["group_key"] for f in merged], ["alice|personal-drive.example"])
+        self.assertEqual(merged[0]["event_ids"], [1, 2])
+        self.assertIn("Alice", merged[0]["title"])
+        apart = rules.unsanctioned_cloud_service(make([
+            _cloud(0, "ÉRIN"),
+            _cloud(30, "érin"),
+        ]), p)
+        self.assertEqual(sorted(f["group_key"] for f in apart), [
+            "Érin|personal-drive.example", "érin|personal-drive.example"])
+        self.assertEqual(sorted(f["event_ids"] for f in apart), [[1], [2]])
+        self.assertEqual(sorted(f["title"] for f in apart), [
+            "Unsanctioned cloud service: ÉRIN used personal-drive.example",
+            "Unsanctioned cloud service: érin used personal-drive.example"])
+        same = rules.unsanctioned_cloud_service(make([
+            _cloud(0, "ÉRIN"),
+            _cloud(30, "Érin"),
+        ]), p)
+        self.assertEqual([f["group_key"] for f in same], ["Érin|personal-drive.example"])
+        self.assertEqual(same[0]["event_ids"], [1, 2])
+        self.assertIn("ÉRIN", same[0]["title"])
+
+    def test_sanctioned_service_still_folds_the_whole_name(self):
+        p = params("unsanctioned_cloud_service", sanctioned_services=[".ÉXAMPLE.com"])
+        quiet = rules.unsanctioned_cloud_service(make([_cloud(0, "ÉRIN", "éxample.com")]), p)
+        self.assertEqual(quiet, [])
+        found = rules.unsanctioned_cloud_service(make([_cloud(0, "érin", "other.example")]), p)
+        self.assertEqual([f["group_key"] for f in found], ["érin|other.example"])
+        self.assertEqual(rules.unsanctioned_cloud_service(make([
+            ev(0, "cloud_data_access", None, "10.0.1.40",
+               message="UploadFile on personal-drive.example (x)"),
+        ]), params("unsanctioned_cloud_service")), [])
+
+
+NIGHT = datetime(2026, 9, 15, 3, 0, tzinfo=timezone.utc)
+
+
+class OffHoursAccountFoldTests(unittest.TestCase):
+    """off_hours_privileged_login keys the account with the ASCII fold.
+
+    covers already used that fold. The finding key used str.lower(), so ÉRIN
+    and érin shared one alert. Alice, alice, and ALICE stay one key. The title
+    shows the account as logged.
+    """
+
+    def test_accented_accounts_do_not_share_a_key(self):
+        p = params("off_hours_privileged_login", privileged_users=["ÉRIN", "érin", "alice"])
+        merged = rules.off_hours_privileged_login(make([
+            ok(0, "Alice", base=NIGHT),
+            ok(60, "ALICE", base=NIGHT),
+        ]), p)
+        self.assertEqual([f["group_key"] for f in merged], [
+            "alice|203.0.113.1|2026-09-15",
+            "alice|203.0.113.1|2026-09-15",
+        ])
+        self.assertEqual(merged[0]["event_ids"], [1])
+        self.assertEqual(merged[1]["event_ids"], [2])
+        self.assertIn("Alice", merged[0]["title"])
+        self.assertIn("ALICE", merged[1]["title"])
+        apart = rules.off_hours_privileged_login(make([
+            ok(0, "ÉRIN", base=NIGHT),
+            ok(60, "érin", base=NIGHT),
+        ]), p)
+        self.assertEqual([f["group_key"] for f in apart], [
+            "Érin|203.0.113.1|2026-09-15",
+            "érin|203.0.113.1|2026-09-15",
+        ])
+        self.assertEqual([f["title"] for f in apart], [
+            "Off-hours privileged login: ÉRIN",
+            "Off-hours privileged login: érin",
+        ])
+        same = rules.off_hours_privileged_login(make([
+            ok(0, "ÉRIN", base=NIGHT),
+            ok(60, "Érin", base=NIGHT),
+        ]), p)
+        self.assertEqual([f["group_key"] for f in same], [
+            "Érin|203.0.113.1|2026-09-15",
+            "Érin|203.0.113.1|2026-09-15",
+        ])
+        self.assertIn("ÉRIN", same[0]["title"])
+        self.assertIn("Érin", same[1]["title"])
+        other_ip = rules.off_hours_privileged_login(make([
+            ok(0, "ÉRIN", ip="198.51.100.8", base=NIGHT),
+        ]), p)
+        self.assertEqual([f["group_key"] for f in other_ip], ["Érin|198.51.100.8|2026-09-15"])
+
+    def test_the_docs_name_the_off_hours_fold(self):
+        text = (Path(__file__).resolve().parent.parent / "docs" / "REFERENCE.md").read_text()
+        self.assertIn("`off_hours_privileged_login`", text)
+        self.assertIn("the key is `account|src_ip|date`", text)
+        self.assertIn("the title still shows the account as logged", text)
+
+
 class TechniqueMappingTests(unittest.TestCase):
     def test_every_rule_has_techniques_and_a_function(self):
         for rule in rules.DEFAULT_RULES:
@@ -337,7 +985,16 @@ class ValidationTests(unittest.TestCase):
             ("cloud_logging_disabled", {"logging_actions": []}),
             ("cloud_logging_disabled", {"logging_actions": "StopLogging"}),
             ("cloud_logging_disabled", {"logging_actions": [""]}),
+            ("cloud_logging_disabled", {"logging_actions": ["Stop Logging"]}),
+            ("cloud_logging_disabled", {"logging_actions": ["x" * 129]}),
             ("cloud_logging_disabled", {"window_seconds": 5}),
+            ("brute_force_ip", {"ignore_ips": ["10.0.0.0/8"]}),
+            ("brute_force_ip", {"ignore_users": [" admin"]}),
+            ("brute_force_ip", {"ignore_users": ["ad\x00min"]}),
+            ("off_hours_privileged_login", {"privileged_users": ["   "]}),
+            ("unsanctioned_cloud_service", {"sanctioned_services": ["..."]}),
+            ("unsanctioned_cloud_service", {"sanctioned_services": ["corp drive.example"]}),
+            ("unsanctioned_cloud_service", {"sanctioned_services": ["amazonaws.com."]}),
             ("admin_action_from_new_source", {"min_prior_actions": 0}),
             ("admin_action_from_new_source", {"min_prior_actions": "3"}),
             ("admin_action_from_new_source", {"history_seconds": 30}),
@@ -348,6 +1005,147 @@ class ValidationTests(unittest.TestCase):
             with self.subTest(rule=rule_id, params=p):
                 with self.assertRaises(rules.RuleConfigError):
                     rules.validate_params(rule_id, p)
+
+    def test_bad_rule_errors_name_the_value(self):
+        cases = [
+            ("brute_force_ip", {"threshold": "10"},
+             "threshold must be an integer between 2 and 10000 (got '10', a str)"),
+            ("brute_force_ip", {"threshold": True},
+             "threshold must be an integer between 2 and 10000 (got True, a boolean)"),
+            ("brute_force_ip", {"threshold": 1},
+             "threshold must be an integer between 2 and 10000 (got 1)"),
+            ("brute_force_ip", {"nope": 1},
+             "unknown parameter(s) for brute_force_ip: nope. "
+             "Known parameters: ignore_ips, ignore_users, threshold, window_seconds"),
+            ("brute_force_ip", {1: 2, "nope": 3},
+             "unknown parameter(s) for brute_force_ip: 'nope', 1. "
+             "Known parameters: ignore_ips, ignore_users, threshold, window_seconds"),
+            ("brute_force_ip", ["threshold"],
+             "params must be an object (got list)"),
+            ("cloud_logging_disabled", {"logging_actions": "StopLogging"},
+             "logging_actions must be a list with 1-500 entries (got a str)"),
+            ("cloud_logging_disabled", {"logging_actions": []},
+             "logging_actions must be a list with 1-500 entries (got 0)"),
+            ("cloud_logging_disabled", {"logging_actions": [""]},
+             "logging_actions entries must be non-empty strings of at most 128 characters "
+             "(logging_actions[0] has length 0)"),
+            ("cloud_logging_disabled", {"logging_actions": [1]},
+             "logging_actions entries must be non-empty strings (logging_actions[0] is int)"),
+            ("cloud_logging_disabled", {"logging_actions": ["x" * 129]},
+             "logging_actions entries must be non-empty strings of at most 128 characters "
+             "(logging_actions[0] has length 129)"),
+            ("brute_force_ip", {"ignore_ips": ["10.0.0.0/8"]},
+             "ignore_ips entry '10.0.0.0/8' is not an IP address (a prefix is not one address)"),
+            ("brute_force_ip", {"ignore_ips": ["not-an-ip"]},
+             "ignore_ips entry 'not-an-ip' is not an IP address"),
+            ("brute_force_ip", {"ignore_users": [" admin"]},
+             "ignore_users entry ' admin' has surrounding whitespace or control characters; "
+             "stored events do not keep them, so this entry would match nothing"),
+            ("brute_force_ip", {"ignore_users": ["ad\x00min"]},
+             "ignore_users entry 'ad\\x00min' has surrounding whitespace or control characters; "
+             "stored events do not keep them, so this entry would match nothing"),
+            ("off_hours_privileged_login", {"privileged_users": ["   "]},
+             "privileged_users entry '   ' has surrounding whitespace or control characters; "
+             "stored events do not keep them, so this entry would match nothing"),
+            ("off_hours_privileged_login", {"business_start_hour": 18, "business_end_hour": 8},
+             "business_start_hour must be before business_end_hour (got 18 and 8)"),
+            ("off_hours_privileged_login", {"business_start_hour": 20},
+             "business_start_hour must be before business_end_hour (got 20 and 18)"),
+            ("unsanctioned_cloud_service", {"sanctioned_services": ["..."]},
+             "sanctioned_services entry '...' is only dots and matches no service"),
+            ("unsanctioned_cloud_service", {"sanctioned_services": ["corp drive.example"]},
+             "sanctioned_services entry 'corp drive.example' must be a single word; a space never matches"),
+            ("unsanctioned_cloud_service", {"sanctioned_services": ["amazonaws.com."]},
+             "sanctioned_services entry 'amazonaws.com.' has punctuation the service parser strips, "
+             "so it would match nothing"),
+            ("cloud_logging_disabled", {"logging_actions": ["Stop Logging"]},
+             "logging_actions entry 'Stop Logging' must be a single word; a space never matches"),
+            ("missing_rule", {}, "unknown rule 'missing_rule'"),
+            (None, {}, "unknown rule None"),
+        ]
+        for rule_id, bad, message in cases:
+            with self.subTest(rule=rule_id, params=bad):
+                with self.assertRaises(rules.RuleConfigError) as caught:
+                    rules.validate_params(rule_id, bad)
+                self.assertEqual(str(caught.exception), message)
+
+    def test_a_long_bad_value_stays_a_short_message(self):
+        with self.assertRaises(rules.RuleConfigError) as caught:
+            rules.validate_params("brute_force_ip", {"threshold": "x" * 500})
+        text = str(caught.exception)
+        self.assertLess(len(text), 200)
+        self.assertIn("threshold must be an integer", text)
+        self.assertIn("a str", text)
+
+    def test_entries_that_can_match_still_pass(self):
+        merged = rules.validate_params("brute_force_ip", {
+            "threshold": 2,
+            "ignore_ips": ["2001:DB8::1"],
+            "ignore_users": ["érin", "John Doe"],
+        })
+        self.assertEqual(merged["threshold"], 2)
+        self.assertEqual(merged["ignore_ips"], ["2001:DB8::1"])
+        self.assertEqual(merged["ignore_users"], ["érin", "John Doe"])
+        self.assertEqual(merged["window_seconds"], 300)
+        hidden = make([
+            fail(0, user="John Doe", ip="198.51.100.9"),
+            fail(1, user="John Doe", ip="198.51.100.9"),
+            fail(2, user="ada", ip="2001:DB8::1"),
+            fail(3, user="ada", ip="2001:db8::1"),
+        ])
+        self.assertEqual(rules.brute_force_ip(hidden, merged), [])
+        seen = rules.brute_force_ip(make([
+            fail(0, user="ada", ip="198.51.100.9"),
+            fail(1, user="ada", ip="198.51.100.9"),
+        ]), merged)
+        self.assertEqual([f["group_key"] for f in seen], ["198.51.100.9"])
+        logging = rules.validate_params("cloud_logging_disabled", {"logging_actions": ["DeleteFlowLogs"]})
+        flow = rules.cloud_logging_disabled(make([trail(0, "DeleteFlowLogs")]), logging)
+        self.assertEqual(len(flow), 1)
+        assert_logging_title(self, flow[0]["title"], denied=False)
+        self.assertEqual(rules.cloud_logging_disabled(make([trail(0, "StopLogging")]), logging), [])
+        rules.validate_params("unsanctioned_cloud_service", {"sanctioned_services": [".ÉXAMPLE.com"]})
+        rules.validate_params("off_hours_privileged_login", {
+            "business_start_hour": 0, "business_end_hour": 24, "privileged_users": ["root"],
+        })
+        rules.validate_params("cloud_logging_disabled", {"logging_actions": ["StopLogging"]})
+        self.assertEqual(rules.validate_params("data_exfil_volume", {"baseline_multiplier": 0})["baseline_multiplier"], 0)
+
+    def test_a_refused_proposal_leaves_rules_and_audit_unchanged(self):
+        conn = connect(":memory:")
+        self.addCleanup(conn.close)
+        init_schema(conn)
+        seed_rules(conn)
+
+        def durable():
+            rules_rows = [tuple(row) for row in conn.execute(
+                "SELECT id, name, description, params, version FROM rules ORDER BY id")]
+            history = [tuple(row) for row in conn.execute(
+                "SELECT rule_id, version, enabled, params, note FROM rule_history ORDER BY id")]
+            changes = conn.execute("SELECT COUNT(*) FROM change_requests").fetchone()[0]
+            audit_rows = [tuple(row) for row in conn.execute(
+                "SELECT actor, action, target, detail FROM audit_log ORDER BY id")]
+            return rules_rows, history, changes, audit_rows
+
+        before = durable()
+        with self.assertRaises(ChangeError):
+            propose_change(
+                conn, "rule_update", "cloud_logging_disabled",
+                {"params": {"logging_actions": ["Stop Logging"]}},
+                "this value cannot match a stored action",
+                "analyst",
+            )
+        after = durable()
+        self.assertEqual(after, before)
+        self.assertEqual(after[2], 0)
+        actions = [row[1] for row in after[3]]
+        self.assertNotIn("change_proposed", actions)
+        self.assertFalse(any("refus" in action for action in actions))
+        stored = next(row for row in after[0] if row[0] == "cloud_logging_disabled")
+        self.assertEqual(stored[0], "cloud_logging_disabled")
+        self.assertIn("StopLogging", stored[3])
+        self.assertIn("DeleteTrail", stored[3])
+        self.assertIn("DeleteFlowLogs", stored[3])
 
 
 class EvaluationTests(unittest.TestCase):
