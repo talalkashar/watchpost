@@ -18,7 +18,7 @@ Watchpost is a SIEM in the Python standard library. It ingests logs, runs explai
 
 ## What it does
 
-- **Ingests** JSON, CSV, Linux `auth.log`, Windows Security events, nginx and Apache access logs, firewall and VPN logs, and cloud audit logs. Input is a file upload, an authenticated API, a syslog listener, `scripts/shipper.py`, or the read-only CloudTrail collector. Normalization writes one schema.
+- **Ingests** JSON, CSV, Linux `auth.log`, Windows Security events, nginx and Apache access logs, firewall and VPN logs, and cloud audit logs. Input is a file upload, an authenticated API, a syslog listener, `scripts/shipper.py`, the read-only CloudTrail collector, or the experimental Windows Event Forwarding collector. Normalization writes one schema.
 - **Detects** with fifteen built-in rules. Each rule is a pure function. Each alert stores a plain-English explanation and the event ids behind it. The rules are listed under [Detections](#detections).
 - **Maps to MITRE ATT&CK.** Today's catalog is the 20 techniques in `watchpost/attack.py`, not the full matrix. A technique is validated only when an enabled rule detects a labeled synthetic scenario tagged with that technique. That grade is not a claim about real traffic. The other grades are mapped, disabled, and gap.
 - **Correlates** alerts that share an IP, account, or host into incidents with kill-chain stages. An incident exports a case record as JSON or Markdown, and a report as Markdown or PDF.
@@ -94,7 +94,7 @@ CI runs the suite on Python 3.11 through 3.14.
 |---|---|
 | [Reference](docs/REFERENCE.md) | Every feature, the architecture, configuration, performance numbers and limits |
 | [API](docs/API.md) | HTTP API reference |
-| [Live ingestion](docs/LIVE_INGEST.md) | Syslog listener (plaintext and TLS), rsyslog forwarding, the file shipper, and the CloudTrail collector |
+| [Live ingestion](docs/LIVE_INGEST.md) | Syslog listener (plaintext and TLS), rsyslog forwarding, the file shipper, the CloudTrail collector, and experimental Windows Event Forwarding |
 | [Threat model](docs/THREAT-MODEL.md) | What it protects, what it assumes, and what it does not cover |
 | [Deployment](deploy/README.md) | Debian 12 kit: hardened systemd service behind Caddy or nginx |
 | [Changelog](CHANGELOG.md) | What changed in each release |
