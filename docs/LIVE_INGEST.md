@@ -423,7 +423,7 @@ Windows can forward its own event logs with nothing installed on it. The feature
 
 - **No agent:** the Windows host uses its built-in forwarder and the WinRM service. It needs a certificate, one policy setting and permission to read the Security log.
 - **Certificates both ways:** the host checks the collector's certificate, and the collector accepts only hosts with a certificate signed by `--client-ca`. TLS 1.2 or newer. `--allow-sender` narrows it to named hosts.
-- **Which events:** by default the eight Security event IDs Watchpost maps (4624, 4625, 4648, 4663, 4672, 4688, 4720, 4740). `--channel Security --channel System` forwards whole channels. `--query-file` takes an event query exported from Event Viewer.
+- **Which events:** by default the thirteen directly mapped Security event IDs (4624, 4625, 4648, 4663, 4672, 4688, 4720, 4740, 4771, 5145, 5152, 5156, 5157). `--channel Security --channel System` forwards whole channels. `--query-file` takes an event query exported from Event Viewer.
 - **Acknowledged delivery:** a batch is acknowledged only after Watchpost has stored it. If Watchpost cannot be reached the collector answers 503, and Windows sends the batch again.
 - **Bookmarks:** Windows sends a bookmark with every batch. The collector saves it per host in the state file and hands it back when the host next asks for its subscription, so the host resumes where it stopped.
 - **Who sent it:** every record carries `wef_sender`, the name in the certificate the host authenticated with, next to `Computer`, the name inside the event. A host can lie about the second, not the first.
