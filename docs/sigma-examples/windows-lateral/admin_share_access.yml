@@ -1,0 +1,44 @@
+# SMB admin shares (ADMIN$, C$) and the PsExec / remote service-control clients that use them.
+# A mapped user share such as \\fileserver\Finance does not match.
+title: Windows Admin Share Lateral Access
+id: bef36f11-5455-48f3-8d0d-200e6b3bbc1d
+status: experimental
+description: |
+  A Windows process mounting an administrative share, launching PsExec or its PSEXESVC service,
+  or creating a service on a remote host with sc.exe. Ordinary user-share mounts do not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1021/002/
+tags:
+  - attack.lateral_movement
+  - attack.t1021.002
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  share:
+    event.action: process_start
+    message|contains:
+      - '\ADMIN$'
+      - '\C$\Windows'
+      - '\IPC$\svcctl'
+  client:
+    message|contains:
+      - 'net use'
+      - net.exe
+      - 'sc.exe \\'
+  psexec:
+    event.action: process_start
+    message|contains:
+      - psexec.exe
+      - PSEXESVC
+  remote_sc:
+    event.action: process_start
+    message|contains|all:
+      - 'sc.exe \\'
+      - ' create '
+  condition: (share and client) or psexec or remote_sc
+falsepositives:
+  - A software-deployment account mapping ADMIN$ or installing a service on a managed host
+level: high

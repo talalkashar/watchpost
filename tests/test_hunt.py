@@ -257,7 +257,9 @@ class HuntApiTests(ServerTestCase):
                 self.assertIn(message, data["error"])
         self.assertEqual(analyst.post("/api/hunt/saved", {"name": "dup", "query": "user:a"})[0], 201)
         status, data, _ = analyst.post("/api/hunt/saved", {"name": "DUP", "query": "user:b"})
-        self.assertEqual((status, "already exists" in data["error"]), (409, True))
+        self.assertEqual(status, 409, data)
+        self.assertIn("'dup'", data["error"])
+        self.assertNotIn("DUP", data["error"])
         self.assertEqual(len(self.audit_actions("saved_search_created")), 1)
 
     def test_only_the_owner_or_an_admin_deletes(self):
@@ -280,6 +282,106 @@ class HuntApiTests(ServerTestCase):
             columns = [r[1] for r in db.execute("PRAGMA table_info(saved_searches)")]
         self.assertEqual(columns, ["id", "name", "query", "description", "owner", "created_at"])
         self.assertEqual(self.client("analyst").post("/api/hunt/saved", {"name": "after", "query": "user:a"})[0], 201)
+
+
+class SavedSearchNameTests(unittest.TestCase):
+    """A name that differs only by case is the stored row, answered 409, never a unique-constraint 500."""
+
+    def setUp(self):
+        self.conn = connect(":memory:")
+        init_schema(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_case_only_difference_names_the_stored_row(self):
+        hunt.save_search(self.conn, {"name": "dup", "query": "user:a"}, "analyst")
+        for variant in ("DUP", "dup"):
+            with self.subTest(variant=variant):
+                with self.assertRaises(hunt.HuntError) as caught:
+                    hunt.save_search(self.conn, {"name": variant, "query": "user:b"}, "analyst")
+                self.assertEqual(caught.exception.status, 409)
+                self.assertEqual(str(caught.exception), "a saved search named 'dup' already exists")
+        self.assertEqual([row["name"] for row in self.conn.execute("SELECT name FROM saved_searches")], ["dup"])
+
+    def test_unique_conflict_names_the_stored_row(self):
+        hunt.save_search(self.conn, {"name": "dup", "query": "user:a"}, "analyst")
+        real = self.conn.execute
+        skipped = {"done": False}
+
+        def execute(sql, params=()):
+            # The lookup misses once, so the insert hits UNIQUE COLLATE NOCASE.
+            if not skipped["done"] and sql == "SELECT name FROM saved_searches WHERE name = ? COLLATE NOCASE":
+                skipped["done"] = True
+                return real("SELECT name FROM saved_searches WHERE 0")
+            return real(sql, params)
+
+        self.conn.execute = execute
+        with self.assertRaises(hunt.HuntError) as caught:
+            hunt.save_search(self.conn, {"name": "DUP", "query": "user:b"}, "analyst")
+        self.assertEqual(caught.exception.status, 409)
+        self.assertEqual(str(caught.exception), "a saved search named 'dup' already exists")
+        self.assertTrue(skipped["done"])
+        self.conn.execute = real
+        self.assertEqual([row["name"] for row in self.conn.execute("SELECT name FROM saved_searches")], ["dup"])
+        created = self.conn.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'saved_search_created'").fetchone()[0]
+        self.assertEqual(created, 1)
+
+
+# (label, query, hits on the full synthetic demo). Dated on the previous weekday, so last:7d matches.
+HUNT_EXAMPLES = [
+    ("Brute force", "event_type:auth_failure user:admin src_ip:203.0.113.45 synthetic:1 last:7d", 40),
+    ("Impossible travel", "user:erin source:demo:impossible_travel synthetic:1 last:7d", 2),
+    ("Large transfer", 'event_type:cloud_data_access user:svc-deploy-tmp "customer-exports" synthetic:1 last:7d', 40),
+]
+
+
+class HuntExampleTests(unittest.TestCase):
+    """The hunt page's example links must return the labeled demo scenario they name."""
+
+    def setUp(self):
+        self.now = datetime.now(timezone.utc)
+        self.conn = connect(":memory:")
+        init_schema(self.conn)
+        from watchpost.simulate import build
+        rows = []
+        for events in build(seed=7, now=self.now).values():
+            for event in events:
+                rows.append((event["ts"], event["ts"], event["source"], event.get("host"), event["event_type"],
+                             "info", event.get("user"), event.get("src_ip"), event.get("dest_ip"),
+                             event.get("message"), 1))
+        self.conn.executemany(
+            "INSERT INTO events(ts, ingested_at, source, host, event_type, severity, user, src_ip, dest_ip,"
+            " message, synthetic) VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_each_example_hits_only_its_synthetic_scenario(self):
+        for label, query, count in HUNT_EXAMPLES:
+            with self.subTest(label=label):
+                page = hunt.run(self.conn, {"q": query, "limit": "100"}, now=self.now)
+                self.assertEqual(page["total"], count)
+                self.assertTrue(page["events"])
+                self.assertTrue(all(event["synthetic"] for event in page["events"]))
+                self.assertTrue(all("[SYNTHETIC]" in (event["message"] or "") for event in page["events"]))
+                self.assertTrue(all(str(event["source"]).startswith("demo:") for event in page["events"]))
+        travel = hunt.run(self.conn, {"q": HUNT_EXAMPLES[1][1], "limit": "10"}, now=self.now)["events"]
+        self.assertEqual({event["event_type"] for event in travel}, {"auth_success", "vpn_login"})
+        self.assertEqual({event["user"] for event in travel}, {"erin"})
+
+    def test_examples_are_links_on_the_hunt_page(self):
+        static = Path(__file__).resolve().parent.parent / "static"
+        app = (static / "app.js").read_text()
+        css = (static / "style.css").read_text()
+        self.assertIn('id: "hunt-examples"', app)
+        self.assertIn("HUNT_EXAMPLES.map(([label, q])", app)
+        self.assertIn("href: huntHref(q)", app)
+        self.assertIn("a.hunt-example", css)
+        for label, query, _count in HUNT_EXAMPLES:
+            self.assertIn(f'["{label}",', app)
+            self.assertIn(query, app)
 
 
 class HuntUiTests(unittest.TestCase):

@@ -103,7 +103,7 @@ def generate(n, seed, days=7, users=2000, hosts=200, internal_ips=3000, now=None
 
 def fake_request(app, query=None, body=b""):
     return SimpleNamespace(app=app, conn=app.conn(), query=query or {}, body=body, status=200,
-                           user={"username": "admin", "role": "admin"})
+                           user={"username": "admin", "role": "admin"}, extra_headers={})
 
 
 def ingest_in_process(app, events, batch):
@@ -137,13 +137,14 @@ def ingest_in_process(app, events, batch):
 
 def ingest_http(url, token, events, batch):
     started = time.perf_counter()
+    opener = urllib.request.build_opener(simulate.NoIngestRedirect)
     for i in range(0, len(events), batch):
         body = json.dumps({"source": "loadtest", "synthetic": True, "events": events[i:i + batch]}).encode()
         request = urllib.request.Request(url.rstrip("/") + "/api/ingest", data=body, method="POST",
                                          headers={"Content-Type": "application/json",
                                                   "Authorization": f"Bearer {token}"})
         try:
-            with urllib.request.urlopen(request, timeout=600) as response:
+            with opener.open(request, timeout=600) as response:
                 json.load(response)
         except urllib.error.HTTPError as exc:
             raise SystemExit(f"batch {i // batch}: HTTP {exc.code} {exc.read().decode()[:200]}")

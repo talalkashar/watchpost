@@ -1,0 +1,42 @@
+# Dynamic linker hijack (T1574.006). ld.so.preload and LD_PRELOAD= are rare outside an attack.
+title: Linux Dynamic Linker Preload Persistence
+id: d6a03b81-9f24-4c57-a1e8-3b5d7c0e9a42
+status: experimental
+description: |
+  A command referenced /etc/ld.so.preload or set LD_PRELOAD. Rebuilding /etc/ld.so.cache
+  does not contain either string.
+  logsource does not filter in Watchpost, so web, firewall, network, and VPN events
+  (event.action network_or_web) are excluded: a scanner probing the same path does not match.
+  Host lines that normalize to other or syslog, such as auditd EXECVE records and shell
+  command logs, still match. A web access line forwarded through syslog is stored as other
+  and is not excluded.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1574/006/
+tags:
+  - attack.persistence
+  - attack.defense_evasion
+  - attack.privilege_escalation
+  - attack.t1574.006
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  network_or_web:
+    event.action:
+      - web_request
+      - web_scan
+      - web_error
+      - fw_deny
+      - fw_allow
+      - network_connection
+      - vpn_login
+  selection:
+    message|contains:
+      - '/etc/ld.so.preload'
+      - 'LD_PRELOAD='
+  condition: (selection) and not network_or_web
+falsepositives:
+  - A developer intentionally preloading a library while debugging
+level: critical

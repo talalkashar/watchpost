@@ -1,0 +1,43 @@
+# A ConsoleLogin CloudTrail stored without an error code, from outside the private ranges.
+# responseElements.ConsoleLogin (Success or Failure) and errorMessage are not detection fields.
+# A native failure with no errorCode is stored as the same message as a success, so this title
+# does not say the sign-in succeeded. A recorded errorCode appends " (errorCode)" and does not match.
+title: Cloud Console Sign-in Recorded From an External Address
+id: 6e0f1b4a-8c55-4a1d-9c33-7b2e1d0a4f90
+status: experimental
+description: |
+  ConsoleLogin on signin.amazonaws.com with no errorCode, from an address outside the private
+  ranges. Watchpost does not keep the native ConsoleLogin response, so a failure recorded with
+  only that response matches the same way as a success. A missing or service-name source address
+  does not match. An internal IPv6 address does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1078/004/
+tags:
+  - attack.initial_access
+  - attack.t1078.004
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    event.action: cloud_api_call
+    message: ConsoleLogin on signin.amazonaws.com
+  internal:
+    source.ip|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+      - 169.254.0.0/16
+      - '::1/128'
+      - fc00::/7
+      - fe80::/10
+  missing_ip:
+    source.ip: null
+  condition: selection and not internal and not missing_ip
+falsepositives:
+  - An administrator signing in from a home network or a hotel
+  - A console failure CloudTrail recorded without errorCode
+level: high

@@ -87,10 +87,38 @@ class QueryPlanTests(unittest.TestCase):
             self.assertIn("idx_events_dest_ip", plan)
 
     def test_host_and_severity_filters_use_their_indexes(self):
-        self.assert_all_use(self.plans(lambda: queries.search_events(self.conn, {"host": "web01"})),
-                            "idx_events_host")
+        self.assert_all_use(self.plans(lambda: queries.search_events(self.conn, {"host": "WEB01"})),
+                            "idx_events_host_nocase (host=?)")
+        self.assert_all_use(self.plans(lambda: hunt.run(self.conn, {"q": "host:web01"})),
+                            "idx_events_host_nocase")
+        for plan in self.plans(lambda: queries.search_events(self.conn, {"host": "web*"})):
+            self.assertIn("idx_events_host_nocase (host>? AND host<?)", plan)
         self.assert_all_use(self.plans(lambda: queries.search_events(
             self.conn, {"severity": "high", "severity_mode": "min"})), "idx_events_severity")
+
+    def test_source_equality_uses_the_nocase_index(self):
+        self.assert_all_use(self.plans(lambda: queries.search_events(self.conn, {"source": "Demo"})),
+                            "idx_events_source_nocase (source=?)")
+        self.assert_all_use(self.plans(lambda: hunt.run(self.conn, {"q": "source:demo"})),
+                            "idx_events_source_nocase")
+        for plan in self.plans(lambda: queries.search_events(self.conn, {"source": "de*"})):
+            self.assertIn("idx_events_source_nocase (source>? AND source<?)", plan)
+
+    def test_outcome_equality_uses_the_nocase_index(self):
+        self.assert_all_use(self.plans(lambda: queries.search_events(self.conn, {"outcome": "Failure"})),
+                            "idx_events_outcome_nocase (outcome=?)")
+        self.assert_all_use(self.plans(lambda: hunt.run(self.conn, {"q": "outcome:failure"})),
+                            "idx_events_outcome_nocase")
+        for plan in self.plans(lambda: queries.search_events(self.conn, {"outcome": "fail*"})):
+            self.assertIn("idx_events_outcome_nocase (outcome>? AND outcome<?)", plan)
+
+    def test_batch_id_equality_uses_the_nocase_index(self):
+        self.assert_all_use(self.plans(lambda: queries.search_events(self.conn, {"batch_id": "ABCDEF"})),
+                            "idx_events_batch_nocase (batch_id=?)")
+        self.assert_all_use(self.plans(lambda: hunt.run(self.conn, {"q": "batch_id:abcdef"})),
+                            "idx_events_batch_nocase")
+        for plan in self.plans(lambda: queries.search_events(self.conn, {"batch_id": "abcd*"})):
+            self.assertIn("idx_events_batch_nocase (batch_id>? AND batch_id<?)", plan)
 
 
 class HistoryOnIngestTests(unittest.TestCase):

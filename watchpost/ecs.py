@@ -12,8 +12,11 @@ Only fields with a clean ECS match are mapped. Fields without one are kept under
   (`network.bytes`); a Watchpost event carries one count without a direction, and for cloud data access it
   is bytes read from storage, not network traffic.
 - batch_id: the Watchpost ingest batch, with no ECS counterpart.
-- outcome: mapped to `event.outcome` only when it is one of ECS's allowed values (success, failure, unknown);
-  any other text stays as `watchpost.outcome`.
+- outcome: mapped to `event.outcome` only when an ASCII fold is one of ECS's allowed values
+  (success, failure, unknown). `Failure` becomes `failure`. A dotted capital I is not an ASCII `I`,
+  so it is not folded, and the original text stays as `watchpost.outcome`. `str.lower()` is not used:
+  it expands that letter into `i` plus a combining dot (not an ECS outcome) and maps the Kelvin sign
+  onto `k`, so `unKnown` would collide with `unknown`.
 """
 
 # Watchpost field -> ECS field (dotted path). Every target is a field defined in ECS.
@@ -33,6 +36,8 @@ FIELD_MAP = {
 }
 UNMAPPED = ("severity", "bytes", "batch_id")  # see the module docstring
 ECS_OUTCOMES = {"success", "failure", "unknown"}
+# A–Z only. Not str.lower(): İ (U+0130) becomes i + combining dot, and K (U+212A) becomes k.
+_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 
 # The allowed values of ECS event.category, to check EVENT_TYPE_CATEGORIES against.
 ECS_CATEGORIES = {"authentication", "configuration", "database", "driver", "email", "file", "host", "iam",
@@ -61,6 +66,19 @@ EVENT_TYPE_CATEGORIES = {
 }
 
 
+def _user_domain(name):
+    """DOMAIN\\name or name@domain. The stored spelling of user.name is not rewritten."""
+    if not isinstance(name, str):
+        return None
+    if "\\" in name:
+        domain, rest = name.split("\\", 1)
+        return domain if domain and rest else None
+    if "@" in name:
+        rest, domain = name.rsplit("@", 1)
+        return domain if rest and domain else None
+    return None
+
+
 def _put(doc, dotted, value):
     *parents, leaf = dotted.split(".")
     for key in parents:
@@ -76,16 +94,21 @@ def to_ecs(event):
         value = event.get(field)
         if value is not None:
             _put(doc, target, str(value) if field == "id" else value)  # event.id is a keyword in ECS
+    # Windows accounts often arrive as DOMAIN\name or a UPN. user.name stays the stored text.
+    domain = _user_domain(event.get("user"))
+    if domain:
+        _put(doc, "user.domain", domain)
     category = EVENT_TYPE_CATEGORIES.get(event.get("event_type"))
     if category:
         _put(doc, "event.category", list(category[0]))
         _put(doc, "event.type", list(category[1]))
     outcome = event.get("outcome")
     if outcome is not None:
-        if str(outcome).lower() in ECS_OUTCOMES:
-            _put(doc, "event.outcome", str(outcome).lower())
+        folded = outcome.translate(_ASCII_FOLD) if isinstance(outcome, str) else None
+        if folded in ECS_OUTCOMES:
+            _put(doc, "event.outcome", folded)
         else:
-            _put(doc, "watchpost.outcome", outcome)
+            _put(doc, "watchpost.outcome", outcome)  # the stored value, not a lowered copy
     if event.get("synthetic") is not None:
         _put(doc, "labels.synthetic", "true" if event["synthetic"] else "false")  # ECS labels are keywords
     for field in UNMAPPED:

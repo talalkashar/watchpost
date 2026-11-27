@@ -151,27 +151,68 @@ def run_evaluation(conn, actor):
 
 
 def list_evaluations(conn, limit=20):
-    rows = conn.execute("SELECT * FROM evaluation_runs ORDER BY id DESC LIMIT ?", (limit,))
-    return [row_to_dict(r, ["results"]) for r in rows]
+    """Evaluation runs, newest id first, and how many the limit left out.
+
+    The second value is 0 when the history fits. A later created_at on a
+    lower id is the one left out. Callers that return the bare array send
+    that count as X-Watchpost-Omitted.
+    """
+    total = conn.execute("SELECT COUNT(*) FROM evaluation_runs").fetchone()[0]
+    rows = [row_to_dict(r, ["results"]) for r in conn.execute(
+        "SELECT * FROM evaluation_runs ORDER BY id DESC LIMIT ?", (limit,))]
+    return rows, total - len(rows)
+
+
+def list_rule_history(conn, rule_id, limit=50):
+    """One rule's versions, newest version first, and how many the limit left out.
+
+    The second value is 0 when that rule's history fits, including an unknown
+    rule. A later changed_at on a lower version is the one left out. Another
+    rule's rows are not counted. Callers that return the bare array send
+    that count as X-Watchpost-Omitted.
+    """
+    total = conn.execute(
+        "SELECT COUNT(*) FROM rule_history WHERE rule_id = ?", (rule_id,)).fetchone()[0]
+    rows = [row_to_dict(r, ["params", "grouping"]) for r in conn.execute(
+        "SELECT * FROM rule_history WHERE rule_id = ? ORDER BY version DESC LIMIT ?",
+        (rule_id, limit))]
+    return rows, total - len(rows)
 
 
 # --- Analyst feedback -> rule performance ---------------------------------------------
 
 def rule_performance(conn):
-    perf = {}
-    for rule in load_rules(conn, enabled_only=False):
-        row = conn.execute(
-            "SELECT COUNT(*) AS total,"
-            " SUM(status = 'open') AS open, SUM(status = 'investigating') AS investigating,"
-            " SUM(status = 'resolved') AS resolved,"
-            " SUM(disposition = 'true_positive') AS tp, SUM(disposition = 'false_positive') AS fp,"
-            " SUM(disposition = 'benign') AS benign"
-            " FROM alerts WHERE rule_id = ?", (rule["id"],)
-        ).fetchone()
-        stats = {k: row[k] or 0 for k in row.keys()}
+    """Alert counts for every rule, from one GROUP BY rule_id.
+
+    A rule with no alerts is still present, with those counts at 0 and
+    precision None. A resolved alert with no disposition counts as resolved
+    and not as tp, fp, or benign. Precision is tp / (tp + fp), or None when
+    neither is set. Benign is not part of that ratio. An alert whose rule_id
+    is not in the catalog is not a key.
+    """
+    rows = conn.execute(
+        "SELECT rule_id, COUNT(*) AS total,"
+        " SUM(status = 'open') AS open,"
+        " SUM(status = 'investigating') AS investigating,"
+        " SUM(status = 'resolved') AS resolved,"
+        " SUM(disposition = 'true_positive') AS tp,"
+        " SUM(disposition = 'false_positive') AS fp,"
+        " SUM(disposition = 'benign') AS benign"
+        " FROM alerts GROUP BY rule_id"
+    ).fetchall()
+    counted = {}
+    for row in rows:
+        stats = {k: row[k] or 0 for k in (
+            "total", "open", "investigating", "resolved", "tp", "fp", "benign")}
         labeled = stats["tp"] + stats["fp"]
         stats["precision"] = round(stats["tp"] / labeled, 3) if labeled else None
-        perf[rule["id"]] = stats
+        counted[row["rule_id"]] = stats
+    perf = {}
+    for rule in load_rules(conn, enabled_only=False):
+        perf[rule["id"]] = counted.get(rule["id"]) or {
+            "total": 0, "open": 0, "investigating": 0, "resolved": 0,
+            "tp": 0, "fp": 0, "benign": 0, "precision": None,
+        }
     return perf
 
 
@@ -203,26 +244,30 @@ def suggest_for_rule(conn, rule):
     tp_ips = set().union(*[t["ips"] for t in tps]) if tps else set()
     tp_users = set().union(*[t["users"] for t in tps]) if tps else set()
 
-    ip_counts = Counter(ip for f in fps for ip in f["ips"])
-    ips = sorted(ip for ip, n in ip_counts.items()
-                 if n >= MIN_FEEDBACK_FOR_SUGGESTION and ip not in tp_ips and ip not in params["ignore_ips"])
-    if ips:
-        return {
-            "params": {"ignore_ips": params["ignore_ips"] + ips},
-            "reason": f"{len(fps)} alerts from this rule were marked false positive by analysts; "
-                      f"{', '.join(ips)} appeared in {max(ip_counts[i] for i in ips)} of them and in no "
-                      f"true-positive alert. Proposed: exclude these IP(s) from this rule.",
-        }
+    # Only suggest a list the rule already stores. log_source_silent has neither list; indexing
+    # them raised KeyError and aborted suggestions for every other rule.
+    if "ignore_ips" in params:
+        ip_counts = Counter(ip for f in fps for ip in f["ips"])
+        ips = sorted(ip for ip, n in ip_counts.items()
+                     if n >= MIN_FEEDBACK_FOR_SUGGESTION and ip not in tp_ips and ip not in params["ignore_ips"])
+        if ips:
+            return {
+                "params": {"ignore_ips": params["ignore_ips"] + ips},
+                "reason": f"{len(fps)} alerts from this rule were marked false positive by analysts; "
+                          f"{', '.join(ips)} appeared in {max(ip_counts[i] for i in ips)} of them and in no "
+                          f"true-positive alert. Proposed: exclude these IP(s) from this rule.",
+            }
 
-    user_counts = Counter(u for f in fps for u in f["users"])
-    users = sorted(u for u, n in user_counts.items()
-                   if n >= MIN_FEEDBACK_FOR_SUGGESTION and u not in tp_users and u not in params["ignore_users"])
-    if users:
-        return {
-            "params": {"ignore_users": params["ignore_users"] + users},
-            "reason": f"{len(fps)} false-positive alerts involved the account(s) {', '.join(users)}, "
-                      f"which never appeared in a true-positive alert. Proposed: exclude them from this rule.",
-        }
+    if "ignore_users" in params:
+        user_counts = Counter(u for f in fps for u in f["users"])
+        users = sorted(u for u, n in user_counts.items()
+                       if n >= MIN_FEEDBACK_FOR_SUGGESTION and u not in tp_users and u not in params["ignore_users"])
+        if users:
+            return {
+                "params": {"ignore_users": params["ignore_users"] + users},
+                "reason": f"{len(fps)} false-positive alerts involved the account(s) {', '.join(users)}, "
+                          f"which never appeared in a true-positive alert. Proposed: exclude them from this rule.",
+            }
 
     key = "threshold" if "threshold" in params else None
     if key and tps:
@@ -278,9 +323,12 @@ def _validate_change(conn, kind, target, payload):
             raise ChangeError("enabled must be true or false")
         if sigma.is_sigma(target):
             # Imported logic is not tuned in place, and it runs only once its labeled sample passes.
-            if "params" in payload and payload["params"] != {} and \
-                    {**json.loads(rule["params"]), **payload["params"]} != json.loads(rule["params"]):
-                raise ChangeError("a Sigma rule has no tunable params: change its YAML and import it again")
+            if "params" in payload:
+                if not isinstance(payload["params"], dict):
+                    raise ChangeError("params must be an object")
+                current = json.loads(rule["params"])
+                if payload["params"] != {} and {**current, **payload["params"]} != current:
+                    raise ChangeError("a Sigma rule has no tunable params: change its YAML and import it again")
             if payload.get("enabled") is True:
                 _require_passing_sample(conn, sigma, target, "Sigma rule")
             return json.loads(rule["params"]) if "params" in payload else None
@@ -424,7 +472,7 @@ def _validate_search(conn, kind, target, payload):
         raise ChangeError(str(exc))
 
 
-LIVE_IMPACT_RECENT = 5  # newest matching alerts listed in an exception's evidence
+LIVE_IMPACT_RECENT = 5  # matching alerts, and the proposer's status changes, listed in evidence
 BACKTEST_EVIDENCE_LIMIT = 10  # kept/new/lost findings listed in a rule change's evidence; counts are complete
 
 
@@ -455,12 +503,18 @@ def _alert_impact(alerts, history, ids, proposer):
         by_status[row["status"]] = by_status.get(row["status"], 0) + 1
         if row["disposition"]:
             by_disposition[row["disposition"]] = by_disposition.get(row["disposition"], 0) + 1
+    recent = rows[:LIVE_IMPACT_RECENT]
+    own_recent = own[:LIVE_IMPACT_RECENT]
     return {
         "alerts": len(rows), "by_status": by_status, "by_disposition": by_disposition,
-        "recent": rows[:LIVE_IMPACT_RECENT],
+        "recent": recent,
+        # How many matching alerts were past the newest LIVE_IMPACT_RECENT by id. 0 when the list fits.
+        "recent_omitted": len(rows) - len(recent),
         "ever_true_positive": len(ever_true_positive),
         # Status and verdict changes the proposer made on these alerts, so the reviewer sees them.
-        "proposer_verdict_changes": {"count": len(own), "recent": own[:LIVE_IMPACT_RECENT]},
+        # `omitted` is how many of those rows were past the newest LIVE_IMPACT_RECENT by activity id.
+        "proposer_verdict_changes": {
+            "count": len(own), "recent": own_recent, "omitted": len(own) - len(own_recent)},
     }
 
 
@@ -619,8 +673,12 @@ def evidence_digest(evaluation):
     if isinstance(evaluation.get("backtest"), dict):
         # The backtest's scan context moves with every ingested event (the window ends at the newest one);
         # the digest covers what the reviewer decides on: the kept / new / lost findings and open alerts lost.
-        evaluation = {**evaluation, "backtest": {k: v for k, v in evaluation["backtest"].items()
-                                                 if k not in BACKTEST_CONTEXT}}
+        replay = evaluation["backtest"]
+        context = BACKTEST_CONTEXT
+        if not replay.get("capped") and not replay.get("incomplete"):
+            # A complete, uncapped replay has the same evidence as before row budgets were introduced.
+            context += ("incomplete", "events_omitted", "bound")
+        evaluation = {**evaluation, "backtest": {k: v for k, v in replay.items() if k not in context}}
     canonical = json.dumps(evaluation, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -648,6 +706,12 @@ def _open_alerts_lost(evaluation):
     """
     bt = (evaluation or {}).get("backtest")
     return [a["id"] for a in bt["open_alerts_lost"]] if bt else []
+
+
+def _backtest_incomplete(evaluation):
+    """True when the stored-event replay left rows unread. That result cannot show a change is safe."""
+    bt = (evaluation or {}).get("backtest")
+    return isinstance(bt, dict) and bool(bt.get("incomplete"))
 
 
 def validate_rule_update(conn, rule_id, payload):
@@ -712,14 +776,25 @@ def get_change(conn, change_id):
     return _change(conn.execute("SELECT * FROM change_requests WHERE id = ?", (change_id,)).fetchone())
 
 
-def list_changes(conn, status=None, limit=100):
-    sql, args = "SELECT * FROM change_requests", []
+def list_changes(conn, status=None, limit=100, kinds=None):
+    """Change requests, newest id first, and how many the limit left out.
+
+    The second value is 0 when every match fits. A status filter counts only
+    that status. `kinds` counts only those kinds. Callers that return the bare
+    array send that count as X-Watchpost-Omitted.
+    """
+    clauses, args = [], []
     if status:
-        sql += " WHERE status = ?"
+        clauses.append("status = ?")
         args.append(status)
-    sql += " ORDER BY id DESC LIMIT ?"
-    args.append(limit)
-    return [_change(r) for r in conn.execute(sql, args)]
+    if kinds:
+        clauses.append(f"kind IN ({','.join('?' for _ in kinds)})")
+        args.extend(kinds)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    total = conn.execute(f"SELECT COUNT(*) FROM change_requests{where}", args).fetchone()[0]
+    rows = [_change(r) for r in conn.execute(
+        f"SELECT * FROM change_requests{where} ORDER BY id DESC LIMIT ?", args + [limit])]
+    return rows, total - len(rows)
 
 
 def review_change(conn, change_id, decision, reviewer, note="", digest=None, acknowledge_detection_loss=False):
@@ -734,6 +809,8 @@ def review_change(conn, change_id, decision, reviewer, note="", digest=None, ack
             raise ChangeError(f"change request is already {change['status']}", 409)
         if change["proposed_by"] == reviewer:
             raise ChangeError("you cannot review your own change request; a second person must approve it", 403)
+        if note is not None and not isinstance(note, str):
+            raise ChangeError("note must be a string")
         note = (note or "").strip()[:2000]
         problem, lost, lost_alerts = None, [], []
         if decision == "approve":
@@ -756,6 +833,10 @@ def review_change(conn, change_id, decision, reviewer, note="", digest=None, ack
             elif fresh is not None and digest != evidence_digest(fresh):
                 problem = ChangeError("the evidence changed since this request was last shown; nothing was "
                                       "applied. Review the updated evidence and approve again", 409)
+            elif _backtest_incomplete(fresh) and not (lost or lost_alerts):
+                # No losses here can mean only that the unread rows were the ones that would have fired.
+                problem = ChangeError("the stored-event backtest is incomplete; this change cannot be "
+                                      "approved as safe")
             elif (lost or lost_alerts) and acknowledge_detection_loss is not True:
                 what = [f"labeled attacks it detects today ({', '.join(lost)})"] if lost else []
                 if lost_alerts:
@@ -849,11 +930,25 @@ def review_change(conn, change_id, decision, reviewer, note="", digest=None, ack
 
 # --- Tuning exceptions and the noise lab ------------------------------------------------
 
-def list_suppressions(conn):
-    """Every approved tuning exception, newest first; `active` is false once it has expired or been revoked."""
+def _suppression_row(row, now):
+    """One approved exception. `active` is false once it has expired or been revoked."""
+    item = dict(row)
+    item["active"] = item["expires_at"] > now and item["revoked_at"] is None
+    return item
+
+
+def list_suppressions(conn, limit=100):
+    """Approved tuning exceptions, newest id first, and how many the limit left out.
+
+    The second value is 0 when the list fits. A later created_at on a lower
+    id is the one left out. `active` is false once expired or revoked.
+    Callers that return the bare array send that count as X-Watchpost-Omitted.
+    """
     now = now_iso()
-    return [{**dict(r), "active": r["expires_at"] > now and r["revoked_at"] is None}
-            for r in conn.execute("SELECT * FROM suppressions ORDER BY id DESC")]
+    total = conn.execute("SELECT COUNT(*) FROM suppressions").fetchone()[0]
+    rows = [_suppression_row(r, now) for r in conn.execute(
+        "SELECT * FROM suppressions ORDER BY id DESC LIMIT ?", (limit,))]
+    return rows, total - len(rows)
 
 
 def revoke_suppression(conn, suppression_id, actor):
@@ -870,25 +965,40 @@ def revoke_suppression(conn, suppression_id, actor):
                      (now_iso(), actor, suppression_id))
         audit(conn, actor, "suppression_revoked", row["rule_id"],
               {"id": suppression_id, "group_key": row["group_key"], "change_request": row["change_request_id"]})
-    return next(s for s in list_suppressions(conn) if s["id"] == suppression_id)
+    # The revoked row may sit past the list cap. Read it back on its own.
+    stored = conn.execute("SELECT * FROM suppressions WHERE id = ?", (suppression_id,)).fetchone()
+    return _suppression_row(stored, now_iso())
 
 
-def list_rule_suppression_windows(conn):
-    """Every approved rule-wide window, including upcoming, expired and ended history."""
+def _window_row(row, now):
+    """One approved rule-wide window. `active` is true only while the window is in force."""
+    item = dict(row)
+    if item["ended_at"] is not None:
+        state = "ended"
+    elif item["starts_at"] > now:
+        state = "upcoming"
+    elif item["expires_at"] <= now:
+        state = "expired"
+    else:
+        state = "active"
+    item["state"] = state
+    item["active"] = state == "active"
+    return item
+
+
+def list_rule_suppression_windows(conn, limit=100):
+    """Approved rule-wide windows, newest id first, and how many the limit left out.
+
+    The second value is 0 when the list fits. A later created_at on a lower
+    id is the one left out. Each row keeps `upcoming`, `active`, `expired`,
+    or `ended`, and `active` is true only for `active`. Callers that return
+    the bare array send that count as X-Watchpost-Omitted.
+    """
     now = now_iso()
-    result = []
-    for row in conn.execute("SELECT * FROM rule_suppression_windows ORDER BY id DESC"):
-        item = dict(row)
-        if item["ended_at"] is not None:
-            state = "ended"
-        elif item["starts_at"] > now:
-            state = "upcoming"
-        elif item["expires_at"] <= now:
-            state = "expired"
-        else:
-            state = "active"
-        result.append({**item, "state": state, "active": state == "active"})
-    return result
+    total = conn.execute("SELECT COUNT(*) FROM rule_suppression_windows").fetchone()[0]
+    rows = [_window_row(r, now) for r in conn.execute(
+        "SELECT * FROM rule_suppression_windows ORDER BY id DESC LIMIT ?", (limit,))]
+    return rows, total - len(rows)
 
 
 def end_rule_suppression_window(conn, window_id, actor):
@@ -906,7 +1016,9 @@ def end_rule_suppression_window(conn, window_id, actor):
                      (ended, actor, window_id))
         audit(conn, actor, "rule_suppression_window_ended", row["rule_id"],
               {"id": window_id, "change_request": row["change_request_id"]})
-    return next(w for w in list_rule_suppression_windows(conn) if w["id"] == window_id)
+    # The ended row may sit past the list cap. Read it back on its own.
+    stored = conn.execute("SELECT * FROM rule_suppression_windows WHERE id = ?", (window_id,)).fetchone()
+    return _window_row(stored, now_iso())
 
 
 def _verdict(rule, r, other):
@@ -924,6 +1036,50 @@ def _verdict(rule, r, other):
         return "untested", "No benign look-alike has been written for this rule yet."
     return "quiet", (f"Quiet: catches its attack and stays silent on {len(r['lookalikes'])} look-alike(s) "
                      f"({', '.join(r['lookalikes'])}).{excepted}")
+
+
+def lab_strip(rows, scenarios):
+    """Pass/fail counts for the noise lab, read before the scenario list.
+
+    A labeled attack counts as detected only when every rule it expects is enabled and lists
+    that scenario in `detected`. A false positive is one benign scenario that any enabled rule
+    fired on (two rules on the same scenario count once). Names that are not in `scenarios`,
+    such as a rule's own labeled sample, are ignored. The verdict is pass only when every
+    attack is detected and no benign scenario fired.
+    """
+    by_id = {r["rule_id"]: r for r in rows}
+    detected, missed = [], []
+    for scenario in scenarios:
+        if not scenario["malicious"]:
+            continue
+        name = scenario["name"]
+        expected = scenario.get("expected_rules") or []
+        caught = True
+        if not expected:
+            caught = False
+        for rule_id in expected:
+            row = by_id.get(rule_id)
+            if row is None or not row["enabled"] or name not in row["detected"]:
+                caught = False
+                break
+        (detected if caught else missed).append(name)
+    fired = []
+    for scenario in scenarios:
+        if scenario["malicious"]:
+            continue
+        name = scenario["name"]
+        if any(row["enabled"] and name in (row["lookalikes_fired"] + row["other_benign_fired"]) for row in rows):
+            fired.append(name)
+    attacks = len(detected) + len(missed)
+    return {
+        "verdict": "pass" if attacks and not missed and not fired else "fail",
+        "scenarios": len(scenarios),
+        "attacks": attacks,
+        "detected_attacks": len(detected),
+        "false_positives": len(fired),
+        "missed": missed,
+        "false_positive_scenarios": fired,
+    }
 
 
 def noise_lab(conn):
@@ -957,12 +1113,14 @@ def noise_lab(conn):
             "other_benign_fired": other, "suppressed": r["suppressed"], "verdict": verdict, "summary": summary,
             **({"sample": sample} if family else {}),
         })
+    scenarios = [{"name": n, "malicious": s["malicious"], "description": s["description"],
+                  "lookalike_of": s.get("lookalike_of"), "expected_rules": list(s["expected"])}
+                 for n, s in simulate.SCENARIOS.items()]
     return {
         "seed": results["seed"],
         "rules": rows,
-        "scenarios": [{"name": n, "malicious": s["malicious"], "description": s["description"],
-                       "lookalike_of": s.get("lookalike_of"), "expected_rules": list(s["expected"])}
-                      for n, s in simulate.SCENARIOS.items()],
+        "scenarios": scenarios,
+        "strip": lab_strip(rows, scenarios),
         "summary": {"rules": len(rows), "noisy": sum(r["verdict"] == "noisy" for r in rows),
                     "lookalikes": sum("lookalike_of" in s for s in simulate.SCENARIOS.values())},
     }

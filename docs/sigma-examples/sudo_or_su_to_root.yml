@@ -1,0 +1,33 @@
+# sudo or su whose target account is root, from the Linux auth lines Watchpost already parses.
+# sudo: "USER=root ; COMMAND=". su: "(to root) <user> on".
+# Written for Watchpost's Sigma subset (docs/REFERENCE.md, "Sigma rule import").
+title: Sudo Or Su To Root
+id: e4e6de47-792d-4dca-a1da-9fbb50e34e82
+status: experimental
+description: |
+  A privilege_escalation event that names root as the target account. Elevation to
+  any other account does not match, and neither does a sudo session-open (privilege_use),
+  which does not carry the target. The trailing space in "USER=root " keeps USER=rootkit out.
+  Each matching event is evidence; Watchpost groups them per source IP.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1548/003/
+tags:
+  - attack.privilege_escalation
+  - attack.t1548.003
+logsource:
+  category: process_creation
+  product: linux
+detection:
+  elevation:
+    event.action: privilege_escalation
+  to_root:
+    message|contains:
+      - 'USER=root '
+      - '(to root)'
+  condition: elevation and to_root
+falsepositives:
+  - An operator running a sanctioned root command from a jump host
+  - A message that quotes the text "(to root)" without being an su line
+level: high

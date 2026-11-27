@@ -1,14 +1,18 @@
 """Sigma subset import: the YAML-subset parser, the compiled detection, and the reviewed import workflow."""
 
+import hashlib
 import json
+import sqlite3
 import time
 import unittest
 from datetime import timedelta
 from pathlib import Path
+from unittest.mock import patch
 
+from watchpost import backtest
 from watchpost import rules as rules_mod
 from watchpost import sigma
-from watchpost.db import iso, utcnow
+from watchpost.db import connect, init_schema, iso, now_iso, utcnow
 
 from .helpers import ServerTestCase
 
@@ -109,11 +113,57 @@ class YamlSubsetTests(unittest.TestCase):
         # The stored-params path (a rule_update) is held to the same budget.
         big = {"op": "match", "field": "message", "mod": "contains", "all": False,
                "values": ["x"] * (sigma.MAX_COMPILED_VALUES + 1)}
-        with self.assertRaises(sigma.SigmaError):
-            sigma.validate_params({"title": "t", "detection": big})
+        for header in ({}, {"format": sigma.COMPILED_FORMAT}):
+            with self.assertRaisesRegex(sigma.SigmaError, "too large"):
+                sigma.validate_params({**header, "title": "t", "detection": big})
 
 
 class CompileTests(unittest.TestCase):
+    def test_rejects_whole_negated_short_offset(self):
+        node = {"op": "match", "field": "message", "mod": "contains",
+                "all": False, "values": ["Y", "", "h"]}
+        params = {"title": "legacy fixture", "detection": {"op": "not", "arg": node}}
+        for event in ({"message": "scheduled maintenance"}, {"host": "maintenance"}):
+            with self.subTest(event=event):
+                self.assertFalse(sigma.matches(params, event))
+
+    def test_short_transforms_reject_the_entire_source(self):
+        for modifier, value in (("base64offset", "a"), ("base64offset", "abc"),
+                                ("base64", ""), ("windash", "")):
+            with self.subTest(modifier=modifier, value=value), self.assertRaises(sigma.SigmaError):
+                compiled(f"  sel:\n    message|{modifier}|contains: '{value}'\n"
+                         "  good:\n    host: maintenance\n  condition: good or not sel\n")
+        p = compiled("  sel:\n    message|base64offset|contains: AAAA\n  condition: sel\n")
+        for fragment in ("QUFBQ", "FBQU", "BQUFB"):
+            self.assertTrue(sigma.matches(p, {"message": f"prefix {fragment} suffix"}))
+        self.assertFalse(sigma.matches(p, {"message": "scheduled maintenance"}))
+
+    def test_transform_budgets_precede_product_and_encoding(self):
+        # First group fits. The next group's entire product must be refused before it is built.
+        with patch.object(sigma, "MAX_COMPILED_VALUES", 249), \
+                patch.object(sigma.itertools, "product", wraps=sigma.itertools.product) as product:
+            with self.assertRaisesRegex(sigma.SigmaError, "too large"):
+                compiled("  sel:\n    message|windash: ['-a -b -c', '-x -y -z']\n  condition: sel\n")
+            self.assertEqual(product.call_count, 1)
+        # Four UTF-8 bytes across three offset slices occupy exactly 14 characters.
+        det = "  sel:\n    message|base64offset: 'éé'\n  condition: sel\n"
+        with patch.object(sigma, "MAX_COMPILED_CHARS", 13), patch.object(sigma.base64, "b64encode") as encode:
+            with self.assertRaisesRegex(sigma.SigmaError, "too large"):
+                compiled(det)
+            encode.assert_not_called()
+        with patch.object(sigma, "MAX_COMPILED_CHARS", 14):
+            self.assertEqual(sum(map(len, compiled(det)["detection"]["values"])), 14)
+
+    def test_repeated_selections_are_charged_before_expansion(self):
+        with patch.object(sigma, "MAX_COMPILED_VALUES", 249), patch.object(sigma.itertools, "product") as product:
+            with self.assertRaisesRegex(sigma.SigmaError, "too large"):
+                compiled("  Sel:\n    message|windash: '-a -b -c'\n  condition: Sel or 1 of S*\n")
+            product.assert_not_called()
+        with patch.object(sigma, "MAX_COMPILED_VALUES", 2):
+            params = compiled("  Sel:\n    user: [alice, bob]\n  unused:\n    user: [carol, dave]\n  condition: Sel\n")
+            self.assertTrue(sigma.matches(params, {"user": "ALICE"}))
+            self.assertFalse(sigma.matches(params, {"user": "carol"}))
+
     def test_leading_zero_values_match_literal_text(self):
         # Keyboard layout IDs such as 00000429 are text. Read as the number 429 they would match any value with "429".
         p = compiled("  sel:\n    message|contains:\n      - 00000429\n  condition: sel\n")
@@ -131,6 +181,8 @@ class CompileTests(unittest.TestCase):
         self.assertTrue(sigma.matches(p, {"message": "GET /wp-login.php"}))
         self.assertFalse(sigma.matches(p, {"message": "GET /wp-login.php?x"}))
         p = compiled("  sel:\n    message|contains|all:\n      - ../\n      - etc/passwd\n  condition: sel\n")
+        self.assertEqual(p["detection"], {"op": "match", "field": "message", "mod": "contains", "all": True,
+                                          "values": ["../", "etc/passwd"]})
         self.assertTrue(sigma.matches(p, {"message": "GET /../../etc/passwd"}))
         self.assertFalse(sigma.matches(p, {"message": "GET /etc/passwd"}))
         p = compiled("  sel:\n    src_ip|cidr: 203.0.113.0/24\n  condition: sel\n")
@@ -145,6 +197,99 @@ class CompileTests(unittest.TestCase):
         p = compiled("  sel:\n    message: 'a\\*b'\n  condition: sel\n")  # an escaped star is literal
         self.assertTrue(sigma.matches(p, {"message": "a*b"}))
         self.assertFalse(sigma.matches(p, {"message": "axxb"}))
+
+    def test_cidr_rejects_host_bits(self):
+        for det in (
+            "  sel:\n    src_ip|cidr: 192.168.1.1/24\n  condition: sel\n",
+            "  sel:\n    src_ip|cidr: '2001:db8::1/64'\n  condition: sel\n",
+        ):
+            with self.subTest(detection=det):
+                with self.assertRaises(sigma.SigmaError) as ctx:
+                    compiled(det)
+                self.assertIn("not a CIDR", str(ctx.exception))
+        p = compiled("  sel:\n    src_ip|cidr: '2001:db8::/32'\n  condition: sel\n")
+        self.assertTrue(sigma.matches(p, {"src_ip": "2001:db8::1"}))
+        self.assertFalse(sigma.matches(p, {"src_ip": "2001:db9::1"}))
+        p = compiled("  sel:\n    src_ip|cidr: 203.0.113.9\n  condition: sel\n")  # a bare address is a /32
+        self.assertTrue(sigma.matches(p, {"src_ip": "203.0.113.9"}))
+        self.assertFalse(sigma.matches(p, {"src_ip": "203.0.113.10"}))
+        # A stored rule compiled under the old host-bit acceptance must fail closed, not widen.
+        stored = {"title": "t", "detection": {
+            "op": "match", "field": "src_ip", "mod": "cidr", "all": False, "values": ["192.168.1.1/24"],
+        }}
+        self.assertFalse(sigma.matches(stored, {"src_ip": "192.168.1.50"}))
+        self.assertFalse(sigma.matches(stored, {"src_ip": "192.168.1.1"}))
+
+    def test_empty_field_matches_star_and_empty_string(self):
+        star = compiled("  sel:\n    message: '*'\n  condition: sel\n")
+        self.assertTrue(sigma.matches(star, {"message": ""}))
+        self.assertTrue(sigma.matches(star, {"message": "x"}))
+        self.assertFalse(sigma.matches(star, {}))
+        self.assertFalse(sigma.matches(star, {"message": None}))
+        empty = compiled("  sel:\n    message: ''\n  condition: sel\n")
+        self.assertTrue(sigma.matches(empty, {"message": ""}))
+        self.assertFalse(sigma.matches(empty, {"message": "x"}))
+        self.assertFalse(sigma.matches(empty, {}))
+        for mod in ("startswith", "endswith", "contains"):
+            p = compiled(f"  sel:\n    message|{mod}: ''\n  condition: sel\n")
+            self.assertTrue(sigma.matches(p, {"message": ""}), mod)
+            self.assertTrue(sigma.matches(p, {"message": "x"}), mod)
+        one = compiled("  sel:\n    message: '?'\n  condition: sel\n")
+        self.assertFalse(sigma.matches(one, {"message": ""}))
+        self.assertTrue(sigma.matches(one, {"message": "a"}))
+        self.assertFalse(sigma.matches(one, {"message": "ab"}))
+
+    def test_windash_base64_and_base64offset(self):
+        p = compiled("  sel:\n    message|windash|contains: '-enc'\n  condition: sel\n")
+        self.assertTrue(sigma.matches(p, {"message": "powershell -enc AA"}))
+        self.assertTrue(sigma.matches(p, {"message": "powershell /enc AA"}))
+        self.assertTrue(sigma.matches(p, {"message": "powershell \u2013enc AA"}))
+        self.assertFalse(sigma.matches(p, {"message": "powershell enc AA"}))
+        # A dash between two word characters is not a Windows parameter dash.
+        inner = compiled("  sel:\n    message|windash|contains: param-name\n  condition: sel\n")
+        self.assertEqual(inner["detection"]["values"], ["param-name"])
+        self.assertFalse(sigma.matches(inner, {"message": "param/name"}))
+        # An en dash already in the rule is not a second expansion source.
+        typed = compiled("  sel:\n    message|windash|contains: '\u2013enc'\n  condition: sel\n")
+        self.assertTrue(sigma.matches(typed, {"message": "\u2013enc"}))
+        self.assertFalse(sigma.matches(typed, {"message": "-enc"}))
+        spec = compiled("  sel:\n    message|windash|contains: '-param-1 -param2'\n  condition: sel\n")
+        self.assertEqual(len(spec["detection"]["values"]), 25)
+        self.assertTrue(sigma.matches(spec, {"message": "run -param-1 /param2"}))
+        self.assertTrue(sigma.matches(spec, {"message": "run \u2013param-1 -param2"}))
+        self.assertFalse(sigma.matches(spec, {"message": "run param-1 param2"}))
+        both = compiled("  sel:\n    message|windash|contains|all:\n      - '-enc'\n      - '-w'\n"
+                        "  condition: sel\n")
+        self.assertEqual(both["detection"]["op"], "and")
+        self.assertTrue(sigma.matches(both, {"message": "powershell -enc AA -w hidden"}))
+        self.assertTrue(sigma.matches(both, {"message": "powershell /enc AA \u2013w hidden"}))
+        self.assertFalse(sigma.matches(both, {"message": "powershell -enc AA"}))
+        # windash runs before base64, so the slash form is encoded too.
+        encoded = compiled("  sel:\n    message|windash|base64: '-a'\n  condition: sel\n")
+        self.assertTrue(sigma.matches(encoded, {"message": "LWE="}))
+        self.assertTrue(sigma.matches(encoded, {"message": "L2E="}))
+        self.assertFalse(sigma.matches(encoded, {"message": "-a"}))
+        plain = compiled("  sel:\n    message|base64: foobar\n  condition: sel\n")
+        self.assertTrue(sigma.matches(plain, {"message": "Zm9vYmFy"}))
+        self.assertFalse(sigma.matches(plain, {"message": "foobar"}))
+        literal = compiled("  sel:\n    message|base64: 'x\\*y'\n  condition: sel\n")
+        self.assertTrue(sigma.matches(literal, {"message": "eCp5"}))
+        offset = compiled("  sel:\n    message|base64offset|contains: 'cmd\\?.exe'\n  condition: sel\n")
+        for frag in ("Y21kPy5leG", "NtZD8uZXhl", "jbWQ/LmV4Z"):
+            self.assertTrue(sigma.matches(offset, {"message": f"prefix {frag} suffix"}), frag)
+        self.assertFalse(sigma.matches(offset, {"message": "cmd.exe"}))
+        refused = {
+            "  sel:\n    message|windash: '-a -b -c -d'\n  condition: sel\n": "at most three",
+            "  sel:\n    message|base64: 'foo*bar'\n  condition: sel\n": "wildcard",
+            "  sel:\n    message|contains|base64: foobar\n  condition: sel\n": "unmodified",
+            "  sel:\n    message|base64: 123\n  condition: sel\n": "applies to strings",
+            "  sel:\n    src_ip|cidr|windash: 10.0.0.0/8\n  condition: sel\n": "cidr cannot",
+        }
+        for det, reason in refused.items():
+            with self.subTest(detection=det):
+                with self.assertRaises(sigma.SigmaError) as ctx:
+                    compiled(det)
+                self.assertIn(reason, str(ctx.exception))
 
     def test_conditions(self):
         det = ("  sel_a:\n    user: alice\n  sel_b:\n    src_ip: 203.0.113.9\n  other:\n    host: web01\n"
@@ -187,7 +332,7 @@ class CompileTests(unittest.TestCase):
             "  sel:\n    CommandLine: x\n  condition: sel\n": "field 'CommandLine'",
             "  sel:\n    EventID: 4625\n  condition: sel\n": "field 'EventID'",
             "  sel:\n    message|re: '.*'\n  condition: sel\n": "'re' refused",
-            "  sel:\n    message|base64: x\n  condition: sel\n": "base64",
+            "  sel:\n    message|wide: x\n  condition: sel\n": "encoding",
             "  sel:\n    message|foo: x\n  condition: sel\n": "'foo' is not supported",
             "  sel:\n    user: x\n  condition: sel | count() by src_ip > 5\n": "aggregations",
             "  sel:\n    user: x\n  condition: sel near other\n": "near",
@@ -234,6 +379,46 @@ class CompileTests(unittest.TestCase):
         self.assertFalse(sigma.matches(c["params"], {"event_type": "auth_success", "user": "root", "src_ip": "203.0.113.5"}))
 
 
+class SigmaGroupKeyTests(unittest.TestCase):
+    def test_host_and_user_keys_fold_ascii_only(self):
+        params = compiled("  sel:\n    message: hit\n  condition: sel\n")
+        # The matcher still casefolds the whole string. Grouping does not.
+        folded = compiled("  sel:\n    user: érin\n  condition: sel\n")
+        self.assertTrue(sigma.matches(folded, {"user": "ÉRIN"}))
+        self.assertTrue(sigma.matches(folded, {"user": "érin"}))
+
+        def event(i, **fields):
+            return {"id": i, "ts": "2026-09-15T12:00:00+00:00", "message": "hit", **fields}
+
+        events = [
+            event(1, host="WEB01"),
+            event(2, host="web01"),
+            event(3, host="Érin-host"),
+            event(4, host="érin-host"),
+            event(5, user="Alice"),
+            event(6, user="alice"),
+            event(7, user="ALICE"),
+            event(8, user="ÉRIN"),
+            event(9, user="érin"),
+            event(10, src_ip="2001:DB8::1", host="WEB01", user="Alice"),
+            event(11, src_ip="2001:db8::1", host="web01", user="alice"),
+            event(12, src_ip="", host="WEB01"),
+            event(13),
+        ]
+        findings = sigma.run(events, params)
+        found = {f["group_key"]: f["event_ids"] for f in findings}
+        self.assertEqual(found["web01"], [1, 2, 12])
+        self.assertEqual(found["Érin-host"], [3])
+        self.assertEqual(found["érin-host"], [4])
+        self.assertEqual(found["alice"], [5, 6, 7])
+        self.assertEqual(found["Érin"], [8])
+        self.assertEqual(found["érin"], [9])
+        self.assertEqual(found["2001:DB8::1"], [10])
+        self.assertEqual(found["2001:db8::1"], [11])
+        self.assertEqual(found["unknown"], [13])
+        self.assertIn("for web01", next(f["title"] for f in findings if f["group_key"] == "web01"))
+
+
 WEB_RULE = rule_yaml("  sel:\n    event_type: web_request\n    message|contains: /cgi-bin/.%2e/\n  condition: sel\n",
                      title="Path Traversal Probe")
 WEB_ID = "sigma_path_traversal_probe"
@@ -241,6 +426,108 @@ GOOD_SAMPLE = {"malicious": [{"event_type": "web_request", "message": "GET /cgi-
                "benign": [{"event_type": "web_request", "message": "GET /cgi-bin/status"}]}
 BAD_SAMPLE = {"malicious": [{"event_type": "web_request", "message": "GET /cgi-bin/../bin/sh"}],
               "benign": [{"event_type": "web_request", "message": "GET /cgi-bin/status"}]}
+
+
+class LegacyUpgradeTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = connect(":memory:")
+        self.addCleanup(self.conn.close)
+        init_schema(self.conn)
+
+    def legacy(self, title, detection="  Sel:\n    message|contains: ['Y', '', 'h']\n  condition: not Sel\n"):
+        # Both sources had exactly this negated tree in the old compiler.
+        source = rule_yaml(detection, title)
+        rule_id = sigma.slug(title)
+        digest = hashlib.sha256(source.encode()).hexdigest()
+        change = self.conn.execute(
+            "INSERT INTO change_requests(kind,target,payload,reason,proposed_by,status,evaluation,"
+            "created_at,reviewed_by) VALUES ('sigma_add',?,?,'import','analyst','approved',?,?,'admin')",
+            (rule_id, json.dumps({"source": source}), json.dumps({"rule": rule_id, "sha256": digest}), now_iso())
+        ).lastrowid
+        node = {"op": "match", "field": "message", "mod": "contains", "all": False, "values": ["Y", "", "h"]}
+        old = {"title": title, "detection": {"op": "not", "arg": node}}
+        sigma.add_rule(self.conn, {"rule_id": rule_id, "title": title, "params": old, "sha256": digest,
+                                   "sigma_id": None, "techniques": [], "description": "", "severity": "low"},
+                       source, None, "analyst", "admin", change, now_iso())
+        self.conn.execute("UPDATE rules SET enabled = 1 WHERE id = ?", (rule_id,))
+        return rule_id
+
+    def state(self, rule_id):
+        row = self.conn.execute("SELECT enabled,version,params FROM rules WHERE id = ?", (rule_id,)).fetchone()
+        return row["enabled"], row["version"], json.loads(row["params"])
+
+    def test_identical_trees_upgrade_by_source_once(self):
+        unsafe = self.legacy("Offset", "  Sel:\n    message|base64offset|contains: a\n  condition: not Sel\n")
+        literal = self.legacy("Literal")
+        self.assertEqual(self.state(unsafe)[2]["detection"], self.state(literal)[2]["detection"])
+        init_schema(self.conn)
+        enabled, version, rejected = self.state(unsafe)
+        self.assertEqual((enabled, version), (0, 2))
+        self.assertIn("short encoding", sigma.describe(rejected["detection"]))
+        enabled, version, good = self.state(literal)
+        self.assertEqual((enabled, version), (1, 2))
+        for event in ({"message": "scheduled maintenance"}, {"host": "maintenance"}):
+            self.assertFalse(sigma.matches(rejected, event))
+        self.assertFalse(sigma.matches(good, {"message": "scheduled maintenance"}))
+        self.assertTrue(sigma.matches(good, {"host": "maintenance"}))
+        self.assertEqual(sigma.run([{"host": "maintenance"}], rejected), [])
+        self.assertFalse(sigma.sample_result(rejected, GOOD_SAMPLE)["passes"])
+        with patch.object(sigma, "compile_rule", side_effect=AssertionError("recompiled on restart")):
+            init_schema(self.conn)
+        self.assertEqual(self.state(unsafe), (0, 2, rejected))
+        self.assertEqual(self.state(literal), (1, 2, good))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM rule_history").fetchone()[0], 4)
+
+    def test_unsafe_sibling_of_matching_branch_disables_entire_rule(self):
+        rule_id = self.legacy("Mixed", "  Sel:\n    message|base64offset|contains: a\n  good:\n    host: maintenance\n"
+                              "  condition: good or not Sel\n")
+        init_schema(self.conn)
+        enabled, _, params = self.state(rule_id)
+        self.assertFalse(enabled)
+        self.assertFalse(sigma.matches(params, {"host": "maintenance"}))
+
+    def test_missing_or_conflicting_provenance_disables_only_affected_rules(self):
+        edits = {
+            "Missing source": "DELETE FROM sigma_rules WHERE rule_id = ?",
+            "Source digest": "UPDATE sigma_rules SET sha256 = '' WHERE rule_id = ?",
+            "Reviewed digest": "UPDATE change_requests SET evaluation = json_set(evaluation,'$.sha256','wrong')"
+                               " WHERE target = ?",
+            "Unapproved": "UPDATE change_requests SET status = 'pending' WHERE target = ?",
+            "Wrong target": "UPDATE change_requests SET target = 'sigma_other' WHERE target = ?",
+            "Wrong Sigma ID": "UPDATE sigma_rules SET sigma_id = 'other' WHERE rule_id = ?",
+            "Wrong title": "UPDATE rules SET name = 'different' WHERE id = ?",
+            "Malformed evidence": "UPDATE change_requests SET evaluation = '[' WHERE target = ?",
+        }
+        for title, sql in edits.items():
+            self.conn.execute(sql, (self.legacy(title),))
+        valid = self.legacy("Valid sibling")
+        init_schema(self.conn)
+        for title in edits:
+            with self.subTest(title=title):
+                enabled, version, params = self.state(sigma.slug(title))
+                self.assertEqual((enabled, version), (0, 2))
+                self.assertFalse(sigma.matches(params, {"host": "maintenance"}))
+        self.assertTrue(sigma.matches(self.state(valid)[2], {"host": "maintenance"}))
+
+    def test_unexpected_compiler_error_disables_only_that_rule(self):
+        broken = self.legacy("Broken")
+        with patch.object(sigma, "compile_rule", side_effect=TypeError("unexpected")):
+            init_schema(self.conn)
+        enabled, version, params = self.state(broken)
+        self.assertEqual((enabled, version), (0, 2))
+        self.assertFalse(sigma.matches(params, {"host": "maintenance"}))
+
+    def test_upgrade_rolls_back_on_write_failure_then_retries(self):
+        rule_id = self.legacy("Interrupted")
+        before = self.state(rule_id)
+        self.conn.execute("CREATE TEMP TRIGGER fail_history BEFORE INSERT ON rule_history"
+                          " BEGIN SELECT RAISE(ABORT, 'interrupted'); END")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "interrupted"):
+            init_schema(self.conn)
+        self.assertEqual(self.state(rule_id), before)
+        self.conn.execute("DROP TRIGGER fail_history")
+        init_schema(self.conn)
+        self.assertEqual(self.state(rule_id)[:2], (1, 2))
 
 
 class ImportWorkflowTests(ServerTestCase):
@@ -372,6 +659,41 @@ class ImportWorkflowTests(ServerTestCase):
         alerts = [a for a in analyst.get(f"/api/alerts?rule_id={WEB_ID}")[1] if a["rule_id"] == WEB_ID]
         self.assertEqual(len(alerts), 1, alerts)
         self.assertEqual((alerts[0]["group_key"], alerts[0]["event_count"]), ("198.51.100.7", 1))
+
+    def test_upgraded_approved_offset_runs_in_ingest_and_backtest(self):
+        source = rule_yaml("  Select:\n    message|base64offset|contains: AAAA\n  condition: Select\n",
+                           title="Offset approval")
+        sample = {"malicious": [{"message": "prefix FBQU suffix"}], "benign": [{"message": "scheduled maintenance"}]}
+        analyst, admin = self.client("analyst"), self.client("admin")
+        status, change, _ = self.import_rule(analyst, source, sample)
+        self.assertEqual(status, 201, change)
+        rule_id = change["target"]
+        self.approve(admin, change)
+        status, change, _ = analyst.post(f"/api/rules/{rule_id}/proposals", {"enabled": True, "reason": "enable"})
+        self.assertEqual(status, 201, change)
+        self.approve(admin, change)
+        db = connect(self.db_path)
+        self.addCleanup(db.close)
+        # The upgrade must obtain every offset from the approved YAML, even if the old params are wrong.
+        old = {"title": "stale", "detection": {"op": "match", "field": "message", "mod": "contains",
+                                               "all": False, "values": ["maintenance"]}}
+        db.execute("UPDATE rules SET params = ? WHERE id = ?", (json.dumps(old), rule_id))
+        init_schema(db)
+        rule = self.rule(admin, rule_id)
+        self.assertTrue(rule["enabled"])
+        self.assertTrue(rule["sigma"]["sample_result"]["passes"])
+        ts = iso(utcnow() - timedelta(minutes=5))
+        events = [{"ts": ts, "type": "process", "src_ip": ip, "message": sample[side][0]["message"]}
+                  for ip, side in (("198.51.100.7", "malicious"), ("198.51.100.8", "benign"))]
+        status, result, _ = analyst.post("/api/ingest", {"source": "host", "events": events})
+        self.assertEqual(status, 201, result)
+        self.assertEqual(result["detection"]["status"], "ok")
+        alerts = analyst.get(f"/api/alerts?rule_id={rule_id}")[1]
+        self.assertEqual([(a["group_key"], a["event_count"]) for a in alerts if a["rule_id"] == rule_id],
+                         [("198.51.100.7", 1)])
+        replay = backtest.backtest(db, rule_id, rule["params"])
+        self.assertEqual([item["group_key"] for item in replay["kept"]], ["198.51.100.7"])
+        self.assertEqual(replay["events_scanned"], 2)
 
     def test_example_rule_imports(self):
         analyst, admin = self.client("analyst"), self.client("admin")

@@ -1,0 +1,33 @@
+# Azure Activity Log: a control-plane call that removes a diagnostic setting, a classic log profile,
+# or an activity-log alert. Written for Watchpost's Sigma subset. The operation name is matched in
+# message; event.action is the Watchpost cloud type (ECS event.action).
+title: Azure Diagnostic Setting Deleted
+id: c4a1e7b2-6d58-4f90-9c13-2b8e5a7d04f6
+status: experimental
+description: |
+  Someone deleted an Azure diagnostic setting, a log profile, or an activity-log alert.
+  Those calls stop a subscription or resource from shipping control-plane audit to a workspace.
+  A write or update of the same resource does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1562/008/
+tags:
+  - attack.defense_evasion
+  - attack.t1562.008
+logsource:
+  product: azure
+  service: activitylogs
+detection:
+  selection:
+    event.action:
+      - cloud_api_call
+      - cloud_iam_change
+    message|contains:
+      - Microsoft.Insights/diagnosticSettings/delete
+      - Microsoft.Insights/logProfiles/delete
+      - Microsoft.Insights/activityLogAlerts/delete
+  condition: selection
+falsepositives:
+  - An administrator removing a diagnostic setting during a reviewed logging migration
+level: high

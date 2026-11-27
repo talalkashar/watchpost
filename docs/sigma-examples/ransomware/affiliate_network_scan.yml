@@ -1,0 +1,40 @@
+# Discovery tools named in leaked ransomware affiliate playbooks (Conti and others): map the
+# network, then spread. ATT&CK T1046. The command line is matched in message.
+title: Ransomware Affiliate Network Scanner
+id: 3b8f0c21-6e14-4a77-8d05-91c2e7a4b6d8
+status: experimental
+description: |
+  A process start whose command line names a network scanner ransomware affiliates run before
+  lateral movement: Advanced IP Scanner, SoftPerfect, Angry IP, masscan, nbtscan, rustscan, or nmap
+  with a scan flag. A log line that only mentions the tool does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1046/
+  - https://www.cisa.gov/stopransomware
+tags:
+  - attack.discovery
+  - attack.t1046
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  process:
+    event.action: process_start
+  tool:
+    message|contains:
+      - advanced_ip_scanner
+      - 'advanced ip scanner'
+      - softperfect
+      - angryip
+      - 'angry ip scanner'
+      - masscan
+      - nbtscan
+      - rustscan
+      - 'nmap -s'
+      - 'nmap -p'
+      - nmap.exe
+  condition: process and tool
+falsepositives:
+  - An inventory or vulnerability scan that the security team actually scheduled
+level: medium

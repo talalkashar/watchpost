@@ -6,11 +6,13 @@ import hmac
 import json
 import os
 import secrets
+import sqlite3
+from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 
 from . import totp
-from .db import audit, iso, now_iso, parse_iso, transaction, utcnow
+from .db import audit, iso, now_iso, parse_iso, row_to_dict, transaction, utcnow
 
 ROLES = {"viewer": 1, "analyst": 2, "admin": 3}
 TOKEN_CAPABILITIES = {"read", "ingest", "triage"}
@@ -35,12 +37,18 @@ def hash_password(password, iterations=None):
 
 def verify_password(password, stored):
     try:
+        if not isinstance(password, str):
+            return False
         algo, iterations, salt, digest = stored.split("$")
         if algo != "pbkdf2_sha256":
             return False
-        candidate = hashlib.pbkdf2_hmac("sha256", password.encode(), base64.b64decode(salt), int(iterations))
+        try:
+            secret = password.encode()
+        except UnicodeEncodeError:
+            return False
+        candidate = hashlib.pbkdf2_hmac("sha256", secret, base64.b64decode(salt), int(iterations))
         return hmac.compare_digest(candidate, base64.b64decode(digest))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError, AttributeError):
         return False
 
 
@@ -53,6 +61,25 @@ def validate_password_strength(password):
         raise AuthError("password must be at least 12 characters", 400)
     if len(password) > 256:
         raise AuthError("password is too long", 400)
+    try:
+        password.encode()
+    except UnicodeEncodeError:
+        raise AuthError("password must be valid UTF-8", 400) from None
+
+
+def _stored_username(conn, username):
+    """The saved spelling of `username`. `COLLATE NOCASE` folds ASCII letters only.
+
+    `Admin` is the stored `admin`. `Érin` is not `érin`. The table's UNIQUE index is
+    case-sensitive, so this lookup is what refuses the second spelling.
+    """
+    row = conn.execute(
+        "SELECT username FROM users WHERE username = ? COLLATE NOCASE", (username,)).fetchone()
+    return None if row is None else row["username"]
+
+
+def _username_taken(stored):
+    raise AuthError(f"a user named {stored!r} already exists", 409)
 
 
 def create_user(conn, username, password, role, actor="system"):
@@ -61,11 +88,21 @@ def create_user(conn, username, password, role, actor="system"):
     if not isinstance(username, str) or not (3 <= len(username) <= 32) or not username.replace("_", "").isalnum():
         raise AuthError("username must be 3-32 letters, digits, or underscores", 400)
     validate_password_strength(password)
-    conn.execute(
-        "INSERT INTO users(username, pw_hash, role, created_at) VALUES (?,?,?,?)",
-        (username, hash_password(password), role, now_iso()),
-    )
-    audit(conn, actor, "user_created", username, {"role": role})
+    with transaction(conn):
+        stored = _stored_username(conn, username)
+        if stored is not None:
+            _username_taken(stored)
+        try:
+            # Hash only after the name is free. A taken spelling never reaches PBKDF2.
+            conn.execute(
+                "INSERT INTO users(username, pw_hash, role, created_at) VALUES (?,?,?,?)",
+                (username, hash_password(password), role, now_iso()),
+            )
+        except sqlite3.IntegrityError:
+            # A concurrent insert of the same spelling can pass the lookup and still hit UNIQUE.
+            stored = _stored_username(conn, username)
+            _username_taken(stored if stored is not None else username)
+        audit(conn, actor, "user_created", username, {"role": role})
 
 
 def bootstrap_users(conn, config, data_dir):
@@ -97,6 +134,8 @@ def _bootstrap_initial(conn, config, data_dir):
         path = Path(data_dir) / "initial_credentials.txt"
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # Mode on open applies only when the file is created. A pre-existing looser file stays loose.
+        os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w") as handle:
             handle.write("# Watchpost initial credentials. Store them safely, then delete this file.\n")
             for username, password in generated.items():
@@ -121,12 +160,6 @@ def _lockout_settings(conn):
     return get_setting_int(conn, "login_lockout_threshold", 5), get_setting_int(conn, "login_lockout_minutes", 15)
 
 
-def _check_not_locked(conn, user):
-    if user["locked_until"] and parse_iso(user["locked_until"]) > utcnow():
-        audit(conn, user["username"], "login_blocked", None, {"reason": "locked"})
-        raise AuthError("account temporarily locked after repeated failures; try again later", 429)
-
-
 def _count_failure(conn, user_id):
     """Add one failure to the account inside the caller's transaction, locking it at the threshold.
 
@@ -143,33 +176,60 @@ def _count_failure(conn, user_id):
     return bool(locked_until)
 
 
-def _record_failure(conn, user, detail=None):
-    """Count a failed password toward the per-account lockout. Returns True when it locks."""
-    with transaction(conn):
-        locked = _count_failure(conn, user["id"])
-        audit(conn, user["username"], "login_failed", None, {**(detail or {}), "locked": locked})
-    return locked
+_LOCKED = "account temporarily locked after repeated failures; try again later"
+_EXPIRED = "sign-in step expired; sign in again"
 
 
-def _reserve_code_attempt(conn, user_id):
-    """Spend one attempt before a TOTP code is checked: refuse when locked, else count it as a failure now.
+def _locked(user):
+    return user["locked_until"] and parse_iso(user["locked_until"]) > utcnow()
 
-    Checking the lock and counting happen in one transaction, so parallel guesses cannot all slip in before
-    the lock lands: at most `threshold` codes are ever checked per lockout window. A correct code then
-    clears the count and the lock (_start_session), and a TOTP step can only be used once, so counting first
-    loses nothing. Returns True when this attempt set the lock.
+
+@contextmanager
+def _verification_slot(conn, user_id, challenge=None):
+    """Reserve remaining guess capacity across connections without charging a failure.
+
+    A crashed verifier's lease expires. Its late result then has no authority to
+    change account state. Each reservation belongs to one request and challenge.
     """
+    attempt = secrets.token_hex(16)
     with transaction(conn):
-        row = conn.execute("SELECT username, locked_until FROM users WHERE id = ?", (user_id,)).fetchone()
-        if row["locked_until"] and parse_iso(row["locked_until"]) > utcnow():
-            audit(conn, row["username"], "login_blocked", None, {"reason": "locked"})
-            locked_out = True
+        conn.execute("CREATE TABLE IF NOT EXISTS login_verifications ("
+                     "user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,"
+                     "attempt TEXT NOT NULL, challenge TEXT, expires_at TEXT NOT NULL,"
+                     "PRIMARY KEY(user_id, attempt))")
+        user = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        if user is None:
+            raise AuthError(_EXPIRED if challenge else "invalid username or password")
+        conn.execute("DELETE FROM login_verifications WHERE user_id=? AND expires_at <= ?", (user_id, now_iso()))
+        pending = conn.execute("SELECT COUNT(*) FROM login_verifications WHERE user_id=?", (user_id,)).fetchone()[0]
+        threshold, _ = _lockout_settings(conn)
+        # A newly lowered policy may already be below the stored count. Allow one
+        # attempt to settle it through the normal success or timed-lock path.
+        if user["disabled"]:
+            blocked = pending >= threshold
         else:
-            locked_out = False
-            locked = _count_failure(conn, user_id)
-    if locked_out:
-        raise AuthError("account temporarily locked after repeated failures; try again later", 429)
-    return locked
+            blocked = _locked(user) or pending >= max(1, threshold - user["failed_logins"])
+        if blocked:
+            if user["disabled"]:
+                audit(conn, user["username"], "login_failed", None, {"reason": "disabled"})
+            else:
+                audit(conn, user["username"], "login_blocked", None, {"reason": "locked" if _locked(user) else "busy"})
+        else:
+            conn.execute("INSERT INTO login_verifications VALUES (?,?,?,?)",
+                         (user_id, attempt, challenge, iso(utcnow() + timedelta(seconds=MFA_TOKEN_TTL_SECONDS))))
+    if blocked:
+        if user["disabled"]:
+            raise AuthError("invalid username or password")
+        raise AuthError(_LOCKED, 429)
+    try:
+        yield attempt
+    finally:
+        conn.execute("DELETE FROM login_verifications WHERE user_id=? AND attempt=?", (user_id, attempt))
+
+
+def _consume_slot(conn, user_id, attempt, challenge=None):
+    return conn.execute("DELETE FROM login_verifications WHERE user_id=? AND attempt=?"
+                        " AND challenge IS ? AND expires_at > ?", (user_id, attempt, challenge, now_iso())).rowcount
 
 
 def _start_session(conn, user, ttl_seconds, detail=None):
@@ -188,68 +248,137 @@ def _start_session(conn, user, ttl_seconds, detail=None):
     return token, csrf, {"username": user["username"], "role": user["role"]}
 
 
+# Same cap as create-user. A longer value is never passed to PBKDF2.
+PASSWORD_MAX_LEN = 256
+_TIMING_PASSWORD = "dummy-password-for-timing"
+
+
+def _password_is_login_shaped(password):
+    return isinstance(password, str) and len(password) <= PASSWORD_MAX_LEN
+
+
+def _reject_unknown_login(conn, password):
+    """Same work and response as a missing account, so a bad length is not a distinct failure.
+
+    The dummy hash stays the short fixed string. A password that is not a string, or is longer
+    than 256 characters, is not hashed: the timing check uses that short string instead.
+    """
+    global _DUMMY_HASH
+    _DUMMY_HASH = _DUMMY_HASH or hash_password(_TIMING_PASSWORD)
+    checked = password if _password_is_login_shaped(password) else _TIMING_PASSWORD
+    verify_password(checked, _DUMMY_HASH)
+    audit(conn, "anonymous", "login_failed", None, {"reason": "unknown user"})
+    raise AuthError("invalid username or password")
+
+
+def _reject_disabled_login(conn, user, password):
+    """Check the stored hash, then the same 401 as a wrong password.
+
+    Returning before verify_password was faster than a wrong password and wrote no
+    audit row. failed_logins is not incremented and the account is not locked.
+    The error text does not say the account is disabled.
+    """
+    verify_password(password, user["pw_hash"])
+    audit(conn, user["username"], "login_failed", None, {"reason": "disabled"})
+    raise AuthError("invalid username or password")
+
+
 def login(conn, username, password, ttl_seconds):
     """Check the password. Returns (token, csrf, user), or an MfaChallenge when the account has TOTP enrolled.
 
     For an enrolled account the password step does not reset the failure count: only a correct code does,
     so knowing the password does not buy unlimited code guesses.
+
+    Usernames are 3–32 characters. A value outside that is rejected before the lookup and is not sliced,
+    so a longer string cannot match a stored prefix.
+
+    A password that is not a string, or is longer than 256 characters, is rejected before the lookup
+    and before any hash of that value. The response matches an unknown account.
+
+    A disabled account still checks the stored hash, then returns that same 401. It does not
+    increment failed_logins and it does not lock. The error text does not say the account is disabled.
+
+    Password verification runs outside the write transaction. The final decision
+    uses the current account and commits atomically with the audit entry.
     """
-    global _DUMMY_HASH
-    user = conn.execute("SELECT * FROM users WHERE username = ?", (str(username)[:64],)).fetchone()
+    if not _password_is_login_shaped(password) or not isinstance(username, str) or not 3 <= len(username) <= 32:
+        _reject_unknown_login(conn, password)
+    user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     if user is None:
-        # Spend comparable time so response timing does not reveal valid usernames.
-        _DUMMY_HASH = _DUMMY_HASH or hash_password("dummy-password-for-timing")
-        verify_password(str(password), _DUMMY_HASH)
-        audit(conn, "anonymous", "login_failed", None, {"reason": "unknown user"})
-        raise AuthError("invalid username or password")
-    if user["disabled"]:
-        raise AuthError("invalid username or password")
-    _check_not_locked(conn, user)
-    if not verify_password(str(password), user["pw_hash"]):
-        _record_failure(conn, user)
-        raise AuthError("invalid username or password")
-    if user["totp_secret"]:
-        mfa_token = secrets.token_urlsafe(32)
-        conn.execute("DELETE FROM mfa_pending WHERE expires_at < ?", (now_iso(),))
-        conn.execute("INSERT INTO mfa_pending(token_hash, user_id, created_at, expires_at) VALUES (?,?,?,?)",
-                     (sha256(mfa_token), user["id"], now_iso(),
-                      iso(utcnow() + timedelta(seconds=MFA_TOKEN_TTL_SECONDS))))
-        audit(conn, user["username"], "login_mfa_challenge", None)
-        return MfaChallenge(mfa_token)
-    return _start_session(conn, user, ttl_seconds)
+        _reject_unknown_login(conn, password)
+    with _verification_slot(conn, user["id"]) as attempt:
+        if user["disabled"]:
+            _reject_disabled_login(conn, user, password)
+        ok = verify_password(password, user["pw_hash"])
+        with transaction(conn):
+            row = conn.execute("SELECT * FROM users WHERE id=?", (user["id"],)).fetchone()
+            if not _consume_slot(conn, user["id"], attempt) or row is None:
+                raise AuthError("invalid username or password")
+            if row["disabled"] or row["pw_hash"] != user["pw_hash"]:
+                reason = "disabled" if row["disabled"] else "credential_changed"
+                audit(conn, username, "login_failed", None, {"reason": reason})
+            elif _locked(row):
+                audit(conn, username, "login_blocked", None, {"reason": "locked"})
+            elif not ok:
+                audit(conn, username, "login_failed", None, {"locked": _count_failure(conn, row["id"])})
+            elif row["totp_secret"]:
+                return _issue_challenge(conn, row)
+            else:
+                return _start_session(conn, row, ttl_seconds)
+    if _locked(row) and not row["disabled"]:
+        raise AuthError(_LOCKED, 429)
+    raise AuthError("invalid username or password")
+
+
+def _challenge_token(nonce, user):
+    # Bind the password proof to both factors at issuance, without storing either twice.
+    message = json.dumps([nonce, user["totp_secret"]]).encode()
+    return nonce + "." + hmac.new(user["pw_hash"].encode(), message, hashlib.sha256).hexdigest()
+
+
+def _issue_challenge(conn, user):
+    token = _challenge_token(secrets.token_urlsafe(32), user)
+    conn.execute("DELETE FROM mfa_pending WHERE expires_at < ? OR user_id = ?", (now_iso(), user["id"]))
+    conn.execute("INSERT INTO mfa_pending(token_hash, user_id, created_at, expires_at) VALUES (?,?,?,?)",
+                 (sha256(token), user["id"], now_iso(), iso(utcnow() + timedelta(seconds=MFA_TOKEN_TTL_SECONDS))))
+    audit(conn, user["username"], "login_mfa_challenge", None)
+    return MfaChallenge(token)
+
+
+def _pending_user(conn, token, digest):
+    user = conn.execute("SELECT u.* FROM mfa_pending p JOIN users u ON u.id=p.user_id"
+                        " WHERE p.token_hash=? AND p.expires_at > ?", (digest, now_iso())).fetchone()
+    if (user is None or user["disabled"] or not user["totp_secret"]
+            or not hmac.compare_digest(token, _challenge_token(token.partition(".")[0], user))):
+        raise AuthError(_EXPIRED)
+    return user
 
 
 def complete_mfa(conn, mfa_token, code, ttl_seconds):
-    """Second login step: a pending token from login() plus a current TOTP code. Returns (token, csrf, user).
-
-    A wrong code counts toward the same lockout as a wrong password. The pending token may be retried until
-    it expires or the account locks, and is consumed by the first success.
-    """
-    if not isinstance(mfa_token, str) or not mfa_token:
-        raise AuthError("sign-in step expired; sign in again")
-    pending = conn.execute(
-        "SELECT p.expires_at, u.* FROM mfa_pending p JOIN users u ON u.id = p.user_id WHERE p.token_hash = ?",
-        (sha256(mfa_token),),
-    ).fetchone()
-    if pending is None or parse_iso(pending["expires_at"]) < utcnow() or pending["disabled"] \
-            or not pending["totp_secret"]:
-        raise AuthError("sign-in step expired; sign in again")
-    locked = _reserve_code_attempt(conn, pending["id"])
-    step = totp.verify(pending["totp_secret"], code, pending["totp_last_step"])
-    if step is None:
-        if locked:
-            conn.execute("DELETE FROM mfa_pending WHERE user_id = ?", (pending["id"],))
-        audit(conn, pending["username"], "login_failed", None, {"reason": "mfa", "locked": locked})
-        raise AuthError("invalid authentication code")
-    # Both checks are single statements, so two requests racing with the same token or code cannot both win.
-    if not conn.execute("DELETE FROM mfa_pending WHERE token_hash = ?", (sha256(mfa_token),)).rowcount:
-        raise AuthError("sign-in step expired; sign in again")
-    if not _claim_step(conn, pending["id"], step):
-        if locked:
-            conn.execute("DELETE FROM mfa_pending WHERE user_id = ?", (pending["id"],))
-        audit(conn, pending["username"], "login_failed", None, {"reason": "mfa", "locked": locked})
-        raise AuthError("invalid authentication code")
-    return _start_session(conn, pending, ttl_seconds, {"mfa": True})
+    """Only the current password proof may charge a wrong code or issue a session."""
+    if not isinstance(mfa_token, str) or not mfa_token or not mfa_token.isascii():
+        raise AuthError(_EXPIRED)
+    digest = sha256(mfa_token)
+    user = _pending_user(conn, mfa_token, digest)
+    with _verification_slot(conn, user["id"], digest) as attempt:
+        step = totp.verify(user["totp_secret"], code, user["totp_last_step"])
+        with transaction(conn):
+            current = _pending_user(conn, mfa_token, digest)
+            if not _consume_slot(conn, current["id"], attempt, digest):
+                raise AuthError(_EXPIRED)
+            if _locked(current):
+                audit(conn, current["username"], "login_blocked", None, {"reason": "locked"})
+            elif step is not None and _claim_step(conn, current["id"], step):
+                conn.execute("DELETE FROM mfa_pending WHERE user_id=?", (current["id"],))
+                return _start_session(conn, current, ttl_seconds, {"mfa": True})
+            else:
+                locked = _count_failure(conn, current["id"])
+                if locked:
+                    conn.execute("DELETE FROM mfa_pending WHERE user_id=?", (current["id"],))
+                audit(conn, current["username"], "login_failed", None, {"reason": "mfa", "locked": locked})
+    if _locked(current):
+        raise AuthError(_LOCKED, 429)
+    raise AuthError("invalid authentication code")
 
 
 def _claim_step(conn, user_id, step):
@@ -260,6 +389,9 @@ def _claim_step(conn, user_id, step):
 
 
 def logout(conn, token):
+    # A bearer request can reach logout with no session cookie. sha256(None) must not 500.
+    if not isinstance(token, str) or not token:
+        return
     conn.execute("DELETE FROM sessions WHERE token_hash = ?", (sha256(token),))
 
 
@@ -339,43 +471,94 @@ def mfa_disable(conn, username, code):
             return {"enabled": False}
         raise AuthError("two-factor authentication is not on", 409)
     # Same budget as signing in, so a stolen session cannot guess codes to turn the second factor off.
-    _reserve_code_attempt(conn, user["id"])
-    step = totp.verify(user["totp_secret"], code, user["totp_last_step"])
-    if step is None or not _claim_step(conn, user["id"], step):
-        audit(conn, username, "mfa_disable_failed", username)
-        raise AuthError("invalid authentication code", 400)
-    conn.execute("UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = ?", (user["id"],))
-    _clear_mfa(conn, user["id"])
-    audit(conn, username, "mfa_disabled", username)
-    return {"enabled": False}
+    with _verification_slot(conn, user["id"]) as attempt:
+        step = totp.verify(user["totp_secret"], code, user["totp_last_step"])
+        with transaction(conn):
+            current = _user_row(conn, username)
+            if (not _consume_slot(conn, user["id"], attempt) or current["disabled"]
+                    or current["totp_secret"] != user["totp_secret"] or current["pw_hash"] != user["pw_hash"]):
+                raise AuthError("account changed; sign in again")
+            if _locked(current):
+                audit(conn, username, "login_blocked", None, {"reason": "locked"})
+            elif step is not None and _claim_step(conn, user["id"], step):
+                conn.execute("UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = ?", (user["id"],))
+                _clear_mfa(conn, user["id"])
+                audit(conn, username, "mfa_disabled", username)
+                return {"enabled": False}
+            else:
+                if _count_failure(conn, user["id"]):
+                    conn.execute("DELETE FROM mfa_pending WHERE user_id=?", (user["id"],))
+                audit(conn, username, "mfa_disable_failed", username)
+    if _locked(current):
+        raise AuthError(_LOCKED, 429)
+    raise AuthError("invalid authentication code", 400)
 
 
 def mfa_admin_reset(conn, username, actor):
-    """The recovery path: an admin turns off another user's TOTP. There are no recovery codes."""
-    if username == actor:
-        raise AuthError("use your own disable step (with a current code) for your account", 400)
-    user = _user_row(conn, username)
-    if not user["totp_secret"] and not user["totp_pending"]:
-        raise AuthError("that user has no two-factor authentication to reset", 409)
-    _clear_mfa(conn, user["id"])
-    audit(conn, actor, "mfa_reset", username)
+    """The recovery path: an admin turns off another user's TOTP. There are no recovery codes.
+
+    The name matches ASCII case (`COLLATE NOCASE`) and the reset applies to the stored
+    account. `Admin` resets `admin` when that is the only match. Two accounts that share
+    the fold are 409 and nobody is reset. `Érin` does not match `érin`. A name outside
+    3–32 stays unmatched (404), with no slice. Resetting your own account stays 400.
+    """
+    if not isinstance(username, str) or not (3 <= len(username) <= 32):
+        raise AuthError("user not found", 404)
+    with transaction(conn):
+        users = conn.execute(
+            "SELECT * FROM users WHERE username = ? COLLATE NOCASE", (username,)).fetchall()
+        if len(users) > 1:
+            raise AuthError("username matches more than one account", 409)
+        if not users:
+            raise AuthError("user not found", 404)
+        user = users[0]
+        if user["username"] == actor:
+            raise AuthError("use your own disable step (with a current code) for your account", 400)
+        if not user["totp_secret"] and not user["totp_pending"]:
+            raise AuthError("that user has no two-factor authentication to reset", 409)
+        _clear_mfa(conn, user["id"])
+        audit(conn, actor, "mfa_reset", user["username"])
     return {"enabled": False}
 
 
 # --- Sessions -------------------------------------------------------------------------------
 
-def list_sessions(conn, username=None, current_sid=None):
-    """Active sessions (all users when `username` is None). Never includes the token or its hash."""
-    sql = ("SELECT s.sid, u.username, s.created_at, s.last_seen_at, s.expires_at FROM sessions s"
-           " JOIN users u ON u.id = s.user_id WHERE s.expires_at >= ?")
+# Active sessions returned by the list routes, newest by created_at then sid.
+SESSION_LIST_LIMIT = 100
+# API tokens, newest by id. A revoked row in that page keeps revoked_at.
+TOKEN_LIST_LIMIT = 100
+_TOKEN_LIST_COLUMNS = (
+    "id, name, prefix, created_by, created_at, last_used_at, revoked_at, role, capabilities, expires_at"
+)
+
+
+def list_sessions(conn, username=None, current_sid=None, limit=SESSION_LIST_LIMIT, *, fold_user=False):
+    """Active sessions, newest by created_at then sid, and how many were left out.
+
+    All users when `username` is None. With `fold_user`, the name matches ASCII
+    case only (`Admin` is `admin` and `Admin`; `Érin` is not `érin`). The count
+    is only those matches. The second value is 0 when the list fits, including
+    when none are active and when the name matches nobody. An expired session
+    is not a row and is not part of that count. The rows never include the
+    token or its hash. A later created_at wins. The same timestamp keeps the
+    greater sid.
+    """
+    where = " WHERE s.expires_at >= ?"
     args = [now_iso()]
     if username is not None:
-        sql += " AND u.username = ?"
+        # The signed-in list stays that account. Only the admin ?user= filter folds.
+        where += " AND u.username = ? COLLATE NOCASE" if fold_user else " AND u.username = ?"
         args.append(username)
-    rows = conn.execute(sql + " ORDER BY s.created_at DESC", args).fetchall()
-    return [{"id": r["sid"], "username": r["username"], "created_at": r["created_at"],
-             "last_seen_at": r["last_seen_at"], "expires_at": r["expires_at"],
-             "current": r["sid"] == current_sid} for r in rows]
+    base = "FROM sessions s JOIN users u ON u.id = s.user_id" + where
+    total = conn.execute("SELECT COUNT(*) " + base, args).fetchone()[0]
+    rows = conn.execute(
+        "SELECT s.sid, u.username, s.created_at, s.last_seen_at, s.expires_at " + base
+        + " ORDER BY s.created_at DESC, s.sid DESC LIMIT ?",
+        (*args, limit)).fetchall()
+    listed = [{"id": r["sid"], "username": r["username"], "created_at": r["created_at"],
+               "last_seen_at": r["last_seen_at"], "expires_at": r["expires_at"],
+               "current": r["sid"] == current_sid} for r in rows]
+    return listed, total - len(listed)
 
 
 def revoke_session(conn, sid, actor, owner=None):
@@ -391,6 +574,21 @@ def revoke_session(conn, sid, actor, owner=None):
     conn.execute("DELETE FROM sessions WHERE token_hash = ?", (row["token_hash"],))
     audit(conn, actor, "session_revoked", row["username"], {"session": sid})
     return {"ok": True}
+
+
+def list_api_tokens(conn, limit=TOKEN_LIST_LIMIT):
+    """API tokens, newest id first, and how many the limit left out.
+
+    The second value is 0 when the list fits, including an empty table.
+    A later created_at on a lower id is the one left out. A revoked row
+    in the page keeps revoked_at. The rows never include the secret or
+    its hash. Callers that return the bare array send that count as
+    X-Watchpost-Omitted.
+    """
+    total = conn.execute("SELECT COUNT(*) FROM api_tokens").fetchone()[0]
+    rows = [row_to_dict(r, json_fields=("capabilities",)) for r in conn.execute(
+        "SELECT " + _TOKEN_LIST_COLUMNS + " FROM api_tokens ORDER BY id DESC LIMIT ?", (limit,))]
+    return rows, total - len(rows)
 
 
 def create_api_token(conn, name, actor, role="analyst", capabilities=None, expires_in_days=None):
@@ -422,7 +620,7 @@ def create_api_token(conn, name, actor, role="analyst", capabilities=None, expir
     return token
 
 
-def token_user(conn, token):
+def token_user(conn, token, *, record_use=True):
     """Return a bearer principal when the token is active and unexpired."""
     if not token or not token.startswith("wp_"):
         return None
@@ -442,7 +640,8 @@ def token_user(conn, token):
             or len(set(capabilities)) != len(capabilities) or not set(capabilities) <= TOKEN_CAPABILITIES \
             or row["role"] == "viewer" and capabilities != ["read"]:
         return None
-    conn.execute("UPDATE api_tokens SET last_used_at = ? WHERE id = ?", (now_iso(), row["id"]))
+    if record_use:
+        conn.execute("UPDATE api_tokens SET last_used_at = ? WHERE id = ?", (now_iso(), row["id"]))
     return {"username": f"token:{row['name']}", "role": row["role"],
             "capabilities": capabilities, "via": "token"}
 
