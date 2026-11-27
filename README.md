@@ -108,7 +108,7 @@ Watchpost is a portfolio and learning project, not a production SIEM. All bundle
 
 ## Credits
 
-Built by [Talal Kashar](https://github.com/talalkashar). Juan Carlos Munera ([LinkedIn](https://www.linkedin.com/in/juanmunera), [GitHub](https://github.com/juancarlosmunera)) contributed the asset inventory (PR #9) and suggested several hardening changes after reviewing the project.
+Built by [Talal Kashar](https://github.com/talalkashar). Juan Carlos Munera ([LinkedIn](https://www.linkedin.com/in/juanmunera), [GitHub](https://github.com/juancarlosmunera)) contributed the asset inventory (#9), the CloudTrail collector (#80), Windows Event Forwarding collection and its forwarder (#81, #87), response playbooks (#82), tiered retention (#83), multi-stage correlation rules (#84) and threat intelligence feeds (#85), and suggested several hardening changes after reviewing the project.
 
 ## License
 
