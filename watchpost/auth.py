@@ -16,7 +16,7 @@ from .db import audit, iso, now_iso, parse_iso, row_to_dict, transaction, utcnow
 
 ROLES = {"viewer": 1, "analyst": 2, "admin": 3}
 TOKEN_CAPABILITIES = {"read", "ingest", "triage"}
-PBKDF2_ITERATIONS = int(os.environ.get("SIEM_PBKDF2_ITERATIONS", "310000"))
+PBKDF2_ITERATIONS = int(os.environ.get("SIEM_PBKDF2_ITERATIONS", "600000"))
 _DUMMY_HASH = None
 MFA_TOKEN_TTL_SECONDS = 300
 SESSION_SEEN_INTERVAL_SECONDS = 60  # last_seen_at is refreshed at most this often per session
@@ -35,6 +35,18 @@ def hash_password(password, iterations=None):
     return f"pbkdf2_sha256${iterations}${base64.b64encode(salt).decode()}${base64.b64encode(digest).decode()}"
 
 
+def _stored_iterations(stored):
+    """Round count written into a `pbkdf2_sha256` hash, or None when the hash is not that format."""
+    try:
+        algo, iterations, _salt, _digest = stored.split("$")
+        count = int(iterations)
+    except (ValueError, TypeError, AttributeError):
+        return None
+    if algo != "pbkdf2_sha256" or count < 1:
+        return None
+    return count
+
+
 def verify_password(password, stored):
     try:
         if not isinstance(password, str):
@@ -50,6 +62,31 @@ def verify_password(password, stored):
         return hmac.compare_digest(candidate, base64.b64decode(digest))
     except (ValueError, TypeError, OverflowError, AttributeError):
         return False
+
+
+def _needs_rehash(stored):
+    """True when the stored round count is below the current default."""
+    count = _stored_iterations(stored)
+    return count is not None and count < PBKDF2_ITERATIONS
+
+
+def _store_rehash(conn, row, upgraded):
+    """Save a stronger hash for the password just verified. A changed row is left alone.
+
+    The new digest is computed before the write transaction. This update matches the
+    hash that was checked, so a concurrent password change is not overwritten.
+    """
+    if upgraded is None:
+        return row
+    changed = conn.execute(
+        "UPDATE users SET pw_hash = ? WHERE id = ? AND pw_hash = ?",
+        (upgraded, row["id"], row["pw_hash"]),
+    ).rowcount
+    if not changed:
+        return row
+    current = dict(row)
+    current["pw_hash"] = upgraded
+    return current
 
 
 def sha256(value):
@@ -300,6 +337,11 @@ def login(conn, username, password, ttl_seconds):
 
     Password verification runs outside the write transaction. The final decision
     uses the current account and commits atomically with the audit entry.
+
+    A correct password whose stored round count is below PBKDF2_ITERATIONS is hashed
+    again at the current default and saved with the session or the MFA challenge.
+    A wrong password does not change the stored hash. `SIEM_PBKDF2_ITERATIONS` still
+    overrides that default.
     """
     if not _password_is_login_shaped(password) or not isinstance(username, str) or not 3 <= len(username) <= 32:
         _reject_unknown_login(conn, password)
@@ -310,6 +352,8 @@ def login(conn, username, password, ttl_seconds):
         if user["disabled"]:
             _reject_disabled_login(conn, user, password)
         ok = verify_password(password, user["pw_hash"])
+        # Hash outside the write lock. The transaction stores it only after the password is accepted.
+        upgraded = hash_password(password) if ok and not _locked(user) and _needs_rehash(user["pw_hash"]) else None
         with transaction(conn):
             row = conn.execute("SELECT * FROM users WHERE id=?", (user["id"],)).fetchone()
             if not _consume_slot(conn, user["id"], attempt) or row is None:
@@ -322,8 +366,9 @@ def login(conn, username, password, ttl_seconds):
             elif not ok:
                 audit(conn, username, "login_failed", None, {"locked": _count_failure(conn, row["id"])})
             elif row["totp_secret"]:
-                return _issue_challenge(conn, row)
+                return _issue_challenge(conn, _store_rehash(conn, row, upgraded))
             else:
+                _store_rehash(conn, row, upgraded)
                 return _start_session(conn, row, ttl_seconds)
     if _locked(row) and not row["disabled"]:
         raise AuthError(_LOCKED, 429)
