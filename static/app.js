@@ -592,7 +592,7 @@ async function alertDetail(id) {
         playbookCard(a),
         el("div", { class: "card" }, el("h2", {}, `Evidence (${a.evidence.length} events)`),
           table(["Time", "Type", "User", "Source IP", "Host", "Message"],
-            a.evidence.map((e) => ({ cells: [stamp(e.ts), e.event_type, entityLink("user", e.user), el("code", {}, entityLink("src_ip", e.src_ip)), entityLink("host", e.host), eventMessage(e)] })))),
+            a.evidence.map((e) => ({ cells: [stamp(e.ts), e.event_type, entityLink("user", e.user), el("span", {}, el("code", {}, entityLink("src_ip", e.src_ip)), " ", threatMark(e.threat)), entityLink("host", e.host), eventMessage(e)] })))),
         el("div", { class: "card" }, el("h2", {}, "Related timeline"),
           el("p", { class: "muted" }, "Every event involving these IPs or accounts from 30 minutes before to 30 minutes after. Highlighted rows are evidence."),
           table(["Time", "Type", "User", "Source IP", "Source", "Message"],
@@ -609,6 +609,40 @@ async function alertDetail(id) {
         el("div", { class: "card" }, el("h2", {}, "Activity"),
           a.activity.map((x) => el("div", { class: "note" }, el("span", { class: "muted" }, `${fmtTime(x.created_at)} · ${x.actor} `), `${x.action.replace("_", " ")}${x.detail ? ` — ${x.detail}` : ""}`))))),
   );
+}
+
+// ---------- threat intelligence (see watchpost/threat_intel.py) ----------
+// A marker for an event whose source or destination address is on a feed.
+const threatMark = (label) => (label ? el("span", { class: "pill sev-critical", title: label }, "listed") : null);
+
+function threatCard(t) {
+  const act = (path, body, done) => guarded(async () => { const out = await api(path, { method: "POST", body }); toast(done(out)); admin(); });
+  const form = el("form", {},
+    el("div", { class: "row" },
+      el("label", {}, "Feed name", el("input", { name: "name", required: true, maxlength: 32, pattern: "[a-z0-9_\\-]{1,32}", placeholder: "e.g. my-list", size: 16 })),
+      el("label", { style: { flexDirection: "row", alignItems: "center" } }, el("input", { type: "checkbox", name: "synthetic" }), "Synthetic (sample data)")),
+    el("label", {}, "Addresses and networks, one per line. A note may follow #", el("textarea", { name: "text", required: true, rows: 4, placeholder: "203.0.113.45 # botnet C2\n198.51.100.0/24" })),
+    el("button", { type: "submit" }, "Import (replaces the feed)"));
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const f = new FormData(form);
+    act(`/api/threat-intel/feeds/${encodeURIComponent(f.get("name").trim())}`, { text: f.get("text"), synthetic: f.get("synthetic") === "on" },
+      (o) => `${o.indicators} entries listed, ${o.refused} refused${o.events_tagged === null ? "" : `, ${o.events_tagged} stored events tagged`}`);
+  });
+  return el("div", { class: "card" }, el("h2", {}, "Threat intelligence"),
+    el("p", {}, `${t.indicators.toLocaleString()} addresses and networks on ${t.feeds.length} feed(s). ${t.tagged_events.toLocaleString()} stored events touch one. Events are tagged as they arrive, an alert whose evidence is tagged is raised one severity level, and the hunt `, el("code", {}, "threat:*"), " finds them all."),
+    t.feeds.length ? table(["Feed", "From", "Entries", "Refused", "Updated", ""],
+      t.feeds.map((f) => ({ cells: [el("span", {}, f.name, " ", synth(f.synthetic)), f.source === "url" ? "fetched" : "imported", { num: f.indicators }, { num: f.refused },
+        f.last_error ? el("span", { class: "error" }, f.last_error) : `${fmtTime(f.updated_at)} by ${f.updated_by}`,
+        f.updated_at ? el("button", { class: "ghost", onclick: () => { if (confirm(`Remove the feed "${f.name}"? Its tags come off the stored events.`)) act(`/api/threat-intel/feeds/${f.name}/delete`, {}, () => `Feed ${f.name} removed`); } }, "Remove") : ""] })))
+      : el("p", { class: "muted" }, "No feed yet."),
+    t.url_feeds.length ? el("div", { class: "row" }, el("button", { class: "ghost", onclick: () => act("/api/threat-intel/refresh", {}, (o) => o.map((r) => `${r.feed}: ${r.error ?? r.skipped ?? `${r.indicators} entries`}`).join("; ")) }, "Fetch the configured feeds now")) : null,
+    el("h3", {}, "Open feeds you can turn on"),
+    el("p", { class: "muted" }, "Set SIEM_THREAT_FEEDS to the names you want, separated by commas, and restart. Nothing is fetched until you do, and each feed at most once an hour. Each publisher has its own terms: read them before you rely on a feed."),
+    table(["Name", "What it lists", "Terms, as read in November 2026", "On"],
+      t.presets.map((p) => ({ cells: [el("code", {}, p.name), p.about, el("span", {}, p.use, " ", el("a", { href: p.terms, target: "_blank", rel: "noopener noreferrer" }, "Publisher's terms")), p.enabled ? pill("on", "st-resolved") : "—"] }))),
+    el("h3", {}, "Import a list"),
+    form);
 }
 
 // ---------- tiered retention (see watchpost/retention.py) ----------
@@ -1030,7 +1064,7 @@ function eventResults(data, filtered) {
   const empty = data.total ? "No events on this page." : filtered ? "No events match this search." : "No events have been collected.";
   return table(["Time", "Severity", "Type", "User", "Source IP", "Host", "Source", "Message"],
     data.events.map((e) => ({ id: e.id, cells: [stamp(e.ts), sev(e.severity), e.event_type, e.user ?? "—",
-      el("code", {}, e.src_ip ?? "—"), el("span", { class: "event-host", title: e.host }, e.host ?? "—"), e.source,
+      el("span", {}, el("code", {}, e.src_ip ?? "—"), " ", threatMark(e.threat)), el("span", { class: "event-host", title: e.host }, e.host ?? "—"), e.source,
       el("div", {}, el("span", {}, eventMessage(e)), el("button", { type: "button", class: "event-details ghost",
         "aria-haspopup": "dialog", "aria-label": `View details for event #${e.id}` }, "View details"))] })),
     (r, row) => guarded(() => eventDialog(r.id, row)), "event-log event-results", empty);
@@ -2205,9 +2239,9 @@ async function health() {
 // ---------- admin ----------
 async function admin() {
   if (!can("admin")) return render(el("p", {}, "Admins only."));
-  const result = await readView("admin", () => Promise.all([api("/api/tokens"), api("/api/audit"), api("/api/assets"), api("/api/audit/verify"), api("/api/sessions"), api("/api/retention")]));
+  const result = await readView("admin", () => Promise.all([api("/api/tokens"), api("/api/audit"), api("/api/assets"), api("/api/audit/verify"), api("/api/sessions"), api("/api/retention"), api("/api/threat-intel")]));
   if (!result) return;
-  const [tokens, audit, inventory, chain, sessions, kept] = result;
+  const [tokens, audit, inventory, chain, sessions, kept, intel] = result;
   const tokenOut = el("div");
   const tokenForm = el("form", { class: "row" },
     el("label", {}, "Token name", el("input", { name: "name", required: true, maxlength: 64, placeholder: "e.g. web01-forwarder" })),
@@ -2275,6 +2309,7 @@ async function admin() {
     el("div", { class: "card" }, el("h2", {}, "Sign-in sessions"),
       el("p", { class: "muted" }, "Revoking a session signs that browser out on its next request. Reset two-factor access if someone loses their authenticator."),
       sessionsTable(sessions, "/api/sessions", admin, true), resetForm),
+    threatCard(intel),
     retentionCard(kept),
     el("div", { class: "card" }, el("h2", {}, "Audit log"), chainBadge(chain),
       table(["When", "Actor", "Action", "Target", "Detail"], audit.map((a) => ({ cells: [fmtTime(a.created_at), a.actor, a.action, a.target ?? "", el("code", {}, a.detail ?? "")] })))),

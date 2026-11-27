@@ -1,0 +1,16 @@
+# [SYNTHETIC] Watchpost sample threat intelligence feed.
+# Every address is in a range reserved for documentation (RFC 5737, RFC 3849). None is a real host.
+# It lists some of the addresses the synthetic demo dataset uses as attackers, so importing it shows
+# what a feed does: Admin > Threat intelligence > Import, with "synthetic" ticked. Or:
+#   curl -b cookies -H "X-CSRF-Token: ..." -H "Content-Type: application/json" \
+#        -d "$(python3 -c 'import json;print(json.dumps({"synthetic": True, "text": open("samples/threat_intel.txt").read()}))')" \
+#        https://siem.example.internal/api/threat-intel/feeds/sample
+#
+# One address or network per line. A note may follow #, ; or a comma.
+203.0.113.45 # [SYNTHETIC] password guessing against SSH
+198.51.100.23 # [SYNTHETIC] password spraying
+203.0.113.150 # [SYNTHETIC] used with stolen cloud credentials
+192.0.2.77 ; [SYNTHETIC] login after a burst of failures
+203.0.113.80,[SYNTHETIC] web vulnerability scanner
+198.51.100.128/25 # [SYNTHETIC] network leased to a bulletproof host
+2001:db8:bad::/48 # [SYNTHETIC] IPv6 example

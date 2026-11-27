@@ -69,7 +69,7 @@ _ATTACKER_FROM = (
     " FROM alerts a JOIN alert_events ae ON ae.alert_id = a.id"
     " JOIN events e ON e.id = ae.event_id WHERE e.src_ip IS NOT NULL")
 EVENT_FIELDS = "id, ts, ingested_at, source, host, event_type, outcome, severity, user, src_ip, dest_ip, dest_port, " \
-               "bytes, message, synthetic, batch_id"
+               "bytes, message, synthetic, batch_id, threat"
 
 
 class QueryError(ValueError):
