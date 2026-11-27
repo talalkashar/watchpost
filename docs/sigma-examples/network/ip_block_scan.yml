@@ -1,0 +1,32 @@
+# Internet-wide scanners and Zeek's address-scan notice, on firewall denies and flow logs.
+title: IP Block Scan From Network Scanner
+id: 91c4e2ab-5d60-4f73-8a19-c6e2b047d5aa
+status: experimental
+description: |
+  A firewall deny or a network connection whose message names an IP-block scanner
+  (masscan, zmap, an Nmap scan report) or Zeek's Scan::Address_Scan notice.
+  A deny with no scanner name is ordinary noise and does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1595/001/
+tags:
+  - attack.reconnaissance
+  - attack.t1595.001
+logsource:
+  category: firewall
+  product: zeek
+detection:
+  selection:
+    event.action:
+      - fw_deny
+      - network_connection
+    message|contains:
+      - 'Scan::Address_Scan'
+      - masscan
+      - zmap
+      - 'Nmap scan report'
+  condition: selection
+falsepositives:
+  - An authorized scanner that is supposed to sweep this network
+level: medium

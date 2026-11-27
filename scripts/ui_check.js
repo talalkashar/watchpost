@@ -1,4 +1,4 @@
-// Headless UI check: every view at desktop (1440px) and phone (390px) width, plus keyboard triage.
+// Headless UI check: every view at 320px, 390px and 1440px, plus keyboard triage.
 // Needs playwright-core and a Chromium (headless shell) outside this repo; no node deps are added here.
 //
 //   NODE_PATH=/path/to/node_modules CHROME=/path/to/chrome-headless-shell node scripts/ui_check.js
@@ -7,7 +7,7 @@
 // synthetic demo data as admin, runs the checks, and stops that server by PID. Exit code 1 on any failure.
 // What it asserts per view: no horizontal page scroll, every visible input/select/textarea/button and
 // link has an accessible name (a small in-page audit, not axe), landmarks and aria-current are present,
-// tap targets are at least 40px tall at 390px, and no JS errors. It is not a screen-reader audit.
+// tap targets are at least 44px tall on phones, and no JS errors. It is not a screen-reader audit.
 "use strict";
 const { chromium } = require("playwright-core");
 const { spawn } = require("child_process");
@@ -49,7 +49,7 @@ function audit(minTap) {
   const visible = (n) => {
     const r = n.getBoundingClientRect();
     const st = getComputedStyle(n);
-    return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && !n.closest("[hidden]") && !n.closest("svg");
+    return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && n.checkVisibility() && !n.closest("[hidden]") && !n.closest("svg");
   };
   const name = (n) => {
     const by = n.getAttribute("aria-labelledby");
@@ -64,13 +64,14 @@ function audit(minTap) {
   };
   const problems = [];
   const scope = document.querySelector("dialog[open]") || document;
-  for (const n of scope.querySelectorAll("input:not([type=hidden]), select, textarea, button, a[href]")) {
+  for (const n of scope.querySelectorAll("input:not([type=hidden]), select, textarea, button, a[href], summary")) {
     if (!visible(n)) continue;
     const desc = `${n.tagName.toLowerCase()}${n.name ? `[name=${n.name}]` : ""}${n.className ? `.${String(n.className).split(" ")[0]}` : ""}`;
     if (!name(n)) problems.push(`unlabeled ${desc}`);
     // Inline text links are exempt from the target size (WCAG 2.5.8); link-styled buttons are not.
-    if (minTap && (n.tagName !== "A" || n.classList.contains("button")) && n.type !== "checkbox" && n.type !== "radio") {
-      const h = n.getBoundingClientRect().height;
+    if (minTap && (n.tagName !== "A" || n.matches(".button, .ph a, .bmore, .page-head a"))) {
+      const target = ["checkbox", "radio"].includes(n.type) ? n.closest("label") || n : n;
+      const h = target.getBoundingClientRect().height;
       if (h < minTap - 0.5) problems.push(`small tap target ${desc} "${name(n).slice(0, 30)}" ${Math.round(h)}px`);
     }
   }
@@ -88,7 +89,7 @@ function audit(minTap) {
 }
 
 async function login(browser, user, pw, width) {
-  const ctx = await browser.newContext({ viewport: { width, height: 900 } });
+  const ctx = await browser.newContext({ viewport: { width, height: width === 320 ? 568 : width === 390 ? 844 : 900 } });
   const page = await ctx.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
@@ -111,8 +112,37 @@ async function show(page, hash) {
 }
 
 async function auditView(page, label, width) {
-  const problems = await page.evaluate(audit, width <= 400 ? 40 : 0);
+  const problems = await page.evaluate(audit, width <= 400 ? 44 : 0);
   check(!problems.length, `${width}px ${label}${problems.length ? `: ${problems.join("; ")}` : ""}`);
+}
+
+// SVG font-size is in user units. Include the screen transform to catch a
+// readable CSS declaration being scaled down by the chart's viewBox.
+function matrixGeometry(box) {
+  const labels = [...box.querySelectorAll(".heat text")];
+  const columns = [...box.querySelectorAll(".tactic")];
+  const bounds = box.getBoundingClientRect();
+  const edges = columns.map((column) => {
+    const ctm = column.getScreenCTM();
+    return { left: ctm.e, right: ctm.e + column.width.baseVal.value * ctm.a };
+  });
+  const impact = columns.findIndex((column) => column.querySelector(".th title").textContent === "Impact");
+  return {
+    columns: columns.length,
+    font: Math.min(...labels.map((el) => {
+      const m = el.getScreenCTM();
+      return parseFloat(getComputedStyle(el).fontSize) * Math.hypot(m.c, m.d);
+    })),
+    fit: edges.every(({ left, right }) => left >= bounds.left - 0.02 && right <= bounds.right + 0.02),
+    clipped: labels.filter((el) => {
+      const { left, right } = el.getBoundingClientRect();
+      const column = el.ownerSVGElement;
+      const m = column.getScreenCTM();
+      return left < m.e - 0.02 || right > m.e + column.width.baseVal.value * m.a + 0.02;
+    }).map((el) => el.firstChild.textContent),
+    impactRight: edges[impact]?.right, containerRight: bounds.right,
+    contentWidth: box.scrollWidth, containerWidth: box.clientWidth, pageWidth: document.scrollingElement.scrollWidth,
+  };
 }
 
 async function main() {
@@ -122,22 +152,58 @@ async function main() {
   try {
     await waitReady();
 
-    // Login form (logged out), both widths.
-    for (const width of [1440, 390]) {
-      const ctx = await browser.newContext({ viewport: { width, height: 900 } });
+    // Login form (logged out), phones first.
+    for (const width of [320, 390, 1440]) {
+      const ctx = await browser.newContext({ viewport: { width, height: width === 320 ? 568 : width === 390 ? 844 : 900 } });
       const p = await ctx.newPage();
-      await p.goto(BASE);
+      let releaseLoader;
+      const loaderGate = new Promise((resolve) => { releaseLoader = resolve; });
+      await p.route("**/load-console.js", async (route) => { await loaderGate; await route.continue(); });
+      await p.goto(BASE, { waitUntil: "commit" });
+      const submit = p.locator("#login-form button[type=submit]");
+      check(await submit.isDisabled(), `${width}px sign-in is disabled before the loader runs`);
+      releaseLoader();
+      await p.waitForLoadState("load");
       await p.waitForSelector("#login-view:not([hidden])");
+      check(await submit.isEnabled(), `${width}px sign-in is enabled after the submit guard loads`);
       await auditView(p, "login form", width);
+      check(await p.locator("#login-view").getByText("All data is synthetic.").isVisible(),
+        `${width}px sign-in includes the data disclosure`);
       await ctx.close();
     }
 
     // Demo data, loaded through the Admin view like a person would.
     const admin = await login(browser, "admin", ADMIN_PW, 1440);
     await show(admin.page, "admin");
-    await admin.page.click("text=Load synthetic demo data");
+    await admin.page.click("text=Load demo data");
     await admin.page.waitForSelector("text=Alerts created", { timeout: 60000 });
     ok("demo data loaded");
+    // A fresh document must keep the flat map out of view until the globe is ready.
+    const firstLoad = await admin.ctx.newPage();
+    let releaseOrbit;
+    const orbitGate = new Promise((resolve) => { releaseOrbit = resolve; });
+    await firstLoad.route("**/orbit.js", async (route) => { await orbitGate; await route.continue(); });
+    const orbitRequested = firstLoad.waitForRequest("**/orbit.js");
+    await firstLoad.goto(BASE, { waitUntil: "domcontentloaded" });
+    await orbitRequested;
+    const flatMap = firstLoad.locator("#map svg.worldmap");
+    await flatMap.waitFor({ state: "attached" });
+    check(!await flatMap.isVisible(), "flat map stays hidden while the globe module is pending");
+    releaseOrbit();
+    await firstLoad.locator("canvas.orbit-surface").waitFor({ state: "visible" });
+    await firstLoad.close();
+    await admin.page.goto(BASE + "#dashboard");
+    for (const width of [1101, 1180, 1280, 1440, 1920]) {
+      await admin.page.setViewportSize({ width, height: 900 });
+      await admin.page.reload();
+      await admin.page.waitForSelector("#attack-chart .cellg");
+      const size = await admin.page.locator("#attack-chart").evaluate(matrixGeometry);
+      check(size.columns === 15 && size.fit && size.impactRight <= size.containerRight + 0.02
+        && size.contentWidth === size.containerWidth && size.pageWidth === width && !size.clipped.length && size.font >= 11,
+        `${width}px ATT&CK matrix: ${size.font.toFixed(2)}px labels, IMPACT right ${size.impactRight?.toFixed(2)} / ${size.containerRight.toFixed(2)}, clipped [${size.clipped}]`);
+    }
+    await admin.page.setViewportSize({ width: 1440, height: 900 });
+
     const alertId = await admin.page.evaluate(async () => (await (await fetch("/api/alerts?status=open")).json())[0].id);
     const incidentId = await admin.page.evaluate(async () => (await (await fetch("/api/incidents")).json())[0]?.id);
     const ruleId = await admin.page.evaluate(async () => (await (await fetch("/api/rules")).json())[0].id);
@@ -146,17 +212,39 @@ async function main() {
       headers: { "Content-Type": "application/json", "X-CSRF-Token": state.csrf },
       body: JSON.stringify({ name: "UI check failed logins", query: "event_type:auth_failure" }) })).status);
     check(savedStatus === 201, `saved a search for the promote dialog (${savedStatus})`);
+    // Exercise logout, expired MFA and sign-in again in the same tab.
+    const page = admin.page;
+    check(await page.locator("#login-view[hidden]").count() === 1, "signed-in page keeps the sign-in section hidden");
+    await page.click("#logout");
+    const expired = "sign-in step expired; sign in again";
+    await page.route("**/api/auth/login", (route) => route.fulfill({
+      json: { mfa_required: true, mfa_token: "ui-test-challenge" },
+    }), { times: 1 });
+    await page.route("**/api/auth/mfa", (route) => route.fulfill({ status: 401, json: { error: expired } }), { times: 1 });
+    await page.fill("#login-form [name=username]", "admin");
+    await page.fill("#login-form [name=password]", ADMIN_PW);
+    await page.click("#login-form button[type=submit]");
+    await page.fill("#mfa-code", "000000");
+    await page.click("#mfa-form button[type=submit]");
+    await page.waitForSelector("#login-error:visible");
+    check(await page.textContent("#login-error") === expired && await page.isVisible("#login-form")
+      && await page.locator("#mfa-form").count() === 0, "expired MFA after logout restores the password form and shows the server message in #login-error");
+    await page.fill("#login-form [name=username]", "admin");
+    await page.fill("#login-form [name=password]", ADMIN_PW);
+    await page.click("#login-form button[type=submit]");
+    await page.waitForSelector("body.authed");
+    check(await page.locator("#login-view[hidden]").count() === 1 && !admin.errors.length, "sign-in succeeds after the expired challenge");
     await admin.ctx.close();
 
-    const views = ["dashboard", "incidents", "alerts", `alerts/${alertId}`, incidentId ? `incidents/${incidentId}` : null, "events",
+    const views = ["dashboard", "graph", "incidents", "alerts", `alerts/${alertId}`, incidentId ? `incidents/${incidentId}` : null, "events",
       "hunt", "hunt/user%3Aalice%20last%3A7d", "overview", "ingest", "rules", "noise", "coverage", "health", "admin", "account",
       "entity/user/alice"].filter(Boolean);
 
-    for (const width of [1440, 390]) {
+    for (const width of [320, 390, 1440]) {
       console.log(`\n== ${width}px, admin ==`);
       const { ctx, page, errors } = await login(browser, "admin", ADMIN_PW, width);
       if (width <= 400) {
-        check(await page.isHidden("#nav"), "390px nav folded behind the Menu button");
+        check(await page.isHidden("#nav"), `${width}px nav folded behind the Menu button`);
         await page.click("#nav-toggle");
         check(await page.isVisible("#nav") && (await page.getAttribute("#nav-toggle", "aria-expanded")) === "true", "Menu opens the nav (aria-expanded=true)");
         await page.click("#nav button[data-view=alerts]");
@@ -166,11 +254,40 @@ async function main() {
       for (const v of views) {
         await show(page, v);
         await auditView(page, `#${v}`, width);
+        check(await page.locator("#strip .synthetic, #view .synthetic, #view .syn").count() === 0,
+          `${width}px #${v} has no repeated origin badges`);
+        if (v === "alerts") {
+          const related = page.locator(".active-incidents");
+          await related.locator("summary").click();
+          check(await related.locator("tbody tr[data-id]").first().isVisible(), `${width}px active incidents expand`);
+          await related.locator("summary").click();
+        }
+        if (v === "events") {
+          const message = await page.locator(".event-log tr[data-id] td:last-child").first().innerText();
+          check(message.length > 0 && !message.includes("[SYNTHETIC"), `${width}px event rows show the message without its fixture marker`);
+        }
+        if (width >= 390 && v === "dashboard") {
+          await page.waitForSelector("#attack-chart .cellg");
+          const size = await page.locator("#attack-chart").evaluate((box) => {
+            box.scrollLeft = box.scrollWidth;
+            const result = { offset: box.scrollLeft, total: box.scrollWidth, visible: box.clientWidth,
+              page: document.scrollingElement.scrollWidth, overflow: getComputedStyle(box).overflowX };
+            box.scrollLeft = 0;
+            return result;
+          });
+          if (width === 390) {
+            check(["auto", "scroll"].includes(size.overflow) && size.offset > 0
+              && size.offset === size.total - size.visible && size.page === width,
+              `390px ATT&CK matrix scrolls ${size.offset}px inside its ${size.visible}px box (${size.total}px content, ${size.page}px page)`);
+          } else {
+            check(size.offset === 0 && size.total === size.visible, `${width}px ATT&CK matrix fits its ${size.visible}px box`);
+          }
+        }
       }
       await show(page, "overview");
       const triage = await page.evaluate(() => { const c = document.querySelector("#triage-metrics");
         return { rows: c ? c.querySelectorAll("tbody tr").length : 0, synth: !!c?.querySelector(".pill.synthetic") }; });
-      check(triage.rows > 0 && triage.synth, `${width}px overview renders the triage metrics panel with the synthetic label (${triage.rows} rows)`);
+      check(triage.rows > 0 && !triage.synth, `${width}px overview renders triage metrics without a repeating origin badge (${triage.rows} rows)`);
       await show(page, "health");
       const sources = await page.evaluate(() => { const c = document.querySelector("#source-health");
         return { rows: c ? c.querySelectorAll("tbody tr").length : 0, pills: c ? c.querySelectorAll(".pill").length : 0 }; });
@@ -239,6 +356,58 @@ async function main() {
       await ctx.close();
     }
 
+    // Motion follows the document scroll and preserves layout, navigation and fallbacks.
+    console.log("\n== scroll motion and reload ==");
+    {
+      const { ctx, page } = await login(browser, "admin", ADMIN_PW, 320);
+      await show(page, "dashboard");
+      await page.waitForTimeout(1000);
+      check(await page.locator("#p-health").evaluate((n) => getComputedStyle(n).opacity === "0"), "below-fold panel waits for scrolling");
+      const motion = await page.locator("#p-health").evaluate(async (node) => {
+        const before = { top: node.offsetTop, height: node.offsetHeight };
+        let shifts = 0;
+        const observer = new PerformanceObserver((list) => { for (const entry of list.getEntries()) if (!entry.hadRecentInput) shifts += entry.value; });
+        observer.observe({ type: "layout-shift" });
+        node.scrollIntoView({ block: "center" });
+        const samples = [];
+        const start = performance.now();
+        await new Promise((resolve) => {
+          const frame = () => { samples.push(Number(getComputedStyle(node).opacity));
+            if (performance.now() - start < 1100) requestAnimationFrame(frame); else resolve(); };
+          requestAnimationFrame(frame);
+        });
+        observer.disconnect();
+        return { animated: samples.some((v) => v > 0 && v < 1), visible: Number(getComputedStyle(node).opacity) === 1,
+          stable: node.offsetTop === before.top && node.offsetHeight === before.height, shifts };
+      });
+      check(motion.animated && motion.visible, "scrolling reveals the panel and leaves it readable");
+      check(motion.stable && motion.shifts === 0, `reveal preserves layout (CLS ${motion.shifts})`);
+      await page.evaluate(() => { history.replaceState(null, "", location.pathname); scrollTo(0, 600); });
+      await page.reload();
+      await page.waitForSelector("#soc");
+      await page.waitForTimeout(1000);
+      check(await page.evaluate(() => scrollY === 0 && history.scrollRestoration === "manual"), "reload returns to the document top");
+      await page.evaluate(() => { location.hash = "main"; });
+      await page.waitForTimeout(100);
+      check(await page.evaluate(() => scrollY > 0 && document.body.dataset.view === "dashboard"), "in-page hash jumps without replacing the view");
+      await page.reload();
+      await page.waitForSelector("#soc");
+      await page.waitForTimeout(1000);
+      check(await page.evaluate(() => Math.abs(document.querySelector("#main").getBoundingClientRect().top) < 1), "reload preserves the hash destination");
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      check(await page.locator(".reveal-pending").evaluateAll((nodes) => nodes.every((n) => getComputedStyle(n).opacity === "1" && getComputedStyle(n).transform === "none")), "enabling reduced motion makes pending content visible immediately");
+      await show(page, "overview");
+      check(await page.locator(".reveal-pending").count() === 0
+        && await page.locator("#view h1").evaluate((n) => getComputedStyle(n).animationName === "none"), "reduced motion disables reveals and intros on new views");
+      await ctx.close();
+      const noScript = await browser.newContext({ javaScriptEnabled: false, viewport: { width: 320, height: 568 } });
+      const plain = await noScript.newPage();
+      await plain.goto(BASE);
+      check(await plain.locator("#login-form").isVisible()
+        && await plain.locator(".credit").last().isVisible(), "sign-in content and footer remain visible without JavaScript");
+      await noScript.close();
+    }
+
     // Keyboard triage as admin.
     console.log("\n== keyboard triage (admin) ==");
     {
@@ -294,6 +463,21 @@ async function main() {
       check((await page.textContent("#modal h2")) === "Keyboard shortcuts", "? shows the shortcut help");
       await page.keyboard.press("Escape");
       await show(page, "incidents");
+      // Leave Hunt before its query returns, then reopen it without the shortcut.
+      let releaseQuery;
+      const held = new Promise((resolve) => { releaseQuery = resolve; });
+      await page.route("**/api/hunt?*", async (route) => { await held; await route.continue(); }, { times: 1 });
+      const started = page.waitForRequest("**/api/hunt?*");
+      await page.keyboard.press("/");
+      await started;
+      await page.click('#nav [data-view="incidents"]');
+      await page.waitForSelector('[data-kbd-list="incidents"]');
+      releaseQuery();
+      await page.click('#nav [data-view="hunt"]');
+      await page.waitForSelector("#view [data-search]");
+      check(await page.locator('#nav [data-view="hunt"]').evaluate((b) => b === document.activeElement),
+        "leaving a pending Hunt cancels shortcut focus on the next visit");
+      await show(page, "incidents");
       await page.keyboard.press("j");
       const inc = await page.evaluate(() => document.activeElement?.getAttribute("href"));
       check(/^#(incidents|alerts)\/\d+$/.test(inc || ""), `j selects the first incident card (${inc})`);
@@ -330,7 +514,7 @@ async function main() {
       await page.keyboard.press("?");
       check(!/(^|\n)r\b/.test(await page.textContent("#modal")) && !(await page.textContent("#modal")).includes("resolve dialog"), "viewer: help lists no action keys");
       await page.keyboard.press("Escape");
-      for (const v of ["dashboard", "alerts", "hunt", "coverage", "rules"]) { await show(page, v); await auditView(page, `viewer #${v}`, 390); }
+      for (const v of ["dashboard", "graph", "alerts", "hunt", "coverage", "rules"]) { await show(page, v); await auditView(page, `viewer #${v}`, 390); }
       check(await page.locator("a[href='/api/rules/export']").count() === 1 && await page.locator("button:has-text('Import rules…')").count() === 0
         && await page.locator("button:has-text('Import Sigma rule…')").count() === 0,
         "viewer: rules export link shown, no import buttons");

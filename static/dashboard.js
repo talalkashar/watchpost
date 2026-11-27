@@ -12,11 +12,11 @@ const SEV_RANK = { info: 0, low: 1, medium: 2, high: 3, critical: 4 };
 const TACTICS = [
   ["Reconnaissance", "Recon"], ["Resource Development", "Res Dev"], ["Initial Access", "Init Access"],
   ["Execution", "Execution"], ["Persistence", "Persist"], ["Privilege Escalation", "Priv Esc"],
-  ["Defense Evasion", "Def Evasion"], ["Credential Access", "Cred Access"], ["Discovery", "Discovery"],
+  ["Stealth", "Stealth"], ["Defense Impairment", "Def Impair"],
+  ["Credential Access", "Cred Access"], ["Discovery", "Discovery"],
   ["Lateral Movement", "Lateral"], ["Collection", "Collect"], ["Command and Control", "C2"],
   ["Exfiltration", "Exfil"], ["Impact", "Impact"],
 ];
-const HQ_DEFAULT = { city: "Watchpost HQ (internal)", lat: 39.1, lon: -94.6, internal: true, synthetic: true };
 const FEED_MAX = 140;
 const DASH_PANELS = ["p-map", "p-feed", "p-timeline", "p-attackers", "p-attack", "p-board", "p-rules", "p-health", "p-entities"];
 const DASH_LAYOUTS = {
@@ -59,6 +59,61 @@ function parseMaybeJson(v) {
 }
 const asList = (v) => { const p = parseMaybeJson(v); return Array.isArray(p) ? p : p ? [p] : []; };
 const fmtN = (v) => (v === null || v === undefined ? "—" : Number(v).toLocaleString());
+// First paint of the status strip. Open alerts, critical, and stored events come from
+// /api/dashboard; until that returns they are skeletons, not em dashes. Incidents use the
+// same skeleton until /api/incidents returns. A later failure keeps the last number.
+function stripDashboardTiles(summary) {
+  if (!summary) {
+    return {
+      open: { loading: true },
+      critical: { loading: true, hot: false },
+      stored: { loading: true },
+    };
+  }
+  return {
+    open: { loading: false, text: fmtN(summary.alerts_open + summary.alerts_investigating) },
+    critical: { loading: false, text: fmtN(summary.alerts_critical_open), hot: summary.alerts_critical_open > 0 },
+    stored: { loading: false, text: fmtN(summary.events_total) },
+  };
+}
+function stripIncidentTile(incidents) {
+  const state = incidents && incidents.state;
+  if (state === "ok") {
+    const open = incidents.list.filter((i) => boardColumn(i.status) !== "resolved").length;
+    return { loading: false, text: fmtN(open), dim: false, title: "" };
+  }
+  if (state === "pending") {
+    return {
+      loading: false,
+      text: "pending",
+      dim: true,
+      title: "Incidents arrive with the correlation engine (/api/incidents)",
+    };
+  }
+  if (state === "error") return { keep: true, dim: true };
+  return { loading: true, dim: false, title: "" };
+}
+function applyStripTile(node, tile) {
+  if (!node || !tile) return;
+  if (tile.keep) {
+    node.classList.toggle("dim", !!tile.dim);
+    return;
+  }
+  node.classList.toggle("skel", tile.loading === true);
+  node.classList.toggle("dim", !!tile.dim);
+  if (Object.prototype.hasOwnProperty.call(tile, "title")) node.title = tile.title;
+  if (tile.loading) {
+    node.setAttribute("aria-busy", "true");
+    if (!node.querySelector(".skel-bar")) {
+      node.replaceChildren(
+        el("span", { class: "skel-bar", "aria-hidden": "true" }),
+        el("span", { class: "sr-only" }, "Loading"));
+    }
+    return;
+  }
+  node.removeAttribute("aria-busy");
+  node.textContent = tile.text;
+}
 const sevOf = (s) => (SEV_RANK[s] !== undefined ? s : "info");
 const maxSev = (a, b) => (SEV_RANK[sevOf(a)] >= SEV_RANK[sevOf(b)] ? sevOf(a) : sevOf(b));
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
@@ -76,6 +131,54 @@ function panel(id, title, meta, ...body) {
     el("header", { class: "ph" }, el("h2", {}, title), el("div", { class: "pm", id: `${id}-meta` }, ...(meta || []))),
     el("div", { class: "pb", id: `${id}-body` }, ...body));
 }
+
+// A store with zero events is one next action, not a map and not a saved-view form.
+// Keep the admin demo shortcut. Analysts can upload, and viewers get a read-only explanation.
+function emptyDashboard(eventsTotal, role) {
+  if (typeof eventsTotal !== "number" || eventsTotal !== 0) return null;
+  const title = "No events yet";
+  if (role === "admin") {
+    return { title, body: "No events are stored.", load: true, label: "Load demo data" };
+  }
+  if (role === "analyst") {
+    return {
+      title,
+      body: "No events are stored.",
+      href: "#ingest",
+      label: "Upload a log",
+      hint: "",
+    };
+  }
+  return {
+    title,
+    body: "No events are stored. This account is read-only.",
+    href: "",
+    label: "",
+    hint: "",
+  };
+}
+function dashboardRole() {
+  const role = state.user && state.user.role;
+  return role === "admin" || role === "analyst" || role === "viewer" ? role : "viewer";
+}
+function ownerName(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+// The public <title> stays the search title. Once signed in, the tab names the open critical count.
+const PUBLIC_TITLE = "Watchpost: an open-source SIEM and SOC console in Python";
+function consoleTitle(signedIn, criticalOpen) {
+  if (signedIn !== true) return PUBLIC_TITLE;
+  if (typeof criticalOpen !== "number" || !Number.isInteger(criticalOpen) || criticalOpen < 0) return PUBLIC_TITLE;
+  return `Watchpost · ${criticalOpen} critical`;
+}
+// How often the feed polls after the event stream fails. The feed sentence uses this same interval.
+const STREAM_POLL_MS = 3000;
+function feedPollNote(mode) {
+  if (mode !== "poll") return "";
+  const seconds = STREAM_POLL_MS / 1000;
+  if (!Number.isInteger(seconds) || seconds <= 0) return "";
+  return `polling every ${seconds}s`;
+}
 const chip = (text, cls = "") => el("span", { class: `chip ${cls}` }, text);
 const SEV_SHORT = { critical: "CRIT", high: "HIGH", medium: "MED", low: "LOW", info: "INFO" };
 const sevTag = (s) => el("span", { class: `sevtag sev-${sevOf(s)}` }, SEV_SHORT[sevOf(s)]);
@@ -89,8 +192,10 @@ function normIncidents(payload) {
       id: i.id, title: i.title || `Incident #${i.id}`, severity: sevOf(i.severity || "medium"),
       status: String(i.status || "open"), first_seen: i.first_seen, last_seen: i.last_seen || i.updated_at,
       alert_count: i.alert_count ?? i.alerts_count ?? (alerts.length || asList(i.alert_ids).length),
+      assignee: ownerName(i.assignee),
       tactics: asList(i.kill_chain ?? i.stages ?? i.kill_chain_stages ?? i.tactics).map((t) => (typeof t === "string" ? t : t.name || t.tactic)).filter(Boolean),
-      entities: parseMaybeJson(i.entities ?? i.entity_summary) || {}, synthetic: i.synthetic,
+      top_technique: techniqueRef(i.top_technique),
+      entities: parseMaybeJson(i.entities ?? i.entity_summary) || {},
     };
   });
 }
@@ -106,6 +211,79 @@ function normCoverage(payload) {
   }));
 }
 const tacticKey = (name) => String(name).toLowerCase().replace(/[^a-z]/g, "");
+
+function techniqueRef(value) {
+  if (!value) return null;
+  if (typeof value === "string") return value ? { id: value, name: "", tactic: "" } : null;
+  const id = value.id || value.technique_id;
+  if (!id) return null;
+  return { id: String(id), name: value.name || "", tactic: value.tactic || "" };
+}
+
+// Evidence counts for the one-line chip shown when a layout hides the matrix.
+// A payload with no level still treats a covered technique as validated, matching the matrix.
+function coverageLevel(technique) {
+  const level = technique && technique.level;
+  if (level === "validated" || level === "mapped" || level === "disabled" || level === "gap") return level;
+  const rules = technique && technique.rules;
+  const proven = technique && (technique.covered ?? (Array.isArray(rules) && rules.length > 0));
+  return proven ? "validated" : "gap";
+}
+function coverageCounts(list) {
+  const counts = { validated: 0, mapped: 0, disabled: 0, gap: 0 };
+  for (const technique of list || []) counts[coverageLevel(technique)] += 1;
+  return counts;
+}
+function coverageChipText(counts) {
+  return `${counts.validated} validated · ${counts.mapped} mapped · ${counts.disabled} disabled · ${counts.gap} gap`;
+}
+function layoutHidesMatrix(layout) {
+  return !(layout || []).includes("p-attack");
+}
+function coverageChipLabel(coverage) {
+  if (!coverage || coverage.state === "loading") return "coverage loading";
+  if (coverage.state !== "ok") return coverage.state === "error" ? "coverage unavailable" : "coverage pending";
+  return coverageChipText(coverageCounts(coverage.list));
+}
+
+// The heat matrix is an SVG image, so its cells are not text. One row per cell, including
+// cells the chart clips behind "+N", names the technique, the tactic, and the evidence level.
+function matrixTextRows(columns) {
+  const rows = [];
+  for (const column of columns || []) {
+    const tactic = (column && (column.name || column.short)) || "Unmapped";
+    for (const cell of (column && column.cells) || []) {
+      if (!cell || cell.id === undefined || cell.id === null || String(cell.id) === "") continue;
+      rows.push({ id: String(cell.id), tactic: String(tactic), level: coverageLevel(cell) });
+    }
+  }
+  return rows;
+}
+function matrixTextLine(row) {
+  return `${row.id}, ${row.tactic}, ${row.level}`;
+}
+function mountMatrixText(box, columns) {
+  if (!box) return;
+  const items = matrixTextRows(columns).map((row) => el("li", {}, matrixTextLine(row)));
+  box.append(el("ul", { class: "sr-only", id: "attack-text" }, ...items));
+}
+
+// Tactic tags (at most four) plus the earliest kill-chain technique, the same order as the matrix.
+function boardTags(tactics, technique) {
+  const tags = [];
+  const tech = techniqueRef(technique);
+  if (tech) tags.push({ kind: "tech", id: tech.id, name: tech.name, tactic: tech.tactic });
+  for (const name of (Array.isArray(tactics) ? tactics : []).slice(0, 4)) {
+    if (name) tags.push({ kind: "tactic", text: String(name) });
+  }
+  return tags;
+}
+
+function techniqueTagTitle(tag) {
+  const name = tag.name ? ` ${tag.name}` : "";
+  const tactic = tag.tactic ? ` (${tag.tactic})` : "";
+  return `${tag.id}${name}${tactic}`;
+}
 function boardColumn(status) {
   const s = String(status).toLowerCase();
   if (["resolved", "closed", "false_positive", "benign"].includes(s)) return "resolved";
@@ -114,6 +292,28 @@ function boardColumn(status) {
 }
 
 // ---------- synthetic geo cache ----------
+// Side list for the attack map. Each arc is one fictional city aimed at HQ, busiest first.
+// `unknown` counts source IPs the synthetic geo table does not know.
+// A locate() of undefined is still in flight and is neither an arc nor unknown.
+function mapSide(sources, locate, limit = 5) {
+  const cities = new Map();
+  let unknown = 0;
+  for (const s of sources || []) {
+    const loc = locate(s.ip);
+    if (loc === undefined) continue;
+    if (loc === null) { unknown += 1; continue; }
+    if (loc.internal || !loc.city) continue;
+    const row = cities.get(loc.city) || { city: loc.city, lon: loc.lon, lat: loc.lat, events: 0, sev: "info", ips: 0 };
+    row.events += Number(s.events) || 0;
+    row.ips += 1;
+    row.sev = maxSev(row.sev, s.sev);
+    cities.set(loc.city, row);
+  }
+  const ranked = [...cities.values()].sort((a, b) =>
+    b.events - a.events || SEV_RANK[b.sev] - SEV_RANK[a.sev] || a.city.localeCompare(b.city));
+  return { arcs: ranked.slice(0, limit), locations: ranked.length, unknown };
+}
+
 const Geo = {
   cache: new Map(),  // ip -> location | null (null = no table entry: "unknown")
   get(ip) { return this.cache.get(ip); },
@@ -186,12 +386,12 @@ const Live = {
       try {
         const r = await api(`/api/events?limit=50&since_id=${this.lastEventId}`);
         if (this.lastEventId && r.events.length) this.onEvents(r.events, r.total);
-        this.lastEventId = Math.max(this.lastEventId, ...r.events.map((e) => e.id));
+        this.lastEventId = Math.max(0, this.lastEventId || 0, ...r.events.map((e) => e.id || 0));
         if (ticks % 5 === 0) this.refreshSummary();
       } catch { /* api() already handles 401 */ }
     };
     poll();
-    this.timers.poll = setInterval(poll, 3000);
+    this.timers.poll = setInterval(poll, STREAM_POLL_MS);
     this.timers.retry = setTimeout(() => { this.stopPolling(); this.connect(); }, 30000);
   },
   stopPolling() {
@@ -201,10 +401,19 @@ const Live = {
   setMode(mode) {
     this.mode = mode;
     const pill = $("#k-live");
-    if (!pill) return;
-    pill.dataset.mode = mode;
-    $("#k-live-text").textContent = { live: "LIVE · SSE", poll: "POLLING 3s", reconnecting: "RECONNECTING", off: "OFFLINE" }[mode] || mode;
-    if (Dash.mounted) Dash.renderHealth();
+    if (pill) {
+      pill.dataset.mode = mode;
+      $("#k-live-text").textContent = { live: "LIVE · SSE", poll: "POLLING 3s", reconnecting: "RECONNECTING", off: "OFFLINE" }[mode] || mode;
+      if (Dash.mounted) Dash.renderHealth();
+    }
+    this.paintFeedPoll();
+  },
+  paintFeedPoll() {
+    const note = $("#feed-poll");
+    if (!note) return;
+    const text = feedPollNote(this.mode);
+    note.textContent = text;
+    note.hidden = !text;
   },
 
   onEvents(events, count) {
@@ -212,8 +421,11 @@ const Live = {
     if (this.summary) this.summary.events_total += count;
     for (const e of events) this.lastEventId = Math.max(this.lastEventId, e.id || 0);
     this.renderStrip();
-    if (Dash.mounted) Dash.enqueue(events);
-    if (events.some((e) => e.synthetic)) $("#k-synth").hidden = false;
+    if (Dash.mounted) {
+      // The first stored event replaces the empty-store card with the panels.
+      if ($("#soc")?.hidden && this.summary && this.summary.events_total > 0) Dash.update(this.summary);
+      Dash.enqueue(events);
+    }
   },
   onAlert(a) {
     if (Dash.mounted && a.change === "created") Dash.alertRow(a);
@@ -238,8 +450,7 @@ const Live = {
       const d = await api("/api/dashboard");
       this.summary = d;
       this.epm = d.events_per_minute.slice();
-      if (!this.lastEventId) this.lastEventId = Math.max(0, ...d.recent_events.map((e) => e.id));
-      $("#k-synth").hidden = !d.synthetic_events;
+      if (!this.lastEventId) this.lastEventId = Math.max(0, ...(d.recent_events || []).map((e) => e.id || 0));
       this.renderStrip();
       if (Dash.mounted) Dash.update(d);
     } catch { /* offline; the strip keeps its last values */ }
@@ -276,6 +487,7 @@ const Live = {
     const now = new Date();
     const c = $("#k-clock");
     if (c) c.replaceChildren(now.toISOString().slice(11, 19), el("small", {}, "UTC"));
+    Dash.mapView?.tick(now, this.rollingEpm(), Dash.lastMapEvent);
     const epm = $("#k-epm");
     if (epm) epm.textContent = fmtN(this.rollingEpm());
     if (now.getUTCSeconds() === 0) this.bumpEpm(0);
@@ -284,21 +496,17 @@ const Live = {
   renderSpark() {
     const vals = this.epm.slice(-30).map((m) => m.count);
     const summary = vals.length ? `: latest ${vals[vals.length - 1]}, peak ${Math.max(...vals)}` : ": no data yet";
-    mountSvg($("#k-epm-spark"), WPCharts.sparkline(vals, { w: 84, h: 22, cls: "accent", label: `events per minute, last 30 minutes${summary}` }));
+    mountSvg($("#k-epm-spark"), WPCharts.sparkline(vals, { w: 112, h: 28, cls: "accent", label: `events per minute, last 30 minutes${summary}` }));
   },
   renderStrip() {
     const d = this.summary;
-    if (d) {
-      $("#k-open").textContent = fmtN(d.alerts_open + d.alerts_investigating);
-      $("#k-crit").textContent = fmtN(d.alerts_critical_open);
-      $("#k-crit").parentElement.classList.toggle("hot", d.alerts_critical_open > 0);
-      $("#k-events").textContent = fmtN(d.events_total);
-    }
-    const inc = this.incidents;
-    const kInc = $("#k-inc");
-    if (inc.state === "ok") { kInc.textContent = fmtN(inc.list.filter((i) => boardColumn(i.status) !== "resolved").length); kInc.title = ""; }
-    else if (inc.state === "pending") { kInc.textContent = "pending"; kInc.title = "Incidents arrive with the correlation engine (/api/incidents)"; }
-    kInc.classList.toggle("dim", inc.state !== "ok");
+    document.title = consoleTitle(!!state.user, d ? d.alerts_critical_open : undefined);
+    const tiles = stripDashboardTiles(d);
+    applyStripTile($("#k-open"), tiles.open);
+    applyStripTile($("#k-crit"), tiles.critical);
+    $("#k-crit").parentElement.classList.toggle("hot", !!tiles.critical.hot);
+    applyStripTile($("#k-events"), tiles.stored);
+    applyStripTile($("#k-inc"), stripIncidentTile(this.incidents));
     $("#k-epm").textContent = fmtN(this.rollingEpm());
     this.renderSpark();
     const checks = Object.entries(this.health);
@@ -326,35 +534,39 @@ const Live = {
 // ---------- the dashboard view ----------
 const Dash = {
   mounted: false, data: null, coverage: { state: "loading" }, details: null,
-  queue: [], feedCount: 0, paused: false, live: new Map(), mapSize: null, timers: {}, observer: null,
-  views: [], currentView: null, severities: DASH_FILTERS.all, layout: DASH_LAYOUTS.full,
+  queue: [], feedCount: 0, paused: false, mapView: null, lastMapEvent: null, mapSize: null, timers: {}, observer: null,
+  views: [], viewsError: "", currentView: null, severities: DASH_FILTERS.all, layout: DASH_LAYOUTS.full,
 
   mount() {
     this.unmount();
     this.mounted = true;
     this.mapSize = null;
+    this.mapDims = null;
+    this.lastMapEvent = null;
+    this.mapView = new AttackMapView();
     this.feedCount = 0;
-    const pause = el("button", { class: "mini ghost", id: "feed-pause", onclick: () => this.togglePause() }, "Pause");
-    render(el("div", { class: "card", id: "dashboard-view-bar" }, el("p", { class: "muted" }, "Loading saved dashboard views…")),
-      el("div", { class: "soc", id: "soc" },
-      panel("p-map", "Attack map", [chip("SYNTHETIC GEO", "synthetic"), el("span", { class: "muted", id: "map-count" })],
-        el("div", { class: "mapwrap", id: "map" }),
-        el("div", { class: "map-side", id: "map-side" }),
-        el("div", { class: "map-legend" }, ...["critical", "high", "medium", "low"].map((s) => el("span", {}, el("i", { class: `dot sev-${s}` }), s)),
-          el("span", {}, el("i", { class: "dot hq" }), "HQ target"))),
-      panel("p-feed", "Live event stream", [el("span", { class: "muted", id: "feed-rate" }), pause],
-        el("div", { class: "feed-head" }, el("span", {}, "TIME"), el("span", {}, "SEV"), el("span", {}, "TYPE"), el("span", {}, "SOURCE → TARGET")),
-        el("div", { class: "feed", id: "feed", onmouseenter: () => this.hover(true), onmouseleave: () => this.hover(false) })),
+    const pause = el("button", { class: "mini ghost", id: "feed-pause", type: "button", "aria-pressed": "false", onclick: () => this.togglePause() }, "Pause");
+    render(el("div", { class: "view-bar", id: "dashboard-view-bar", hidden: true }),
+      el("div", { id: "dash-empty", hidden: true }),
+      el("div", { class: "soc", id: "soc", hidden: true },
+      this.mapView.card,
+      panel("p-feed", "Live event stream", [el("span", { class: "muted", id: "feed-poll", hidden: true }), el("span", { class: "muted", id: "feed-rate" }), pause],
+        el("div", { class: "feed-head" }, el("span", {}, "Time"), el("span", {}, "Sev"), el("span", {}, "Event")),
+        el("p", { class: "empty-note feed-filter-empty", role: "status" }, "No matching events."),
+        el("div", { class: "feed", id: "feed", tabindex: "0", role: "region", "aria-label": "Live event stream",
+          onmouseenter: () => this.hover(true), onmouseleave: () => this.hover(false),
+          onfocusin: () => this.focusFeed(true), onfocusout: (ev) => { if (!ev.currentTarget.contains(ev.relatedTarget)) this.focusFeed(false); } })),
       panel("p-timeline", "Alerts over time", [el("span", { class: "muted", id: "tl-bucket" })], el("div", { class: "chartbox", id: "tl-chart" }),
         el("div", { class: "legend" }, ...["critical", "high", "medium", "low"].map((s) => el("span", {}, el("i", { class: `dot sev-${s}` }), s)),
           el("span", {}, el("i", { class: "dot volume" }), "event volume"))),
       panel("p-attackers", "Top attacker IPs", [el("span", { class: "muted" }, "by evidence events")], el("div", { class: "chartbox", id: "atk-chart" })),
-      panel("p-attack", "MITRE ATT&CK coverage", [el("span", { class: "muted", id: "attack-meta" }), el("a", { href: "/api/attack/navigator.json", download: "watchpost-navigator-layer.json", title: "MITRE ATT&CK Navigator layer (JSON) colored by evidence level; scores come from synthetic demo data" }, "Export Navigator layer")], el("div", { class: "chartbox", id: "attack-chart" })),
-      panel("p-board", "Incident board", [el("span", { id: "board-meta" })], el("div", { class: "board", id: "board" })),
+      panel("p-attack", "MITRE ATT&CK coverage", [el("span", { class: "muted", id: "attack-meta" }), el("a", { href: "/api/attack/navigator.json", download: "watchpost-navigator-layer.json", title: "MITRE ATT&CK Navigator layer (JSON) colored by evidence level" }, "Export Navigator layer")], el("div", { class: "chartbox", id: "attack-chart", tabindex: "0", role: "region", "aria-label": "ATT&CK technique matrix", onkeydown: (ev) => this.scrollChart(ev) }), el("div", { class: "heat-legend", id: "attack-legend" })),
+      panel("p-board", "Incident board", [el("span", { id: "board-meta" })], el("div", { class: "board", id: "board", "data-kbd-list": "board" })),
       panel("p-rules", "Top rules", [el("span", { class: "muted" }, "alerts all time")], el("div", { class: "chartbox", id: "rules-chart" })),
       panel("p-health", "Health", [el("a", { href: "#health", class: "muted" }, "details →")], el("div", { id: "health-body" })),
       panel("p-entities", "Riskiest entities", [el("span", { class: "muted" }, "alert weight, decayed by age")], el("div", { id: "ent-list" })),
     ));
+    Live.paintFeedPoll();
     this.timers.drip = setInterval(() => this.drip(), 110);
     this.timers.details = setInterval(() => this.loadHealthDetails(), 30000);
     const soc = $("#soc");
@@ -368,6 +580,8 @@ const Dash = {
   unmount() {
     if (!this.mounted) return;
     this.mounted = false;
+    this.mapView.dispose();
+    this.mapView = null;
     for (const t of Object.values(this.timers)) clearInterval(t);
     this.timers = {};
     if (this.observer) { this.observer.disconnect(); this.observer = null; }
@@ -383,22 +597,86 @@ const Dash = {
   },
   async update(d) {
     this.data = d;
+    if (this.renderEmpty()) { this.lastMapEvent = null; return; }
     if (!this.feedCount) this.fillFeed(d.recent_events);
-    const ips = [...d.attackers.map((a) => a.ip), ...d.recent_events.map((e) => e.src_ip), ...d.recent_events.map((e) => e.dest_ip), "10.0.0.10"].filter(Boolean);
+    const recent = d.recent_events || [];
+    this.noteMapTime(recent);
+    const ips = [...(d.attackers || []).map((a) => a.ip), ...recent.map((e) => e.src_ip), ...recent.map((e) => e.dest_ip), "10.0.0.10"].filter(Boolean);
     this.redraw();
     if (await Geo.resolve(ips)) this.renderMarks();
     this.renderAttackers();
   },
+  // Returns true when the store is empty: one card, and the panel grid stays hidden.
+  renderEmpty() {
+    const box = $("#dash-empty");
+    const soc = $("#soc");
+    const bar = $("#dashboard-view-bar");
+    if (!box || !soc || !this.data) return false;
+    const copy = emptyDashboard(this.data.events_total, dashboardRole());
+    if (!copy) {
+      const wasHidden = soc.hidden || !box.hidden;
+      if (wasHidden) {
+        box.hidden = true;
+        box.replaceChildren();
+        delete box.dataset.mode;
+        soc.hidden = false;
+        this.renderViewBar();
+      }
+      return false;
+    }
+    soc.hidden = true;
+    if (bar) {
+      bar.hidden = true;
+      bar.replaceChildren();
+    }
+    const mode = copy.load ? "demo" : copy.href ? "ingest" : "read";
+    if (box.hidden || box.dataset.mode !== mode) {
+      box.dataset.mode = mode;
+      box.hidden = false;
+      box.replaceChildren(el("div", { class: "card dash-empty", role: "status" },
+        el("h2", {}, copy.title),
+        el("p", {}, copy.body),
+        copy.load
+          ? el("button", { type: "button", id: "dash-load-demo", onclick: () => guarded(() => this.loadDemo()) }, copy.label)
+          : copy.href
+          ? el("a", { class: "button", id: "dash-next", href: copy.href }, copy.label)
+          : null));
+    }
+    return true;
+  },
+  async loadDemo() {
+    const button = $("#dash-load-demo");
+    if (button) button.disabled = true;
+    try {
+      let loaded;
+      try { loaded = await api("/api/demo/load", { method: "POST", body: {} }); }
+      catch (e) {
+        if (e.status !== 409 || !confirm(`${e.message}. Load another copy?`)) throw e;
+        loaded = await api("/api/demo/load", { method: "POST", body: { force: true } });
+      }
+      toast(`Demo loaded (${Object.keys(loaded).length} scenarios).`);
+      await Live.refreshSummary();
+      await Live.refreshIncidents();
+      this.loadCoverage();
+    } finally {
+      if (button && button.isConnected) button.disabled = false;
+    }
+  },
   redraw() {
-    if (!this.mounted || !this.data) return;
+    if (!this.mounted || !this.data || emptyDashboard(this.data.events_total, false)) return;
+    this.applyLayout();
     this.renderMap(); this.renderTimeline(); this.renderAttackers(); this.renderRules(); this.renderEntities(); this.renderMatrix(); this.renderBoard(); this.renderHealth();
     this.applyView();
   },
   async loadViews() {
     if (!this.mounted) return;
-    try { this.views = await api("/api/dashboard/views"); }
-    catch (e) { return $("#dashboard-view-bar")?.replaceChildren(el("p", { class: "error" }, e.message)); }
-    this.renderViewBar();
+    try {
+      this.views = await api("/api/dashboard/views");
+      this.viewsError = "";
+    } catch (e) {
+      this.viewsError = e.message;
+    }
+    if (this.mounted) this.renderViewBar();
   },
   viewPayload(form) {
     const f = new FormData(form);
@@ -408,6 +686,18 @@ const Dash = {
   renderViewBar() {
     const bar = $("#dashboard-view-bar");
     if (!bar) return;
+    // An empty store has one next action. Do not leave the saved-view form up.
+    if (!this.data || emptyDashboard(this.data.events_total, "viewer")) {
+      bar.hidden = true;
+      bar.replaceChildren();
+      return;
+    }
+    bar.hidden = false;
+    const queue = el("a", { id: "dash-queue", href: "#alerts" }, "Open alert queue");
+    if (this.viewsError) {
+      bar.replaceChildren(queue, el("p", { class: "error", role: "alert" }, this.viewsError));
+      return;
+    }
     const picker = el("select", { name: "saved_view", "aria-label": "Saved dashboard view" },
       el("option", { value: "" }, "Default view"),
       ...this.views.map((v) => el("option", { value: v.id }, `${v.name} · ${v.visibility}${v.owner === state.user.username ? " · mine" : ""}`)));
@@ -416,12 +706,19 @@ const Dash = {
       this.currentView = selected || null;
       this.severities = selected ? selected.filters.severities : DASH_FILTERS.all;
       this.layout = selected ? selected.layout : DASH_LAYOUTS.full;
-      this.applyView(); this.renderViewBar();
+      this.applyView(); this.redraw(); this.renderViewBar();
     };
     picker.value = this.currentView ? String(this.currentView.id) : "";
-    const controls = [el("label", {}, "Saved view", picker), el("button", { type: "button", onclick: apply }, "Apply")];
+    const controls = [picker, el("button", { type: "button", class: "ghost", onclick: apply }, "Apply")];
+    let save = null;
     if (can("analyst")) {
-      const form = el("form", { class: "row" },
+      if (this.currentView?.owner === state.user.username) controls.push(
+        el("button", { type: "button", class: "danger", onclick: () => confirm(`Delete dashboard view "${this.currentView.name}"?`) && guarded(async () => {
+          await api(`/api/dashboard/views/${this.currentView.id}/delete`, { method: "POST" });
+          this.currentView = null; this.severities = DASH_FILTERS.all; this.layout = DASH_LAYOUTS.full;
+          await this.loadViews(); this.applyView(); this.redraw();
+        }) }, "Delete mine"));
+      const form = el("form", { class: "view-save-form" },
         el("label", {}, "Name", el("input", { name: "name", required: true, maxlength: 80 })),
         el("label", {}, "Severity", el("select", { name: "filter" },
           el("option", { value: "all" }, "All severities"), el("option", { value: "elevated" }, "Critical + high"), el("option", { value: "critical" }, "Critical only"))),
@@ -433,157 +730,167 @@ const Dash = {
       form.addEventListener("submit", (ev) => { ev.preventDefault(); guarded(async () => {
         this.currentView = await api("/api/dashboard/views", { method: "POST", body: this.viewPayload(form) });
         this.severities = this.currentView.filters.severities; this.layout = this.currentView.layout;
-        await this.loadViews(); this.applyView(); toast(`Saved dashboard view "${this.currentView.name}"`);
+        await this.loadViews(); this.applyView(); this.redraw(); toast(`Saved dashboard view "${this.currentView.name}"`);
       }); });
-      controls.push(form);
-      if (this.currentView?.owner === state.user.username) controls.push(
-        el("button", { type: "button", class: "danger", onclick: () => confirm(`Delete dashboard view "${this.currentView.name}"?`) && guarded(async () => {
-          await api(`/api/dashboard/views/${this.currentView.id}/delete`, { method: "POST" });
-          this.currentView = null; this.severities = DASH_FILTERS.all; this.layout = DASH_LAYOUTS.full;
-          await this.loadViews(); this.applyView();
-        }) }, "Delete mine"));
+      save = el("details", { class: "view-save" }, el("summary", {}, "Save a view"), form);
     }
-    bar.replaceChildren(el("h2", {}, this.currentView ? this.currentView.name : "Dashboard view"), el("div", { class: "row" }, ...controls));
+    // A link, not a redirect, so an explicit dashboard URL and a saved layout stay put.
+    const lead = [el("h1", { class: "view-name" }, this.currentView ? this.currentView.name : "Dashboard"), queue];
+    if (layoutHidesMatrix(this.layout)) {
+      lead.push(el("a", {
+        class: "chip coverage-chip", id: "coverage-chip", href: "#coverage",
+        title: "Open coverage for this layout",
+      }, coverageChipLabel(this.coverage)));
+    }
+    bar.replaceChildren(...lead, el("div", { class: "view-controls" }, ...controls), ...(save ? [save] : []));
   },
-  applyView() {
+  applyLayout() {
     const soc = $("#soc");
     if (!soc) return;
     for (const id of DASH_PANELS) {
       const panelNode = $(`#${id}`);
       if (!panelNode) continue;
       panelNode.hidden = !this.layout.includes(id);
-      if (!panelNode.hidden) soc.append(panelNode);
     }
+  },
+  applySeverity() {
+    const soc = $("#soc");
+    if (!soc) return;
     for (const severity of SEV_ORDER) {
       for (const node of soc.querySelectorAll(`.sev-${severity}`)) node.hidden = !this.severities.includes(severity);
     }
   },
-  width(id, fallback = 300) { const n = $(id); return n ? Math.max(120, n.clientWidth) : fallback; },
+  applyView() {
+    this.applyLayout();
+    this.applySeverity();
+  },
+  // A hidden panel reports 0. Keep the fallback until it is on screen, and do not
+  // inflate a narrow box to 120px (that clips the SVG inside overflow:hidden).
+  width(id, fallback = 300) { const n = $(id); const w = n ? n.clientWidth : 0; return w >= 2 ? w : fallback; },
+  scrollChart(ev) {
+    const box = ev.currentTarget;
+    if (!box) return;
+    const step = Math.max(48, box.clientWidth * 0.8);
+    let left = null;
+    if (ev.key === "ArrowRight") left = box.scrollLeft + step;
+    else if (ev.key === "ArrowLeft") left = box.scrollLeft - step;
+    else if (ev.key === "Home") left = 0;
+    else if (ev.key === "End") left = box.scrollWidth;
+    if (left === null) return;
+    box.scrollTo({ left });
+    ev.preventDefault();
+  },
 
   // --- map ---
   hq() {
-    const loc = Geo.get("10.0.0.10");
-    return loc || HQ_DEFAULT;
+    return Geo.get("10.0.0.10");
   },
   renderMap() {
     const box = $("#map");
     if (!box) return;
-    const w = Math.max(320, box.clientWidth), h = Math.max(160, box.clientHeight);
+    // Use the laid-out box. A 320px floor draws past a phone panel and overflow:hidden clips it.
+    const w = box.clientWidth, h = box.clientHeight;
+    if (w < 2 || h < 2) return;
     const size = `${w}x${h}`;
     if (this.mapSize !== size) {
       // Fit the 360x140-degree projection inside the box, centered.
       const mw = Math.min(w, h * (360 / 140)), mh = mw * (140 / 360);
-      mountSvg(box, WPMap.baseMap(mw, mh));
+      mountSvg(box, WPMap.baseMap(mw, mh, { step: 1.8 }));
       this.mapSize = size;
       this.mapDims = [mw, mh];
     }
     this.renderMarks();
   },
   sources() {
-    const out = new Map();
-    const add = (ip, events, sev, alerts, last) => {
-      const cur = out.get(ip) || { ip, events: 0, alerts: 0, sev: "info", last: null };
-      cur.events += events; cur.alerts = Math.max(cur.alerts, alerts || 0); cur.sev = maxSev(cur.sev, sev);
-      if (!cur.last || (last && last > cur.last)) cur.last = last;
-      out.set(ip, cur);
-    };
-    for (const a of (this.data && this.data.attackers) || []) add(a.ip, a.events, a.max_severity, a.alerts, a.last_seen);
-    for (const [ip, s] of this.live) add(ip, s.events, s.sev, 0, s.last);
-    return [...out.values()];
+    // Evidence counts come from the server snapshot. Stream events can animate
+    // immediately, including events that never become evidence for an alert.
+    return (this.data?.attackers || []).map(a => ({ ip: a.ip, events: a.events, sev: sevOf(a.max_severity) }));
   },
   renderMarks() {
     const svg = $("#map svg");
-    if (!svg || !this.mapDims) return;
+    if (!svg || !this.mapDims || !this.mapView) return;
     const [w, h] = this.mapDims;
     const hq = this.hq();
-    const cities = new Map();
-    const unknown = [], internal = [];
-    for (const s of this.sources()) {
-      const loc = Geo.get(s.ip);
-      if (loc === undefined) continue;
-      if (loc === null) { unknown.push(s); continue; }
-      if (loc.internal) { internal.push(s); continue; }
-      const c = cities.get(loc.city) || { ...loc, ips: [], events: 0, sev: "info" };
-      c.ips.push(s.ip); c.events += s.events; c.sev = maxSev(c.sev, s.sev);
-      cities.set(loc.city, c);
+    const summary = mapSide(this.sources(), ip => Geo.get(ip), Infinity);
+    if (!hq) {
+      this.mapView.update([], null, summary.unknown);
+      return;
     }
-    const ranked = [...cities.values()].sort((a, b) => SEV_RANK[b.sev] - SEV_RANK[a.sev] || b.events - a.events);
+    const ranked = summary.arcs.filter(c => this.severities.includes(c.sev === "info" ? "low" : c.sev));
     const esc = WPCharts.esc;
-    let arcs = "", marks = "";
-    ranked.forEach((c, i) => {
-      arcs += `<path class="arc s-${c.sev}" pathLength="100" d="${WPMap.arcPath([c.lon, c.lat], [hq.lon, hq.lat], w, h)}"/>`;
-      const [x, y] = WPMap.project(c.lon, c.lat, w, h);
-      const r = 2.6 + Math.min(5, Math.log2(1 + c.events) * 0.8);
-      marks += `<g class="mk sev-${c.sev}"><title>${esc(`${c.city} (synthetic geo)\n${c.ips.join(", ")}\n${c.events} events`)}</title>` +
-        `<circle class="halo" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${(r * 2.2).toFixed(1)}"/>` +
-        `<circle class="core" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${r.toFixed(1)}"/>` +
-        (i < 7 ? `<text class="ml" x="${(x + r + 3).toFixed(1)}" y="${(y + 3).toFixed(1)}">${esc(c.city)}</text>` : "") + `</g>`;
-    });
     const [hx, hy] = WPMap.project(hq.lon, hq.lat, w, h);
-    marks += `<g class="hq"><title>${esc(`${hq.city} (synthetic geo)`)}</title><circle class="ring" cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="9"/>` +
-      `<circle class="core" cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="3.6"/><text class="ml" x="${(hx + 8).toFixed(1)}" y="${(hy + 12).toFixed(1)}">HQ</text></g>`;
+    const placed = [{ x: hx, y: hy }];
+    let arcs = "", marks = "";
+    for (const c of ranked) {
+      const [x, y] = WPMap.project(c.lon, c.lat, w, h);
+      const radius = 2.5 + Math.min(3, Math.log2(1 + c.events) * 0.4);
+      const label = placed.every(p => Math.hypot(p.x - x, p.y - y) > 42);
+      if (label) placed.push({ x, y });
+      arcs += `<path class="arc s-${c.sev}" stroke-width="${1 + Math.log2(1 + c.events) / 4}" pathLength="100" d="${WPMap.arcPath([c.lon, c.lat], [hq.lon, hq.lat], w, h)}"/>`;
+      marks += `<g class="mk sev-${c.sev}" data-city="${esc(c.city)}"><title>${esc(c.city)} · ${c.events} events</title>` +
+        `<circle class="halo" cx="${x}" cy="${y}" r="${radius * 2.4}"/><circle class="core" cx="${x}" cy="${y}" r="${radius}"/>` +
+        (label ? `<text class="ml" x="${x + (x > w - 76 ? -7 : 7)}" y="${Math.max(13, y - 6)}" text-anchor="${x > w - 76 ? "end" : "start"}">${esc(c.city)}</text>` : "") + "</g>";
+    }
+    marks += `<g class="hq"><title>${esc(hq.city)}</title><circle class="ring" cx="${hx}" cy="${hy}" r="8"/>` +
+      `<circle class="core" cx="${hx}" cy="${hy}" r="2.5"/><text class="ml" x="${hx + 10}" y="${hy - 6}">HQ</text></g>`;
     setSvgChildren(svg.querySelector("g.arcs"), arcs);
     setSvgChildren(svg.querySelector("g.marks"), marks);
-    $("#map-count").textContent = `${ranked.length} source locations · ${unknown.length} unknown`;
-
-    const side = $("#map-side");
-    const row = (s, where, cls) => el("div", { class: "ms-row" }, el("i", { class: `dot sev-${s.sev}` }), el("code", {}, s.ip), el("span", { class: cls || "" }, where));
-    const top = this.sources().filter((s) => Geo.get(s.ip) && !Geo.get(s.ip).internal)
-      .sort((a, b) => SEV_RANK[b.sev] - SEV_RANK[a.sev] || b.events - a.events).slice(0, 5);
-    side.replaceChildren(...[
-      el("div", { class: "ms-h" }, "Top sources"),
-      ...(top.length ? top.map((s) => row(s, Geo.get(s.ip).city)) : [el("div", { class: "muted" }, "No external sources yet")]),
-      el("div", { class: "ms-h" }, `Unknown · no geo entry · ${unknown.length}`),
-      ...(unknown.length ? unknown.slice(0, 4).map((s) => row(s, "unknown", "muted")) : [el("div", { class: "muted" }, "none")]),
-      unknown.length > 4 ? el("div", { class: "muted" }, `+${unknown.length - 4} more`) : null,
-      internal.length ? el("div", { class: "ms-h" }, `Internal sources · ${internal.length}`) : null].filter(Boolean));
+    this.mapView.update(ranked, hq, summary.unknown);
+    this.mapView.tick(new Date(), Live.rollingEpm(), this.lastMapEvent);
+  },
+  noteMapTime(events) {
+    for (const e of events) {
+      if (e.ts && (!this.lastMapEvent || e.ts > this.lastMapEvent)) this.lastMapEvent = e.ts;
+    }
   },
   pulse(e) {
-    const svg = $("#map svg");
-    if (!svg || !this.mapDims || !e.src_ip) return;
+    const view = this.mapView;
+    const s = sevOf(e.severity);
+    if (!view || view.motion.matches || !view.near || !this.severities.includes(s)) return;
     const loc = Geo.get(e.src_ip);
     if (!loc || loc.internal) return;
+    const dest = Geo.get(e.dest_ip);
+    const target = dest?.internal ? dest : this.hq();
+    if (!target) return;
+    if (view.active) { view.orbit.pulse(loc, target, s); return; }
+    const fx = $("#map g.fx");
+    if (!fx || !this.mapDims || fx.childNodes.length > 40) return;
     const [w, h] = this.mapDims;
-    const fx = svg.querySelector("g.fx");
-    if (!fx || fx.childNodes.length > 40) return;
-    const target = (e.dest_ip && Geo.get(e.dest_ip) && Geo.get(e.dest_ip).internal) ? Geo.get(e.dest_ip) : this.hq();
     const [x, y] = WPMap.project(loc.lon, loc.lat, w, h);
-    const s = sevOf(e.severity);
-    const wrap = svgNode(`<svg xmlns="http://www.w3.org/2000/svg"><circle class="ping sev-${s}" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3"/>` +
+    const wrap = svgNode(`<svg xmlns="http://www.w3.org/2000/svg"><circle class="ping sev-${s}" cx="${x}" cy="${y}" r="3"/>` +
       `<path class="shot s-${s}" pathLength="100" d="${WPMap.arcPath([loc.lon, loc.lat], [target.lon, target.lat], w, h)}"/></svg>`);
     const nodes = [...wrap.childNodes];
     fx.append(...nodes);
-    setTimeout(() => nodes.forEach((n) => n.remove()), 1700);
+    setTimeout(() => nodes.forEach(n => n.remove()), 1700);
   },
 
   // --- live feed ---
   fillFeed(events) {
     const feed = $("#feed");
     if (!feed) return;
-    feed.replaceChildren(...events.slice(0, FEED_MAX).map((e) => this.feedRow(e, false)));
-    this.feedCount = events.length || 1;
+    const list = events || [];
+    feed.replaceChildren(...(list.length ? list.slice(0, FEED_MAX).map((e) => this.feedRow(e, false))
+      : [el("p", { class: "empty-note" }, "No events received yet.")]));
+    this.feedCount = list.length || 1;
+    this.applySeverity();
   },
   enqueue(events) {
     // Batches arrive newest-first; drip them in oldest-first so the stream reads in order.
     for (const e of [...events].reverse()) this.queue.push(e);
     if (this.queue.length > 600) this.queue.splice(0, this.queue.length - 600);
     const ips = events.flatMap((e) => [e.src_ip, e.dest_ip]).filter(Boolean);
-    for (const e of events) {
-      if (!e.src_ip || (SEV_RANK[sevOf(e.severity)] < 2 && e.event_type !== "auth_failure")) continue;
-      const cur = this.live.get(e.src_ip) || { events: 0, sev: "info", last: null };
-      cur.events += 1; cur.sev = maxSev(cur.sev, e.severity); cur.last = e.ts;
-      this.live.set(e.src_ip, cur);
-    }
+    this.noteMapTime(events);
     Geo.resolve(ips).then((changed) => { if (changed) this.renderMarks(); });
     this.scheduleMarks();
   },
   scheduleMarks: debounce(() => Dash.renderMarks(), 800),
   drip() {
     const rate = $("#feed-rate");
-    if (rate) rate.textContent = `${fmtN(Live.rollingEpm())}/min${this.queue.length ? ` · ${this.queue.length} queued` : ""}`;
+    if (rate) rate.textContent = this.queue.length ? `${this.queue.length} queued` : "";
     if (this.paused || !this.queue.length) return;
     const feed = $("#feed");
     if (!feed) return;
+    feed.querySelector(".empty-note")?.remove();
     const take = Math.min(this.queue.length, Math.max(1, Math.ceil(this.queue.length / 10)));
     for (const e of this.queue.splice(0, take)) {
       feed.prepend(this.feedRow(e, true));
@@ -591,45 +898,60 @@ const Dash = {
     }
     this.feedCount += take;
     while (feed.childElementCount > FEED_MAX) feed.lastElementChild.remove();
+    this.applySeverity();
   },
   feedRow(e, fresh) {
     const s = sevOf(e.severity);
     const target = e.user || e.host || e.dest_ip || "";
-    return el("div", { class: `fr sev-${s}${fresh ? " new" : ""}`, title: e.message || "" },
+    const msg = eventMessage(e);
+    const route = (e.src_ip || target) ? el("span", { class: "route" },
+      e.src_ip ? el("code", {}, e.src_ip) : null,
+      e.src_ip && target ? el("span", { class: "arrow" }, "→") : null,
+      target ? el("span", { class: "fu" }, target) : null) : null;
+    return el("div", { class: `fr sev-${s}${fresh ? " new" : ""}`, title: msg },
       el("span", { class: "ft" }, clock(e.ts)),
       sevTag(s),
-      el("span", { class: "fy" }, e.event_type),
-      el("span", { class: "fd" },
-        e.src_ip ? el("code", {}, e.src_ip) : null, target ? el("span", { class: "arrow" }, " → ") : null,
-        target ? el("span", { class: "fu" }, target) : null,
-        e.message ? el("span", { class: "fm" }, ` ${e.message.replace(/^\[SYNTHETIC\]\s*/, "")}`) : null,
-        e.synthetic ? el("span", { class: "syn" }, "SYN") : null));
+      el("span", { class: "fy" }, el("span", { class: "fn" }, e.event_type)),
+      el("span", { class: "fd" }, route, msg ? el("span", { class: "fm" }, msg) : null));
   },
   alertRow(a) {
     const feed = $("#feed");
     if (!feed) return;
     const row = el("a", { class: `fr alert-row sev-${sevOf(a.severity)} new`, href: `#alerts/${a.id}` },
-      el("span", { class: "ft" }, clock(a.last_seen)), sevTag(a.severity), el("span", { class: "fy" }, "▲ ALERT"),
-      el("span", { class: "fd" }, el("b", {}, a.title), el("span", { class: "fm" }, ` ${a.rule_id}`)));
+      el("span", { class: "ft" }, clock(a.last_seen)), sevTag(a.severity),
+      el("span", { class: "fy" }, el("span", { class: "fn" }, a.title)),
+      el("span", { class: "fd" }, el("span", { class: "fm" }, a.rule_id)));
     feed.prepend(row);
+    this.applySeverity();
     const p = $("#p-feed");
     if (p) { p.classList.remove("flash"); void p.offsetWidth; p.classList.add("flash"); }
   },
-  hover(on) { this.hovering = on; this.paused = on || this.userPaused; },
+  hover(on) { this.hovering = on; this.syncPause(); },
+  focusFeed(on) { this.feedFocused = on; this.syncPause(); },
+  syncPause() { this.paused = !!(this.userPaused || this.hovering || this.feedFocused); },
   togglePause() {
     this.userPaused = !this.userPaused;
-    this.paused = this.userPaused || this.hovering;
-    $("#feed-pause").textContent = this.userPaused ? "Resume" : "Pause";
+    this.syncPause();
+    const btn = $("#feed-pause");
+    if (!btn) return;
+    btn.textContent = this.userPaused ? "Resume" : "Pause";
+    btn.setAttribute("aria-pressed", this.userPaused ? "true" : "false");
   },
 
   // --- charts ---
   renderTimeline() {
-    const t = this.data.alert_timeline;
+    const t = this.data && this.data.alert_timeline;
     const box = $("#tl-chart");
     if (!box) return;
-    $("#tl-bucket").textContent = t.bins.length ? `${t.bucket_minutes === 60 ? "hourly" : `${t.bucket_minutes}-min`} · event time` : "";
+    const bucket = $("#tl-bucket");
+    if (!t || !Array.isArray(t.bins)) {
+      if (bucket) bucket.textContent = "";
+      box.replaceChildren(el("p", { class: "empty-note" }, "No alerts yet. Load demo data or run the storyline."));
+      return;
+    }
+    if (bucket) bucket.textContent = t.bins.length ? `${t.bucket_minutes === 60 ? "hourly" : `${t.bucket_minutes}-min`} · event time` : "";
     if (!t.bins.length) { box.replaceChildren(el("p", { class: "empty-note" }, "No alerts yet. Load demo data or run the storyline.")); return; }
-    const w = this.width("#tl-chart"), h = Math.max(110, box.clientHeight || 130);
+    const w = this.width("#tl-chart"), h = box.clientHeight >= 2 ? box.clientHeight : 130;
     const keys = ["low", "medium", "high", "critical"];
     mountSvg(box, WPCharts.stackedBars(t.bins, keys, {
       w, h, overlay: t.bins.map((b) => b.events), labels: t.bins.map((b) => shortTime(b.start)),
@@ -640,21 +962,31 @@ const Dash = {
   renderAttackers() {
     const box = $("#atk-chart");
     if (!box || !this.data) return;
-    const rows = this.data.attackers.slice(0, 6).map((a) => {
+    const rows = (this.data.attackers || []).slice(0, 6).map((a) => {
       const loc = Geo.get(a.ip);
       return { label: a.ip, value: a.events, cls: sevOf(a.max_severity),
-        sub: loc === undefined ? "…" : loc === null ? "unknown · no geo entry" : `${loc.city}${loc.internal ? "" : " · synthetic geo"}`,
-        subCls: loc === null ? "unknown" : "", title: `${a.ip}: ${a.events} evidence events in ${a.alerts} alerts (${a.open_alerts} open)` };
+        sub: loc === undefined ? "…" : loc === null ? "no geo entry" : loc.city,
+        subCls: loc === null ? "unknown" : "",
+        title: `${a.ip}: ${a.events} evidence events in ${a.alerts} alerts (${a.open_alerts} open)${loc && loc.city ? ` · ${loc.city}` : ""}` };
     });
     if (!rows.length) { box.replaceChildren(el("p", { class: "empty-note" }, "No attacker IPs in alert evidence yet.")); return; }
-    mountSvg(box, WPCharts.hbars(rows, { w: this.width("#atk-chart"), rowH: 25, labelW: 136, label: `top attacker IPs by evidence events: ${rows.map((r) => `${r.label} ${r.value}`).join(", ")}` }));
+    mountSvg(box, WPCharts.hbars(rows, { w: this.width("#atk-chart"), rowH: 26, labelW: 140, label: `top attacker IPs by evidence events: ${rows.map((r) => `${r.label} ${r.value}`).join(", ")}` }));
   },
   renderRules() {
     const box = $("#rules-chart");
     if (!box) return;
-    const rows = this.data.top_rules.map((r) => ({ label: r.name || r.rule_id, sub: `${r.rule_id} · ${r.open} open`, value: r.alerts, cls: sevOf(r.severity) }));
+    const rows = (this.data.top_rules || []).map((r) => ({ label: r.name || r.rule_id, sub: `${r.rule_id} · ${r.open} open`, value: r.alerts, cls: sevOf(r.severity) }));
     if (!rows.length) { box.replaceChildren(el("p", { class: "empty-note" }, "No rule has fired yet.")); return; }
-    mountSvg(box, WPCharts.hbars(rows.slice(0, 7), { w: this.width("#rules-chart"), rowH: 25, labelW: 150, label: `alerts by rule: ${rows.slice(0, 7).map((r) => `${r.label} ${r.value}`).join(", ")}` }));
+    // The rules column is a third of the board. A side label cannot hold these names, so the
+    // name sits on its own line and the bar uses the full width under it.
+    const shown = rows.slice(0, 7);
+    const max = Math.max(1, ...shown.map((r) => r.value));
+    box.replaceChildren(el("div", { class: "rules", role: "group", "aria-label": `alerts by rule: ${shown.map((r) => `${r.label} ${r.value}`).join(", ")}` },
+      ...shown.map((r) => el("div", { class: `rrow sev-${r.cls || "info"}`, title: r.title || `${r.label}: ${r.value}` },
+        el("div", { class: "rname" }, el("span", {}, r.label), el("b", {}, r.value)),
+        r.sub ? el("div", { class: "rsub" }, r.sub) : null,
+        el("div", { class: "rtrack", "aria-hidden": "true" },
+          el("i", { style: { width: `${Math.max(4, Math.round((r.value / max) * 100))}%` } }))))));
   },
   renderEntities() {
     const box = $("#ent-list");
@@ -673,32 +1005,51 @@ const Dash = {
     this.renderMatrix();
   },
   renderMatrix() {
+    const chipNode = $("#coverage-chip");
+    if (chipNode) chipNode.textContent = coverageChipLabel(this.coverage);
     const box = $("#attack-chart");
     if (!box) return;
     const cov = this.coverage;
     const w = this.width("#attack-chart", 900);
     const byTactic = new Map(TACTICS.map(([name, short]) => [tacticKey(name), { name, short, cells: [] }]));
+    // Rules behind critical alerts: a technique they map to and that was observed is drawn red.
+    const critRules = new Set([...(this.data?.alerts || []), ...(this.data?.top_rules || [])]
+      .filter((a) => sevOf(a.severity) === "critical").map((a) => a.rule_id));
     if (cov.state === "ok") {
       for (const t of cov.list) {
         for (const tac of t.tactics.length ? t.tactics : ["Unmapped"]) {
           const key = tacticKey(tac);
           if (!byTactic.has(key)) byTactic.set(key, { name: tac, short: tac, cells: [] });
-          byTactic.get(key).cells.push({ id: t.id, name: t.name, value: t.hits, covered: t.covered ?? t.rules.length > 0, level: t.level, rules: t.rules });
+          byTactic.get(key).cells.push({ id: t.id, name: t.name, value: t.hits, covered: t.covered ?? t.rules.length > 0, level: t.level, rules: t.rules,
+            crit: t.hits > 0 && t.rules.some((id) => critRules.has(id)) });
         }
       }
-      for (const col of byTactic.values()) col.cells.sort((a, b) => b.value - a.value || a.id.localeCompare(b.id));
+      for (const col of byTactic.values()) col.cells.sort((a, b) => a.id.localeCompare(b.id));
     }
-    let columns = [...byTactic.values()];
-    if (w < 900 && cov.state === "ok") columns = columns.filter((c) => c.cells.length);
+    // Empty tactics stay in the row so a gap in the kill chain is visible, not dropped.
+    const columns = [...byTactic.values()];
     const meta = $("#attack-meta");
+    const legend = $("#attack-legend");
     if (cov.state === "ok") {
-      const validated = cov.list.filter((t) => t.covered ?? t.rules.length > 0).length;
+      const validated = cov.list.filter((t) => (t.level ? t.level === "validated" : (t.covered ?? t.rules.length > 0))).length;
+      const mapped = cov.list.filter((t) => t.level === "mapped").length;
       const hot = cov.list.filter((t) => t.hits > 0).length;
-      meta.textContent = `${validated}/${cov.list.length} techniques validated on synthetic scenarios · ${hot} observed · `;
+      const tallest = columns.reduce((n, c) => Math.max(n, c.cells.length), 0);
+      const levelNote = cov.list.some((t) => t.level) ? ` · ${mapped} mapped only` : "";
+      meta.textContent = `${validated}/${cov.list.length} validated${levelNote} · ${hot} observed · `;
       meta.append(el("a", { href: "#coverage" }, "details"));
-      mountSvg(box, WPCharts.heatMatrix(columns, { w, cellH: 21, maxRows: Math.max(3, Math.min(7, ...[Math.max(...columns.map((c) => c.cells.length))])), label: `ATT&CK coverage heat matrix: ${validated} of ${cov.list.length} techniques validated, ${hot} seen in alerts. The Coverage view lists every technique as text.` }));
+      mountSvg(box, WPCharts.heatMatrix(columns.length ? columns : [{ name: "None", short: "—", cells: [] }], {
+        w: Math.max(w, columns.length * 86), cellH: 22, maxRows: Math.max(tallest, 1),
+        label: `ATT&CK coverage: ${validated} of ${cov.list.length} techniques validated on test scenarios, ${mapped} mapped only, ${hot} seen in alerts. Empty tactics have no catalog technique. Colors match the Coverage view.`,
+      }));
+      mountMatrixText(box, columns);
+      if (legend) legend.replaceChildren(
+        ...[["heat", "Validated (heat = alert count)"], ["mapped", "Mapped only"], ["disabled", "Disabled"], ["gap", "Gap"], ["crit", "On a critical alert"]]
+          .map(([cls, text]) => el("span", {}, el("i", { class: `swatch ${cls}`, "aria-hidden": "true" }), text)));
+      box.parentElement.querySelector(".cov-quiet")?.remove();
       return;
     }
+    if (legend) legend.replaceChildren();
     meta.textContent = cov.state === "pending" ? "" : cov.state === "error" ? cov.error : "loading…";
     const ghost = svgNode(WPCharts.heatMatrix(columns, { w, cellH: 21, maxRows: 3, label: "ATT&CK matrix (pending)" }));
     box.replaceChildren(el("div", { class: "pending-wrap" }, ghost,
@@ -710,10 +1061,12 @@ const Dash = {
   renderBoard() {
     const box = $("#board");
     if (!box) return;
-    box.replaceChildren(...incidentBoard(Live.incidents, this.data ? this.data.alerts : [], 5));
+    const inc = Live.incidents;
+    box.replaceChildren(...incidentBoard(inc, this.data ? this.data.alerts : [], 5));
     const meta = $("#board-meta");
-    meta.replaceChildren(Live.incidents.state === "ok" ? el("a", { href: "#incidents", class: "muted" }, "all incidents →")
-      : chip(Live.incidents.state === "loading" ? "LOADING" : "INCIDENTS PENDING · SHOWING ALERTS", "pendingchip"));
+    if (!meta) return;
+    meta.replaceChildren(inc.state === "ok" ? el("a", { href: "#incidents", class: "muted" }, "all incidents →")
+      : incidentFallbackChip(inc.state));
   },
 
   // --- health ---
@@ -732,35 +1085,47 @@ const Dash = {
       ...checks.map(([name, s, msg, ms]) => el("div", { class: "hrow2", title: msg || "" },
         el("span", { class: `hc st-${s}` }, el("i"), el("span", { class: "sr-only" }, `${s}: `)), el("b", {}, name), el("span", { class: "muted hmsg" }, msg), el("span", { class: "hms" }, ms === null ? "" : `${ms} ms`))),
       el("div", { class: "hrow2" }, el("span", { class: `hc st-${Live.mode === "live" ? "ok" : Live.mode === "poll" ? "degraded" : "failing"}` }, el("i")),
-        el("b", {}, "stream"), el("span", { class: "muted hmsg" }, `${$("#k-live-text").textContent}${Live.subscribers ? ` · ${Live.subscribers} viewer(s)` : ""}`), el("span", { class: "hms" }, "")),
+        el("b", {}, "stream"), el("span", { class: "muted hmsg" }, `${$("#k-live-text") ? $("#k-live-text").textContent : ""}${Live.subscribers ? ` · ${Live.subscribers} viewer(s)` : ""}`), el("span", { class: "hms" }, "")),
       runs.length ? el("div", { class: "runs" }, el("span", { class: "muted" }, "detection runs"),
         el("span", { class: "rundots", role: "img", "aria-label": `${runs.length} recent runs: ${runs.filter((r) => r.status === "ok").length} ok, ${runs.filter((r) => r.status === "failed").length} failed` }, ...runs.map((r) => el("i", { class: `st-${r.status === "ok" ? "ok" : r.status === "failed" ? "failing" : "degraded"}`, title: `#${r.id} ${r.trigger} · ${r.status} · ${r.events_scanned} scanned · +${r.alerts_created}` })))) : null].filter(Boolean));
   },
 };
+
+function incidentFallbackChip(state) {
+  const label = state === "loading" ? "LOADING"
+    : state === "error" ? "INCIDENTS UNAVAILABLE · SHOWING ALERTS"
+    : "INCIDENTS PENDING · SHOWING ALERTS";
+  return chip(label, "pendingchip");
+}
 
 // Board columns shared by the dashboard panel and the incidents page.
 function incidentBoard(inc, alerts, perColumn) {
   const cols = { open: [], investigating: [], resolved: [] };
   if (inc.state === "ok") {
     for (const i of inc.list) cols[boardColumn(i.status)].push({
-      href: `#incidents/${i.id}`, sev: i.severity, title: i.title, time: i.last_seen, synthetic: i.synthetic,
-      meta: `${i.alert_count || 0} alerts`, tags: i.tactics.slice(0, 4),
+      href: `#incidents/${i.id}`, sev: i.severity, title: i.title, time: i.last_seen,
+      meta: `${i.alert_count || 0} ${i.alert_count === 1 ? "alert" : "alerts"}`,
+      owner: ownerName(i.assignee), tags: boardTags(i.tactics, i.top_technique),
     });
   } else {
     for (const a of alerts || []) cols[boardColumn(a.status)].push({
-      href: `#alerts/${a.id}`, sev: a.severity, title: a.title, time: a.last_seen, synthetic: a.synthetic,
-      meta: `${a.event_count} events · ${a.rule_id}`, tags: [],
+      href: `#alerts/${a.id}`, sev: a.severity, title: a.title, time: a.last_seen,
+      meta: `${a.event_count} events · ${a.rule_id}`, owner: ownerName(a.assignee), tags: [],
     });
   }
   const order = (x, y) => SEV_RANK[sevOf(y.sev)] - SEV_RANK[sevOf(x.sev)] || String(y.time).localeCompare(String(x.time));
   return Object.entries(cols).map(([name, items]) => {
     items.sort(order);
     return el("div", { class: `bcol bc-${name}` },
-      el("div", { class: "bh" }, el("span", {}, name.toUpperCase()), el("b", {}, items.length)),
+      el("div", { class: "bh" }, el("span", {}, name[0].toUpperCase() + name.slice(1)), el("b", {}, items.length)),
       ...items.slice(0, perColumn).map((c) => el("a", { class: `bcard sev-${sevOf(c.sev)}`, href: c.href },
         el("div", { class: "bt" }, c.title),
-        el("div", { class: "bm" }, sevTag(c.sev), el("span", {}, c.meta), el("span", { class: "muted" }, ago(c.time)), c.synthetic ? el("span", { class: "syn" }, "SYN") : null),
-        c.tags.length ? el("div", { class: "btags" }, ...c.tags.map((t) => el("span", { class: "tag" }, t))) : null)),
+        el("div", { class: "bm" }, sevTag(c.sev), el("span", {}, c.meta),
+          c.owner ? el("span", {}, c.owner) : null,
+          el("span", { class: "muted" }, ago(c.time))),
+        c.tags.length ? el("div", { class: "btags" }, ...c.tags.map((t) => (t.kind === "tech"
+          ? el("span", { class: "tag tech", title: techniqueTagTitle(t) }, t.id)
+          : el("span", { class: "tag" }, t.text)))) : null)),
       items.length > perColumn ? el("div", { class: "muted bmore" }, `+${items.length - perColumn} more`) : null,
       !items.length ? el("div", { class: "muted bmore" }, "—") : null);
   });
@@ -769,18 +1134,4 @@ function incidentBoard(inc, alerts, perColumn) {
 async function socDashboard() {
   Dash.mount();
   await Dash.load();
-}
-
-// ---------- incidents pages ----------
-async function incidentsView() {
-  await Live.refreshIncidents();
-  const inc = Live.incidents;
-  const alerts = inc.state === "ok" ? [] : await api("/api/alerts?limit=200");
-  render(
-    el("div", { class: "page-head" }, el("h1", {}, "Incidents"),
-      inc.state === "ok" ? el("span", { class: "muted" }, `${inc.list.length} incidents`) : chip("INCIDENTS PENDING · SHOWING ALERTS", "pendingchip")),
-    inc.state !== "ok" ? el("p", { class: "muted" }, inc.state === "error" ? inc.error
-      : "Alerts become incidents once the correlation engine ships (GET /api/incidents). Until then this board groups alerts by status.") : null,
-    el("div", { class: "board big", "data-kbd-list": "incidents" }, ...incidentBoard(inc, alerts, 50)));
-  restoreSelection(`[data-kbd-list] a.bcard[href="#incidents/${state.restore}"]`);
 }

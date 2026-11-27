@@ -1,0 +1,37 @@
+# Bulk pull of cloud object storage, the collection step before ransomware encrypts the copies
+# or leaks them. ATT&CK T1530. A single GetObject or an s3 ls does not match.
+title: Ransomware Cloud Storage Staging
+id: 4f0e8b72-5c31-4d9a-a6e8-17b3d9c0f245
+status: experimental
+description: |
+  A cloud data-access event that bulk-copies a bucket: aws s3 sync, a recursive aws s3 cp,
+  az storage blob download-batch, or gsutil -m cp. Listing a bucket or reading one object does not match.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1530/
+  - https://www.cisa.gov/stopransomware
+tags:
+  - attack.collection
+  - attack.t1530
+logsource:
+  category: cloud
+  product: aws
+  service: s3
+detection:
+  access:
+    event.action: cloud_data_access
+  stage_s3_sync:
+    message|contains: 'aws s3 sync'
+  stage_s3_cp:
+    message|contains|all:
+      - 'aws s3 cp'
+      - '--recursive'
+  stage_azure:
+    message|contains: 'blob download-batch'
+  stage_gcs:
+    message|contains: 'gsutil -m cp'
+  condition: access and 1 of stage_*
+falsepositives:
+  - A backup job that syncs a bucket to approved storage
+level: high

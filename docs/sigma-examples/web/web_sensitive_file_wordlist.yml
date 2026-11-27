@@ -1,0 +1,88 @@
+# Wordlist scan for secret files and well-known debug paths. Tokens are anchored
+# so "/.environment" is not "/.env" and "/vendor/phpunit-bridge" is not phpunit.
+# A "?" in a pattern is escaped: unescaped, Sigma treats it as a one-character wildcard.
+title: Web Sensitive File Wordlist Probe
+id: 35586fa6-1d6e-4e21-805e-db7f56dd2e50
+status: experimental
+description: |
+  One request for a name vulnerability wordlists always try: dotenv and VCS
+  metadata, cloud and SSH credentials, WordPress and phpMyAdmin paths, Apache
+  server-status, Spring actuator heap dumps, and the PHPUnit eval-stdin backdoor.
+  This is the single-request form of that scan. The built-in web_scanner rule
+  still requires a burst from one address.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1595/003/
+tags:
+  - attack.reconnaissance
+  - attack.t1595.003
+logsource:
+  category: webserver
+detection:
+  web:
+    event.action:
+      - web_request
+      - web_scan
+      - web_error
+  wordlist:
+    message|contains:
+      - ' /.env *-> ???'
+      - ' /.env.* -> ???'
+      - ' /.env/* -> ???'
+      - ' /.env%* -> ???'
+      - ' /.env\?* -> ???'
+      - ' /.git/* -> ???'
+      - ' /.svn/* -> ???'
+      - ' /.hg/* -> ???'
+      - ' /.aws/* -> ???'
+      - ' /.ssh/* -> ???'
+      - ' /.htpasswd *-> ???'
+      - ' /.htpasswd\?* -> ???'
+      - ' /.htaccess *-> ???'
+      - ' /.htaccess\?* -> ???'
+      - ' /.bash_history *-> ???'
+      - ' /.bash_history\?* -> ???'
+      - ' /.mysql_history *-> ???'
+      - ' /.mysql_history\?* -> ???'
+      - ' /.npmrc *-> ???'
+      - ' /.npmrc\?* -> ???'
+      - ' /.dockercfg *-> ???'
+      - ' /.dockercfg\?* -> ???'
+      - ' /.DS_Store *-> ???'
+      - ' /.DS_Store\?* -> ???'
+      - ' /wp-config.php *-> ???'
+      - ' /wp-config.php\?* -> ???'
+      - ' /phpinfo.php *-> ???'
+      - ' /phpinfo.php\?* -> ???'
+      - ' /backup.sql *-> ???'
+      - ' /backup.sql\?* -> ???'
+      - ' /dump.sql *-> ???'
+      - ' /dump.sql\?* -> ???'
+      - ' /phpmyadmin/* -> ???'
+      - ' /phpmyadmin *-> ???'
+      - ' /pma/* -> ???'
+      - ' /adminer.php *-> ???'
+      - ' /adminer.php\?* -> ???'
+      - ' /server-status *-> ???'
+      - ' /server-status/* -> ???'
+      - ' /server-status\?* -> ???'
+      - ' /elmah.axd *-> ???'
+      - ' /elmah.axd\?* -> ???'
+      - ' /web.config *-> ???'
+      - ' /web.config\?* -> ???'
+      - ' /id_rsa *-> ???'
+      - ' /id_rsa.* -> ???'
+      - ' /.ssh/id_rsa *-> ???'
+      - ' /.ssh/id_rsa\?* -> ???'
+      - ' /actuator/env *-> ???'
+      - ' /actuator/env/* -> ???'
+      - ' /actuator/env\?* -> ???'
+      - ' /actuator/heapdump *-> ???'
+      - ' /actuator/heapdump\?* -> ???'
+      - ' /vendor/phpunit/* -> ???'
+  condition: web and wordlist
+falsepositives:
+  - An operator opening Apache server-status or a Spring actuator endpoint on purpose
+  - A request for a real file named web.config on an IIS site
+level: medium

@@ -1,62 +1,192 @@
 """Read-side incident queries, incident status changes, and ATT&CK coverage."""
 
+import json
+import re
+from itertools import chain
+
 from . import assets, attack, correlate, improve, search_rules, sigma, simulate
 from .db import audit, now_iso, row_to_dict, transaction
 from .engine import load_rules
 from .normalize import SEVERITIES
-from .queries import EVENT_FIELDS, QueryError, _int, alert_row
+from .queries import EVENT_FIELDS, QueryError, _int, alert_row, catalog_pieces
 
 INCIDENT_STATUSES = ("open", "investigating", "resolved")
+# Incident detail returns this many distinct evidence events, earliest first. The rest are events_omitted.
+INCIDENT_EVENT_LIMIT = 1000
+# Incident detail returns this many linked alerts, earliest first_seen then id. The rest are alerts_omitted.
+# The timeline uses that same page. Techniques, stages, and severity still cover every linked alert.
+INCIDENT_ALERT_LIMIT = 200
 _SEVERITY_ORDER = ("CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 "
                    "WHEN 'low' THEN 3 ELSE 4 END")
 
 
+def _json_field(value, kind, fallback):
+    """Decoded JSON of `kind`, or `fallback` when the column is null, corrupt, or another type."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return fallback
+    return value if isinstance(value, kind) else fallback
+
+
+def _entity_values(value):
+    """One host or address when the column stored a string. A list keeps its non-empty strings."""
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, (list, tuple)):
+        return [item for item in value if isinstance(item, str) and item]
+    return []
+
+
 def _incident(row):
-    """An incident row with its JSON columns decoded and each matched correlation rule named."""
-    incident = row_to_dict(row, ["entities", "stages", "patterns"])
-    incident["patterns"] = [
-        {**match, **{k: correlate.PATTERN_INFO[match["id"]][k] for k in ("name", "description", "severity")}}
-        for match in incident.get("patterns") or [] if match.get("id") in correlate.PATTERN_INFO]
-    return incident
+    item = row_to_dict(row)
+    item["entities"] = _json_field(item.get("entities"), dict, {})
+    item["stages"] = _json_field(item.get("stages"), list, [])
+    item["patterns"] = [
+        {**match, **{key: correlate.PATTERN_INFO[match["id"]][key] for key in ("name", "description", "severity")}}
+        for match in _json_field(item.get("patterns"), list, [])
+        if isinstance(match, dict) and isinstance(match.get("id"), str) and match["id"] in correlate.PATTERN_INFO]
+    return item
+
+
+def technique_objects(raw, include_unlisted=False):
+    """Catalog techniques named by one rule, in stored order.
+
+    Missing, corrupt, or non-list JSON contributes nothing. A legacy id becomes the catalog's
+    current technique and is kept once. Integers, booleans, blank ids, and ids the catalog does
+    not know are omitted. Case exports may retain well-formed unlisted mappings.
+    """
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(raw, list):
+        return []
+    techniques = []
+    seen = set()
+    for item in raw:
+        if isinstance(item, str):
+            technique_id = item
+        elif isinstance(item, dict) and isinstance(item.get("id"), str):
+            technique_id = item["id"]
+        else:
+            continue
+        if not technique_id:
+            continue
+        try:
+            decoded = attack.technique(technique_id)
+        except KeyError:
+            if (not include_unlisted or not re.fullmatch(r"T[0-9]{4}(?:\.[0-9]{3})?", technique_id)
+                    or not isinstance(item, dict)
+                    or not all(isinstance(item.get(k), str) for k in ("name", "tactic"))):
+                continue
+            decoded = {k: item[k] for k in ("id", "name", "tactic")}
+        if decoded["id"] in seen:
+            continue
+        seen.add(decoded["id"])
+        techniques.append(decoded)
+    return techniques
+
+
+def top_techniques(conn, incident_ids):
+    """Earliest kill-chain technique on each incident, matching the matrix column order.
+
+    Ties inside a tactic break on technique id. Names and tactics come from the catalog, so a
+    revoked id is its current technique. An incident with no mapped technique is absent.
+    """
+    if not incident_ids:
+        return {}
+    placeholders = ",".join("?" * len(incident_ids))
+    rows = conn.execute(
+        "SELECT ia.incident_id, r.techniques FROM incident_alerts ia"
+        " JOIN alerts a ON a.id = ia.alert_id"
+        " LEFT JOIN rules r ON r.id = a.rule_id"
+        f" WHERE ia.incident_id IN ({placeholders})", incident_ids)
+    best = {}
+    for row in rows:
+        for technique in technique_objects(row["techniques"]):
+            candidate = {"id": technique["id"], "name": technique.get("name") or "",
+                         "tactic": technique.get("tactic") or ""}
+            key = (attack.tactic_rank(candidate["tactic"]), candidate["id"])
+            current = best.get(row["incident_id"])
+            if current is None or key < current[0]:
+                best[row["incident_id"]] = (key, candidate)
+    return {incident_id: pair[1] for incident_id, pair in best.items()}
 
 
 def list_incidents(conn, params):
+    """Matching incidents, and how many the limit left out.
+
+    Rows stay not-resolved first, then severity, then last_seen, then id
+    descending (the newer id stays). The second value is 0 when every match
+    fits. Callers that return the bare array send that count as
+    X-Watchpost-Omitted.
+    """
     where, args = [], []
     if params.get("status"):
-        statuses = params["status"].split(",")
-        if not set(statuses) <= set(INCIDENT_STATUSES):
-            raise QueryError(f"status must be from {', '.join(INCIDENT_STATUSES)}")
+        # One status or a comma list. Spaces around a name are ignored.
+        # ASCII case folds onto the catalog spelling (`Open` binds `open`). A blank piece is invalid.
+        statuses = catalog_pieces(
+            params["status"], INCIDENT_STATUSES,
+            f"status must be from {', '.join(INCIDENT_STATUSES)}")
         where.append(f"status IN ({','.join('?' for _ in statuses)})")
         args += statuses
     if params.get("severity"):
-        if params["severity"] not in SEVERITIES:
-            raise QueryError("invalid severity")
-        where.append("severity = ?")
-        args.append(params["severity"])
+        # One level or a comma list (critical,high), the same rule as the alert queue.
+        # Same fold (`High` binds `high`). A blank piece is invalid, same as an unknown name.
+        levels = catalog_pieces(params["severity"], SEVERITIES, "invalid severity")
+        where.append(f"severity IN ({','.join('?' for _ in levels)})")
+        args += levels
     limit = _int(params.get("limit"), "limit", 100, 1, 500)
     clause = (" WHERE " + " AND ".join(where)) if where else ""
+    total = conn.execute(f"SELECT COUNT(*) FROM incidents{clause}", args).fetchone()[0]
     rows = conn.execute(f"SELECT * FROM incidents{clause} ORDER BY status = 'resolved', {_SEVERITY_ORDER},"
-                        f" last_seen DESC LIMIT ?", args + [limit])
-    return [_incident(r) for r in rows]
+                        f" last_seen DESC, id DESC LIMIT ?", args + [limit])
+    items = [_incident(r) for r in rows]
+    tops = top_techniques(conn, [item["id"] for item in items])
+    # Same sentence as the incident detail. The window is the correlator default, not per row.
+    sentence = correlate.rule_summary()
+    for item in items:
+        item["top_technique"] = tops.get(item["id"])
+        item["correlation_rule"] = sentence
+    return items, total - len(items)
 
 
-def get_incident(conn, incident_id):
+def linked_alerts(conn, incident_id, *, include_unlisted=False):
+    """Every alert on the incident, earliest first_seen then id, with its rule name and techniques.
+
+    Case export and the incident report use this full list. Incident detail pages the same order.
+    Techniques are the catalog's current id, name, and tactic. A legacy id counts as that technique.
+    """
+    # Read technique JSON here. load_rules rejects every rule when one row's JSON is corrupt.
+    rules = {
+        row["id"]: (row["name"], technique_objects(row["techniques"], include_unlisted))
+        for row in conn.execute("SELECT id, name, techniques FROM rules")
+    }
+    alerts = [alert_row(r) for r in conn.execute(
+        "SELECT a.* FROM alerts a JOIN incident_alerts ia ON ia.alert_id = a.id WHERE ia.incident_id = ?"
+        " ORDER BY a.first_seen, a.id", (incident_id,))]
+    for alert in alerts:
+        name, techniques = rules.get(alert["rule_id"], (None, []))
+        alert["rule_name"] = alert["rule_id"] if name is None else name
+        alert["techniques"] = techniques
+    return alerts
+
+
+def get_incident(conn, incident_id, *, include_unlisted=False):
     row = conn.execute("SELECT * FROM incidents WHERE id = ?", (incident_id,)).fetchone()
     if row is None:
         raise QueryError("incident not found", 404)
     incident = _incident(row)
-    rules = {r["id"]: r for r in load_rules(conn, enabled_only=False)}
 
-    alerts = [alert_row(r) for r in conn.execute(
-        "SELECT a.* FROM alerts a JOIN incident_alerts ia ON ia.alert_id = a.id WHERE ia.incident_id = ?"
-        " ORDER BY a.first_seen, a.id", (incident_id,))]
+    alerts = linked_alerts(conn, incident_id, include_unlisted=include_unlisted)
     techniques = {}
     for alert in alerts:
-        rule = rules.get(alert["rule_id"]) or {}
-        alert["rule_name"] = rule.get("name", alert["rule_id"])
-        alert["techniques"] = rule.get("techniques", [])
         for t in alert["techniques"]:
             techniques.setdefault(t["id"], {**t, "alert_ids": []})["alert_ids"].append(alert["id"])
+    shown = alerts[:INCIDENT_ALERT_LIMIT]
 
     event_alerts = {}
     for r in conn.execute("SELECT ae.event_id, ae.alert_id FROM alert_events ae JOIN incident_alerts ia"
@@ -66,27 +196,40 @@ def get_incident(conn, incident_id):
     events = [{**dict(r), "alert_ids": sorted(event_alerts.get(r["id"], []))} for r in conn.execute(
         f"SELECT DISTINCT {fields} FROM events e JOIN alert_events ae ON ae.event_id = e.id"
         " JOIN incident_alerts ia ON ia.alert_id = ae.alert_id WHERE ia.incident_id = ?"
-        " ORDER BY e.ts, e.id LIMIT 1000", (incident_id,))]
+        " ORDER BY e.ts, e.id LIMIT ?", (incident_id, INCIDENT_EVENT_LIMIT))]
+    # Same join as the page. A second alert link is still one event. A link whose event is gone is not a row.
+    event_total = conn.execute(
+        "SELECT COUNT(DISTINCT e.id) AS n FROM events e"
+        " JOIN alert_events ae ON ae.event_id = e.id"
+        " JOIN incident_alerts ia ON ia.alert_id = ae.alert_id WHERE ia.incident_id = ?",
+        (incident_id,)).fetchone()["n"]
 
     ordered = sorted(techniques.values(), key=lambda t: (attack.tactic_rank(t["tactic"]), t["id"]))
-    incident["alerts"] = alerts
+    incident["alerts"] = shown
+    incident["alerts_omitted"] = len(alerts) - len(shown)
     incident["events"] = events
+    incident["events_omitted"] = event_total - len(events)
     incident["timeline"] = [{
         "ts": a["first_seen"], "last_seen": a["last_seen"], "alert_id": a["id"], "rule_id": a["rule_id"],
         "title": a["title"], "severity": a["severity"], "status": a["status"],
         "tactics": attack.tactic_order(t["tactic"] for t in a["techniques"]),
         "techniques": [t["id"] for t in a["techniques"]],
-    } for a in alerts]
+    } for a in shown]
     incident["techniques"] = ordered
     incident["techniques_by_tactic"] = [
         {"tactic": tactic, "techniques": [t for t in ordered if t["tactic"] == tactic]}
         for tactic in incident["stages"]
     ]
     incident["escalated"] = len(incident["stages"]) >= 3
-    # Assets behind the incident: by host name and by the addresses its evidence reached.
+    incident["correlation_rule"] = correlate.rule_summary()
+    # The event list above is capped. Addresses the incident reached still count past that page.
+    addresses = conn.execute(
+        "SELECT e.dest_ip FROM events e JOIN alert_events ae ON ae.event_id = e.id"
+        " JOIN incident_alerts ia ON ia.alert_id = ae.alert_id"
+        " WHERE ia.incident_id = ? AND e.dest_ip IS NOT NULL AND e.dest_ip != ''", (incident_id,))
     incident["assets"] = assets.for_entities(
-        conn, incident["entities"].get("host"),
-        sorted({e["dest_ip"] for e in events if e.get("dest_ip")} | set(incident["entities"].get("src_ip") or [])))
+        conn, _entity_values(incident["entities"].get("host")),
+        chain(_entity_values(incident["entities"].get("src_ip")), (row[0] for row in addresses)))
     return incident
 
 
@@ -101,14 +244,18 @@ def update_status(conn, incident_id, actor, status, note=None):
             raise QueryError("incident not found", 404)
         now = now_iso()
         if status == "resolved":
-            conn.execute("UPDATE incidents SET status = ?, resolved_at = ?, updated_at = ? WHERE id = ?",
-                         (status, now, now, incident_id))
+            # A note added after resolve must not move the time the incident page shows.
+            conn.execute(
+                "UPDATE incidents SET status = ?, resolved_at = COALESCE(resolved_at, ?), updated_at = ?"
+                " WHERE id = ?",
+                (status, now, now, incident_id))
         else:
             conn.execute("UPDATE incidents SET status = ?, resolved_at = NULL,"
                          " assignee = CASE WHEN ? = 'investigating' THEN ? ELSE assignee END, updated_at = ?"
                          " WHERE id = ?", (status, status, actor, now, incident_id))
+        recorded = note.strip() if note else None
         audit(conn, actor, "incident_status_changed", str(incident_id),
-              {"from": row["status"], "to": status, "note": note.strip() if note else None})
+              {"from": row["status"], "to": status, "note": recorded or None})
     return _incident(conn.execute("SELECT * FROM incidents WHERE id = ?", (incident_id,)).fetchone())
 
 

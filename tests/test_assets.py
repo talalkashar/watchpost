@@ -54,6 +54,23 @@ class PureWeightingTests(unittest.TestCase):
         self.assertEqual([a["name"] for a in assets.match(idx, events)], ["DB01"])
         self.assertEqual(assets.match(idx, [{"host": "nothing"}]), [])
 
+    def test_host_match_folds_ascii_letters_only(self):
+        """Érin-host does not take érin-host's criticality. WEB01 still matches web01. An address stays as stored."""
+        accented = self.asset("Érin-host", "critical")
+        other = self.asset("érin-host", "low")
+        ascii_host = self.asset("WEB01", "high")
+        idx = assets.index([accented, other, ascii_host])
+        self.assertEqual([a["name"] for a in assets.match(idx, [{"host": "érin-host"}])], ["érin-host"])
+        self.assertEqual([a["name"] for a in assets.match(idx, [{"host": "Érin-host"}])], ["Érin-host"])
+        self.assertEqual([a["name"] for a in assets.match(idx, [{"host": "web01"}])], ["WEB01"])
+        self.assertEqual([a["name"] for a in assets.match(idx, [{"host": "WEB01"}])], ["WEB01"])
+        # The low asset adds nothing; the critical one must not have been the match.
+        self.assertEqual(assets.weigh("low", assets.match(idx, [{"host": "érin-host"}]))["severity"], "low")
+        self.assertEqual(assets.weigh("medium", assets.match(idx, [{"host": "Érin-host"}]))["severity"], "critical")
+        ip_idx = assets.index([self.asset("files01", addresses=["2001:db8::1"])])
+        self.assertEqual(assets.match(ip_idx, [{"dest_ip": "2001:db8::1"}])[0]["name"], "files01")
+        self.assertEqual(assets.match(ip_idx, [{"src_ip": "2001:DB8::1"}]), [])
+
     def test_an_address_matches_every_asset_that_lists_it(self):
         # Order must not decide the match: a raise or re-case that reorders the inventory cannot drop an asset.
         a, b = self.asset("zz-files", "high", ["confidential"], ["10.0.1.20"]), self.asset("web01", "high", (), ["10.0.1.20"])
@@ -222,7 +239,7 @@ class AssetApiTests(ServerTestCase):
     def test_admin_page_redraws_the_inventory_after_a_demo_load(self):
         # No JS runtime in CI: the demo-load handler must refetch the inventory and swap the card in place.
         app = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text()
-        handler = app[app.index('api("/api/demo/load"'):app.index('"Load synthetic demo data"')]
+        handler = app[app.index('api("/api/demo/load"'):app.index('"Load demo data"')]
         self.assertIn('assetsCard(await api("/api/assets"))', handler)
         self.assertIn("inventoryCard.replaceWith(", handler)
 
@@ -256,6 +273,12 @@ class ReviewGateTests(unittest.TestCase):
                 self.assertEqual(assets.review_reasons(before, self.asset(**{"criticality": "high",
                                                                             "data_tags": ["pii"], **kw})), [])
         self.assertEqual(assets.review_reasons(None, self.asset()), [])
+        # ASCII re-case still matches, so it is not a rename. É folds with str.lower and must be one.
+        accent = {"name": "Érin-host", "criticality": "high", "data_tags": [], "addresses": []}
+        self.assertEqual(assets.review_reasons(accent, {**accent, "name": "érin-host"}),
+                         ["renames Érin-host to érin-host"])
+        web = {"name": "WEB01", "criticality": "high", "data_tags": [], "addresses": []}
+        self.assertEqual(assets.review_reasons(web, {**web, "name": "web01"}), [])
 
 
 class AssetReviewApiTests(ServerTestCase):

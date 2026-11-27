@@ -497,4 +497,3 @@ def start_if_enabled(app):
         return None
     log.info("Threat intelligence: %s fetched every %s minutes", ", ".join(sorted(feeds)), app.config.threat_feed_minutes)
     return Fetcher(app.conn, feeds, app.config.threat_feed_minutes * 60, app.config.otx_api_key, app.config.otx_days).start()
-

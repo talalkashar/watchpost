@@ -193,10 +193,14 @@ def main():
         status, coverage = analyst.call("GET", "/api/attack/coverage")
         hit = [t["id"] for t in coverage["techniques"] if t["hits"]]
         levels = coverage["summary"]["levels"]
+        mapped = [t for t in coverage["techniques"] if t["level"] == "mapped"]
         check(status == 200 and sum(levels.values()) == coverage["summary"]["techniques"] and hit
               and coverage["summary"]["covered"] == levels["validated"]
               and all(t["covered"] == (t["level"] == "validated") and (t["level"] != "validated" or t["scenarios"])
-                      for t in coverage["techniques"]), f"coverage: {coverage.get('summary')}")
+                      for t in coverage["techniques"])
+              and mapped and all(t.get("why") for t in mapped)
+              and all(not t.get("why") for t in coverage["techniques"] if t["level"] != "mapped")
+              and any("never exploits" in t["why"] for t in mapped), f"coverage: {coverage.get('summary')}")
         status, layer = analyst.call("GET", "/api/attack/navigator.json")
         by_level = {t["id"]: t["level"] for t in coverage["techniques"]}
         check(status == 200 and all(t["comment"].lower().startswith(by_level[t["techniqueID"]])

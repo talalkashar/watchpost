@@ -1,0 +1,30 @@
+# Entra ID sign-in log: a successful sign-in Microsoft scored high risk on this attempt
+# (riskLevelDuringSignIn). A none, low, or medium score does not match, and a failed attempt does not.
+title: Azure AD High Risk Sign-In
+id: b19d4e72-0a36-4c81-9f50-7d2e8b6a14c8
+status: experimental
+description: |
+  A successful Entra ID sign-in whose riskLevelDuringSignIn value is high.
+  That score means Microsoft Identity Protection tied this attempt to leaked credentials,
+  an anonymous address, or similar risk. The account was accepted, so the cloud identity was used.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1078/004/
+tags:
+  - attack.initial_access
+  - attack.t1078.004
+logsource:
+  product: azure
+  service: signinlogs
+detection:
+  selection:
+    event.action: auth_success
+    message|contains:
+      - 'riskLevelDuringSignIn":"high"'
+      - riskLevelDuringSignIn=high
+      - 'riskLevelDuringSignIn: high'
+  condition: selection
+falsepositives:
+  - The real account owner signing in from a new device that Identity Protection scored high
+level: high

@@ -110,9 +110,10 @@ backs up a pre-existing `/etc/caddy/Caddyfile` once, to `Caddyfile.pre-watchpost
 Every client IP gets two in-memory token buckets. `POST /api/auth/login` allows a burst of 10, then 10 a minute.
 Every other request (API and static files) allows a burst of 300, then 1200 a minute. Over the limit, the answer is
 HTTP 429 with JSON `{"error", "retry_after"}` and a `Retry-After` header. The template sets `SIEM_TRUST_PROXY=1` so the
-client IP comes from the proxy: the **last** `X-Forwarded-For` entry, and only on connections from loopback. The nginx
-config overwrites that header with `$remote_addr`, and Caddy sets it itself, so clients cannot spoof it. Tune the
-limits with the `SIEM_*RATE*` variables in `/etc/watchpost.env`. The buckets reset on restart.
+client IP comes from the proxy: the **last** entry of the one `X-Forwarded-For` header, and only on connections from
+loopback. Two of those headers, or a value that is not an address, stay the peer address. The nginx config overwrites
+that header with `$remote_addr`, and Caddy sets it itself, so clients cannot spoof it. Tune the limits with the
+`SIEM_*RATE*` variables in `/etc/watchpost.env`. The buckets reset on restart.
 
 Account lockout (5 failures lock the account for 15 minutes) still applies on top of the rate limit.
 

@@ -12,7 +12,8 @@ TACTICS = [
     ("TA0002", "Execution"),
     ("TA0003", "Persistence"),
     ("TA0004", "Privilege Escalation"),
-    ("TA0005", "Defense Evasion"),
+    ("TA0005", "Stealth"),
+    ("TA0112", "Defense Impairment"),
     ("TA0006", "Credential Access"),
     ("TA0007", "Discovery"),
     ("TA0008", "Lateral Movement"),
@@ -34,8 +35,8 @@ TECHNIQUES = {
     "T1098.001": ("Account Manipulation: Additional Cloud Credentials", "Persistence"),
     "T1136.003": ("Create Account: Cloud Account", "Persistence"),
     "T1548.003": ("Abuse Elevation Control Mechanism: Sudo and Sudo Caching", "Privilege Escalation"),
-    "T1562.006": ("Impair Defenses: Indicator Blocking", "Defense Evasion"),
-    "T1562.008": ("Impair Defenses: Disable or Modify Cloud Logs", "Defense Evasion"),
+    "T1685": ("Disable or Modify Tools", "Defense Impairment"),
+    "T1685.002": ("Disable or Modify Tools: Disable or Modify Cloud Log", "Defense Impairment"),
     "T1110": ("Brute Force", "Credential Access"),
     "T1110.001": ("Brute Force: Password Guessing", "Credential Access"),
     "T1110.003": ("Brute Force: Password Spraying", "Credential Access"),
@@ -47,9 +48,17 @@ TECHNIQUES = {
 
 _TACTIC_ORDER = {name: i for i, (_, name) in enumerate(TACTICS)}
 
+# ATT&CK v19 revoked these. Rules and labeled scenarios still pass the old ids.
+_REVOKED = {"T1562.006": "T1685", "T1562.008": "T1685.002"}
+
+
+def _canonical(technique_id):
+    return _REVOKED.get(technique_id, technique_id)
+
 
 def technique(technique_id):
     """Return {"id", "name", "tactic"} for a catalog technique. Raises KeyError if unknown."""
+    technique_id = _canonical(technique_id)
     name, tactic = TECHNIQUES[technique_id]
     return {"id": technique_id, "name": name, "tactic": tactic}
 
@@ -79,20 +88,55 @@ def catalog():
     return sorted(items, key=lambda t: (tactic_rank(t["tactic"]), t["id"]))
 
 
+def _stored_technique_ids(raw):
+    """Yield catalog ids named by one rule's stored mappings, revoked ids included.
+
+    Accepts the list a rule stores (dicts, or a bare id string), one dict, or one id. An entry
+    with no id, or an id the catalog does not know, yields nothing.
+    """
+    if isinstance(raw, (str, dict)):
+        items = (raw,)
+    elif isinstance(raw, list):
+        items = raw
+    else:
+        return
+    for item in items:
+        if isinstance(item, str):
+            technique_id = item
+        elif isinstance(item, dict) and isinstance(item.get("id"), str):
+            technique_id = item["id"]
+        else:
+            continue
+        if not technique_id:
+            continue
+        try:
+            yield technique(technique_id)["id"]
+        except KeyError:
+            continue
+
+
 def coverage(rules, hits_by_rule):
     """Map each catalog technique to the rules that cover it and their alert counts.
 
     `rules`: [{"id", "name", "enabled", "techniques": [...]}]; `hits_by_rule`: {rule_id: alert count}.
+    Stored technique metadata is read through the catalog, so a revoked id counts as its current
+    one and the catalog supplies the name and tactic. Each rule adds its alerts once per canonical
+    id. A missing or unknown id is ignored.
     """
     by_technique = {t["id"]: {**t, "rules": [], "hits": 0} for t in catalog()}
+    seen = set()
     for rule in rules:
-        for t in rule.get("techniques") or []:
-            entry = by_technique.get(t["id"])
-            if entry is None:
+        rule_id = rule["id"]
+        hits = hits_by_rule.get(rule_id, 0)
+        for canonical_id in _stored_technique_ids(rule.get("techniques")):
+            key = (rule_id, canonical_id)
+            if key in seen:
                 continue
-            entry["rules"].append({"id": rule["id"], "name": rule["name"], "enabled": bool(rule["enabled"]),
-                                   "hits": hits_by_rule.get(rule["id"], 0)})
-            entry["hits"] += hits_by_rule.get(rule["id"], 0)
+            seen.add(key)
+            entry = by_technique[canonical_id]
+            entry["rules"].append({"id": rule_id, "name": rule["name"], "enabled": bool(rule["enabled"]),
+                                   "hits": hits})
+            entry["hits"] += hits
     items = list(by_technique.values())
     for item in items:
         item["covered"] = any(r["enabled"] for r in item["rules"])
@@ -107,12 +151,55 @@ def coverage(rules, hits_by_rule):
 # Evidence levels, strongest first. Only "validated" counts as covered.
 LEVELS = ("validated", "mapped", "disabled", "gap")
 LEVEL_MEANING = {
-    "validated": "An enabled rule detects a labeled synthetic attack that exercises this technique.",
+    "validated": "An enabled rule detects a labeled test attack for this technique.",
     "mapped": "An enabled rule maps here, but no labeled scenario proves it detects this technique. "
               "Not counted as covered.",
     "disabled": "Only disabled rules map here, so nothing is watching for it.",
     "gap": "No rule maps here.",
 }
+
+# What a labeled scenario actually shows when a rule maps a technique the scenario does not exercise.
+# The clause is used only while that scenario is detected and the technique stays untagged, so a later
+# scenario that does exercise the technique drops the line (the technique is validated instead).
+_UNPROVEN = {
+    ("web_scan", "T1190"): "probes and injects but never exploits",
+    ("port_sweep", "T1595.001"): "sweeps one host's ports and never scans IP blocks",
+    ("exfiltration", "T1048"): "reads cloud storage and never shows an exfiltration channel",
+}
+
+
+def mapped_why(technique_id, rules, scenarios):
+    """One sentence for a mapped technique: why no labeled scenario validates it.
+
+    `rules` are evidence rows ({"id", "enabled", "detected": [scenario names]}). `scenarios` is
+    {name: {"malicious", "techniques"}}. Returns None when no enabled rule is left to explain.
+    """
+    technique_id = _canonical(technique_id)
+    clauses = []
+    for rule in rules:
+        if not rule.get("enabled"):
+            continue
+        detected = [n for n in (rule.get("detected") or []) if n in scenarios]
+        malicious = [n for n in detected if scenarios[n].get("malicious")]
+        if malicious:
+            for name in malicious:
+                fact = _UNPROVEN.get((name, technique_id))
+                if fact:
+                    clauses.append(f"{rule['id']} detects {name}, which {fact}")
+                else:
+                    others = [_canonical(t) for t in scenarios[name].get("techniques") or []
+                              if _canonical(t) != technique_id]
+                    shown = f"exercises {', '.join(others)}" if others else "is not tagged with it"
+                    clauses.append(f"{rule['id']} detects {name}, which {shown}, not {technique_id}")
+        else:
+            benign = [n for n in detected if not scenarios[n].get("malicious")]
+            if benign:
+                clauses.append(f"{rule['id']} fires only on benign scenario(s) ({', '.join(benign)}), "
+                               "not a labeled attack")
+            else:
+                clauses.append(f"{rule['id']} detects no labeled scenario")
+    unique = list(dict.fromkeys(clauses))
+    return "; ".join(unique) + "." if unique else None
 
 
 def evidence(cov, lab_rules, scenarios):
@@ -129,20 +216,24 @@ def evidence(cov, lab_rules, scenarios):
         rules, proving = [], set()
         for r in t["rules"]:
             row = lab.get(r["id"], {})
-            proves = sorted(n for n in row.get("detected", []) if r["enabled"] and n in scenarios
-                            and scenarios[n]["malicious"] and t["id"] in scenarios[n].get("techniques", ()))
+            detected = list(row.get("detected") or [])
+            proves = sorted(n for n in detected if r["enabled"] and n in scenarios
+                            and scenarios[n]["malicious"]
+                            and t["id"] in {_canonical(tag) for tag in scenarios[n].get("techniques", ())})
             proving.update(proves)
             rules.append({**r, "verdict": row.get("verdict"), "lookalikes_tested": row.get("lookalikes_tested", []),
                           "lookalikes_fired": row.get("lookalikes_fired", []) + row.get("other_benign_fired", []),
-                          "proves": proves})
+                          "proves": proves, "detected": detected})
         if proving:
             level = "validated"
         elif any(r["enabled"] for r in t["rules"]):
             level = "mapped"
         else:
             level = "disabled" if t["rules"] else "gap"
-        items.append({**t, "rules": rules, "level": level, "covered": level == "validated",
-                      "scenarios": sorted(proving)})
+        why = mapped_why(t["id"], rules, scenarios) if level == "mapped" else None
+        published = [{k: v for k, v in rule.items() if k != "detected"} for rule in rules]
+        items.append({**t, "rules": published, "level": level, "covered": level == "validated",
+                      "scenarios": sorted(proving), "why": why})
     levels = {lvl: sum(i["level"] == lvl for i in items) for lvl in LEVELS}
     return {**cov, "techniques": items, "levels": list(LEVELS), "level_meaning": LEVEL_MEANING,
             "summary": {**cov["summary"], "covered": levels["validated"], "levels": levels}}
@@ -161,7 +252,8 @@ def navigator_layer(cov):
     def comment(t):
         rules = ", ".join(r["id"] + ("" if r["enabled"] else " (disabled)") for r in t["rules"]) or "none"
         proof = f" Detected on synthetic scenario(s): {', '.join(t['scenarios'])}." if t["scenarios"] else ""
-        return f"{t['level'].capitalize()}: {LEVEL_MEANING[t['level']]}{proof} Rules: {rules}"
+        why = f" {t['why']}" if t.get("why") else ""
+        return f"{t['level'].capitalize()}: {LEVEL_MEANING[t['level']]}{proof}{why} Rules: {rules}"
 
     return {
         "name": "Watchpost rule coverage",

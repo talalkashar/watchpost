@@ -5,17 +5,25 @@ evidence, notes, and ATT&CK techniques. `build_from_alert(conn, alert_id)` repor
 Both return the same model shape.
 """
 
+import ipaddress
 import json
+from datetime import timedelta
 
 from . import __version__, attack, incidents
-from .db import now_iso
+from .correlate import entity_key
+from .db import iso, now_iso, parse_iso
 from .pdfwriter import Document
 from .queries import QueryError, get_alert
 
 SEVERITY_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 SYNTHETIC_BANNER = ("SYNTHETIC DATA: this report was generated from simulated events for demonstration. "
                     "It does not describe a real intrusion.")
+# Same sentence as the incident case export. "mapped" is a rule name, not a proved detection.
+LEVEL_NOTE = ("Evidence level is the labeled-scenario grade. "
+              "Only validated means a scenario proved the technique. "
+              "mapped means an enabled rule names it and is not proof.")
 EVIDENCE_PER_ALERT = 25
+# Merged timeline keeps this many events, earliest by ts, then id. The rest are timeline_omitted.
 TIMELINE_LIMIT = 200
 
 # Recommended response actions by ATT&CK technique id. Sub-techniques fall back to their parent id.
@@ -35,7 +43,10 @@ ACTIONS = {
     "T1190": ["Check web server logs for successful exploitation and patch the exposed application."],
     "T1548": ["Review sudoers/admin group membership on the host; remove rights that are not needed."],
     "T1548.003": ["Audit /etc/sudoers and sudo logs on the host; require re-authentication for sudo."],
+    # T1562.008 was revoked; rules still name it, and the catalog stores T1685.002. Same response either way.
     "T1562.008": ["Turn cloud audit logging back on (StartLogging, or recreate the trail) and restrict who may stop it.",
+                  "Treat the time logging was off as a blind spot and review it from other sources."],
+    "T1685.002": ["Turn cloud audit logging back on (StartLogging, or recreate the trail) and restrict who may stop it.",
                   "Treat the time logging was off as a blind spot and review it from other sources."],
     "T1068": ["Patch the host's kernel and local services; rebuild it if root was obtained."],
     "T1136": ["Disable accounts created during the incident window and confirm who requested them."],
@@ -98,11 +109,35 @@ def rule_techniques(conn, rule_id):
     return result
 
 
+def evidence_level(graded, technique_id):
+    """Coverage grade for a technique named on a report. Unknown or ungraded stays mapped."""
+    level = graded.get(technique_id, "mapped")
+    return level if level in attack.LEVELS else "mapped"
+
+
+def _stamp_levels(conn, model):
+    """Copy each technique's coverage grade onto the tactic groups and the member alerts."""
+    graded = {row["id"]: row["level"] for row in incidents.coverage(conn)["techniques"]}
+    for items in model["techniques_by_tactic"].values():
+        for technique in items:
+            technique["level"] = evidence_level(graded, technique["id"])
+    for alert in model["alerts"]:
+        for technique in alert.get("techniques") or []:
+            technique["level"] = evidence_level(graded, technique["id"])
+    return model
+
+
 def actions_for(techniques):
     """Recommended actions keyed by technique, de-duplicated, with a generic fallback."""
     rows, seen = [], set()
     for t in techniques:
-        for action in ACTIONS.get(t["id"]) or ACTIONS.get(t["id"].split(".")[0]) or []:
+        # A stored technique may still carry a revoked id. The action is keyed by the current one.
+        try:
+            current_id = attack.technique(t["id"])["id"]
+        except KeyError:
+            current_id = t["id"]
+        for action in (ACTIONS.get(current_id) or ACTIONS.get(t["id"])
+                       or ACTIONS.get(current_id.split(".")[0]) or ACTIONS.get(t["id"].split(".")[0]) or []):
             if action not in seen:
                 seen.add(action)
                 rows.append({"technique": t["id"], "action": action})
@@ -111,20 +146,97 @@ def actions_for(techniques):
     return rows
 
 
+def _folded_entity(kind, value):
+    """Entity list key. Accounts and hosts use the correlation fold. An IP uses the form ingest stores."""
+    if not value:
+        return None
+    if kind in ("src_ip", "dest_ip"):
+        text = str(value)
+        try:
+            return str(ipaddress.ip_address(text))
+        except ValueError:
+            return text
+    return entity_key(kind, value)
+
+
+def _timeline_bounds(alert, pad_minutes=30):
+    """Window and entity predicates for one alert. None when the related timeline would be empty.
+
+    Same match as queries.related_timeline: entities taken from the evidence already on the alert,
+    source IPs exact, users and hosts COLLATE NOCASE, from pad_minutes before first_seen through
+    pad_minutes after last_seen.
+    """
+    ips = {e["src_ip"] for e in alert["evidence"] if e["src_ip"]}
+    users = {e["user"] for e in alert["evidence"] if e["user"]}
+    hosts = {e["host"] for e in alert["evidence"] if e.get("host")}
+    if not ips and not users and not hosts:
+        return None
+    start = iso(parse_iso(alert["first_seen"]) - timedelta(minutes=pad_minutes))
+    end = iso(parse_iso(alert["last_seen"]) + timedelta(minutes=pad_minutes))
+    clauses, args = [], []
+    if ips:
+        clauses.append(f"src_ip IN ({','.join('?' for _ in ips)})")
+        args += sorted(ips)
+    if users:
+        clauses.append(f"user COLLATE NOCASE IN ({','.join('?' for _ in users)})")
+        args += sorted(users)
+    if hosts:
+        clauses.append(f"host COLLATE NOCASE IN ({','.join('?' for _ in hosts)})")
+        args += sorted(hosts)
+    return f"ts BETWEEN ? AND ? AND ({' OR '.join(clauses)})", [start, end] + args
+
+
+def _merged_timeline_total(conn, alerts):
+    """Distinct events inside any alert's related window.
+
+    Each alert detail keeps 300 of those events. Adding the per-alert omitted counts would
+    count a shared event twice, and an event dropped from one alert can still be inside another's
+    returned rows. The in-memory merge is the floor when this predicate undercounts.
+    """
+    seen = set()
+    for alert in alerts:
+        bounds = _timeline_bounds(alert)
+        if bounds is None:
+            continue
+        where_sql, bound = bounds
+        for row in conn.execute(f"SELECT id FROM events WHERE {where_sql}", bound):
+            seen.add(row["id"])
+    return len(seen)
+
+
+def _all_notes(conn, alert_ids):
+    """Every note on these alerts, oldest first. The alert page keeps the newest 100."""
+    if not alert_ids:
+        return []
+    marks = ",".join("?" * len(alert_ids))
+    return [dict(r) for r in conn.execute(
+        "SELECT id, alert_id, author, body, created_at FROM alert_notes"
+        f" WHERE alert_id IN ({marks}) ORDER BY created_at, id",
+        alert_ids)]
+
+
+def _evidence_total(alert):
+    """Live evidence rows. A model built before that total existed falls back to the stored count."""
+    total = alert.get("evidence_total")
+    if total is None:
+        return alert.get("event_count") or 0
+    return total
+
+
 def _assemble(conn, kind, ident, title, alerts, extra):
     """Merge full alert details into the shared report model."""
-    ips, users, hosts, timeline, notes, techniques = set(), set(), set(), {}, [], {}
+    ips, users, hosts, timeline, techniques = set(), set(), set(), {}, {}
     for a in alerts:
         for e in a["evidence"]:
-            ips.update(filter(None, (e.get("src_ip"), e.get("dest_ip"))))
-            users.update(filter(None, (e.get("user"),)))
-            hosts.update(filter(None, (e.get("host"),)))
+            for field, bucket in (("src_ip", ips), ("dest_ip", ips), ("user", users), ("host", hosts)):
+                folded = _folded_entity(field, e.get(field))
+                if folded:
+                    bucket.add(folded)
         for e in a["timeline"]:
             timeline.setdefault(e["id"], {**e, "alert_ids": []})
             if e["is_evidence"]:
                 timeline[e["id"]]["alert_ids"].append(a["id"])
                 timeline[e["id"]]["is_evidence"] = True
-        notes += [{**n, "alert_id": a["id"]} for n in a["notes"]]
         a["techniques"] = rule_techniques(conn, a["rule_id"])
         for t in a["techniques"]:
             techniques.setdefault(t["id"], t)
@@ -138,6 +250,11 @@ def _assemble(conn, kind, ident, title, alerts, extra):
     for a in alerts:
         for asset in a.get("assets") or []:
             matched.setdefault(asset["name"], asset)
+    # One row per event. A second alert that saw the same event does not add a second row.
+    ordered = sorted(timeline.values(), key=lambda e: (e["ts"], e["id"]))
+    shown = ordered[:TIMELINE_LIMIT]
+    timeline_total = max(len(ordered), _merged_timeline_total(conn, alerts))
+    notes = _all_notes(conn, [a["id"] for a in alerts])
     model = {
         "kind": kind, "id": ident, "title": title, "severity": severity, "status": None,
         "assets": [matched[k] for k in sorted(matched)],
@@ -147,8 +264,10 @@ def _assemble(conn, kind, ident, title, alerts, extra):
         "alerts": [{k: a.get(k) for k in ("id", "title", "rule_id", "rule_version", "severity", "base_severity",
                                           "severity_note", "status", "disposition", "explanation", "first_seen",
                                           "last_seen", "event_count", "techniques", "assets")}
-                   | {"evidence": a["evidence"][:EVIDENCE_PER_ALERT]} for a in alerts],
-        "timeline": sorted(timeline.values(), key=lambda e: (e["ts"], e["id"]))[:TIMELINE_LIMIT],
+                   | {"evidence": a["evidence"][:EVIDENCE_PER_ALERT],
+                      "evidence_total": len(a["evidence"]) + (a.get("evidence_omitted") or 0)} for a in alerts],
+        "timeline": shown,
+        "timeline_omitted": timeline_total - len(shown),
         "techniques_by_tactic": by_tactic,
         "notes": sorted(notes, key=lambda n: (n["created_at"], n["id"])),
         "actions": actions_for([t for items in by_tactic.values() for t in items]),
@@ -196,13 +315,14 @@ def build_from_alert(conn, alert_id):
     model = _assemble(conn, "alert", alert["id"], alert["title"], [alert], {})
     model["status"] = alert["status"] + (f" ({alert['disposition']})" if alert.get("disposition") else "")
     model["summary"] = _summary(model)
-    return model
+    return _stamp_levels(conn, model)
 
 
 def build(conn, incident_id):
     try:
         incident = incidents.get_incident(conn, incident_id)
-        alerts = [get_alert(conn, a["id"]) for a in incident["alerts"]]
+        # The detail page caps alerts. The report still covers every linked alert, earliest first.
+        alerts = [get_alert(conn, row["id"]) for row in incidents.linked_alerts(conn, incident_id)]
     except QueryError as exc:
         raise ReportError(str(exc), exc.status)
     model = _assemble(conn, "incident", incident["id"], incident["title"], alerts, {})
@@ -214,7 +334,12 @@ def build(conn, incident_id):
     if incident["severity"] in SEVERITY_ORDER:
         model["severity"] = incident["severity"]
     for key, name in (("ips", "src_ip"), ("users", "user"), ("hosts", "host")):
-        model["entities"][key] = sorted(set(model["entities"][key]) | set(incident["entities"].get(name) or []))
+        extra = set()
+        for value in incident["entities"].get(name) or []:
+            folded = _folded_entity(name, value)
+            if folded:
+                extra.add(folded)
+        model["entities"][key] = sorted(set(model["entities"][key]) | extra)
     known = {a["name"]: a for a in model["assets"]}
     for a in incident.get("assets") or []:
         known.setdefault(a["name"], a)
@@ -227,7 +352,7 @@ def build(conn, incident_id):
     model["techniques_by_tactic"] = by_tactic or model["techniques_by_tactic"]
     model["actions"] = actions_for([t for items in model["techniques_by_tactic"].values() for t in items])
     model["summary"] = _summary(model)
-    return model
+    return _stamp_levels(conn, model)
 
 
 # --- Renderers -----------------------------------------------------------------------------
@@ -254,6 +379,27 @@ def _alert_refs(t):
     return f" (alert{'s' if len(ids) > 1 else ''} " + ", ".join(f"#{i}" for i in ids) + ")" if ids else ""
 
 
+def _technique_phrase(t):
+    """Technique id, name, and evidence level. A missing level is mapped, which is not proof."""
+    raw = f"{t['id']} {t.get('name') or ''}".strip()
+    return f"{raw} ({t.get('level') or 'mapped'})"
+
+
+def _technique_list(techniques):
+    if not techniques:
+        return "none"
+    return ", ".join(_technique_phrase(t) for t in techniques)
+
+
+def timeline_note(m):
+    """How many merged events the cap dropped. None when the timeline fits, so the page stays quiet."""
+    omitted = m["timeline_omitted"]
+    if not omitted:
+        return None
+    shown = len(m["timeline"])
+    return f"First {shown} of {shown + omitted} timeline events shown."
+
+
 def to_markdown(m):
     label = "Incident" if m["kind"] == "incident" else "Alert"
     out = [f"# {label} report: {md(m['title'])}", ""]
@@ -278,25 +424,26 @@ def to_markdown(m):
                           for a in m["assets"]])
     else:
         out.append("No inventoried asset is involved.")
-    out += ["", "## MITRE ATT&CK techniques", ""]
+    out += ["", "## MITRE ATT&CK techniques", "", LEVEL_NOTE, ""]
     if m["techniques_by_tactic"]:
         for tactic, items in m["techniques_by_tactic"].items():
-            out.append(f"- **{md(tactic)}:** " + ", ".join(f"{md(t['id'])} {md(t['name'])}".strip() + _alert_refs(t)
-                                                          for t in items))
+            out.append(f"- **{md(tactic)}:** " + ", ".join(md(_technique_phrase(t)) + _alert_refs(t) for t in items))
     else:
         out.append("No ATT&CK mapping is recorded for the rules involved.")
     out += ["", "## Timeline", ""]
     out += _md_table(["Time", "Type", "User", "Source IP", "Host", "Evidence", "Message"],
                      [[e["ts"], e["event_type"], e.get("user"), e.get("src_ip"), e.get("host"),
                        "yes" if e["is_evidence"] else "", e.get("message")] for e in m["timeline"]])
+    note = timeline_note(m)
+    if note:
+        out += ["", f"_{note}_"]
     out += ["", "## Alerts and evidence", ""]
     for a in m["alerts"]:
-        techs = ", ".join(t["id"] for t in a["techniques"]) or "none"
         out += [f"### Alert #{a['id']}: {md(a['title'])}", "",
                 f"- **Rule:** `{md(a['rule_id'])}` v{a['rule_version']} · **Severity:** {md(a['severity'])} · "
                 f"**Status:** {md(a['status'])}" + (f" ({md(a['disposition'])})" if a["disposition"] else ""),
                 f"- **Window:** {md(a['first_seen'])} to {md(a['last_seen'])} · **Events:** {a['event_count']}",
-                f"- **Techniques:** {md(techs)}"]
+                f"- **Techniques:** {md(_technique_list(a['techniques']))}"]
         if a.get("severity_note") and a.get("base_severity") and a["base_severity"] != a["severity"]:
             out.append(f"- **Asset weighting:** rule severity {md(a['base_severity'])}; {md(a['severity_note'])}")
         out += ["", f"**Why it fired:** {md(a['explanation'])}", ""]
@@ -304,8 +451,9 @@ def to_markdown(m):
         out += _md_table(["Time", "Type", "User", "Source IP", "Host", "Message"],
                          [[e["ts"], e["event_type"], e.get("user"), e.get("src_ip"), e.get("host"), e.get("message")]
                           for e in a["evidence"]])
-        if shown < (a["event_count"] or 0):
-            out.append(f"\n_First {shown} of {a['event_count']} evidence events shown._")
+        total = _evidence_total(a)
+        if shown < total:
+            out.append(f"\n_First {shown} of {total} evidence events shown._")
         out.append("")
     out += ["## Analyst notes", ""]
     out += [f"- {md(n['created_at'])} **{md(n['author'])}**"
@@ -353,11 +501,13 @@ def to_pdf_bytes(m):
     else:
         doc.text("No inventoried asset is involved.")
     doc.heading("MITRE ATT&CK techniques")
+    doc.text(LEVEL_NOTE, size=9)
     if m["techniques_by_tactic"]:
-        doc.table(["Tactic", "Technique", "Name", "Alerts"],
-                  [[tactic, t["id"], t["name"], ", ".join(f"#{i}" for i in t.get("alert_ids") or []) or "-"]
+        doc.table(["Tactic", "Technique", "Name", "Evidence level", "Alerts"],
+                  [[tactic, t["id"], t["name"], t.get("level") or "mapped",
+                    ", ".join(f"#{i}" for i in t.get("alert_ids") or []) or "-"]
                    for tactic, items in m["techniques_by_tactic"].items() for t in items],
-                  widths=[2, 1, 3.4, 1], size=9)
+                  widths=[1.6, 1.05, 2.55, 1.3, 0.9], size=9)
     else:
         doc.text("No ATT&CK mapping is recorded for the rules involved.")
     doc.heading("Timeline")
@@ -365,12 +515,15 @@ def to_pdf_bytes(m):
               [[e["ts"], e["event_type"], e.get("user"), e.get("src_ip"), e.get("host"),
                 "*" if e["is_evidence"] else "", e.get("message")] for e in m["timeline"]],
               widths=[2.3, 1.5, 1, 1.4, 0.9, 0.4, 3.5], size=7)
+    note = timeline_note(m)
+    if note:
+        doc.text(note, size=8, color=(0.4, 0.4, 0.4))
     doc.heading("Alerts and evidence")
     for a in m["alerts"]:
         doc.text(f"Alert #{a['id']}: {a['title']}", size=11, bold=True)
         doc.text(f"Rule {a['rule_id']} v{a['rule_version']} | severity {a['severity']} | status {a['status']}"
                  + (f" ({a['disposition']})" if a["disposition"] else "") + f" | {a['event_count']} events | "
-                 f"techniques: {', '.join(t['id'] for t in a['techniques']) or 'none'}", size=9)
+                 f"techniques: {_technique_list(a['techniques'])}", size=9)
         if a.get("severity_note") and a.get("base_severity") and a["base_severity"] != a["severity"]:
             doc.text(f"Asset weighting: rule severity {a['base_severity']}; {a['severity_note']}", size=9, indent=8)
         doc.text("Why it fired: " + (a["explanation"] or ""), size=9, indent=8)
@@ -378,8 +531,10 @@ def to_pdf_bytes(m):
         doc.table(["Time", "Type", "User", "Source IP", "Host", "Message"],
                   [[e["ts"], e["event_type"], e.get("user"), e.get("src_ip"), e.get("host"), e.get("message")]
                    for e in a["evidence"]], widths=[2.3, 1.5, 1, 1.4, 0.9, 3.9], size=7)
-        if len(a["evidence"]) < (a["event_count"] or 0):
-            doc.text(f"First {len(a['evidence'])} of {a['event_count']} evidence events shown.", size=8,
+        shown = len(a["evidence"])
+        total = _evidence_total(a)
+        if shown < total:
+            doc.text(f"First {shown} of {total} evidence events shown.", size=8,
                      color=(0.4, 0.4, 0.4))
     doc.heading("Analyst notes")
     if m["notes"]:
