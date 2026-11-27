@@ -121,7 +121,9 @@ const Graph = (() => {
       filterState.textContent = filters.join(" · ");
       empty.hidden = !!visible.length;
       empty.textContent = nodes.length ? "No nodes match these filters." : "No alerts yet. Detected alerts and their evidence will appear here.";
-      locked = null; select(null); prepareLinks(); searchNodes(); fit();
+      locked = null;
+      if (selected) select(null); else prepareLinks();
+      searchNodes(); fit();
     }
 
     function searchNodes() {
@@ -380,12 +382,11 @@ const Graph = (() => {
 
     let labelOrder = [];
     function drawLabels() {
-      const alpha = selected ? 1 : clamp((zoom - 1.35) / .65, 0, 1);
-      if (!alpha) return;
-      ctx.globalAlpha = alpha;
+      if (!selected) return;
+      const neighbourAlpha = clamp(.48 + (zoom - 1) * .65, .48, 1);
       const areas = [], budget = Math.min(18, Math.max(4, Math.floor(width * height / 24000 * zoom)));
       ctx.font = '500 11px ui-monospace, Menlo, monospace'; ctx.textAlign = "center";
-      const order = selected ? [selected, ...labelOrder.filter((n) => n !== selected && neighborhood.has(n))] : labelOrder;
+      const order = [selected, ...labelOrder.filter((n) => n !== selected && neighborhood.has(n))];
       for (const n of order) {
         if (areas.length >= budget) break;
         const text = n.caption.length > 22 ? n.caption.slice(0, 21) + "…" : n.caption;
@@ -394,6 +395,7 @@ const Graph = (() => {
         if (areas.some((a) => Math.abs(x - a.x) < (a.w + w) / 2 && Math.abs(y - a.y) < 15)) continue;
         if (visible.some((m) => m !== n && Math.abs(y - 4 - m.py) < m.r + 5 && Math.abs(x - m.px) < w / 2 + m.r)) continue;
         areas.push({ x, y, w });
+        ctx.globalAlpha = n === selected ? 1 : neighbourAlpha;
         ctx.lineWidth = 3.5; ctx.strokeStyle = "#090909"; ctx.strokeText(text, x, y);
         ctx.fillStyle = n.type === "incident" ? "#dbcaff" : "#ddd"; ctx.fillText(text, x, y);
       }
