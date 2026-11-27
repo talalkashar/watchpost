@@ -90,15 +90,18 @@ _NAMESPACES = (f'xmlns:s="{SOAP}" xmlns:a="{ADDRESSING}" xmlns:e="{EVENTING}" xm
                f'xmlns:w="{WSMAN}" xmlns:p="{MS_WSMAN}"')
 
 # The Security events Watchpost has an event type for (normalize.WINDOWS_EVENT_IDS).
-DEFAULT_EVENT_IDS = (4624, 4625, 4648, 4663, 4672, 4688, 4720, 4740)
+DEFAULT_EVENT_IDS = (4624, 4625, 4648, 4663, 4672, 4688, 4720, 4740, 4771, 5145, 5152, 5156, 5157)
 # Field names Watchpost reads from a record (normalize.FIELD_ALIASES). Event data under one of these names
 # is renamed, so a provider's own "level" or "time" field cannot make Watchpost refuse the event.
 RESERVED_FIELDS = frozenset("""ts timestamp @timestamp time TimeCreated event_time source log_source Channel host
     hostname Computer device event_type type action category outcome result status severity level user username
     user_name TargetUserName account src_ip source_ip client_ip ip IpAddress remote_addr dest_ip destination_ip
     server_ip dst_ip dest_port destination_port dst_port dport bytes bytes_out bytes_sent sent_bytes out_bytes
+    ComputerName AccountName SourceAddress ClientAddress DestAddress DestinationAddress DestinationIp DestPort DestinationPort
     message msg description EventID event_id raw synthetic""".split())
-WINDOWS_FIELDS = frozenset({"TargetUserName", "IpAddress"})   # event data Watchpost is meant to read
+ADDRESS_FIELDS = ("IpAddress", "SourceAddress", "ClientAddress", "DestAddress", "DestinationAddress", "DestinationIp")
+PORT_FIELDS = ("DestPort", "DestinationPort")
+WINDOWS_FIELDS = frozenset({"TargetUserName", "AccountName", *ADDRESS_FIELDS, *PORT_FIELDS})   # event data Watchpost is meant to read
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._$-]{0,252}$")
 _SOURCE = re.compile(r"^[A-Za-z0-9_.:\-]{1,64}$")
@@ -344,12 +347,18 @@ def event_record(event, sender, source):
         named += [(_local(item.tag), item) for item in parts["UserData"][0]]
     for name, item in named[:MAX_DATA_FIELDS]:
         record[_field_name(name)] = "".join(item.itertext())[:MAX_VALUE]
-    address = record.pop("IpAddress", None)
-    if address:
-        try:
-            record["IpAddress"] = str(ipaddress.ip_address(address.strip()))
-        except ValueError:   # "-", "LOCAL", a host name: Watchpost would refuse the whole event
-            record["win_IpAddress"] = address
+    for name in ADDRESS_FIELDS:
+        address = record.pop(name, None)
+        if address:
+            try:
+                record[name] = str(ipaddress.ip_address(address.strip()))
+            except ValueError:
+                record[f"win_{name}"] = address
+    for name in PORT_FIELDS:
+        if name in record:
+            port = record[name].strip()
+            if not (port.isascii() and port.isdecimal() and int(port) <= 65535):
+                record[f"win_{name}"] = record.pop(name)
 
     def value(name):
         return (system[name].text or "").strip()[:MAX_VALUE] if name in system else ""
