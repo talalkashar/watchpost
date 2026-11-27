@@ -34,6 +34,7 @@ HOSTS = ["web01", "WEB02", "db01", None, "Web-03"]
 SRC = ["203.0.113.5", "10.0.0.5", None, "10.1.2.3"]
 DEST = ["10.0.0.5", "198.51.100.1", None]
 PORTS = [22, 443, None, 8080]
+BYTE_COUNTS = [0, 100, 1_000_000, None]
 TYPES = ["auth_failure", "auth_success", "web_request", "fw_deny"]
 SOURCES = ["ssh", "web", "FW", "SSH-gw"]
 MESSAGES = ["Invalid password for alice", "GET /admin 100% done", "under_score here", None, "ÉCOLE fermée",
@@ -43,8 +44,10 @@ QUERIES = [
     "user:alice", "user:ALICE", "user:émile", "user:Émile", "user:al*", "user:AL*", 'user:"al*"', "user:al_ice",
     "NOT user:alice", "-user:bob", "host:web*", "host:WEB*", "host:web01", "host:WEB01", "host:*", "NOT host:*",
     "src_ip:10.0.0.5", "ip:10.0.0.5", "ip:10.*", "NOT ip:10.*", "dest_ip:198.51.100.1", "dest_port:22",
+    "src_ip:2001:DB8::1", "ip:2001:0db8:0:0:0:0:0:1", "src_ip:2001:DB8*",
     "NOT dest_port:22", "event_type:auth_failure", "event_type:auth*", "NOT event_type:web_request",
-    "synthetic:1", "synthetic:false", "password", "PASSWORD", '"100%"', "under_score", '"under_"', "école",
+    "synthetic:1", "synthetic:false", "bytes:>=1000000", "bytes:>100", "bytes:<=100", "bytes:<100",
+    "bytes:=0", "NOT bytes:>=1000000", "password", "PASSWORD", '"100%"', "under_score", '"under_"', "école",
     "ÉCOLE", "message:admin*", "message:*", '"back\\\\slash"', "source:ssh", "source:SSH", "source:s*",
     'user:alice event_type:auth_failure NOT src_ip:10.0.0.5', "dest_ip:198.51.100.1 NOT user:al*",
     '"invalid password"', "-message:admin host:w*", "user:* NOT user:a*",
@@ -65,8 +68,15 @@ class MatcherCrossCheckTests(unittest.TestCase):
                 batch.append({"ts": iso(T0 + timedelta(seconds=n)), "source": SOURCES[k % 4], "severity": "low",
                               "host": HOSTS[k % 5], "event_type": TYPES[k % 4], "user": USERS[k % 10],
                               "src_ip": SRC[k % 4], "dest_ip": DEST[k % 3], "dest_port": PORTS[k % 4],
+                              "bytes": BYTE_COUNTS[k % 4],
                               "message": MESSAGES[k % 8]})
             engine.store_batch(self.conn, batch, [], "test", "json", "test", synthetic=synthetic)
+        # Ingest stores this compressed form. The queries above spell the same address differently.
+        engine.store_batch(self.conn, [{
+            "ts": iso(T0), "source": "lab", "severity": "low", "host": "web01",
+            "event_type": "auth_failure", "user": "alice", "src_ip": "2001:db8::1",
+            "message": "[SYNTHETIC] v6",
+        }], [], "test", "json", "test", synthetic=True)
         self.events = [dict(r) for r in self.conn.execute(f"SELECT {engine.RULE_EVENT_FIELDS} FROM events")]
 
     def test_python_matcher_agrees_with_sql(self):
@@ -89,8 +99,13 @@ class MatcherCrossCheckTests(unittest.TestCase):
         self.assertFalse(match({"user": "alicex"}))
         # NOCASE folds ASCII only, as SQLite does.
         self.assertFalse(search_rules.matcher(search_rules.parse_filter("user:émile")[1])({"user": "Émile"}))
-        # Equality on other text fields is exact; prefixes (LIKE) ignore ASCII case.
-        self.assertFalse(search_rules.matcher(search_rules.parse_filter("host:WEB01")[1])({"host": "web01"}))
+        # Host and source fold ASCII case. Other text equality stays exact.
+        self.assertTrue(search_rules.matcher(search_rules.parse_filter("host:WEB01")[1])({"host": "web01"}))
+        self.assertTrue(search_rules.matcher(search_rules.parse_filter("source:LAB")[1])({"source": "lab"}))
+        # outcome is refused in a detection rule, so the term is built here. Equality folds ASCII.
+        outcome = [{"field": "outcome", "value": "Failure", "negate": False, "quoted": False}]
+        self.assertTrue(search_rules.matcher(outcome)({"outcome": "failure"}))
+        self.assertFalse(search_rules.matcher(outcome)({"outcome": "échec"}))
         self.assertTrue(search_rules.matcher(search_rules.parse_filter("host:WEB*")[1])({"host": "web01"}))
         # NOT keeps events that lack the field.
         self.assertTrue(search_rules.matcher(search_rules.parse_filter("NOT host:web*")[1])({"host": None}))
@@ -180,6 +195,22 @@ class WindowTests(unittest.TestCase):
         finding, = search_rules.run([ev(n, n, user=u) for n, u in enumerate(["alice", "Alice", "ALICE"], 1)], by_user)
         self.assertEqual((finding["group_key"], finding["event_ids"]), ("alice", [1, 2, 3]))
 
+    def test_user_group_folds_ascii_letters_only(self):
+        by_user = compiled("event_type:web_request", group_by="user")["params"]
+        # Two and two stay under a threshold of 3. str.lower() would make one group of 4.
+        apart = [ev(1, 0, user="ÉRIN"), ev(2, 1, user="ÉRIN"), ev(3, 2, user="érin"), ev(4, 3, user="érin")]
+        self.assertEqual(search_rules.run(apart, by_user), [])
+        finding, = search_rules.run(
+            [ev(n, n, user=u) for n, u in enumerate(["ÉRIN", "Érin", "ÉRIN"], 1)], by_user)
+        self.assertEqual((finding["group_key"], finding["event_ids"]), ("Érin", [1, 2, 3]))
+        self.assertIn("user Érin", finding["title"])
+        # A host group stays the stored spelling, so these two names do not share a threshold.
+        by_host = compiled("event_type:web_request", group_by="host")["params"]
+        hosts = [ev(1, 0, host="WEB01"), ev(2, 1, host="WEB01"), ev(3, 2, host="web01"), ev(4, 3, host="web01")]
+        self.assertEqual(search_rules.run(hosts, by_host), [])
+        finding, = search_rules.run([ev(n, n, host="WEB01") for n in range(1, 4)], by_host)
+        self.assertEqual(finding["group_key"], "WEB01")
+
     def test_sample_result(self):
         malicious = [{"event_type": "web_request", "src_ip": "203.0.113.9"}] * 3
         benign = [{"event_type": "web_request", "src_ip": "203.0.113.9"}] * 2
@@ -263,6 +294,7 @@ class PromoteWorkflowTests(ServerTestCase):
         self.assertEqual((data["compiled"]["rule_id"], data["compiled"]["query"]), (RULE_ID, WEB_QUERY))
         bt = data["backtest"]
         self.assertEqual((bt["matched_events"], bt["findings"], bt["group_keys"]), (6, 1, ["203.0.113.9"]))
+        self.assertEqual(bt["group_keys_omitted"], 0)
         self.assertEqual(bt["sample_findings"][0]["event_count"], 4)
         self.assertIsNone(data["sample"])
         self.assertEqual(analyst.get("/api/changes")[1], [])

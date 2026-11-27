@@ -1,0 +1,52 @@
+# Successful SSH login as a privileged local account from outside the private ranges.
+# Written for Watchpost's Sigma subset (docs/REFERENCE.md, "Sigma rule import").
+# SSH is destination port 22, or an auth line that contains " ssh2". A missing port is not SSH.
+# A recorded port other than 22 stays out (an admin HTTPS login is not this rule).
+title: Successful Privileged SSH From Internet
+id: a5718903-eba2-470f-98b6-824fe9e38772
+status: experimental
+description: |
+  A successful login as root, admin, or administrator from an address that is not
+  private or local, and that is SSH: destination port 22, or a message containing
+  " ssh2". A privileged login with neither marker stays quiet. Each matching event
+  is evidence; Watchpost groups them per source IP.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1133/
+  - https://attack.mitre.org/techniques/T1078/003/
+tags:
+  - attack.initial_access
+  - attack.t1133
+  - attack.t1078.003
+logsource:
+  category: authentication
+  product: linux
+detection:
+  privileged:
+    event.action: auth_success
+    user.name:
+      - root
+      - admin
+      - administrator
+  ssh_port:
+    DestinationPort: 22
+  ssh_line:
+    message|contains: ' ssh2'
+  internal:
+    SourceIp|cidr:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+      - '::1/128'
+      - fc00::/7
+      - fe80::/10
+  missing_source:
+    SourceIp: null
+  condition: privileged and (ssh_port or ssh_line) and not internal and not missing_source
+falsepositives:
+  - A break-glass login from a home network or from carrier-grade NAT (100.64.0.0/10)
+  - An account literally named admin that is not privileged
+  - A message that contains " ssh2" without being an sshd acceptance
+level: high

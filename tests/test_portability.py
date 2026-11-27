@@ -212,6 +212,55 @@ class EcsTests(ServerTestCase):
         for event_type, (category, _) in ecs.EVENT_TYPE_CATEGORIES.items():
             self.assertTrue(set(category) <= ecs.ECS_CATEGORIES, event_type)
 
+    def test_outcome_folds_ascii_letters_only(self):
+        # Failure is the catalog word. The stored spelling is not rewritten.
+        event = {**SAMPLE, "outcome": "Failure"}
+        doc = ecs.to_ecs(event)
+        self.assertEqual(doc["event"]["outcome"], "failure")
+        self.assertNotIn("outcome", doc.get("watchpost", {}))
+        self.assertEqual(event["outcome"], "Failure")
+        for spelling, catalog in (("SUCCESS", "success"), ("UnKnOwN", "unknown")):
+            mapped = ecs.to_ecs({**SAMPLE, "outcome": spelling})
+            self.assertEqual(mapped["event"]["outcome"], catalog)
+            self.assertNotIn("outcome", mapped.get("watchpost", {}))
+        # İ is not ASCII I. str.lower() would emit i + a combining dot, which is not an ECS outcome.
+        dotted = "fa\u0130lure"
+        kept = ecs.to_ecs({**SAMPLE, "outcome": dotted})
+        self.assertNotIn("outcome", kept["event"])
+        self.assertEqual(kept["watchpost"]["outcome"], dotted)
+        self.assertNotIn("\u0307", kept["watchpost"]["outcome"])
+        # K lowercases to k, so str.lower() would call this `unknown`. It stays the original text.
+        kelvin = "un\u212anown"
+        collided = ecs.to_ecs({**SAMPLE, "outcome": kelvin})
+        self.assertNotIn("outcome", collided["event"])
+        self.assertEqual(collided["watchpost"]["outcome"], kelvin)
+        # A non-string is not folded into a catalog word.
+        other = ecs.to_ecs({**SAMPLE, "outcome": 1})
+        self.assertNotIn("outcome", other["event"])
+        self.assertEqual(other["watchpost"]["outcome"], 1)
+
+    def test_ecs_route_keeps_the_stored_outcome(self):
+        analyst = self.client("analyst")
+        status, data, _ = analyst.post("/api/ingest", {"source": "lab", "synthetic": True, "events": [
+            {"timestamp": "2026-09-15T14:00:00Z", "type": "process", "host": "web01",
+             "outcome": "Failure", "message": "[SYNTHETIC] ecs outcome"},
+            {"timestamp": "2026-09-15T14:01:00Z", "type": "process", "host": "web01",
+             "outcome": "fa\u0130lure", "message": "[SYNTHETIC] ecs dotted outcome"}]})
+        self.assertEqual(status, 201, data)
+        rows = analyst.get("/api/events?source=demo:lab")[1]["events"]
+        by_outcome = {row["outcome"]: row["id"] for row in rows}
+        self.assertEqual(set(by_outcome), {"Failure", "fa\u0130lure"})
+        status, doc, _ = analyst.get(f"/api/events/{by_outcome['Failure']}/ecs")
+        self.assertEqual(status, 200, doc)
+        self.assertEqual(doc["event"]["outcome"], "failure")
+        self.assertNotIn("outcome", doc.get("watchpost", {}))
+        status, doc, _ = analyst.get("/api/events/%s/ecs" % by_outcome["fa\u0130lure"])
+        self.assertEqual(status, 200, doc)
+        self.assertNotIn("outcome", doc["event"])
+        self.assertEqual(doc["watchpost"]["outcome"], "fa\u0130lure")
+        stored = analyst.get("/api/events/%s" % by_outcome["fa\u0130lure"])[1]
+        self.assertEqual(stored["outcome"], "fa\u0130lure")
+
     def test_ecs_route(self):
         analyst, viewer = self.client("analyst"), self.client("viewer")
         status, data, _ = analyst.post("/api/ingest", {"source": "vpn01", "events": [

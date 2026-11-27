@@ -1,0 +1,50 @@
+# Match command chaining in the recorded request target.
+title: Web Command Injection Attempt
+id: e3b1b0bb-cb3e-4057-972b-a9d19ad7bd9e
+status: experimental
+description: |
+  The request target contains a shell separator followed by a command name.
+  The access log records the request and its HTTP status.
+author: Watchpost example
+date: 2026-11-18
+references:
+  - https://attack.mitre.org/techniques/T1190/
+  - https://cwe.mitre.org/data/definitions/78.html
+tags:
+  - attack.initial_access
+  - attack.t1190
+logsource:
+  category: webserver
+detection:
+  web:
+    event.action:
+      - web_request
+      - web_scan
+      - web_error
+  injection:
+    message|contains:
+      - ';wget* -> ???'
+      - ';curl* -> ???'
+      - ';whoami* -> ???'
+      - '; wget* -> ???'
+      - '; curl* -> ???'
+      - '|wget* -> ???'
+      - '|curl* -> ???'
+      - '|whoami* -> ???'
+      - '| wget* -> ???'
+      - '| curl* -> ???'
+      - '$(wget* -> ???'
+      - '$(curl* -> ???'
+      - '$(whoami* -> ???'
+      - '%3bwget* -> ???'
+      - '%3bcurl* -> ???'
+      - '%3bwhoami* -> ???'
+      - '%7cwget* -> ???'
+      - '%7ccurl* -> ???'
+      - '%7cwhoami* -> ???'
+      - '%26%26whoami* -> ???'
+      - '&&whoami* -> ???'
+  condition: web and injection
+falsepositives:
+  - A request that quotes a shell snippet as a search term, including the metacharacter
+level: high
