@@ -17,6 +17,7 @@ body[data-view="graph"] .graph-head h1 { margin: 0; font-size: clamp(25px, 2.45v
 .graph-tip, .graph-empty { position: absolute; max-width: min(260px, 90%); padding: 11px 14px; color: var(--ink);
   background: var(--panel); border: 1px solid var(--line-3); border-radius: 10px; box-shadow: 0 6px 22px #0008; pointer-events: none; }
 .graph-tip { width: max-content; z-index: 1; overflow-wrap: anywhere; }
+.graph-tip button { pointer-events: auto; margin-top: 8px; }
 .graph-tip small { display: block; font: 600 10px var(--mono); text-transform: uppercase; letter-spacing: .08em; color: var(--ink-2); }
 .graph-tip strong { display: block; margin: 4px 0; font-size: 14px; }
 .graph-tip span { display: block; font: 11px/1.45 var(--mono); color: var(--ink-2); }
@@ -34,6 +35,11 @@ body[data-view="graph"] .graph-head h1 { margin: 0; font-size: clamp(25px, 2.45v
 .graph-key summary::marker { color: var(--muted); font-size: 11px; }
 .graph-key-body { padding: 0 15px 18px; }
 body[data-view="graph"] .graph-key h2 { margin: 20px 0 10px; font: 600 10px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+.graph-search { min-width: 0; padding-top: 14px; }
+.graph-search input { width: 100%; min-width: 0; }
+.graph-results { display: grid; max-height: 165px; overflow-y: auto; }
+.graph-results button { text-align: left; padding: 6px 8px; background: transparent; border: 0; border-bottom: 1px solid var(--hair); overflow-wrap: anywhere; }
+.graph-results small { display: block; color: var(--muted); font: 10px var(--mono); }
 .graph-types { display: grid; gap: 5px; }
 .graph-type, .graph-level { border: 1px solid var(--line-3); border-radius: 7px; color: var(--ink); background: var(--panel-2); }
 .graph-type { display: flex; align-items: center; gap: 11px; padding: 6px 10px; text-align: left; font-size: 13px; font-weight: 500; }
@@ -75,7 +81,8 @@ body[data-view="graph"] .graph-key h2 { margin: 20px 0 10px; font: 600 10px var(
   .graph-key { border: 0; border-bottom: 1px solid var(--hair); }
   .graph-key summary { padding: 7px 13px; min-height: 44px; border: 0; }
   .graph-key-body { display: grid; grid-template-columns: 1fr 1fr; column-gap: 12px; padding: 0 12px 12px; }
-  .graph-key h2:nth-of-type(2) { grid-column: 2; grid-row: 1; }
+  .graph-search { grid-column: 1 / -1; padding-top: 4px; }
+  .graph-key h2:nth-of-type(2) { grid-column: 2; grid-row: 2; }
   .graph-key h2:nth-of-type(3), .graph-lines { grid-column: 1 / -1; }
   body[data-view="graph"] .graph-key h2 { margin: 8px 0; }
   .graph-levels { align-content: flex-start; }
