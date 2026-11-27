@@ -88,8 +88,11 @@ function audit(minTap) {
   return problems;
 }
 
-async function login(browser, user, pw, width) {
-  const ctx = await browser.newContext({ viewport: { width, height: width === 320 ? 568 : width === 390 ? 844 : 900 }, hasTouch: width < 761 });
+async function login(browser, user, pw, width, extra = {}) {
+  const ctx = await browser.newContext({
+    viewport: { width, height: extra.height || (width === 320 ? 568 : width === 390 ? 844 : 900) },
+    hasTouch: extra.hasTouch ?? width < 761, isMobile: !!extra.isMobile, reducedMotion: extra.reducedMotion,
+  });
   const page = await ctx.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
@@ -116,7 +119,16 @@ async function auditView(page, label, width) {
   check(!problems.length, `${width}px ${label}${problems.length ? `: ${problems.join("; ")}` : ""}`);
 }
 
-async function checkGraphIncident(page, width, incidentId) {
+// Send a finger tap without changing the desktop context's primary pointer media queries.
+async function tapWithSecondaryTouch(session, locator) {
+  await locator.scrollIntoViewIfNeeded();
+  const box = await locator.boundingBox();
+  await session.send("Input.dispatchTouchEvent", { type: "touchStart",
+    touchPoints: [{ x: box.x + box.width / 2, y: box.y + box.height / 2 }] });
+  await session.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+}
+
+async function checkGraphIncident(page, width, incidentId, secondaryTouch) {
   const hosts = ["us-east-1", "us-west-2", "eu-west-1"].map((region) => `payments-api-${region}.platform.example.com`);
   const label = `Initial Access → Credential Access → Lateral Movement: ${hosts.join(", ")}`;
   await page.route("**/api/graph", (route) => route.fulfill({ json: {
@@ -126,9 +138,16 @@ async function checkGraphIncident(page, width, incidentId) {
   const phone = width < 761;
   if (phone) await page.locator(".graph-key summary").click();
   await page.getByRole("searchbox", { name: "Find a node" }).fill(hosts[0]);
-  await page.locator(".graph-results button").click();
+  const result = page.locator(".graph-results button");
+  if (secondaryTouch) {
+    check(await page.evaluate(() => matchMedia("(hover: hover) and (pointer: fine)").matches),
+      `${width}px touch laptop has a fine primary pointer`);
+    await tapWithSecondaryTouch(secondaryTouch, result);
+  } else await result.click();
   await page.waitForFunction(() => document.querySelector(".graph-tip")?.style.top);
-  if (phone) {
+  if (secondaryTouch) {
+    await tapWithSecondaryTouch(secondaryTouch, page.getByRole("button", { name: "Investigate", exact: true }));
+  } else if (phone) {
     const button = page.getByRole("button", { name: "Investigate", exact: true });
     const fits = await button.evaluate((el) => {
       const b = el.getBoundingClientRect(), stage = el.closest(".graph-stage").getBoundingClientRect();
@@ -139,10 +158,74 @@ async function checkGraphIncident(page, width, incidentId) {
     if (!fits) return;
     await button.tap();
   } else {
+    check(await page.getByRole("button", { name: "Investigate", exact: true }).count() === 0,
+      `${width}px selected graph has no Investigate button`);
     await page.locator(".graph-canvas").press("Enter");
   }
   await page.getByRole("heading", { level: 1, name: new RegExp(`^Incident #${incidentId}:`) }).waitFor();
   ok(`${width}px selected graph incident opens its details`);
+}
+
+// A coarse pointer wider than a phone still has to open details from the selected node.
+async function checkGraphTouch(browser, width, height, incidentId, gesture = "tap") {
+  const { ctx, page, errors } = await login(browser, "admin", ADMIN_PW, width, {
+    height, hasTouch: true, isMobile: true, reducedMotion: "reduce",
+  });
+  try {
+    await page.route("**/api/graph", (route) => route.fulfill({ json: {
+      nodes: [{ id: 0, type: "incident", ref: incidentId, severity: "critical", label: "Touch target" }], edges: [],
+    } }));
+    await show(page, "graph");
+    const media = await page.evaluate(() => ({
+      coarse: matchMedia("(hover: none), (pointer: coarse)").matches,
+      narrow: matchMedia("(max-width: 760px)").matches,
+    }));
+    check(media.coarse, `${width}px touch media ${JSON.stringify(media)}`);
+    check(!media.narrow, `${width}px touch check stays outside the phone layout`);
+    const point = await page.evaluate(() => {
+      const canvas = document.querySelector("canvas.graph-canvas");
+      const g = canvas.getContext("2d"), w = canvas.width, h = canvas.height, data = g.getImageData(0, 0, w, h).data;
+      let best = -1, bx = w / 2, by = h / 2;
+      for (let y = 0; y < h; y += 3) for (let x = 0; x < w; x += 3) {
+        const i = (y * w + x) * 4, score = Math.min(data[i], data[i + 1], data[i + 2]) * 4 + data[i + 3];
+        if (score > best) { best = score; bx = x; by = y; }
+      }
+      return { x: bx * canvas.clientWidth / w, y: by * canvas.clientHeight / h };
+    });
+    const box = await page.locator("canvas.graph-canvas").boundingBox();
+    const x = box.x + point.x, y = box.y + point.y;
+    if (gesture === "hold") {
+      const session = await ctx.newCDPSession(page);
+      await session.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+      await page.getByRole("button", { name: "Investigate", exact: true }).waitFor();
+      await session.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      check(await page.locator(".graph-tip").isVisible(), `${width}px held node stays selected after release`);
+    } else await page.touchscreen.tap(x, y);
+    await page.waitForFunction(() => document.querySelector(".graph-tip")?.style.top);
+    const button = page.getByRole("button", { name: "Investigate", exact: true });
+    const fit = await button.evaluate((el) => {
+      const b = el.getBoundingClientRect(), stage = el.closest(".graph-stage").getBoundingClientRect();
+      const node = el.closest(".graph-stage").querySelector("canvas").getBoundingClientRect();
+      const cx = node.left + node.width / 2, cy = node.top + node.height / 2;
+      return {
+        w: b.width, h: b.height, tab: el.tabIndex,
+        inside: b.top >= stage.top && b.bottom <= stage.bottom && b.left >= stage.left && b.right <= stage.right,
+        covers: b.left <= cx && b.right >= cx && b.top <= cy && b.bottom >= cy,
+      };
+    });
+    check(fit.w >= 44 && fit.h >= 44 && fit.tab >= 0 && fit.inside && !fit.covers,
+      `${width}px touch Investigate is ${Math.round(fit.w)}x${Math.round(fit.h)}, in stage, off the node`);
+    await page.locator("canvas.graph-canvas").focus();
+    await page.keyboard.press("Tab");
+    check(await page.evaluate(() => document.activeElement?.textContent) === "Investigate",
+      `${width}px Investigate is the next tab stop`);
+    await button.tap();
+    await page.getByRole("heading", { level: 1, name: new RegExp(`^Incident #${incidentId}:`) }).waitFor();
+    check(!errors.length, `${width}px touch graph has no JS errors${errors.length ? `: ${errors.join(" | ")}` : ""}`);
+    ok(`${width}px touch opens the selected incident`);
+  } finally {
+    await ctx.close();
+  }
 }
 
 // SVG font-size is in user units. Include the screen transform to catch a
@@ -235,6 +318,9 @@ async function main() {
 
     const alertId = await admin.page.evaluate(async () => (await (await fetch("/api/alerts?status=open")).json())[0].id);
     const incidentId = await admin.page.evaluate(async () => (await (await fetch("/api/incidents")).json())[0]?.id);
+    await checkGraphTouch(browser, 820, 1180, incidentId);
+    await checkGraphTouch(browser, 820, 1180, incidentId, "hold");
+    await checkGraphTouch(browser, 1024, 1366, incidentId);
     const ruleId = await admin.page.evaluate(async () => (await (await fetch("/api/rules")).json())[0].id);
     // A saved search, so the hunt page shows "Promote to detection…" (state.csrf is the app's own token).
     const savedStatus = await admin.page.evaluate(async () => (await fetch("/api/hunt/saved", { method: "POST",
@@ -281,6 +367,7 @@ async function main() {
         check(await page.isHidden("#nav") && page.url().endsWith("#alerts"), "choosing a view closes the menu");
       }
       await checkGraphIncident(page, width, incidentId);
+      if (width === 1440) await checkGraphIncident(page, width, incidentId, await ctx.newCDPSession(page));
       for (const v of views) {
         await show(page, v);
         await auditView(page, `#${v}`, width);

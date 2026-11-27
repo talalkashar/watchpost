@@ -22,6 +22,8 @@ body[data-view="graph"] .graph-head h1 { margin: 0; font-size: clamp(25px, 2.45v
   background: var(--panel); border: 1px solid var(--line-3); border-radius: 10px; box-shadow: 0 6px 22px #0008; pointer-events: none; }
 .graph-tip { width: max-content; z-index: 1; overflow-wrap: anywhere; }
 .graph-tip button { pointer-events: auto; margin-top: 8px; }
+/* Phone buttons are already 44px tall. This sizes the same action on a wider touch screen. */
+.graph-tip button.graph-investigate { min-width: 44px; min-height: 44px; }
 .graph-tip small { display: block; font: 600 10px var(--mono); text-transform: uppercase; letter-spacing: .08em; color: var(--ink-2); }
 .graph-tip strong { display: block; margin: 4px 0; font-size: 14px; }
 .graph-tip span { display: block; font: 11px/1.45 var(--mono); color: var(--ink-2); }
