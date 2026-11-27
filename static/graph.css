@@ -85,6 +85,10 @@ body[data-view="graph"] .graph-key h2 { margin: 20px 0 10px; font: 600 10px var(
   .graph-counts { font-size: 11px; gap: 10px; }
   .graph-counts span + span { padding-left: 10px; }
   .graph-workspace { display: flex; flex-direction: column-reverse; }
+  /* Leave the positioning inset on both edges and reserve the action's full tap target. */
+  .graph-tip { display: flex; flex-direction: column; max-height: calc(100% - 10px); }
+  .graph-tip-info { overflow-y: auto; pointer-events: auto; }
+  .graph-tip button { align-self: flex-start; flex: none; }
   .graph-key { border: 0; border-bottom: 1px solid var(--hair); }
   .graph-key summary { padding: 7px 13px; min-height: 44px; border: 0; }
   .graph-key-body { display: grid; grid-template-columns: 1fr 1fr; column-gap: 12px; padding: 0 12px 12px; }

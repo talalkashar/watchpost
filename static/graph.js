@@ -207,15 +207,17 @@ const Graph = (() => {
           if (e.a === n) neighborhood.add(e.b);
           if (e.b === n) neighborhood.add(e.a);
         }
-        tip.replaceChildren(el("small", {}, types[n.type].name, n.ref ? ` #${n.ref}` : "", n.severity ? ` · ${n.severity}` : ""),
+        const info = el("div", { class: "graph-tip-info", tabindex: mobile.matches ? "0" : null },
+          el("small", {}, types[n.type].name, n.ref ? ` #${n.ref}` : "", n.severity ? ` · ${n.severity}` : ""),
           el("strong", {}, n.title || n.label),
           el("span", {}, n.type === "alert" ? [n.rule, ...n.techniques].join(" · ") : `${n.degree} visible connection${n.degree === 1 ? "" : "s"}`));
+        if (n !== n.group.root) {
+          const root = n.group.root;
+          info.append(el("span", {}, `Cloud · ${types[root.type].name} #${root.ref}`));
+        }
+        tip.replaceChildren(info);
+        if (mobile.matches) tip.append(chip("Investigate", () => detail(n)));
       }
-      if (n && n !== n.group.root) {
-        const root = n.group.root;
-        tip.append(el("span", {}, `Cloud · ${types[root.type].name} #${root.ref}`));
-      }
-      if (n && mobile.matches) tip.append(chip("Investigate", () => detail(n)));
       prepareLinks();
       tip.hidden = !n;
       canvas.classList.toggle("over-node", !!n);
