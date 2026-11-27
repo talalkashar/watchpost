@@ -156,8 +156,16 @@ async function main() {
     for (const width of [320, 390, 1440]) {
       const ctx = await browser.newContext({ viewport: { width, height: width === 320 ? 568 : width === 390 ? 844 : 900 } });
       const p = await ctx.newPage();
-      await p.goto(BASE);
+      let releaseLoader;
+      const loaderGate = new Promise((resolve) => { releaseLoader = resolve; });
+      await p.route("**/load-console.js", async (route) => { await loaderGate; await route.continue(); });
+      await p.goto(BASE, { waitUntil: "commit" });
+      const submit = p.locator("#login-form button[type=submit]");
+      check(await submit.isDisabled(), `${width}px sign-in is disabled before the loader runs`);
+      releaseLoader();
+      await p.waitForLoadState("load");
       await p.waitForSelector("#login-view:not([hidden])");
+      check(await submit.isEnabled(), `${width}px sign-in is enabled after the submit guard loads`);
       await auditView(p, "login form", width);
       check(await p.locator("#login-view").getByText("All data is synthetic.").isVisible(),
         `${width}px sign-in includes the data disclosure`);
@@ -170,6 +178,20 @@ async function main() {
     await admin.page.click("text=Load demo data");
     await admin.page.waitForSelector("text=Alerts created", { timeout: 60000 });
     ok("demo data loaded");
+    // A fresh document must keep the flat map out of view until the globe is ready.
+    const firstLoad = await admin.ctx.newPage();
+    let releaseOrbit;
+    const orbitGate = new Promise((resolve) => { releaseOrbit = resolve; });
+    await firstLoad.route("**/orbit.js", async (route) => { await orbitGate; await route.continue(); });
+    const orbitRequested = firstLoad.waitForRequest("**/orbit.js");
+    await firstLoad.goto(BASE, { waitUntil: "domcontentloaded" });
+    await orbitRequested;
+    const flatMap = firstLoad.locator("#map svg.worldmap");
+    await flatMap.waitFor({ state: "attached" });
+    check(!await flatMap.isVisible(), "flat map stays hidden while the globe module is pending");
+    releaseOrbit();
+    await firstLoad.locator("canvas.orbit-surface").waitFor({ state: "visible" });
+    await firstLoad.close();
     await admin.page.goto(BASE + "#dashboard");
     for (const width of [1101, 1180, 1280, 1440, 1920]) {
       await admin.page.setViewportSize({ width, height: 900 });

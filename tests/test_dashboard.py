@@ -12,6 +12,7 @@ from pathlib import Path
 from tests.helpers import ServerTestCase
 from watchpost import geo, stream
 from watchpost.db import iso, utcnow
+from watchpost.static_assets import CONSOLE_STYLES
 
 STATIC = Path(__file__).resolve().parent.parent / "static"
 
@@ -306,7 +307,17 @@ class StaticAssetTests(unittest.TestCase):
         self.assertNotRegex(html, r"\son[a-z]+=", "inline event handler")
         self.assertNotIn("<style", html)
         for sheet in re.findall(r'href="/([^"]+\.css)"', html):
-            self.assertTrue((STATIC / sheet).is_file(), sheet)
+            sources = CONSOLE_STYLES if sheet == "console.css" else (sheet,)
+            for source in sources:
+                self.assertTrue((STATIC / source).is_file(), source)
+
+    def test_login_is_safe_before_scripts_run(self):
+        form = re.search(r'<form\b([^>]*\bid="login-form"[^>]*)>(.*?)</form>', self.read("index.html"), re.S)
+        self.assertIsNotNone(form)
+        self.assertRegex(form[1], r'\bmethod="post"')
+        button = re.search(r'<button\b([^>]*\btype="submit"[^>]*)>', form[2])
+        self.assertIsNotNone(button)
+        self.assertIn("disabled", button[1].split())
 
     def test_js_never_uses_html_injection_or_eval(self):
         for path in STATIC.glob("*.js"):
