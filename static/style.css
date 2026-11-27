@@ -222,6 +222,8 @@ pre { white-space: pre-wrap; word-break: break-word; background: var(--bg-2); pa
   font: 12px var(--sans); border: 1px solid var(--line); }
 .explain { background: var(--bg-2); border-left: 3px solid var(--line-3); padding: 8px 12px; border-radius: 3px; }
 .note { border-bottom: 1px solid var(--line); padding: 6px 0; }
+ol.steps { list-style: none; margin: 0; padding: 0; }
+ol.steps .row { align-items: center; margin: 4px 0; }
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; }
 .kv dt { color: var(--muted); } .kv dd { margin: 0; overflow-wrap: anywhere; }
 .entity-rule { margin: 10px 0 8px; font-size: 13px; line-height: 1.45; }

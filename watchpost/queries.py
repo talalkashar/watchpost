@@ -353,6 +353,8 @@ def get_alert(conn, alert_id):
         conn, "alert_activity", alert_id, ACTIVITY_LIMIT)
     alert["timeline"] = related_timeline(conn, alert)
     alert["cases"], alert["cases_omitted"] = case_membership(conn, alert_id)
+    from . import playbooks  # here, not at the top: playbooks imports this module
+    alert["playbook"] = playbooks.get(conn, alert_id)
     return alert
 
 

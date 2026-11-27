@@ -268,6 +268,12 @@ class Config:
     demo_loop_speed: float = 1.0
     # HMAC key for the hash-chained audit log. Unset: plain SHA-256, which detects edits but not a full rewrite.
     audit_key: str | None = None
+    # Response playbooks (playbooks.py): where notifications and response-action requests are posted. Unset:
+    # nothing leaves Watchpost. The secret signs each body. Synthetic alerts are sent only when asked for.
+    playbook_webhook_url: str | None = None
+    playbook_webhook_secret: str | None = None
+    playbook_webhook_cafile: str | None = None
+    playbook_webhook_synthetic: bool = False
 
     # Syslog over TLS (RFC 5425), on when a certificate and key are set. A client CA makes senders present a
     # certificate it signed. TLS replaces the plaintext UDP/TCP listeners unless syslog_plaintext is True.
@@ -340,6 +346,10 @@ class Config:
             demo_loop_minutes=os.environ.get("SIEM_DEMO_LOOP"),
             demo_loop_speed=os.environ.get("SIEM_DEMO_LOOP_SPEED"),
             audit_key=os.environ.get("SIEM_AUDIT_KEY"),
+            playbook_webhook_url=os.environ.get("SIEM_PLAYBOOK_WEBHOOK_URL") or None,
+            playbook_webhook_secret=os.environ.get("SIEM_PLAYBOOK_WEBHOOK_SECRET") or None,
+            playbook_webhook_cafile=os.environ.get("SIEM_PLAYBOOK_WEBHOOK_CAFILE") or None,
+            playbook_webhook_synthetic=os.environ.get("SIEM_PLAYBOOK_WEBHOOK_SYNTHETIC", "0") == "1",
         )
         values.update(overrides)
         if "port" not in overrides:
