@@ -1,4 +1,5 @@
 import { seedLayout, stepLayout, signalChains } from "./graph-layout.js";
+import { galaxyGroups, particlePlan, galaxyMotion, nebulaTile } from "./graph-galaxy.js";
 import { fitFrame, limitCenter } from "./graph-camera.js";
 
 // An evidence graph is a snapshot. All geometry is local; ids and detail pivots come from the API.
@@ -10,8 +11,8 @@ const Graph = (() => {
     user: { name: "User", plural: "Users", color: "#72eab1" },
     src_ip: { name: "Source IP", plural: "Source IPs", color: "#75aaff" },
   };
-  const severityColor = { critical: "#ff718f", high: "#ffac61", medium: "#f5db78", low: "#93b9ff", info: "#afc1d5" };
-  const edgeColor = { membership: "#b599ff", correlation: "#ffc47e" };
+  const severityColor = { critical: "#ff806f", high: "#ffac61", medium: "#f5db78", low: "#93b9ff", info: "#afc1d5" };
+  const edgeColor = { evidence: "#b9cddb", membership: "#e1d4ef", correlation: "#ffe1b5" };
   const tau = Math.PI * 2;
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
   const cap = (s) => s[0].toUpperCase() + s.slice(1);
@@ -40,7 +41,8 @@ const Graph = (() => {
       caption: n.type === "incident" ? `Incident ${n.ref}` : n.type === "alert" ? (n.techniques[0] || `Alert ${n.ref}`) : n.label,
     }));
     const edges = data.edges.map((e) => ({ ...e, a: nodes[e.source], b: nodes[e.target] }));
-    seedLayout(nodes, edges);
+    const groups = galaxyGroups(nodes, edges);
+    let activeGroups = [], starCount = 0;
     const shownTypes = new Set(Object.keys(types));
     let severity = "all", visible = [], links = [], selected = null, neighborhood = new Set();
     let width = 0, height = 0, zoom = 1, scale = 1, bounds, cx = 0, cy = 0;
@@ -83,6 +85,7 @@ const Graph = (() => {
       el("summary", {}, "Filters & legend", filterState),
       el("div", { class: "graph-key-body" },
         el("div", { class: "graph-search" }, search, results),
+        el("p", { class: "graph-cloud-key" }, el("i", { "aria-hidden": "true" }), "Dust groups related evidence."),
         el("h2", {}, "Node types"), el("div", { class: "graph-types" }, typeButtons),
         el("h2", {}, "Severity"), el("div", { class: "graph-levels" }, severityButtons),
         el("h2", {}, "Connections"), el("ul", { class: "graph-lines" },
@@ -106,6 +109,11 @@ const Graph = (() => {
       visible = nodes.filter((n) => shownTypes.has(n.type) && (severity === "all" || matches.has(n)));
       const included = new Set(visible);
       links = edges.filter((e) => included.has(e.a) && included.has(e.b));
+      activeGroups = groups.filter(group => {
+        group.shown = group.members.filter(n => included.has(n));
+        return group.shown.length;
+      });
+      prepareDust();
       for (const n of visible) n.degree = 0;
       for (const e of links) { e.a.degree++; e.b.degree++; }
       // Prefer identifiable entities and incident hubs as labels compete for space.
@@ -179,7 +187,7 @@ const Graph = (() => {
       width = rect.width; height = rect.height;
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       canvas.width = Math.round(width * dpr); canvas.height = Math.round(height * dpr);
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); fit();
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); prepareDust(); fit();
     }
 
     function zoomAt(x, y, factor) {
@@ -203,6 +211,10 @@ const Graph = (() => {
           el("strong", {}, n.title || n.label),
           el("span", {}, n.type === "alert" ? [n.rule, ...n.techniques].join(" · ") : `${n.degree} visible connection${n.degree === 1 ? "" : "s"}`));
       }
+      if (n && n !== n.group.root) {
+        const root = n.group.root;
+        tip.append(el("span", {}, `Cloud · ${types[root.type].name} #${root.ref}`));
+      }
       if (n && mobile.matches) tip.append(chip("Investigate", () => detail(n)));
       prepareLinks();
       tip.hidden = !n;
@@ -215,7 +227,7 @@ const Graph = (() => {
       const groups = new Map();
       for (const e of links) {
         const lit = selected && (e.a === selected || e.b === selected);
-        const color = edgeColor[e.type] || e.b.color;
+        const color = edgeColor[e.type];
         const id = e.type + color + !!lit;
         if (!groups.has(id)) groups.set(id, { color, type: e.type, lit, edges: [] });
         groups.get(id).edges.push(e);
@@ -227,50 +239,79 @@ const Graph = (() => {
     // needs one canvas draw per point, including the halo, glyph and bright core.
     const sprites = new Map();
     function sprite(n) {
-      const id = n.type + n.color + (n.type === "incident" ? n.severity : "");
+      const id = n.group.seed + "/" + n.type + "/" + (n.severity || "");
       if (sprites.has(id)) return sprites.get(id);
       const tile = document.createElement("canvas");
       tile.width = tile.height = 96;
-      const g = tile.getContext("2d"), color = n.color;
-      const halo = g.createRadialGradient(48, 48, 1, 48, 48, 48);
-      halo.addColorStop(0, color + "dd"); halo.addColorStop(.18, color + "91");
-      halo.addColorStop(.42, color + "32"); halo.addColorStop(.7, color + "0b"); halo.addColorStop(1, color + "00");
+      const g = tile.getContext("2d"), core = severityColor[n.severity] || n.color;
+      const halo = g.createRadialGradient(48, 48, 0, 48, 48, 48);
+      halo.addColorStop(0, "#fff"); halo.addColorStop(.09, "#fff9ef");
+      halo.addColorStop(.16, core + "ea");
+      if (n.severity === "critical") halo.addColorStop(.22, "#ff6959a8");
+      halo.addColorStop(.28, `hsl(${n.group.hue} 94% 72% / .49)`);
+      halo.addColorStop(.48, `hsl(${n.group.hue} 98% 66% / .13)`);
+      halo.addColorStop(.72, `hsl(${n.group.hue} 92% 63% / .035)`);
+      halo.addColorStop(1, `hsl(${n.group.hue} 100% 60% / 0)`);
       g.fillStyle = halo; g.fillRect(0, 0, 96, 96);
-      g.fillStyle = color; g.strokeStyle = color;
-      glyph(g, n.type, 48, 48, 10);
       if (n.type === "incident") {
-        g.lineWidth = 2; g.stroke(); g.fillStyle = severityColor[n.severity];
-        glyph(g, n.type, 48, 48, 5);
+        // Narrow diffraction spikes distinguish the incident hubs inside the dust.
+        g.save(); g.translate(48, 48); g.rotate(-.24); g.fillStyle = "#ffedd4a6";
+        for (let i = 0; i < 4; i++) {
+          g.beginPath(); g.moveTo(-1.6, 0); g.lineTo(0, i % 2 ? 23 : 31); g.lineTo(1.6, 0);
+          g.fill(); g.rotate(Math.PI / 2);
+        }
+        g.restore();
       }
-      g.fill(); g.fillStyle = "#ffffffe0";
-      glyph(g, n.type, 48, 48, n.type === "incident" ? 2.3 : 3.8); g.fill();
+      g.fillStyle = "#fff7ed"; g.strokeStyle = n.type === "incident" ? types.incident.color : core;
+      glyph(g, n.type, 48, 48, 7);
+      if (n.type === "incident") {
+        g.lineWidth = 2; g.stroke(); glyph(g, n.type, 48, 48, 3.7);
+      }
+      g.fill();
       sprites.set(id, tile); return tile;
     }
 
-    const clouds = new Map();
-    function incidentGlow(n) {
-      const color = severityColor[n.severity] || n.color;
-      if (!clouds.has(color)) {
-        const tile = document.createElement("canvas"); tile.width = tile.height = 128;
-        const g = tile.getContext("2d"), halo = g.createRadialGradient(64, 64, 0, 64, 64, 64);
-        halo.addColorStop(0, color + "70"); halo.addColorStop(.5, color + "27"); halo.addColorStop(1, color + "00");
-        g.fillStyle = halo; g.fillRect(0, 0, 128, 128); clouds.set(color, tile);
-      }
-      return clouds.get(color);
+    function prepareDust() {
+      const plan = particlePlan(width, height, activeGroups.map(group => group.shown.length));
+      starCount = plan.stars;
+      activeGroups.forEach((group, i) => {
+        if (group.count !== plan.dust[i]) {
+          group.count = plan.dust[i];
+          group.tile = group.count ? nebulaTile(group, group.count) : null;
+        }
+      });
     }
 
-    function dust() {
-      if (!visible.length) return;
-      for (let layer = 1; layer <= 2; layer++) {
-        ctx.fillStyle = layer === 1 ? "#ffffff1c" : "#ffffff32";
-        const count = Math.min(80, Math.ceil(width * height / (layer * 6700)));
-        for (let i = 1; i <= count; i++) {
-          const travel = Motion.reduced.matches ? 0 : elapsed * 0.0007;
-          const px = width * ((i * .75487767 + layer * .34) % 1) - (cx * scale - travel) * .042 * layer;
-          const py = height * ((i * .56984029 + layer * .21) % 1) - cy * scale * .042 * layer;
-          ctx.fillRect((px % width + width) % width, (py % height + height) % height, layer * .68, layer * .68);
-        }
+    function starField(time) {
+      const colors = ["", "#ddcfdc35", "#b3c6df59", "#e0eaff75"];
+      for (let i = 1; i <= starCount; i++) {
+        const layer = 1 + i % 3, size = .42 + layer * .27;
+        const px = width * ((i * .75487767 + Math.sin(i * 11) * .17) % 1) - (cx * scale - time) * .06 * layer;
+        const py = height * ((i * .56984029 + Math.cos(i * 7) * .21) % 1) - cy * scale * .06 * layer;
+        ctx.fillStyle = colors[layer];
+        ctx.fillRect((px % width + width) % width, (py % height + height) % height, size, size);
       }
+    }
+
+    function drawCloud(group, bloom) {
+      if (!group.tile || !bloom) return;
+      const members = group.shown, count = members.length;
+      let x = 0, y = 0;
+      for (const n of members) { x += n.px; y += n.py; }
+      x /= count; y /= count;
+      let xx = 0, xy = 0, yy = 0;
+      for (const n of members) {
+        const dx = n.px - x, dy = n.py - y;
+        xx += dx * dx; xy += dx * dy; yy += dy * dy;
+      }
+      const angle = count > 1 ? .5 * Math.atan2(2 * xy, xx - yy) : group.seed * 2.4;
+      const spread = Math.sqrt((xx + yy) / count);
+      const unit = Math.min(1.4, scale) * zoom * bloom;
+      const radius = Math.min(230 * unit, 62 * unit + 2.0 * spread);
+      ctx.save(); ctx.translate(x, y); ctx.rotate(angle + group.breath * .015);
+      ctx.scale(radius * (1 + .025 * group.breath), radius * (.74 - .025 * group.breath));
+      ctx.globalAlpha = bloom * (selected && !members.some(n => neighborhood.has(n)) ? .19 : .94);
+      ctx.drawImage(group.tile, -1, -1, 2, 2); ctx.restore();
     }
 
     function refreshBounds() {
@@ -312,23 +353,21 @@ const Graph = (() => {
         constrain(); if (t === 1) flight = null;
       }
 
-      const t = reduced ? 1 : Math.min(1, elapsed / 920);
-      const bloom = 1 - Math.pow(1 - t, 3);
-      const density = clamp(Math.sqrt(width * height / Math.max(1, visible.length)) / 74, 0.58, 1);
-      ctx.clearRect(0, 0, width, height); dust();
-      for (const n of visible) {
-        const phase = elapsed * .00046 + n.id * 1.81;
-        const drift = reduced || n.pinned || n === selected || drag?.node === n ? 0 : 1.15;
-        n.px = width / 2 + ((n.x - cx) * scale * zoom + drift * Math.sin(phase)) * bloom;
-        n.py = height / 2 + ((n.y - cy) * scale * zoom + drift * Math.cos(phase)) * bloom;
-        n.r = ((n.type === "incident" ? 5.2 : 2.2) + Math.min(4, Math.sqrt(n.degree) * .86) +
-          (SEVERITY_RANK[n.severity] || 0) * .52) * density * Math.min(1.6, Math.sqrt(zoom));
-      }
-      for (const n of visible) {
-        if (n.type !== "incident" || !n.degree) continue;
-        const radius = (n.r + 8 * density) * 6;
-        ctx.globalAlpha = (selected && !neighborhood.has(n) ? .07 : .34) * bloom;
-        ctx.drawImage(incidentGlow(n), n.px - radius, n.py - radius, radius * 2, radius * 2);
+      const motion = galaxyMotion(elapsed, reduced), bloom = motion.bloom;
+      const density = clamp(Math.sqrt(width * height / Math.max(1, visible.length)) / 75, .52, 1);
+      ctx.clearRect(0, 0, width, height); starField(motion.time);
+      for (const group of activeGroups) {
+        const phase = group.seed * 1.81 + motion.time * .27;
+        group.breath = reduced ? 0 : Math.sin(phase);
+        const dx = group.breath * 2.4, dy = reduced ? 0 : Math.cos(phase * .8) * 1.9;
+        for (const n of group.shown) {
+          const drift = !n.pinned && n !== selected && drag?.node !== n;
+          n.px = width / 2 + ((n.x - cx) * scale * zoom + (drift ? dx : 0)) * bloom;
+          n.py = height / 2 + ((n.y - cy) * scale * zoom + (drift ? dy : 0)) * bloom;
+          n.r = ((n.type === "incident" ? 4.3 : 2.5) + Math.min(3.5, Math.sqrt(n.degree) * .76) +
+            (SEVERITY_RANK[n.severity] || 0) * .46) * density * Math.min(1.6, Math.sqrt(zoom));
+        }
+        drawCloud(group, bloom);
       }
       for (const batch of batches) {
         const { color, type, lit } = batch;
@@ -341,13 +380,16 @@ const Graph = (() => {
         }
         ctx.strokeStyle = color;
         if (lit) { ctx.lineWidth = 4; ctx.globalAlpha = .09 * bloom; ctx.stroke(); }
-        ctx.lineWidth = lit ? 1.35 : (type === "membership" ? 1 : .76);
-        ctx.globalAlpha = bloom * (selected ? (lit ? .88 : .08) : (type === "evidence" ? .43 : .6));
+        ctx.lineWidth = lit ? 1.25 : (type === "membership" ? .9 : .74);
+        ctx.globalAlpha = bloom * (selected ? (lit ? .92 : .065) : (type === "evidence" ? .31 : .49));
         ctx.stroke();
       }
-      if (!reduced && t > .55) drawSignals();
+      if (motion.animate && bloom > .9) drawSignals();
+      ctx.globalCompositeOperation = "lighter";
       for (const n of visible) {
-        const { px: x, py: y, r } = n, halo = r * 4.8;
+        const { px: x, py: y, r } = n;
+        const pulse = n.severity === "critical" && motion.animate ? 1 + .09 * Math.sin(motion.time * 2.0 + n.id) : 1;
+        const halo = r * (neighborhood.has(n) ? 5.4 : 4.3) * pulse;
         if (x < -halo || x > width + halo || y < -halo || y > height + halo) continue;
         ctx.globalAlpha = bloom * (selected && !neighborhood.has(n) ? .21 : 1);
         ctx.drawImage(sprite(n), x - halo, y - halo, halo * 2, halo * 2);
@@ -356,13 +398,14 @@ const Graph = (() => {
           ctx.beginPath(); ctx.arc(x, y, r + 4, 0, tau); ctx.stroke();
         }
       }
-      ctx.globalAlpha = 1; drawLabels();
+      ctx.globalCompositeOperation = "source-over"; ctx.globalAlpha = 1;
+      if (bloom > .93) drawLabels();
       if (selected) {
         const x = selected.px, y = selected.py, w = tip.offsetWidth, h = tip.offsetHeight;
         tip.style.left = Math.max(5, Math.min(width - w - 5, x + 18)) + "px";
         tip.style.top = clamp(y + h + 12 < height ? y + 12 : y - h - 12, 5, height - h - 5) + "px";
       }
-      if (visible.length && !reduced) requestDraw();
+      if (visible.length && motion.animate) requestDraw();
     }
 
     function drawSignals() {
@@ -382,22 +425,25 @@ const Graph = (() => {
 
     let labelOrder = [];
     function drawLabels() {
-      if (!selected) return;
-      const neighbourAlpha = clamp(.48 + (zoom - 1) * .65, .48, 1);
-      const areas = [], budget = Math.min(18, Math.max(4, Math.floor(width * height / 24000 * zoom)));
+      const areas = [], budget = width < 450 ? 2 : width < 1100 ? 4 : 6;
       ctx.font = '500 11px ui-monospace, Menlo, monospace'; ctx.textAlign = "center";
-      const order = [selected, ...labelOrder.filter((n) => n !== selected && neighborhood.has(n))];
+      const order = selected ? [selected, ...labelOrder.filter(n => n !== selected && neighborhood.has(n))] : labelOrder;
       for (const n of order) {
         if (areas.length >= budget) break;
+        if (n !== selected && n.type !== "incident" && n.degree < 3) continue;
         const text = n.caption.length > 22 ? n.caption.slice(0, 21) + "…" : n.caption;
-        const w = text.length * 6.7 + 9, x = clamp(n.px, w / 2 + 2, width - w / 2 - 2), y = n.py + n.r + 16;
-        if (Math.abs(n.px - x) > w / 2 || y < 12 || y > height - 3) continue;
-        if (areas.some((a) => Math.abs(x - a.x) < (a.w + w) / 2 && Math.abs(y - a.y) < 15)) continue;
-        if (visible.some((m) => m !== n && Math.abs(y - 4 - m.py) < m.r + 5 && Math.abs(x - m.px) < w / 2 + m.r)) continue;
-        areas.push({ x, y, w });
-        ctx.globalAlpha = n === selected ? 1 : neighbourAlpha;
-        ctx.lineWidth = 3.5; ctx.strokeStyle = "#090909"; ctx.strokeText(text, x, y);
-        ctx.fillStyle = n.type === "incident" ? "#dbcaff" : "#ddd"; ctx.fillText(text, x, y);
+        const w = ctx.measureText(text).width + 8;
+        const x = clamp(n.px, w / 2 + 3, width - w / 2 - 3);
+        if (Math.abs(n.px - x) > w / 2) continue;
+        for (const y of [n.py - n.r - 7, n.py + n.r + 16]) {
+          if (y < 12 || y > height - 3) continue;
+          if (areas.some(a => Math.abs(x - a.x) < (a.w + w) / 2 && Math.abs(y - a.y) < 16)) continue;
+          if (n !== selected && visible.some(m => m !== n && Math.abs(y - 4 - m.py) < m.r + 4 && Math.abs(x - m.px) < w / 2 + m.r)) continue;
+          areas.push({ x, y, w });
+          ctx.lineWidth = 3.5; ctx.lineJoin = "round"; ctx.strokeStyle = "#0a090c"; ctx.strokeText(text, x, y);
+          ctx.fillStyle = n === selected ? "#fff" : "#e3dfe8"; ctx.fillText(text, x, y);
+          break;
+        }
       }
       ctx.globalAlpha = 1;
     }
@@ -533,6 +579,8 @@ const Graph = (() => {
       onScreen = false; controller.abort(); observer.disconnect(); intersection.disconnect();
       clearTimeout(holdTimer); clearTimeout(clickTimer); cancelAnimationFrame(frame);
     };
+    const rect = stage.getBoundingClientRect();
+    seedLayout(nodes, edges, clamp(rect.width / (rect.height || 1), .65, 2.5));
     update(); resize();
   }
 
