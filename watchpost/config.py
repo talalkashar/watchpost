@@ -13,7 +13,11 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+# Wheels carry their web assets and fixtures inside the package. A source checkout
+# keeps them alongside it, and continues to store its database in the checkout.
+_PACKAGE = Path(__file__).resolve().parent
+RESOURCE_DIR = _PACKAGE if (_PACKAGE / "static").is_dir() else _PACKAGE.parent
+BASE_DIR = Path.home() / ".local" / "share" / "watchpost" if RESOURCE_DIR == _PACKAGE else RESOURCE_DIR
 
 # Cookie Max-Age and the other counters are signed 32-bit at the edge that consumes them.
 _INT_MAX = 2**31 - 1

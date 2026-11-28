@@ -1,115 +1,53 @@
 # Watchpost
 
-Watchpost is a SIEM in the Python standard library. It ingests logs, runs explainable detection rules, correlates alerts into incidents, and tracks each case from triage to resolution. It has no third-party dependencies.
-
-[![tests](https://github.com/talalkashar/watchpost/actions/workflows/tests.yml/badge.svg)](https://github.com/talalkashar/watchpost/actions/workflows/tests.yml)
-![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776ab)
-![Dependencies: none](https://img.shields.io/badge/dependencies-none-2ea44f)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/talalkashar/watchpost/badge)](https://scorecard.dev/viewer/?uri=github.com/talalkashar/watchpost)
-
-**[Live demo](https://watchpost-nxxu.onrender.com)** · read-only login `viewer` / `watchpost-viewer-demo` (free tier: the first load can take a minute) · [Full reference](docs/REFERENCE.md)
-
-![Watchpost SOC dashboard on labeled synthetic data, with the ATT&CK legend: validated, mapped, disabled, and gap](docs/screenshots/01-dashboard-1117.jpg)
-
-| Incident board | Alerts and correlated incidents |
-|---|---|
-| ![Incidents on labeled synthetic data, with the earliest technique id on each card](docs/screenshots/02-incidents-1117.jpg) | ![Alerts on labeled synthetic data, filtered to open critical and high](docs/screenshots/03-alerts-1117.jpg) |
-
-## What it does
-
-- **Ingests** JSON, CSV, Linux `auth.log`, Windows Security events, nginx and Apache access logs, firewall and VPN logs, and cloud audit logs. Input is a file upload, an authenticated API, a syslog listener, `scripts/shipper.py`, the read-only CloudTrail collector, or the experimental Windows Event Forwarding collector. Normalization writes one schema.
-- **Detects** with fifteen built-in rules. Each rule is a pure function. Each alert stores a plain-English explanation and the event ids behind it. The rules are listed under [Detections](#detections).
-- **Maps to MITRE ATT&CK.** Today's catalog is the 20 techniques in `watchpost/attack.py`, not the full matrix. A technique is validated only when an enabled rule detects a labeled synthetic scenario tagged with that technique. That grade is not a claim about real traffic. The other grades are mapped, disabled, and gap.
-- **Correlates** alerts that share an IP, account, or host into incidents with kill-chain stages. Five multi-stage rules also link related alerts up to a day apart. An incident exports a case record as JSON or Markdown, and a report as Markdown or PDF.
-- **Graphs the evidence.** Open **Graph** to follow a detection to its hosts, accounts, source IPs, and incident. Gold arcs connect alerts in the same incident that share evidence entities within 30 minutes. [See the investigation graph](docs/screenshots/07-investigation-graph.jpg).
-- **Hunts** with one line: `field:value`, `NOT`, `last:7d`, and one of `| stats`, `| top`, or `| timechart`. The compiler uses a field whitelist and bound values. A saved search can be promoted to a detection.
-- **Responds** with a playbook for every alert: automatic context, steps an analyst checks off, and response actions (block an address, disable an account, isolate a host) that are sent as signed requests to a webhook you configure. Watchpost never carries out an action itself.
-- **Uses threat intelligence:** lists of hostile addresses, pasted in or fetched from open feeds you turn on by name (Spamhaus DROP, Emerging Threats, CINS Army, blocklist.de, IPsum, abuse.ch Feodo, Tor exits, AlienVault OTX with your own key). Events that touch a listed address are tagged and searchable, and alerts on them are raised. No feed data is bundled, and nothing is fetched until you ask.
-- **Retains** in tiers when asked to: recent events in the database, older ones in verified compressed files, the oldest in a cold directory, deleted at the end of a period you set. Off by default; nothing is deleted before its archive has been written and checked.
-- **Tunes** from analyst feedback. The proposal is backtested on stored events. A second person approves it. Rules export and import as versioned JSON. A subset of Sigma imports.
-- **Secures itself** with PBKDF2 password hashes, lockout, server-side sessions, TOTP, and CSRF protection. The audit log is a hash chain. `viewer_masking` defaults to off (`0` in `watchpost/improve.py`). When a reviewed change sets it to `1`, only the `viewer` role sees pseudonyms (`user-` and `internal-`, eight hex digits) for known usernames and internal IPs. Analyst and admin responses are not masked. Public IPs, host names, and the signed-in viewer's own name stay visible.
-
-## Detections
-
-Fifteen threshold rules. No machine learning. Default parameters are in `watchpost/rules.py`. Asset criticality can raise an alert after the rule fires. Imported Sigma rules and promoted saved searches run on the same engine. They are not in this list.
-
-| Rule | What it catches | Severity | ATT&CK |
-|---|---|---|---|
-| `brute_force_ip` | Many failed logins from one source IP | high | T1110.001 |
-| `password_spray` | One source IP failing across many accounts | high | T1110.003 |
-| `account_repeated_failures` | Many failures against one account, from any IPs | medium | T1110 |
-| `success_after_failures` | A successful login after repeated failures | critical | T1110, T1078 |
-| `off_hours_privileged_login` | A privileged login outside business hours (UTC) | medium | T1078.003 |
-| `web_scanner` | Scanner-like web probes from one source IP | medium | T1595.002, T1595.003, T1190 |
-| `firewall_port_sweep` | The firewall denies one source IP on many ports | medium | T1046, T1595.001 |
-| `impossible_geo_login` | The same account in two places, faster than travel allows | high | T1078, T1133 |
-| `privilege_escalation_after_login` | sudo, su, or runas soon after a login that followed failures | critical | T1548.003, T1078 |
-| `cloud_iam_change_by_new_principal` | An IAM change by a principal with no recent cloud activity | high | T1098.001, T1136.003, T1078.004 |
-| `data_exfil_volume` | A large outbound transfer, or many cloud data reads, by one principal | high | T1530, T1048 |
-| `unsanctioned_cloud_service` | Use of a cloud service that is not on the sanctioned list | medium | T1567 |
-| `cloud_logging_disabled` | A cloud audit request whose action is `StopLogging`, `DeleteTrail`, or `DeleteFlowLogs`, including a denied call | high | T1685.002 |
-| `admin_action_from_new_source` | A privileged action from a source IP new to that principal | medium | T1078, T1078.004 |
-| `log_source_silent` | A source with a learned cadence goes quiet (an arrival gap, not a fixed event count) | medium | T1685 |
-
-Impossible-travel positions come from a synthetic geo table for demo address ranges only (RFC 5737 and RFC 1918). That is not a GeoIP lookup. An unmapped address does not alert. `data_exfil_volume` stays on flat thresholds unless an approved exception turns on a per-principal baseline. `log_source_silent` compares arrival gaps with a learned cadence. A gap is not proof the source was tampered with. `cloud_logging_disabled` matches the action name on the request, including a denied call, and does not prove that logging stopped.
-
-Open **Alerts** (`#alerts`), then a row (`#alerts/<id>`). The **Evidence** card lists the stored events for that alert. The same rows are the `evidence` array on `GET /api/alerts/<id>`.
-
-## How it works
-
-One process. SQLite stores the events. Detection runs on ingest and when an analyst runs it.
-
-```
- log files ──► POST /api/ingest/upload ─┐
- shipper.py ─► (same, ingest token) ────┤
- collectors ─► POST /api/ingest (token) ├─► normalize.py ──► events (SQLite) ──► engine.run_detection
- simulator ──► (same API, loopback) ────┤   parse + validate      │                 │  rules.py (pure functions)
- syslog ─────► syslog_listener.py ──────┘   + redact secrets      │                 ▼
-                                                                  │            alerts + alert_events
-                                                                  ▼                 │
- browser UI (static/) ◄── server.py (auth, CSRF, roles) ◄── queries.py ◄────────────┘
-                                   │
-                                   ├── health.py   storage / ingestion / detection / dependencies
-                                   └── improve.py  feedback → performance → suggestions → reviewed changes
-                                                   + evaluation against labeled synthetic scenarios
-```
+Watchpost is a local SIEM lab for analysts. Follow failed SSH logins from the raw log to the rule that fired and the accounts it saw.
 
 ## Quick start
 
-```bash
-git clone https://github.com/talalkashar/watchpost.git
-cd watchpost
-./start.sh        # http://127.0.0.1:8080
+With Git and Python 3.10+ (SQLite 3.35+), paste this into a macOS or Linux terminal.
+
+```sh
+git clone --depth 1 https://github.com/talalkashar/watchpost.git &&
+  cd watchpost && ./start.sh --demo
 ```
 
-On first start, generated passwords are written to `data/initial_credentials.txt` (mode 0600). Set `SIEM_ADMIN_PASSWORD`, `SIEM_ANALYST_PASSWORD`, and `SIEM_VIEWER_PASSWORD` to choose them. Sign in as `admin`. Open **Admin → Load synthetic demo data**.
+![Watchpost alert explaining why 15 failed SSH logins from one address crossed the detection threshold](docs/screenshots/ssh-alert.png)
 
-```bash
-./run_tests.sh    # unit and integration tests, then a 26-step end-to-end smoke check
-```
+The command reads the bundled synthetic SSH log into SQLite in memory. Expect **19 accepted records, one rejected line and two alerts**. One rule counts failures from the address, the other counts failures against the root account. Each run starts fresh and needs no login or running server.
 
-CI runs the suite on Python 3.11 through 3.14.
+[Try the hosted console](https://watchpost-nxxu.onrender.com) with the read-only user `viewer` and password `watchpost-viewer-demo`. Allow time for the service to wake up.
 
-## Documentation
+## Investigate in the browser
 
-| | |
-|---|---|
-| [Reference](docs/REFERENCE.md) | Every feature, the architecture, configuration, performance numbers and limits |
-| [API](docs/API.md) | HTTP API reference |
-| [Live ingestion](docs/LIVE_INGEST.md) | Syslog listener (plaintext and TLS), rsyslog forwarding, the file shipper, the CloudTrail collector, experimental Windows Event Forwarding, and the experimental WEC forwarder |
-| [Threat model](docs/THREAT-MODEL.md) | What it protects, what it assumes, and what it does not cover |
-| [Deployment](deploy/README.md) | Debian 12 kit: hardened systemd service behind Caddy or nginx |
-| [Changelog](CHANGELOG.md) | What changed in each release |
+1. In the cloned directory, run `./start.sh`. Leave that terminal running and open [the local console](http://127.0.0.1:8080).
+2. Sign in as `admin` with the first-start password saved in `data/initial_credentials.txt`. The local console keeps its database between runs.
+3. To reproduce the screenshot, open **Ingest**, choose `samples/auth.log`, set **Year (BSD syslog)** to **2026**, tick **Mark as synthetic**, and click **Ingest**. In **Alerts**, open the high-severity SSH alert. Scroll to **Evidence** to read the events behind it.
+4. For a fuller dashboard, open **Admin → Load demo data**. On a phone, **Menu** opens the navigation. Stop the local server with Ctrl+C.
 
-## Scope, honestly
+## Three investigations to try
 
-Watchpost is a portfolio and learning project, not a production SIEM. All bundled data is synthetic. It runs as a single process on SQLite, was measured up to 250,000 events on one laptop, and runs detection on ingest and on demand rather than on a schedule. The [reference](docs/REFERENCE.md#what-is-real-vs-synthetic-vs-future) lists what is real, what is synthetic and what is not built.
+| Question | Run from the clone |
+| --- | --- |
+| Did one address guess several SSH accounts? | `./start.sh --demo ssh` |
+| Did a Windows login succeed after repeated failures? | `./start.sh --demo windows` |
+| Which denied ports and outbound transfers crossed a firewall rule? | `./start.sh --demo firewall` |
+
+The [example walkthroughs](examples/README.md) pair each result with the source records and a follow-up question. To keep the commands on your PATH, use `pipx install .` from the clone. Run `watchpost-demo windows` or `watchpost-serve`. The packaged console defaults to `~/.local/share/watchpost/data/`. Set `SIEM_DB` to choose the database path.
+
+## Scope and limits
+
+Watchpost normalizes logs, runs explainable rules, and correlates related alerts into incidents. The Python runtime uses the standard library. The console runs in one process and stores its data in SQLite. It is designed for a local lab. Production monitoring at enterprise scale is outside its tested scope.
+
+Bundled logs and demo addresses are synthetic. A detection on these fixtures shows how a rule behaves on that input. Its real-world precision and recall require your own evaluation. Detection runs on ingest or on demand. The [threat model](docs/THREAT-MODEL.md) describes the security boundaries.
+
+## Reference
+
+- [Detection rules and thresholds](docs/REFERENCE.md#detection-rules) · [API](docs/API.md) · [Live ingest](docs/LIVE_INGEST.md) · [Deployment](deploy/README.md)
+- [Dashboard with ATT&CK legend: validated, mapped, disabled, and gap](docs/screenshots/01-dashboard-1117.jpg) · [Incident board](docs/screenshots/02-incidents-1117.jpg) · [Alert queue](docs/screenshots/03-alerts-1117.jpg) · [Investigation graph](docs/screenshots/07-investigation-graph.jpg)
+- [Changelog](CHANGELOG.md) · [Contributing and running tests](CONTRIBUTING.md) · [Report a security issue](SECURITY.md) · [MIT license](LICENSE)
+
+[![tests](https://github.com/talalkashar/watchpost/actions/workflows/tests.yml/badge.svg)](https://github.com/talalkashar/watchpost/actions/workflows/tests.yml)
 
 ## Credits
 
 Built by [Talal Kashar](https://github.com/talalkashar). Juan Carlos Munera ([LinkedIn](https://www.linkedin.com/in/juanmunera), [GitHub](https://github.com/juancarlosmunera)) contributed the asset inventory (#9), the CloudTrail collector (#80), Windows Event Forwarding collection and its forwarder (#81, #87), response playbooks (#82), tiered retention (#83), multi-stage correlation rules (#84) and threat intelligence feeds (#85), and suggested several hardening changes after reviewing the project.
-
-## License
-
-[MIT](LICENSE). Security issues: see [SECURITY.md](SECURITY.md).

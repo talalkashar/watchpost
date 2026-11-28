@@ -6,7 +6,7 @@ The full feature, architecture and API reference. The short version is in the [R
 
 Watchpost is a self-contained Security Information and Event Management (SIEM) lab. It ingests authentication, web, firewall/VPN, cloud audit, and host logs, normalizes them into one schema, and stores them in SQLite. It runs explainable detection rules, raises alerts with evidence, and supports an analyst workflow from triage to resolution. It also reports its own health and learns nothing on its own: rule changes come from analyst feedback and need approval from a second person.
 
-It uses only the Python standard library (3.10+). No packages to install, no paid services, no outbound network calls.
+It uses only the Python standard library (3.10+). The local sample demo runs offline. Configured collectors, threat feeds and playbook webhooks can make outbound requests.
 
 > **Honesty note.** This is a portfolio/learning project, not a production SIEM. All bundled data is synthetic. See [What is real vs. synthetic vs. future](#what-is-real-vs-synthetic-vs-future).
 
@@ -116,12 +116,12 @@ export SIEM_VIEWER_PASSWORD='a-read-only-demo-login'     # optional; creates a r
 
 If you don't set the password variables, Watchpost generates random passwords on first start. It writes them to `data/initial_credentials.txt` (mode 0600) and never prints them to the logs.
 
-Then sign in as `admin`, open **Admin → Load synthetic demo data**.
+Then sign in as `admin`, open **Admin → Load demo data**.
 
 ### Tests
 
 ```bash
-./run_tests.sh      # unit and integration tests, then a 26-step end-to-end smoke check
+./run_tests.sh      # unit and integration tests, then the end-to-end smoke check
 ```
 
 ### Replit
@@ -901,7 +901,7 @@ time window; changing an alert grouping key does not change that incident logic.
 **Synthetic:** all bundled data. The demo dataset and simulator scenarios (`watchpost/simulate.py`) and the files in `samples/` are invented. External IPs come from the RFC 5737 documentation ranges. Synthetic events are stored with `synthetic=1`, sourced `demo:*`, and tagged in the UI. The evaluation scores (recall and precision) measure the rules against these hand-labeled scenarios only. They say nothing about real-world accuracy.
 
 **Limitations:**
-- Single process with SQLite. Measured up to 250,000 events on one laptop (see [Performance](#performance)); larger volumes are untested, and this is not enterprise volume. No retention or rollup.
+- Single process with SQLite. Measured up to 250,000 events on one laptop (see [Performance](#performance)); larger volumes are untested, and this is not enterprise volume. Optional tiered retention archives older events. There is no rollup.
 - Live ingestion is basic: an optional syslog listener (plaintext and loopback by default; TLS with optional client certificates when configured, without revocation checks or certificate reload) and a single-file-per-flag shipper script. See [docs/LIVE_INGEST.md](LIVE_INGEST.md) for its limits.
 - Timestamps without a zone are treated as UTC. BSD syslog lines carry no year, so you pass one or the current year is assumed.
 - Seeded accounts only (admin, analyst, and an optional viewer); there is no user-management UI or API. Accounts can be added with `watchpost.auth.create_user`. A second account whose name differs only by ASCII case is refused (`Admin` when `admin` is stored). `Érin` and `érin` stay two accounts. An exact duplicate is that same refusal.
