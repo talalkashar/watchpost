@@ -13,13 +13,14 @@ from datetime import timedelta, timezone
 from pathlib import Path
 from types import MethodType
 
+from .config import RESOURCE_DIR
 from .db import iso, now_iso, parse_iso, utcnow
 from .diagnostics import describe_exception
 
 STATUS_ORDER = {"ok": 0, "degraded": 1, "failing": 2}
 _BUILTIN_CHECKS = frozenset({"storage", "ingestion", "detection", "dependencies"})
 _CHECKS_LOCK = threading.Lock()
-STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+STATIC_DIR = RESOURCE_DIR / "static"
 LOW_DISK_BYTES = 100 * 1024 * 1024
 
 # Each check explains both fault states, including while it is healthy.

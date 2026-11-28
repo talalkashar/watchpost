@@ -908,6 +908,7 @@ body:not(.authed) #view { display: none; }
 .login .error { margin: 12px 0 0; color: var(--bad); }
 .login .error:empty { min-height: 0; margin: 0; }
 .login-footer { margin-top: 18px; text-align: center; }
+.login-footer p a { display: inline-flex; align-items: center; min-height: 44px; }
 .login .credit {
   display: inline-flex;
   align-items: center;

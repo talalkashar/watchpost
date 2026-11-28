@@ -37,6 +37,13 @@ jobs:
           cache-dependency-path: .github/workflows/tests.yml
       - name: Graph camera, layout and signal paths
         run: node --test tests/graph-*.test.mjs
+      - name: Run the installed demo outside the checkout
+        run: |
+          python -m pip install .
+          cd "$RUNNER_TEMP"
+          watchpost-demo ssh
+          watchpost-demo windows
+          watchpost-demo firewall
       - name: Ruff
         run: pip install ruff==0.8.6 && ruff check .
   test:

@@ -1,6 +1,6 @@
 # Contributing
 
-Watchpost is pure standard-library Python (3.11+). There is nothing to install.
+The runtime uses the Python standard library (3.10+ with SQLite 3.35+). CI runs on Python 3.11 through 3.14.
 
 ## Run it
 
