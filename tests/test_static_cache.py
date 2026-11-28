@@ -53,6 +53,23 @@ class StaticCacheTests(ServerTestCase):
         self.assertTrue(body)
         self.assertEqual(headers["Cache-Control"], "no-cache")
 
+    def test_sign_in_page_is_excluded_from_search(self):
+        for path in ("/", "/index.html"):
+            with self.subTest(path=path):
+                status, page, _ = self._open(path)
+                self.assertEqual(status, 200)
+                head = page.split(b"</head>", 1)[0]
+                self.assertIn(b'<meta name="robots" content="noindex">', head)
+
+        with self.subTest(path="/robots.txt"):
+            status, robots, _ = self._open("/robots.txt")
+            self.assertEqual(status, 200)
+            self.assertNotRegex(robots.lower(), rb"(?m)^\s*sitemap\s*:")
+
+        with self.subTest(path="/sitemap.xml"):
+            status, _, _ = self._open("/sitemap.xml")
+            self.assertIn(status, (404, 410))
+
     def test_console_styles_preserve_cascade_as_one_encoded_response(self):
         sheets = ("style.css", "views.css", "glass.css", "orbit.css", "declutter.css", "graph.css")
         expected = b"\n".join((STATIC_DIR / name).read_bytes() for name in sheets)

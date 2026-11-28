@@ -1739,6 +1739,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(405, {"error": "method not allowed"},
                               extra_headers=self._unread_body_headers({"Cache-Control": "no-store"}))
         name = "index.html" if path in ("", "/") else path.lstrip("/")
+        if name == "sitemap.xml":
+            return self._send(410, b"gone", "text/plain", {"Cache-Control": "no-store"})
         names = static_assets.CONSOLE_STYLES if path == "/console.css" else (name,)
         root = STATIC_DIR.resolve()
         paths = tuple(static_assets.public_file(root, filename) for filename in names)
